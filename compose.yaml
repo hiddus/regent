@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: regent
+      POSTGRES_USER: regent
+      POSTGRES_PASSWORD: regent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U regent -d regent"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    ports: ["5432:5432"]
+    volumes: ["regent-postgres:/var/lib/postgresql/data"]
+  api:
+    build: {context: ., dockerfile: core/Dockerfile}
+    command: ["regent-api"]
+    env_file: ${REGENT_ENV_FILE:-.env}
+    ports: ["8000:8000"]
+    volumes:
+      - /opt/regent/artifacts:/var/lib/regent/artifacts
+      - /opt/regent/workspaces:/var/lib/regent/workspaces
+      - /opt/regent/builds:/var/lib/regent/builds
+    depends_on:
+      postgres: {condition: service_healthy}
+  worker:
+    build: {context: ., dockerfile: core/Dockerfile}
+    command: ["regent-worker"]
+    env_file: ${REGENT_ENV_FILE:-.env}
+    volumes:
+      - /opt/regent/artifacts:/var/lib/regent/artifacts
+      - /opt/regent/workspaces:/var/lib/regent/workspaces
+      - /opt/regent/builds:/var/lib/regent/builds
+    depends_on:
+      postgres: {condition: service_healthy}
+volumes:
+  regent-postgres:

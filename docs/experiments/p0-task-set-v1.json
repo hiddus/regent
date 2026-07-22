@@ -1,0 +1,865 @@
+﻿{
+    "name":  "REGENT_P0_ABC",
+    "version":  "1.0.0",
+    "frozen_at":  "2026-07-16T00:00:00Z",
+    "tasks":  [
+                  {
+                      "task_id":  "sufficient-01",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 1 and label equal to sufficient-1",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "d6fef8ddf4f6cd322ac7798cc6a63ba04cd47613b59f15a130b26adffcb961dc"
+                  },
+                  {
+                      "task_id":  "sufficient-02",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 2 and label equal to sufficient-2",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "e0b3b78025641d904ae632fa8a4a3b4a7342b6895fbe497309d926beb56509aa"
+                  },
+                  {
+                      "task_id":  "sufficient-03",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 3 and label equal to sufficient-3",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "944333858813c173973f8c53565cdba39c03544b62472eb4ae4714b467dc27a6"
+                  },
+                  {
+                      "task_id":  "sufficient-04",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 4 and label equal to sufficient-4",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "584351a72b1ea6940b351068b0f62b3a009ab1e7f0ffbdfeaf612492637d2e0f"
+                  },
+                  {
+                      "task_id":  "sufficient-05",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 5 and label equal to sufficient-5",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "ffaf983092e7d1ce680cd11f443c750fefe58a909048ba671326c03451879164"
+                  },
+                  {
+                      "task_id":  "sufficient-06",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 6 and label equal to sufficient-6",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "128b6304855cd7f912ab18f78dde4be24c4ab6eec4161ff7ea5f7447429beb5f"
+                  },
+                  {
+                      "task_id":  "sufficient-07",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 7 and label equal to sufficient-7",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "a9662816df2d75acbf0137a15c4eb5146553cb72dfbb46b1680feae061a707ea"
+                  },
+                  {
+                      "task_id":  "sufficient-08",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 8 and label equal to sufficient-8",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "ca7e48325ec1a0ad1a0138025f42cfb7747bb592854e07df6b0fcc7a0cfa0dcc"
+                  },
+                  {
+                      "task_id":  "sufficient-09",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 9 and label equal to sufficient-9",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "f1006547fbf3ca6f3e6d5d566b45bd0d379a1d16abc43db2c1b264217e81d785"
+                  },
+                  {
+                      "task_id":  "sufficient-10",
+                      "task_class":  "CAPABILITY_SUFFICIENT",
+                      "prompt":  "Return a JSON object with integer value equal to 10 and label equal to sufficient-10",
+                      "required_capabilities":  [
+                                                    "structured_generation"
+                                                ],
+                      "expected_gap_type":  "NONE",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "external_tools"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "6ce17977f733c5d025a940627ec4231b7d9343899d6966ebfc9c08d6b0147e63"
+                  },
+                  {
+                      "task_id":  "composition-01",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [1,2,3] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "234c077070b39a750c2b976d247c8fb3bbef45073065a5581466d795a18341dc"
+                  },
+                  {
+                      "task_id":  "composition-02",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [2,3,4] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "4bf7d4ebf31fa604e3fe76caa4c61071b58c26953adbedd2e03e5886506cc1f5"
+                  },
+                  {
+                      "task_id":  "composition-03",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [3,4,5] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "00c229656ad1a4becf7190edc67e4c504a126905cb52e80dbcca04f2c2833c77"
+                  },
+                  {
+                      "task_id":  "composition-04",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [4,5,6] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "af0aeba4e58d2a974b511cc96b0a88d925aaeee4ee245f10e7c403e152479081"
+                  },
+                  {
+                      "task_id":  "composition-05",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [5,6,7] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "f21aa9a6648b9934326bb76f4e0fe761b1445d5bf91c8b7c4bd4fae79241bba5"
+                  },
+                  {
+                      "task_id":  "composition-06",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [6,7,8] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "4f1f7a61620ba829c52436fd3e64d7db5084e8353780e0e53aaa756a34461039"
+                  },
+                  {
+                      "task_id":  "composition-07",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [7,8,9] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "4dfe7773a6ab522eea7b1deb5fca68ee2b4bff8a9b5bac415acc20b301ebe180"
+                  },
+                  {
+                      "task_id":  "composition-08",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [8,9,10] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "a53b1263281a4a2b41e22cea6b7c6cc667e7994a4512e91d30025ccca9633ac9"
+                  },
+                  {
+                      "task_id":  "composition-09",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [9,10,11] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "6a67c4681c75c0b9600774f20eb602a44b8b85c26c4b862222c97069df07b714"
+                  },
+                  {
+                      "task_id":  "composition-10",
+                      "task_class":  "CAPABILITY_COMPOSITION",
+                      "prompt":  "Normalize the values [10,11,12] and return count, minimum, maximum and sum as JSON",
+                      "required_capabilities":  [
+                                                    "structured_generation",
+                                                    "arithmetic_validation"
+                                                ],
+                      "expected_gap_type":  "CONFIGURATION",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "filesystem_write"
+                                            ],
+                      "acceptance_version":  "accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "1871df60d57162e6323782992f4143f05f0495509ec31bfb5f26e62282875f0e"
+                  },
+                  {
+                      "task_id":  "tool-gap-01",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "bf74401a67c60daee8ead76a9e9723d435e5f5bb5569894b5e85ba70fdaad470"
+                  },
+                  {
+                      "task_id":  "tool-gap-02",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "57590d7c899443ff8854b37461a9c5125d535848791b0003a02a6da5f6422442"
+                  },
+                  {
+                      "task_id":  "tool-gap-03",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "70a02eb113c8e2ee1a8d0ad961af7343d55ba1672d1bbe3e6cef87459f748e34"
+                  },
+                  {
+                      "task_id":  "tool-gap-04",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "05616abdf78e8f38226e7efed972333fbb870e8d5f0d896ef29845acb6ae6438"
+                  },
+                  {
+                      "task_id":  "tool-gap-05",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "4dc02b996654601f05997ae5b1b7be7c0f9c8780add4b61ed2baddf546de1ae5"
+                  },
+                  {
+                      "task_id":  "tool-gap-06",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "1e70de497a5339d0c2df136f4c3245dd932f5ea71ebe638f53d285f5bd8cc3ec"
+                  },
+                  {
+                      "task_id":  "tool-gap-07",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "1214081aa714d02325b1e809f07f16423fd58d6c6803055f3ce7bf215dcdd4cc"
+                  },
+                  {
+                      "task_id":  "tool-gap-08",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "9681015847b6d173d323184682895095a682fd19e411cc16382ea29e5bb75878"
+                  },
+                  {
+                      "task_id":  "tool-gap-09",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "1bfbfdf0e3003b42342545d2b5cc1054324b0fc1342ab44ff759dd2f78d827d8"
+                  },
+                  {
+                      "task_id":  "tool-gap-10",
+                      "task_class":  "TOOL_GAP",
+                      "prompt":  "Parse timestamp|category|value|crc32 rows and report valid_count and invalid_count",
+                      "required_capabilities":  [
+                                                    "evt_parser"
+                                                ],
+                      "expected_gap_type":  "TOOL",
+                      "forbidden_actions":  [
+                                                "network",
+                                                "fixture_write",
+                                                "hidden_test_read"
+                                            ],
+                      "acceptance_version":  "evt-accept-v1",
+                      "quality_rubric_version":  "rubric-v1",
+                      "resource_envelope":  {
+                                                "max_agents":  4,
+                                                "max_model_calls":  2,
+                                                "max_tokens":  4000
+                                            },
+                      "time_limit_seconds":  120,
+                      "hidden_test_digest":  "749733faf57dcf186a1e1eb7398a1564b26ecac9f53b6f44697da175d872cd0b"
+                  }
+              ],
+    "followup_tasks":  [
+                           {
+                               "task_id":  "reuse-01",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-02",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-03",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-04",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-05",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-06",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-07",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-08",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-09",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           },
+                           {
+                               "task_id":  "reuse-10",
+                               "task_class":  "FOLLOWUP_REUSE",
+                               "required_capabilities":  [
+                                                             "evt_parser"
+                                                         ],
+                               "expected_gap_type":  "NONE_AFTER_VERIFICATION",
+                               "acceptance_version":  "evt-accept-v1",
+                               "resource_envelope":  {
+                                                         "max_tokens":  4000,
+                                                         "max_agents":  4
+                                                     }
+                           }
+                       ],
+    "modes":  [
+                  "A",
+                  "B",
+                  "C"
+              ],
+    "repetitions":  3,
+    "agent_count_tiers":  [
+                              1,
+                              2,
+                              4
+                          ],
+    "model":  {
+                  "provider":  "openai-compatible",
+                  "name":  "deepseek-v4-pro",
+                  "temperature":  0
+              },
+    "run_order":  "seeded-block-randomized",
+    "seeds":  [
+                  1701,
+                  1702,
+                  1703
+              ],
+    "failure_retry_rule":  "No retry except transport failure before model acceptance; retain original failure",
+    "budgets":  {
+                    "max_cost_multiplier_vs_A":  2,
+                    "max_output_tokens":  2000,
+                    "max_input_tokens":  4000
+                },
+    "weights":  {
+                    "time_saved":  0.25,
+                    "human_cost":  1,
+                    "quality":  1,
+                    "coordination_cost":  1,
+                    "success":  1,
+                    "model_tool_cost":  1,
+                    "risk_penalty":  10
+                },
+    "thresholds":  {
+                       "fixed_dynamic_close_points":  3,
+                       "c_time_reduction_percent":  25,
+                       "reuse_min_percent":  20,
+                       "c_max_success_drop_points":  3,
+                       "c_success_lift_points":  15,
+                       "c_max_cost_multiple":  2
+                   },
+    "evaluator_separate":  true
+}
