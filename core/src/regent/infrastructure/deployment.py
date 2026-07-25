@@ -165,6 +165,15 @@ class StaticPreviewDeploymentProvider:
                     },
                 },
             )
+        except ValueError as exc:
+            # Re-raise delivery-review-v1 failures so the orchestrator can trigger recovery.
+            if "delivery-review-v1" in str(exc):
+                raise
+            result = DeploymentResult(
+                external_request_id=request.idempotency_key,
+                status="FAILED",
+                evidence={"provider": "static-preview", "error": str(exc)},
+            )
         except Exception as exc:
             result = DeploymentResult(
                 external_request_id=request.idempotency_key,
