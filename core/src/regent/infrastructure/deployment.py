@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from regent.application.auto_fix_service import AutoFixService
 from regent.application.delivery_review_service import review_html_for_delivery
 from regent.application.p1_ports import (
     DeploymentRequest,
@@ -127,8 +128,28 @@ class StaticPreviewDeploymentProvider:
                 acceptance_contract=request.acceptance_contract,
                 success_criteria=request.success_criteria,
             )
+            fix_result = None
             if not review.passed:
-                review.raise_if_failed()
+                # GAC-D6: Core auto-fix - attempt to repair delivery issues before failing.
+                failed_checks = [c for c in review.checks if not c.passed]
+                auto_fix = AutoFixService()
+                fix_result = auto_fix.fix(
+                    html,
+                    acceptance_contract=request.acceptance_contract,
+                    success_criteria=request.success_criteria,
+                    failed_checks=failed_checks,
+                )
+                if fix_result.fixed:
+                    html = fix_result.html
+                    # Re-review the fixed HTML
+                    review = review_html_for_delivery(
+                        html,
+                        acceptance_contract=request.acceptance_contract,
+                        success_criteria=request.success_criteria,
+                    )
+                if not review.passed:
+                    # Still failed after auto-fix - raise for orchestrator recovery
+                    review.raise_if_failed()
             (target_dir / "regent-preview.js").write_text(_ACTIVATION_JS, encoding="utf-8")
             if "regent-preview.js" not in html:
                 if "</body>" in html:
@@ -162,6 +183,11 @@ class StaticPreviewDeploymentProvider:
                             {"name": c.name, "passed": c.passed, "detail": c.detail}
                             for c in review.checks
                         ],
+                    },
+                    "auto_fix": {
+                        "applied": fix_result is not None and fix_result.fixed,
+                        "fixes": fix_result.fixes_applied if fix_result else [],
+                        "attempts": fix_result.attempts if fix_result else 0,
                     },
                 },
             )
