@@ -1231,6 +1231,10 @@ class ExecutionOrchestrator:
         async with self._sessions() as session:
             goal_meta_row = await session.get(GoalModel, goal_id)
             goal_meta = dict((goal_meta_row.metadata_json if goal_meta_row else None) or {})
+        # GAC-GA: GoalAnchor — inject original goal text into acceptance_contract
+        # so both the generator and delivery review can see it.
+        if goal_meta_row and goal_meta_row.original_input:
+            acceptance_contract["goal_anchor_text"] = goal_meta_row.original_input
         if goal_meta.get("goal_scale"):
             acceptance_contract["goal_scale"] = goal_meta["goal_scale"]
         first_deliverable = str(
@@ -1296,6 +1300,9 @@ class ExecutionOrchestrator:
             dependency_intents=dependency_intents,
             verification_commands=verification_commands,
             acceptance_contract=acceptance_contract,
+            # GAC-GA: GoalAnchor — inject original goal text so the
+            # generator LLM sees what the user actually asked for.
+            goal_anchor_text=goal.original_input if goal else "",
         )
 
         try:

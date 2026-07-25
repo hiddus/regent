@@ -16,6 +16,7 @@ from regent.application.p1_contracts import (
 )
 from regent.application.p1_ports import GeneratedFileChangeSet
 from regent.infrastructure.artifact_store import FileArtifactStore
+from regent.application.goal_anchor_service import build_goal_anchored_prompt
 from regent.infrastructure.html_evidence import (
     ensure_semantic_main,
     inject_observed_entries,
@@ -110,9 +111,24 @@ class ArtifactBackedCodeGenerator:
         planned_paths = set(plan.get("planned_paths", []))
         if not planned_paths:
             raise ValueError("generation plan must freeze planned paths")
+        # GAC-GA: GoalAnchor — inject original goal text into user prompt
+        # so the LLM cannot ignore what the user actually asked for.
+        user_prompt = json.dumps(plan, ensure_ascii=False)
+        goal_text = plan.get("goal_anchor_text") or ""
+        if goal_text:
+            acceptance = plan.get("acceptance_contract") or {}
+            user_prompt = build_goal_anchored_prompt(
+                user_prompt,
+                goal_text=goal_text,
+                success_criteria=acceptance.get("success_criteria"),
+                first_deliverable=str(
+                    acceptance.get("first_deliverable") or ""
+                ),
+                retry_context=self._build_retry_context(acceptance),
+            )
         response = await self._provider.generate_structured(
             system_prompt=_PROMPT,
-            user_prompt=json.dumps(plan, ensure_ascii=False),
+            user_prompt=user_prompt,
             response_model=GeneratedSourceBundle,
         )
         scope = uuid.UUID(str(plan["hypothesis_decision_id"]))
@@ -173,6 +189,21 @@ class ArtifactBackedCodeGenerator:
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
         )
+
+    @staticmethod
+    def _build_retry_context(acceptance: dict[str, Any]) -> str:
+        """Build retry context from delivery gap reasons."""
+        gap_reasons = acceptance.get("delivery_gap_reasons") or []
+        attempt = acceptance.get("delivery_gap_recovery_attempt") or 1
+        if not gap_reasons or int(attempt) <= 1:
+            return ""
+        lines = [f"Previous attempt #{attempt} failed delivery review:"]
+        for reason in gap_reasons[:5]:
+            lines.append(f"  - {reason}")
+        lines.append(
+            "You MUST fix these issues and ensure the output matches the goal."
+        )
+        return "\n".join(lines)
 
 
 class ArtifactUriResolver:

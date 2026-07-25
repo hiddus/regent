@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from regent.application.goal_anchor_service import validate_goal_alignment
 from regent.infrastructure.delivery_review_capability import (
     CAPABILITY_NAME,
     load_delivery_review_capability_package,
@@ -371,6 +372,23 @@ def review_html_for_delivery(
             "demo/placeholder copy detected" if demo_hit else "ok",
         )
     )
+
+    # GAC-GA: GoalAnchor alignment check — validate HTML against original goal text.
+    goal_anchor_text = str(contract.get("goal_anchor_text") or "").strip()
+    if goal_anchor_text and len(goal_anchor_text) >= 5:
+        alignment = validate_goal_alignment(
+            html,
+            goal_anchor_text,
+            success_criteria=criteria,
+            first_deliverable=first_deliverable,
+        )
+        checks.append(
+            DeliveryReviewCheck(
+                "goal-anchor-alignment",
+                alignment.aligned,
+                f"score={alignment.score:.0%} — {'; '.join(alignment.details[:3])}",
+            )
+        )
 
     passed = all(c.passed for c in checks)
     summary = (

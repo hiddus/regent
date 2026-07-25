@@ -150,6 +150,9 @@ class GenerationPlanContract(BaseModel):
     dependency_intents: list[dict[str, Any]] = Field(default_factory=list)
     verification_commands: list[str] = Field(min_length=1)
     acceptance_contract: dict[str, Any] = Field(default_factory=dict)
+    # GAC-GA: Original goal text injected as anchor so the generator
+    # LLM cannot ignore what the user actually asked for.
+    goal_anchor_text: str = ""
 
 
 class WorkspaceSnapshotContract(BaseModel):
