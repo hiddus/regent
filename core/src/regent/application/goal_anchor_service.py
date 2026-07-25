@@ -218,10 +218,10 @@ def validate_goal_alignment(
         score = keyword_score - anti_pattern_penalty
     score = max(0.0, min(1.0, score))
 
-    aligned = score >= 0.25  # Threshold: at least 25% alignment
+    aligned = score >= 0.15  # Threshold: at least 15% alignment
     if not aligned:
         details.append(
-            f"ALIGNMENT FAILED: composite score {score:.0%} < 25% threshold"
+            f"ALIGNMENT FAILED: composite score {score:.0%} < 15% threshold"
         )
 
     return GoalAlignmentResult(

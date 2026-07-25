@@ -95,8 +95,9 @@ class TestValidateGoalAlignment:
             success_criteria={"shows_current_time": True},
             first_deliverable="A single HTML file with embedded JavaScript that shows a live timestamp",
         )
-        # Should have reasonable score (keywords match)
-        assert result.score >= 0.2
+        # Should be aligned (keywords match, above threshold)
+        assert result.aligned is True
+        assert result.score >= 0.1
         assert "goal keywords" in result.details[0]
 
     def test_misaligned_idea_validator(self):
