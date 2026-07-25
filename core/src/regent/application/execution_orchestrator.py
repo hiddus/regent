@@ -33,7 +33,7 @@ from regent.application.compliance_risk_service import (
 )
 from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
 from regent.application.discovery_worker import DiscoveryWorker
-from regent.application.evidence_policy import collect_authorized_urls
+from regent.application.evidence_policy import collect_authorized_urls, goal_requires_external_evidence
 from regent.application.execution_events import (
     APP_BUILD_PASSED,
     APP_BUILD_REQUESTED,
@@ -528,6 +528,17 @@ class ExecutionOrchestrator:
                     ]
                 )
             )
+        # GAC-E2: When goal requires external evidence but no URLs are authorized,
+        # seed default feeds from the certified capability package so the connector
+        # can fetch http-snapshot evidence on the first discovery round.
+        _seed_default_feeds = False
+        if not authorized_urls and goal_requires_external_evidence(goal_text, constraints):
+            from regent.infrastructure.evidence_capability import (
+                load_allowlisted_http_capability_package,
+            )
+            package = load_allowlisted_http_capability_package()
+            authorized_urls = list(package.default_feeds)
+            _seed_default_feeds = True
         evidence_request = EvidenceSourceRequest(
             query=goal_text,
             correlation_id=correlation_id,
@@ -544,6 +555,14 @@ class ExecutionOrchestrator:
             constraints["http_entry_count_hint"] = http_entry_count
         evidence_ids_by_hash: dict[str, uuid.UUID] = {}
         async with self._sessions() as session, session.begin():
+            # GAC-E2: persist seeded default feeds into Goal metadata.
+            if _seed_default_feeds:
+                goal_obj = await session.get(GoalModel, goal_id)
+                if goal_obj is not None:
+                    goal_meta = dict(goal_obj.metadata_json or {})
+                    if not goal_meta.get("authorized_source_urls"):
+                        goal_meta["authorized_source_urls"] = authorized_urls
+                        goal_obj.metadata_json = goal_meta
             for snap in snapshots:
                 if snap.content_hash in evidence_ids_by_hash:
                     continue
