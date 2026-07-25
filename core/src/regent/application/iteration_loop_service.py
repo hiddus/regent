@@ -25,6 +25,7 @@ from regent.application.feedback_service import (
     Aggregation,
     BindMetricDefinition,
     Comparison,
+    CreateIterationDecision,
     FeedbackService,
     MetricDefinition,
 )
@@ -59,21 +60,33 @@ class IterationLoopService:
     ) -> list[uuid.UUID]:
         """Bind default P1 metric definitions after a successful deployment.
 
-        Creates a minimal set of metric bindings for real external observations:
-        - task_completion_count: at least 1 real user task completion
-        Internal smoke observations must not satisfy these gates.
+        Preview attainment (GAC-A2): smoke_pass from preview-smoke may count
+        (internal allowed) so Goals can converge without unreachable product-analytics.
+        product_rejection_count remains a fail-closed guardrail (0 samples = pass).
         """
         binding_ids: list[uuid.UUID] = []
 
         default_metrics = [
             MetricDefinition(
-                metric_key="task_completion_count",
+                metric_key="smoke_pass",
+                definition_version="v1",
+                observation_source="preview-smoke",
+                value_field="value",
+                aggregation=Aggregation.SUM,
+                comparison=Comparison.GTE,
+                threshold=1.0,
+                minimum_samples=1,
+                exclude_bots=True,
+                exclude_internal=False,
+            ),
+            MetricDefinition(
+                metric_key="product_rejection_count",
                 definition_version="v1",
                 observation_source="product-analytics",
                 value_field="value",
                 aggregation=Aggregation.COUNT,
-                comparison=Comparison.GTE,
-                threshold=1.0,
+                comparison=Comparison.LTE,
+                threshold=0.0,
                 minimum_samples=1,
                 exclude_bots=True,
                 exclude_internal=True,
@@ -146,34 +159,40 @@ class IterationLoopService:
             if spec is None or spec.status != "FROZEN":
                 raise DomainError(ErrorCode.INVALID_STATE, "goal spec is not FROZEN")
 
-            # Create new Work item for the revision
-            work_id = uuid.uuid4()
-            session.add(
-                WorkModel(
-                    id=work_id,
-                    goal_id=goal_id,
-                    purpose=f"REVISE: {decision.primary_hypothesis}",
-                    input_refs=[
-                        {
-                            "type": "iteration_decision",
-                            "id": str(decision.id),
+            # Create / reuse Work item for the revision
+            if decision.new_work_id is not None:
+                work = await session.get(WorkModel, decision.new_work_id)
+                if work is None or work.goal_id != goal_id:
+                    raise DomainError(ErrorCode.INVALID_STATE, "revision work must belong to goal")
+                work_id = work.id
+            else:
+                work_id = uuid.uuid4()
+                session.add(
+                    WorkModel(
+                        id=work_id,
+                        goal_id=goal_id,
+                        purpose=f"REVISE: {decision.primary_hypothesis}",
+                        input_refs=[
+                            {
+                                "type": "iteration_decision",
+                                "id": str(decision.id),
+                                "primary_hypothesis": decision.primary_hypothesis,
+                            }
+                        ],
+                        acceptance_criteria={
+                            "revision_of": str(decision.id),
                             "primary_hypothesis": decision.primary_hypothesis,
-                        }
-                    ],
-                    acceptance_criteria={
-                        "revision_of": str(decision.id),
-                        "primary_hypothesis": decision.primary_hypothesis,
-                    },
-                    dependency_ids=[],
-                    priority=100,
-                    budget={"max_model_calls": 10},
-                    correlation_id=goal.correlation_id,
-                    metadata_json={
-                        "revision": True,
-                        "iteration_decision_id": str(decision.id),
-                    },
+                        },
+                        dependency_ids=[],
+                        priority=100,
+                        budget={"max_model_calls": 10},
+                        correlation_id=goal.correlation_id,
+                        metadata_json={
+                            "revision": True,
+                            "iteration_decision_id": str(decision.id),
+                        },
+                    )
                 )
-            )
 
             # Create new DiscoveryRound
             idempotency_key = make_idempotency_key(
@@ -292,3 +311,116 @@ class IterationLoopService:
                 },
             )
             return discovery_round.id
+
+    async def revise_from_product_rejection(
+        self,
+        goal_id: uuid.UUID,
+        deployment_id: uuid.UUID,
+        *,
+        actor: str,
+        reason: str,
+        primary_hypothesis: str = "intent_mismatch",
+        event_id: str | None = None,
+    ) -> dict[str, str]:
+        """Record product rejection Observation and emit a REVISE decision + discovery.
+
+        This is the PRODUCT evolution loop entry: dissatisfaction is system input,
+        not a reason to freeze Graduation forever.
+        """
+        from datetime import UTC, datetime
+
+        from regent.application.observation_service import ObservationInput, ObservationService
+        from regent.config import get_settings
+        from regent.model import ModelConfigurationError
+
+        settings = get_settings()
+        if settings.observation_signing_key is None:
+            raise ModelConfigurationError("observation signing key is not configured")
+
+        await self.bind_default_metrics(goal_id, deployment_id, actor=actor)
+
+        observations = ObservationService(
+            self._sessions,
+            settings.observation_signing_key.get_secret_value(),
+        )
+        obs_event = event_id or f"rejection:{deployment_id}:{uuid.uuid4()}"
+        item = ObservationInput(
+            event_id=f"deployment:{deployment_id}:{obs_event}",
+            goal_id=goal_id,
+            metric_name="product_rejection_count",
+            metric_value={"value": 1.0, "reason": reason[:500]},
+            source="product-analytics",
+            definition_version="v1",
+            is_bot=False,
+            is_internal=False,
+            observed_at=datetime.now(UTC),
+        )
+        observation_id = await observations.ingest(item, observations.sign(item))
+
+        work_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "goal not found")
+            session.add(
+                WorkModel(
+                    id=work_id,
+                    goal_id=goal_id,
+                    purpose=f"REVISE from product rejection: {primary_hypothesis}",
+                    input_refs=[
+                        {
+                            "type": "product_rejection",
+                            "observation_id": str(observation_id),
+                            "reason": reason[:500],
+                        }
+                    ],
+                    acceptance_criteria={
+                        "primary_hypothesis": primary_hypothesis,
+                        "rejection_reason": reason[:500],
+                    },
+                    dependency_ids=[],
+                    priority=100,
+                    budget={"max_model_calls": 10},
+                    correlation_id=goal.correlation_id,
+                    metadata_json={
+                        "revision": True,
+                        "product_rejection": True,
+                        "observation_id": str(observation_id),
+                    },
+                )
+            )
+
+        gate = await self._feedback.evaluate(goal_id, deployment_id, actor=actor)
+        if gate.status != "FAILED":
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                f"expected FAILED gate after rejection, got {gate.status}",
+            )
+        decision = await self._feedback.decide(
+            CreateIterationDecision(
+                gate_evaluation_id=gate.id,
+                actor=actor,
+                primary_hypothesis=primary_hypothesis,
+                new_work_id=work_id,
+            )
+        )
+        round_id = await self.handle_revise(decision.id, actor=actor)
+
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id)
+            if goal is not None:
+                metadata = dict(goal.metadata_json or {})
+                metadata["last_gate_status"] = gate.status
+                metadata["last_iteration_decision"] = decision.decision
+                metadata["last_revise_discovery_round_id"] = str(round_id)
+                metadata["last_product_rejection_reason"] = reason[:500]
+                goal.metadata_json = metadata
+
+        return {
+            "observation_id": str(observation_id),
+            "gate_evaluation_id": str(gate.id),
+            "iteration_decision_id": str(decision.id),
+            "decision": decision.decision,
+            "discovery_round_id": str(round_id),
+            "work_id": str(work_id),
+        }

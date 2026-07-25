@@ -123,7 +123,6 @@ async def get_goal(goal_id: uuid.UUID, service: GoalServiceDep) -> GoalResponse:
     return _response(await service.get(goal_id))
 
 
-@router.post("/{goal_id}/organize", response_model=OrganizationReceipt)
 @router.post(
     "/{goal_id}/start",
     response_model=GoalExecutionReceipt,
@@ -136,8 +135,15 @@ async def start_goal(
         goal_id, actor=payload.actor, idempotency_key=payload.idempotency_key
     )
 
+
+@router.post("/{goal_id}/organize", response_model=OrganizationReceipt)
 async def organize_goal(goal_id: uuid.UUID, request: Request) -> OrganizationReceipt:
     return await OrganizationService(request.app.state.sessions).organize(goal_id)
+
+
+@router.get("/{goal_id}/organization", response_model=OrganizationReceipt)
+async def get_goal_organization(goal_id: uuid.UUID, request: Request) -> OrganizationReceipt:
+    return await OrganizationService(request.app.state.sessions).get_organization(goal_id)
 
 
 @router.post("/{goal_id}/plan", response_model=PlanReceipt)

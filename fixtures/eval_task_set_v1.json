@@ -1,0 +1,22 @@
+{
+  "version": "v1",
+  "frozen_at": "2025-01-01T00:00:00Z",
+  "tasks": [
+    {"id": "task-01", "description": "Parse CSV with 1000 rows", "expected": "correct_parse", "category": "data_processing"},
+    {"id": "task-02", "description": "Generate REST API scaffold", "expected": "valid_scaffold", "category": "code_generation"},
+    {"id": "task-03", "description": "Validate JSON schema compliance", "expected": "schema_valid", "category": "validation"},
+    {"id": "task-04", "description": "Compute aggregate metrics from time series", "expected": "correct_aggregates", "category": "data_processing"},
+    {"id": "task-05", "description": "Generate unit tests for a sorting function", "expected": "tests_pass", "category": "code_generation"},
+    {"id": "task-06", "description": "Detect PII in unstructured text", "expected": "pii_detected", "category": "compliance"},
+    {"id": "task-07", "description": "Resolve dependency graph cycles", "expected": "acyclic_graph", "category": "data_processing"},
+    {"id": "task-08", "description": "Generate deployment manifest", "expected": "valid_manifest", "category": "code_generation"},
+    {"id": "task-09", "description": "Evaluate constraint satisfaction", "expected": "constraints_met", "category": "validation"},
+    {"id": "task-10", "description": "Summarize long document with key points", "expected": "summary_complete", "category": "nlp"}
+  ],
+  "metadata": {
+    "seed": "eval-harness-v1-frozen",
+    "baseline": "strong_single_agent",
+    "min_pass_rate": 0.5,
+    "confidence_level": 0.95
+  }
+}

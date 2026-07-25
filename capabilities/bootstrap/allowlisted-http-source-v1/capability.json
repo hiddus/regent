@@ -1,0 +1,18 @@
+{
+  "name": "allowlisted-http-source-v1",
+  "status": "VERIFIED",
+  "description": "Certified allowlisted HTTP/RSS evidence connector. Not a Core kernel feature; owned by the capability pool. Fetches only Goal-authorized URLs plus this capability's certified default feeds under platform egress policy.",
+  "verification": {
+    "connector": "allowlisted-http-source-v1",
+    "protocol": "evidence-acquisition-v1",
+    "fail_closed": true
+  },
+  "default_feeds": [
+    "https://techcrunch.com/feed/",
+    "https://hnrss.org/frontpage",
+    "https://www.theverge.com/rss/index.xml",
+    "https://www.36kr.com/feed",
+    "https://www.jiqizhixin.com/rss",
+    "https://www.techweb.com.cn/rss.xml"
+  ]
+}

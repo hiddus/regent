@@ -73,6 +73,7 @@ class FeedbackService:
             existing = await session.scalar(
                 select(MetricDefinitionBindingModel).where(
                     MetricDefinitionBindingModel.goal_id == command.goal_id,
+                    MetricDefinitionBindingModel.deployment_id == command.deployment_id,
                     MetricDefinitionBindingModel.metric_key == command.definition.metric_key,
                     MetricDefinitionBindingModel.definition_version
                     == command.definition.definition_version,
@@ -145,7 +146,21 @@ class FeedbackService:
                     ]
                 )
                 enough = len(values) >= definition.minimum_samples
-                aggregate = self._aggregate(values, definition.aggregation) if values else None
+                # Guardrail metrics (e.g. rejection LTE 0): zero samples means
+                # "no violations observed" — treat as enough + passed.
+                if (
+                    definition.comparison is Comparison.LTE
+                    and definition.threshold == 0
+                    and definition.aggregation is Aggregation.COUNT
+                    and len(values) == 0
+                ):
+                    enough = True
+                if values:
+                    aggregate = self._aggregate(values, definition.aggregation)
+                elif definition.aggregation is Aggregation.COUNT:
+                    aggregate = 0.0
+                else:
+                    aggregate = None
                 passed = (
                     enough
                     and aggregate is not None
@@ -239,7 +254,10 @@ class FeedbackService:
                 if work is None or work.goal_id != gate.goal_id:
                     raise DomainError(ErrorCode.INVALID_STATE, "revision work must belong to goal")
                 decision = "REVISE"
-                rationale = "metric evidence requires a revision of the primary hypothesis"
+                rationale = (
+                    "metric evidence or product rejection requires revision "
+                    "of the primary hypothesis"
+                )
             elif gate.status == "FAILED":
                 decision = "STOP"
                 rationale = "one or more frozen metric gates failed"

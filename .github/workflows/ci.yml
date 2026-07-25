@@ -11,3 +11,5 @@ jobs:
       - run: ruff check .
       - run: mypy
       - run: pytest
+      - run: python -c "from pathlib import Path; assert Path('docs/definitions/REGENT-DEFINITION-1.0.txt').is_file()"
+      # definition freeze covered by tests/architecture/test_regent_definition_freeze.py

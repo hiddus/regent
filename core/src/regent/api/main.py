@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import uvicorn
@@ -16,19 +16,25 @@ from regent.api.app_previews import router as app_previews_router
 from regent.api.app_projects import router as app_projects_router
 from regent.api.baselines import router as baselines_router
 from regent.api.conversations import router as conversations_router
+from regent.api.eval_runs import router as eval_runs_router
 from regent.api.experiments import router as experiments_router
 from regent.api.feedback import router as feedback_router
 from regent.api.goals import router as goals_router
 from regent.api.governance import router as governance_router
+from regent.api.memories import router as memories_router
 from regent.api.observations import router as observations_router
 from regent.api.product_creation import router as product_creation_router
+from regent.api.runtime_profiles import router as runtime_profiles_router
+from regent.api.scheduler import router as scheduler_router
 from regent.api.self_improvement import router as self_improvement_router
 from regent.api.side_effects import router as side_effects_router
 from regent.api.tools import router as tools_router
 from regent.api.works import router as works_router
+from regent.application.runtime_profile_service import RuntimeProfileService
 from regent.config import get_settings
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.database import create_engine, create_session_factory
+from regent.infrastructure.delivery_review_capability import ensure_delivery_review_capability
 from regent.model import ModelConfigurationError, ModelOutputError
 
 
@@ -39,6 +45,17 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(settings)
         app.state.sessions = create_session_factory(engine)
+        # Migration may not have applied yet; fail open at boot, fail-closed at use.
+        with suppress(Exception):
+            await RuntimeProfileService(app.state.sessions).seed_bootstrap()
+        with suppress(Exception):
+            await ensure_delivery_review_capability(app.state.sessions)
+        with suppress(Exception):
+            from regent.infrastructure.product_surface_capability import (
+                ensure_product_surface_capability,
+            )
+
+            await ensure_product_surface_capability(app.state.sessions)
         yield
         await engine.dispose()
 
@@ -105,7 +122,12 @@ def create_app() -> FastAPI:
         app.mount("/console", StaticFiles(directory=console_path, html=True), name="console")
 
     def preview_file(project_id: uuid.UUID, release_id: uuid.UUID, filename: str) -> FileResponse:
-        allowed = {"index.html": "text/html", "styles.css": "text/css", "app.js": "text/javascript"}
+        allowed = {
+            "index.html": "text/html",
+            "styles.css": "text/css",
+            "app.js": "text/javascript",
+            "regent-preview.js": "text/javascript",
+        }
         if filename not in allowed:
             raise HTTPException(status_code=404, detail="preview file not found")
         root = (Path(settings.workspace_root) / "previews").resolve()
@@ -155,6 +177,10 @@ def create_app() -> FastAPI:
     app.include_router(self_improvement_router)
     app.include_router(experiments_router)
     app.include_router(feedback_router)
+    app.include_router(scheduler_router)
+    app.include_router(runtime_profiles_router)
+    app.include_router(eval_runs_router)
+    app.include_router(memories_router)
     return app
 
 

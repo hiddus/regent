@@ -1,6 +1,7 @@
-"""P1 execution main chain event catalog.
+"""P1 execution main chain event catalog + V3 domain events.
 
-Defines all P1 main chain event type constants, event envelope, and Outbox event factory.
+Defines all event type constants (P1 main chain + V3 domain events),
+event envelope, and Outbox event factory.
 """
 
 import uuid
@@ -54,6 +55,79 @@ FAILURE_GOAL_NOT_ACTIVE = "GOAL_NOT_ACTIVE"
 FAILURE_SPEC_NOT_FROZEN = "SPEC_NOT_FROZEN"
 FAILURE_PROJECT_NOT_ACTIVE = "PROJECT_NOT_ACTIVE"
 FAILURE_DISCOVERY_CREATION_FAILED = "DISCOVERY_CREATION_FAILED"
+FAILURE_COMPLIANCE = "FAILURE_COMPLIANCE"
+
+# ---------------------------------------------------------------------------
+# V3 Domain Events (supplementing P1 main chain)
+# These events cover the full V3 §4 event-driven iteration loop.
+# ---------------------------------------------------------------------------
+
+# Goal lifecycle events
+GOAL_DRAFTED = "GoalDrafted"
+GOAL_FROZEN = "GoalFrozen"
+GOAL_STARTED = "GoalStarted"
+GOAL_ACHIEVED = "GoalAchieved"
+GOAL_EXHAUSTED = "GoalExhausted"
+GOAL_FAILED = "GoalFailed"
+GOAL_CANCELLED = "GoalCancelled"
+GOAL_PAUSED = "GoalPaused"
+GOAL_BLOCKED = "GoalBlocked"
+
+# Work events
+WORK_CREATED = "WorkCreated"
+WORK_ACCEPTED = "WorkAccepted"
+WORK_REJECTED = "WorkRejected"
+
+# Run events
+RUN_DISPATCHED = "RunDispatched"
+RUN_EXECUTED = "RunExecuted"
+RUN_FAILED = "RunFailed"
+RUN_UNKNOWN = "RunUnknown"
+
+# Permit events
+PERMIT_REQUESTED = "PermitRequested"
+PERMIT_GRANTED = "PermitGranted"
+PERMIT_CLAIMED = "PermitClaimed"
+PERMIT_CONSUMED = "PermitConsumed"
+PERMIT_REVOKED = "PermitRevoked"
+
+# HumanTask events
+HUMANTASK_CREATED = "HumanTaskCreated"
+HUMANTASK_COMPLETED = "HumanTaskCompleted"
+HUMANTASK_ESCALATED = "HumanTaskEscalated"
+
+# Evidence & Observation events
+EVIDENCE_ARRIVED = "EvidenceArrived"
+OBSERVATION_SIGNED = "ObservationSigned"
+GATE_EVALUATED = "GateEvaluated"
+
+# Organization events
+REORGANIZATION_TRIGGERED = "ReorganizationTriggered"
+ORGANIZATION_SELECTED = "OrganizationSelected"
+
+# Constraint & Governance events
+CONSTRAINT_VIOLATED = "ConstraintViolated"
+COMPLIANCE_CHECK_PASSED = "ComplianceCheckPassed"
+COMPLIANCE_CHECK_FAILED = "ComplianceCheckFailed"
+RISK_ESCALATED = "RiskEscalated"
+
+# System events
+RECONCILING_REQUIRED = "ReconcilingRequired"
+BUCKET_EXCEEDED = "BucketExceeded"
+
+# All V3 domain event types
+V3_DOMAIN_EVENTS: tuple[str, ...] = (
+    GOAL_DRAFTED, GOAL_FROZEN, GOAL_STARTED, GOAL_ACHIEVED,
+    GOAL_EXHAUSTED, GOAL_FAILED, GOAL_CANCELLED, GOAL_PAUSED, GOAL_BLOCKED,
+    WORK_CREATED, WORK_ACCEPTED, WORK_REJECTED,
+    RUN_DISPATCHED, RUN_EXECUTED, RUN_FAILED, RUN_UNKNOWN,
+    PERMIT_REQUESTED, PERMIT_GRANTED, PERMIT_CLAIMED, PERMIT_CONSUMED, PERMIT_REVOKED,
+    HUMANTASK_CREATED, HUMANTASK_COMPLETED, HUMANTASK_ESCALATED,
+    EVIDENCE_ARRIVED, OBSERVATION_SIGNED, GATE_EVALUATED,
+    REORGANIZATION_TRIGGERED, ORGANIZATION_SELECTED,
+    CONSTRAINT_VIOLATED, COMPLIANCE_CHECK_PASSED, COMPLIANCE_CHECK_FAILED, RISK_ESCALATED,
+    RECONCILING_REQUIRED, BUCKET_EXCEEDED,
+)
 
 
 # ---------------------------------------------------------------------------

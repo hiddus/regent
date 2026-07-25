@@ -91,6 +91,40 @@ async def test_discovery_acquires_evidence_and_selects_existing_candidate() -> N
 
 
 @pytest.mark.asyncio
+async def test_discovery_forces_research_more_without_http_for_news_goal() -> None:
+    evidence_id = uuid.uuid4()
+    snapshot = EvidenceSourceSnapshot(
+        source_uri="regent://goal-intent/x",
+        captured_at="2026-07-18T00:00:00Z",
+        content_artifact_uri="artifact://evidence/1",
+        content_hash="a" * 64,
+        metadata={"kind": "goal-intent"},
+    )
+    candidates = ProductHypothesisBatch(
+        hypotheses=[hypothesis("one", evidence_id), hypothesis("two", evidence_id)]
+    )
+    decision = HypothesisSelection(
+        decision=HypothesisDecisionValue.SELECT,
+        selected_candidate_key="one",
+        rationale="model wrongly selects without external evidence",
+        policy_version="product-hypothesis-decision-v1",
+    )
+    service = ProductDiscoveryService(
+        InMemoryEvidenceSourceConnector([snapshot]),
+        QueueProvider(candidates, decision),  # type: ignore[arg-type]
+    )
+    outcome = await service.discover(
+        goal="Build an AI industry news digest",
+        constraints={},
+        requests=[EvidenceSourceRequest(query="news digest", correlation_id="corr")],
+        evidence_ids_by_hash={"a" * 64: evidence_id},
+    )
+    assert outcome.decision.decision is HypothesisDecisionValue.RESEARCH_MORE
+    assert outcome.decision.selected_candidate_key is None
+    assert "authorized source URLs" in outcome.decision.rationale
+
+
+@pytest.mark.asyncio
 async def test_discovery_rejects_model_selected_unknown_candidate() -> None:
     evidence_id = uuid.uuid4()
     snapshot = EvidenceSourceSnapshot(

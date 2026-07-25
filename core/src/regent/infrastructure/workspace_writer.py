@@ -106,11 +106,11 @@ class WorkspaceWriter:
             self._sync_tree(stage)
             if target.exists():
                 existing = target / ".regent-manifest.json"
-                if (
-                    existing.is_file()
-                    and hashlib.sha256(existing.read_bytes()).hexdigest() == manifest_hash
-                ):
-                    return self._existing_commit(target, manifest_hash)
+                if existing.is_file():
+                    # Immutable snapshot: first commit wins. Re-execution after a DB
+                    # commit race must reuse the existing workspace (not rewrite it).
+                    existing_hash = hashlib.sha256(existing.read_bytes()).hexdigest()
+                    return self._existing_commit(target, existing_hash)
                 raise WorkspaceConflictError(f"immutable snapshot already exists: {snapshot_key}")
             self._atomic_directory_commit(stage, target)
             self._sync_directory(self._root)

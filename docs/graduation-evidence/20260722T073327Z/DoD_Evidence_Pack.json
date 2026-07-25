@@ -1,0 +1,105 @@
+{
+  "artifact": "DoD_Evidence_Pack",
+  "pack_id": "20260722T073327Z",
+  "built_at": "2026-07-22T08:00:02.438642+00:00",
+  "definition_id": "REGENT-DEFINITION-1.0",
+  "release": "20260722-p1-g0-eo-r34",
+  "files": [
+    "DoD_Evidence_Pack.json",
+    "G8_FAULT_INJECTION_REPORT.json",
+    "GraduationDecisionRecord.json",
+    "INDEX.md",
+    "PRODUCT_EVIDENCE_WINDOW.json",
+    "SUMMARY.md",
+    "g10_quality.json",
+    "g1_g5_post_journey_goals.json",
+    "g1_g5_system_goals.json",
+    "g1_g5_system_goals_repolled.json",
+    "g1_goal_0.json",
+    "g1_goal_1.json",
+    "g1_goal_2.json",
+    "g3_hypotheses.json",
+    "g6_journey_batch1.json",
+    "g8_fault_injection.json",
+    "g8_live_probe.json",
+    "g9_secret_scan.json",
+    "manifest.json"
+  ],
+  "system": {
+    "G1": {
+      "status": "PASS_EVIDENCE",
+      "preview_succeeded": 4,
+      "with_decision": 4,
+      "evidence": "g1_g5_system_goals_repolled.json,g1_g5_post_journey_goals.json"
+    },
+    "G2": {
+      "status": "PASS_PARTIAL",
+      "note": "News goals show RESEARCH_MORE→capability REUSE audit; feedback goal used authorized path",
+      "evidence": "g1_g5_system_goals_repolled.json capability_resolution"
+    },
+    "G3": {
+      "status": "PASS",
+      "evidence": "g3_hypotheses.json",
+      "goals_passing": 4
+    },
+    "G4": {
+      "status": "PASS_OPERATIONAL",
+      "note": "Generation/build reached PREVIEW_SUCCEEDED under Requirement-driven pipeline"
+    },
+    "G5": {
+      "status": "PASS_OPERATIONAL",
+      "note": "Isolated preview builds succeeded; SBOM export follow-up if API exposes report"
+    },
+    "G8": {
+      "status": "TECH_PASS_WITH_RESIDUAL_NOTE",
+      "evidence": "G8_FAULT_INJECTION_REPORT.json,g8_live_probe.json,g8_fault_injection.json"
+    },
+    "G9": {
+      "status": "PASS",
+      "evidence": "g9_secret_scan.json"
+    },
+    "G10": {
+      "status": "PASS",
+      "evidence": "g10_quality.json"
+    },
+    "G11": {
+      "status": "PASS",
+      "release": "20260722-p1-g0-eo-r34",
+      "note": "Deployed production; rollback = previous image tag"
+    },
+    "G12": {
+      "status": "PACKED",
+      "evidence": "DoD_Evidence_Pack.json + INDEX.md"
+    }
+  },
+  "product": {
+    "G6": {
+      "status": "INSUFFICIENT_EVIDENCE",
+      "window": "PRODUCT_EVIDENCE_WINDOW.json"
+    },
+    "G7": {
+      "status": "INSUFFICIENT_EVIDENCE",
+      "window": "PRODUCT_EVIDENCE_WINDOW.json"
+    }
+  },
+  "sha256": {
+    "g10_quality.json": "45e24edf074e7a1ab5561ddd10b76534ed11fae7ac81f1b1b5b9cd65c972468f",
+    "g1_g5_post_journey_goals.json": "c5720d962d9028a68bd490125a61710a8b604635b00fa6e28c8cab305c675db4",
+    "g1_g5_system_goals.json": "6e77c62962bc31d007b0987988d453d81d30459f6300f4d9ba2f0d789c3cd72d",
+    "g1_g5_system_goals_repolled.json": "bc6d2c9ca94a579531a1a18d14ed795009c744b41382f3510b782525858fd5bc",
+    "g1_goal_0.json": "4aec782cd8fffdcdcea27edb8992b377a2cca0321cdd08e5383590444a22a8c9",
+    "g1_goal_1.json": "af0acd4651f4c914c90781eb36e8cb5ae8a646a54794bd8d28601af9627a4c4e",
+    "g1_goal_2.json": "3236340881551916a4049a87a571a52dcb832427e61388e2ad061e2726e0f069",
+    "g3_hypotheses.json": "86f431369f024ba980c5e7e7274a561627a65796ebd6a27aefa23b228ddee82c",
+    "g6_journey_batch1.json": "edc2028d808555859f15eeceebc7b951f26640630486125a668e8714d11ff595",
+    "g8_fault_injection.json": "7e7af7896053d874bd130ab6e0bb627ed2958bcb3fd2b4964d498279ed619f98",
+    "G8_FAULT_INJECTION_REPORT.json": "89a83313daaed50332ba9f35d2437cf95fde57b664dc4646bd95ea2a648fa6cf",
+    "g8_live_probe.json": "fd7172ad2ac4e66b69ce6d26e3323a905c38cedbc2a713c2c40182c450f0b346",
+    "g9_secret_scan.json": "409575cbe74a44635f0dbd603b486db6e2aa6b755322b774f8a74f9103f02f3d",
+    "GraduationDecisionRecord.json": "45ddca2290c231b3a3e01fa7c7f2847c6206e12031dae24a8d7079f10ef8ef8b",
+    "INDEX.md": "5d0a7e75946d573dc699930b462eb468634db75a79d145f948beecbcf6baffbc",
+    "manifest.json": "1327a4c3c44799ec0a9eef30cc6278296f085eef1469ef68ae18422d71a96629",
+    "PRODUCT_EVIDENCE_WINDOW.json": "6f787c15e5a8e26821fb6fcbdcdec1746c6c3ace31a1bd47e380205ac02b8530",
+    "SUMMARY.md": "f0d47603ef3a6dd4b5f694cd233bd6a71b55f93243bebbb7372a32f4a39bab66"
+  }
+}

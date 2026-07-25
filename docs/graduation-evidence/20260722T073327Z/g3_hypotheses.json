@@ -1,0 +1,198 @@
+{
+  "source": "discovery_rounds via DB + /hypotheses API",
+  "goals": [
+    {
+      "goal_id": "6dc62bcb-58d5-46d3-bef6-46cb067943a9",
+      "rounds": [
+        {
+          "goal_id": "6dc62bcb-58d5-46d3-bef6-46cb067943a9",
+          "round_id": "ca7b7e71-6474-4c22-82a6-d7aef97f6d68",
+          "round": "1",
+          "status": "DECIDED",
+          "hypothesis_count": 2,
+          "hypotheses": [
+            {
+              "id": "49d671f5-2720-42b7-8827-369e1fe76afe",
+              "candidate_key": "smart_parser",
+              "title": "smart_parser",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "b1acbaeec736a2c41c75a77592a7e22c7b4a4cdcf5b593ce52b180282adc69ec"
+            },
+            {
+              "id": "dd0893de-4984-494f-bc91-08089c20e21a",
+              "candidate_key": "structured_template",
+              "title": "structured_template",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "2e6e4e99c3075820971b88243c21e38daa8c7801fe035e2a2950a560ed760e8e"
+            }
+          ],
+          "machine_listable_diff_titles": [
+            "smart_parser",
+            "structured_template"
+          ],
+          "pass_g3": true
+        },
+        {
+          "goal_id": "6dc62bcb-58d5-46d3-bef6-46cb067943a9",
+          "round_id": "9180f4c0-db3b-4dff-aac4-96f517378446",
+          "round": "2",
+          "status": "DECIDED",
+          "hypothesis_count": 2,
+          "hypotheses": [
+            {
+              "id": "4b5c3e34-b534-46e9-b594-e1f9c235e655",
+              "candidate_key": "ai_nlp_summarizer",
+              "title": "ai_nlp_summarizer",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "ba229900323b4b6be7b32d1e97a3a04cca096f14d5ba56ab1750fa523539a08a"
+            },
+            {
+              "id": "a134b613-a7fb-403e-8dc7-d194cc547040",
+              "candidate_key": "text_paste_summarizer",
+              "title": "text_paste_summarizer",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "b6ed586b12111a678704d896e1015feae8a5f8328a51eeac1c2576b22fed1b8e"
+            }
+          ],
+          "machine_listable_diff_titles": [
+            "ai_nlp_summarizer",
+            "text_paste_summarizer"
+          ],
+          "pass_g3": true
+        }
+      ],
+      "pass_g3": true
+    },
+    {
+      "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+      "rounds": [
+        {
+          "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+          "round_id": "c7bef853-c067-4287-b6c1-73ab09af50a9",
+          "round": "1",
+          "status": "DECIDED",
+          "hypothesis_count": 2,
+          "hypotheses": [
+            {
+              "id": "c206bc01-a023-4ab1-b590-6fa08d6df523",
+              "candidate_key": "formspree_feedback",
+              "title": "formspree_feedback",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "a64e85f6ac4a30255b50d48d41037e6031674c5a8e23bc15b5006eacbc69ec9b"
+            },
+            {
+              "id": "d3fb5bf4-368b-4e07-9451-7154131f14f4",
+              "candidate_key": "mailto_feedback",
+              "title": "mailto_feedback",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "ace2465808f152decd87a827d31e465ea92deff393a1f2bcc2c6e66314d3bc4f"
+            }
+          ],
+          "machine_listable_diff_titles": [
+            "formspree_feedback",
+            "mailto_feedback"
+          ],
+          "pass_g3": true
+        }
+      ],
+      "pass_g3": true
+    },
+    {
+      "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+      "rounds": [
+        {
+          "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+          "round_id": "0d33d88f-fc5f-4d17-a8b5-dab47243fd3c",
+          "round": "1",
+          "status": "DECIDED",
+          "hypothesis_count": 2,
+          "hypotheses": [
+            {
+              "id": "d5c2f158-e8f3-4fd2-be32-2e3181b80fb8",
+              "candidate_key": "public-api-feed",
+              "title": "public-api-feed",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "6d10af7b69d946e8f29fa318e2bd0a7a391989f3ec5d501a25276974bd3cb9f0"
+            },
+            {
+              "id": "54f817f3-281d-44a6-8d0d-436b689a4a15",
+              "candidate_key": "static-json-feed",
+              "title": "static-json-feed",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "36f203a849f22e532cad7ab9f7223ab7409fe19f9eca8d961c451c7d0d49e75c"
+            }
+          ],
+          "machine_listable_diff_titles": [
+            "public-api-feed",
+            "static-json-feed"
+          ],
+          "pass_g3": true
+        },
+        {
+          "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+          "round_id": "9d7f2c6e-4a12-42b3-aeae-81e49ffc0212",
+          "round": "2",
+          "status": "DECIDED",
+          "hypothesis_count": 2,
+          "hypotheses": [
+            {
+              "id": "52245763-486c-4df1-bbca-4900e8e8a68b",
+              "candidate_key": "multi_feed_aggregator",
+              "title": "multi_feed_aggregator",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "ddbf1993674d94965ac9a2bbfa15605bdef5cb354b7396e70dcafd2118647566"
+            },
+            {
+              "id": "d3e78569-1fdb-4537-9f18-a50f1a73cf12",
+              "candidate_key": "single_feed_reader",
+              "title": "single_feed_reader",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "55efd48f9534d611268c27e1fba9a6328f814893b97a14d1c446b4de89eca977"
+            }
+          ],
+          "machine_listable_diff_titles": [
+            "multi_feed_aggregator",
+            "single_feed_reader"
+          ],
+          "pass_g3": true
+        }
+      ],
+      "pass_g3": true
+    },
+    {
+      "goal_id": "74abfc0e-632e-496f-aeac-3af058f45a06",
+      "rounds": [
+        {
+          "goal_id": "74abfc0e-632e-496f-aeac-3af058f45a06",
+          "round_id": "774b03b5-56cd-4e83-8fdc-2b6d2c67dfb8",
+          "round": "1",
+          "status": "DECIDED",
+          "hypothesis_count": 2,
+          "hypotheses": [
+            {
+              "id": "e6beaf8a-98e6-4d64-9043-c6b135c49e00",
+              "candidate_key": "hello_world_dev_test",
+              "title": "hello_world_dev_test",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "cc7c8b4795a4abf2be8b58f77acff1fdccc3fbfdba18fc628dba1c917c4ace61"
+            },
+            {
+              "id": "b4ddd940-c1ce-467f-9b44-b09326a24710",
+              "candidate_key": "hello_world_landing_page",
+              "title": "hello_world_landing_page",
+              "eligibility": "ELIGIBLE",
+              "content_hash": "fee2e03384e5df2e6fe639673794cd2bf97412bf13ad3d68b08962cfa75ee6d0"
+            }
+          ],
+          "machine_listable_diff_titles": [
+            "hello_world_dev_test",
+            "hello_world_landing_page"
+          ],
+          "pass_g3": true
+        }
+      ],
+      "pass_g3": true
+    }
+  ],
+  "goals_passing_g3": 4
+}

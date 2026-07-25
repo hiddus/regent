@@ -1,0 +1,35 @@
+{
+  "artifact": "G6_G7_PREWINDOW_EVIDENCE",
+  "recorded_at": "2026-07-22T15:30:00+00:00",
+  "window": {
+    "policy": "NO_CALENDAR_MINIMUM",
+    "calibration": "PRODUCT_EVOLUTION_GATE.md",
+    "merge_procedure": "IMMEDIATE_MERGE_PROCEDURE.md",
+    "note": "7-day wait abolished; evolution loop evidence is sufficient"
+  },
+  "g6_independent_paths": [
+    {
+      "path_id": "P1_reject_revise_feedback",
+      "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+      "deployment_id": "7203f3cf-32b2-4567-bd66-011daefc870b",
+      "decision": "REVISE",
+      "discovery_round_id": "5861cc88-ebaf-4ffd-a088-8ddfeb5759ef",
+      "observation_id": "88ce208c-50e3-4bbf-9539-e6d32db9e6fd"
+    },
+    {
+      "path_id": "P2_reject_revise_news",
+      "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+      "deployment_id": "769de2ef-853e-4bcb-92e8-211694e8fdc7",
+      "decision": "REVISE",
+      "discovery_round_id": "b324e4a7-38bf-4cd4-ae82-8fa8c49f6641",
+      "observation_id": "28f5f627-a321-445a-a9a2-ea58006cb124"
+    }
+  ],
+  "g7_observation_ids_registered": [
+    "88ce208c-50e3-4bbf-9539-e6d32db9e6fd",
+    "28f5f627-a321-445a-a9a2-ea58006cb124",
+    "1a8e6fa2-0965-40eb-a4d6-583de0307fbf",
+    "7f0eec37-384b-4288-9837-4ad12d2935bf"
+  ],
+  "note": "G6/G7 satisfied under evolution-gate policy (no calendar floor). Await SYSTEM countersign + docs CURRENT + P2Start before Scheduler."
+}

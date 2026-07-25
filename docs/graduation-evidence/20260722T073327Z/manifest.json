@@ -1,0 +1,11 @@
+{
+  "stamp": "20260722T073327Z",
+  "base_url": "http://118.31.171.159:8000",
+  "health": {
+    "status": "ok",
+    "environment": "production",
+    "database": "ok",
+    "outbox_failed": "0",
+    "outbox_dead_letter": "9"
+  }
+}

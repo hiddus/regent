@@ -10,6 +10,7 @@ class ResolutionMethod(StrEnum):
     CONFIGURE = "CONFIGURE"
     COMPOSE = "COMPOSE"
     BUILD = "BUILD"
+    ACQUIRE = "ACQUIRE"
     REQUEST_HUMAN = "REQUEST_HUMAN"
     BLOCK = "BLOCK"
 
@@ -34,6 +35,7 @@ class CapabilityGap:
     capability_name: str
     composable_from: tuple[str, ...] = ()
     build_allowed: bool = False
+    acquire_allowed: bool = False
     human_resolvable: bool = False
 
 
@@ -97,6 +99,13 @@ class CapabilityResolutionService:
             elif gap.build_allowed:
                 item = ResolutionItem(
                     gap.requirement_key, gap.capability_name, "MISSING", ResolutionMethod.BUILD
+                )
+            elif gap.acquire_allowed:
+                item = ResolutionItem(
+                    gap.requirement_key,
+                    gap.capability_name,
+                    "ACQUIRABLE",
+                    ResolutionMethod.ACQUIRE,
                 )
             elif gap.human_resolvable:
                 item = ResolutionItem(

@@ -10,6 +10,8 @@ class EvidenceSourceRequest(BaseModel):
     source_types: list[str] = Field(default_factory=list)
     budget: dict[str, int | float] = Field(default_factory=dict)
     correlation_id: str = Field(min_length=1)
+    # URLs authorized by the Goal / constraints / Permit — never Core product seeds.
+    authorized_urls: list[str] = Field(default_factory=list)
 
 
 class EvidenceSourceSnapshot(BaseModel):
@@ -53,6 +55,9 @@ class DeploymentRequest(BaseModel):
     environment: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     correlation_id: str = Field(min_length=1)
+    # Optional delivery-review-v1 context (from GoalSpec / acceptance_contract).
+    acceptance_contract: dict[str, Any] = Field(default_factory=dict)
+    success_criteria: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeploymentResult(BaseModel):

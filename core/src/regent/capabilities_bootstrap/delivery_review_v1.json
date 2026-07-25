@@ -1,0 +1,62 @@
+{
+  "name": "delivery-review-v1",
+  "status": "VERIFIED",
+  "description": "Delivery-oriented review capability. Every generated preview/app must pass as a shippable product surface for real users — not a demo stub and not an unstyled browser-default dump. Fail-closed.",
+  "verification": {
+    "protocol": "delivery-review-v1",
+    "fail_closed": true,
+    "target": "deliverable_product",
+    "forbid_demo_only": true,
+    "rules": {
+      "require_semantic_main": true,
+      "require_observation_hook": true,
+      "require_stylesheet": true,
+      "min_style_chars": 220,
+      "min_style_signals": 4,
+      "min_visible_text_chars": 280,
+      "min_structure_signals": 2,
+      "stub_titles": [
+        "welcome",
+        "welcome to",
+        "activation page",
+        "activation",
+        "hello world",
+        "coming soon",
+        "todo",
+        "placeholder",
+        "demo",
+        "sample app",
+        "test page"
+      ],
+      "structure_selectors": [
+        "<ul",
+        "<ol",
+        "<table",
+        "<article",
+        "<section",
+        "data-regent-list",
+        "class=\"card",
+        "class='card",
+        "class=\"article",
+        "class='article"
+      ],
+      "style_signals": [
+        "font-family",
+        "background",
+        "color:",
+        "padding",
+        "margin",
+        "display:",
+        "flex",
+        "grid",
+        "gap:",
+        "border",
+        "max-width",
+        "line-height",
+        "border-radius",
+        "box-shadow"
+      ],
+      "min_observed_titles_rendered": 3
+    }
+  }
+}

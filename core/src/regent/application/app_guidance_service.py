@@ -1,3 +1,5 @@
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -6,6 +8,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.evidence_policy import extract_urls_from_text
+from regent.application.execution_events import (
+    DISCOVERY_ROUND_REQUESTED,
+    EventEnvelope,
+    make_idempotency_key,
+    make_outbox_event,
+)
 from regent.application.goal_execution_service import GoalExecutionService
 from regent.application.p1_contracts import canonical_hash
 from regent.domain.errors import DomainError, ErrorCode
@@ -80,6 +89,9 @@ class AppGuidanceService:
             response_model=GuidanceInterpretation,
         )
         interpretation = generated.output
+        resumed = await self._maybe_resume_research_more(project_id, message, actor)
+        if resumed is not None:
+            return resumed
         if interpretation.command_type == "QUERY":
             return await self._record_query(
                 project_id, message, actor, interpretation, generated.model
@@ -374,6 +386,188 @@ class AppGuidanceService:
         )
         return await self._persist_simple(
             project_id, message, actor, interpretation, model, response
+        )
+
+    async def _maybe_resume_research_more(
+        self, project_id: uuid.UUID, message: str, actor: str
+    ) -> GuidanceReceipt | None:
+        """Optional human URL override when auto capability recovery is exhausted or blocked."""
+        urls = extract_urls_from_text(message)
+        if not urls:
+            return None
+        command_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            project = await session.get(AppProjectModel, project_id)
+            goal = await session.scalar(
+                select(GoalModel)
+                .where(GoalModel.app_project_id == project_id)
+                .order_by(GoalModel.created_at.desc())
+                .with_for_update()
+            )
+            if project is None or goal is None or goal.status != "ACTIVE":
+                return None
+            metadata = dict(goal.metadata_json or {})
+            stage = str(metadata.get("execution_stage") or "")
+            awaiting = bool(metadata.get("awaiting_authorized_sources"))
+            latest_decision = await session.scalar(
+                select(HypothesisDecisionModel.decision)
+                .where(
+                    HypothesisDecisionModel.round_id.in_(
+                        select(DiscoveryRoundModel.id).where(
+                            DiscoveryRoundModel.goal_id == goal.id
+                        )
+                    )
+                )
+                .order_by(HypothesisDecisionModel.created_at.desc())
+                .limit(1)
+            )
+            if (
+                stage != "RESEARCH_MORE"
+                and not awaiting
+                and latest_decision != "RESEARCH_MORE"
+            ):
+                return None
+            spec = await session.scalar(
+                select(GoalSpecModel)
+                .where(GoalSpecModel.goal_id == goal.id)
+                .order_by(GoalSpecModel.version.desc())
+                .limit(1)
+            )
+            if spec is None or spec.status != "FROZEN":
+                return None
+
+            existing = list(metadata.get("authorized_source_urls") or [])
+            merged = list(
+                dict.fromkeys([*[str(item) for item in existing if item], *urls])
+            )
+            metadata["authorized_source_urls"] = merged
+            metadata["awaiting_authorized_sources"] = False
+            metadata["execution_stage"] = "DISCOVERING"
+            goal.metadata_json = metadata
+
+            conversation = await self._conversation(session, project_id)
+            ordinal = await self._next_ordinal(session, conversation.id)
+            session.add(
+                ConversationMessageModel(
+                    id=uuid.uuid4(),
+                    conversation_id=conversation.id,
+                    ordinal=ordinal,
+                    role="USER",
+                    message_type="GUIDANCE",
+                    content=message,
+                    metadata_json={"authorized_source_urls": urls},
+                    created_by=actor,
+                )
+            )
+            response = (
+                "已记录授权来源 URL, 并重新启动产品发现。"
+                f" 将抓取: {', '.join(merged[:5])}"
+                + ("..." if len(merged) > 5 else "")
+            )
+            session.add(
+                ConversationMessageModel(
+                    id=uuid.uuid4(),
+                    conversation_id=conversation.id,
+                    ordinal=ordinal + 1,
+                    role="ASSISTANT",
+                    message_type="RESEARCH_MORE_SOURCES_ACCEPTED",
+                    content=response,
+                    metadata_json={
+                        "goal_id": str(goal.id),
+                        "authorized_source_urls": merged,
+                    },
+                    created_by="regent-core",
+                )
+            )
+
+            idempotency_key = make_idempotency_key(
+                "discovery-resume", goal.id, str(command_id)
+            )
+            next_round = (
+                int(
+                    await session.scalar(
+                        select(func.coalesce(func.max(DiscoveryRoundModel.round), 0)).where(
+                            DiscoveryRoundModel.goal_id == goal.id
+                        )
+                    )
+                    or 0
+                )
+                + 1
+            )
+            snapshot = {
+                "goal_id": str(goal.id),
+                "goal_version": goal.version,
+                "spec_version": spec.version,
+                "constraints": spec.explicit_constraints,
+                "success_criteria": spec.success_criteria,
+                "authorized_source_urls": merged,
+                "resume_of": "RESEARCH_MORE",
+            }
+            snapshot_hash = hashlib.sha256(
+                json.dumps(
+                    snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode()
+            ).hexdigest()
+            discovery_round = DiscoveryRoundModel(
+                id=uuid.uuid4(),
+                goal_id=goal.id,
+                round=next_round,
+                status="REQUESTED",
+                version=0,
+                input_snapshot_hash=snapshot_hash,
+                budget={"max_sources": 5, "max_tokens": 50_000},
+                policy_version="discovery-v1",
+                idempotency_key=idempotency_key,
+                created_by=actor,
+                correlation_id=str(goal.correlation_id),
+            )
+            session.add(discovery_round)
+            session.add(
+                make_outbox_event(
+                    EventEnvelope(
+                        event_type=DISCOVERY_ROUND_REQUESTED,
+                        aggregate_type="goal",
+                        aggregate_id=goal.id,
+                        aggregate_version=goal.version,
+                        payload={
+                            "goal_id": str(goal.id),
+                            "app_project_id": str(project_id),
+                            "discovery_round_id": str(discovery_round.id),
+                            "round": next_round,
+                            "actor": actor,
+                            "idempotency_key": idempotency_key,
+                            "resume_of": "RESEARCH_MORE",
+                        },
+                        idempotency_key=idempotency_key,
+                        correlation_id=goal.correlation_id,
+                    )
+                )
+            )
+            session.add(
+                ConversationMessageModel(
+                    id=uuid.uuid4(),
+                    conversation_id=conversation.id,
+                    ordinal=ordinal + 2,
+                    role="EVENT",
+                    message_type="DISCOVERY_ROUND_REQUESTED",
+                    content=(
+                        f"Core has created discovery round {next_round} with authorized "
+                        "source URLs and is collecting evidence."
+                    ),
+                    metadata_json={
+                        "goal_id": str(goal.id),
+                        "discovery_round_id": str(discovery_round.id),
+                        "round": next_round,
+                    },
+                    created_by="regent-core",
+                )
+            )
+        return GuidanceReceipt(
+            command_id=command_id,
+            command_type="PROVIDE_SOURCES",
+            resulting_goal_id=None,
+            requires_confirmation=False,
+            response=response,
         )
 
     async def _record_continue(

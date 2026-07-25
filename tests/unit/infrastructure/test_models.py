@@ -70,6 +70,23 @@ def test_kernel_metadata_contains_required_tables() -> None:
         "conversation_commands",
         "app_preview_releases",
         "self_improvement_runs",
+        # G0 ExternalOperation
+        "external_operations",
+        # P2-1 Scheduler
+        "execution_queue_entries",
+        "goal_priority_policies",
+        "resource_quotas",
+        "resource_reservations",
+        "scheduling_decisions",
+        "preemption_records",
+        "scheduler_checkpoints",
+        "budget_ledger_entries",
+        # P2-2 Runtime
+        "runtime_profiles",
+        # P2-3 Memory
+        "memory_records",
+        # P2-4 Eval
+        "eval_runs",
     }
 
 

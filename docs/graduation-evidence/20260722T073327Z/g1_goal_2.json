@@ -1,0 +1,28 @@
+{
+  "project_id": "2c923acb-5623-4313-bc36-d2c69db85a1a",
+  "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+  "idea": "做一个轻量 Web MVP：展示公开科技资讯列表并支持按关键词过滤",
+  "status": "ACTIVE",
+  "execution_stage": "DISCOVERING",
+  "awaiting_authorized_sources": false,
+  "capability_resolution": {
+    "method": "REUSE",
+    "capability_id": "f15e6f98-bd9c-401c-b681-be0368daa684",
+    "capability_name": "allowlisted-http-source-v1",
+    "bound_from_round_id": "0d33d88f-fc5f-4d17-a8b5-dab47243fd3c",
+    "default_feeds_from_capability": [
+      "https://techcrunch.com/feed/",
+      "https://hnrss.org/frontpage",
+      "https://www.theverge.com/rss/index.xml"
+    ]
+  },
+  "last_preview_endpoint": null,
+  "last_gate_status": null,
+  "last_iteration_decision": null,
+  "authorized_source_urls": [
+    "https://techcrunch.com/feed/",
+    "https://hnrss.org/frontpage",
+    "https://www.theverge.com/rss/index.xml"
+  ],
+  "elapsed_sec": 358.1
+}

@@ -1,0 +1,30 @@
+# REGENT-DEFINITION-1.0
+# Normative identity. Do not edit in place.
+# To supersede: create REGENT-DEFINITION-2.0 (or a new product identity), never mutate this file.
+# Other documents must link here; they must not copy this body into a second normative source.
+
+DEFINITION_ID=REGENT-DEFINITION-1.0
+
+DEFINITION_TEXT=
+Regent 接收人的自然语言 Goal，在明确的约束、资源、授权和治理边界内，自主解释目标，发现并补齐能力，形成当前最合适的最小人机组织，创建并运营可脱离 Core 独立运行的应用，并依据可验证的外部结果持续调整计划、能力和组织，直至目标达成、资源耗尽、不可恢复失败或被 Goal Owner 取消。
+
+ATTRIBUTE_1_GOAL_DRIVEN=
+唯一必需的用户输入是自然语言 Goal；结构化 GoalSpec 是 Regent 的解释结果，而不是用户必须预先完成的产品需求。
+
+ATTRIBUTE_2_BOUNDED_AUTONOMY=
+自治始终受约束、资源、授权、治理和人工接管约束；自治不等于无限权限或无人负责。
+
+ATTRIBUTE_3_CAPABILITY_EVOLUTION=
+Regent 不只调用预置工具；它必须能够发现能力缺口，并按复用、配置、组合、构建或请求人类的顺序补齐能力。
+
+ATTRIBUTE_4_ORGANIZATION_AS_MEANS=
+Regent 根据目标形成、调整和解散最小人机组织；单 Agent、固定团队或多 Agent 都只是候选实现，不是产品定义或预设结论。
+
+ATTRIBUTE_5_INDEPENDENT_APP=
+生成的 App 拥有独立源码、依赖、数据、测试、部署和生命周期，可以脱离 Regent Core 运行；业务场景不得被反向固化进 Core。
+
+ATTRIBUTE_6_EXTERNAL_OUTCOME_LOOP=
+Regent 依据可验证的外部 Evidence 与 Observation 调整计划、能力和组织，而不是以生成者自评、内部 smoke 或多数投票代替目标结果。
+
+ATTRIBUTE_7_EXPLICIT_TERMINATION=
+持续调整不是无限运行；系统必须在成功、耗尽、失败或取消时形成有证据的终态。

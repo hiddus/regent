@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from regent.application.delivery_review_service import review_files_for_delivery
 from regent.domain.errors import DomainError, ErrorCode
 
 
@@ -28,6 +29,9 @@ class StaticAppPublisher:
         project_id: uuid.UUID,
         release_id: uuid.UUID,
         files: dict[str, str],
+        *,
+        acceptance_contract: dict[str, object] | None = None,
+        success_criteria: dict[str, object] | None = None,
     ) -> PublishedStaticApp:
         allowed = {"index.html", "styles.css", "app.js"}
         if set(files) != allowed:
@@ -40,6 +44,11 @@ class StaticAppPublisher:
         combined = "\n".join(files.values()).lower()
         if "http://" in combined or "https://" in combined or "//cdn." in combined:
             raise DomainError(ErrorCode.POLICY_DENIED, "preview cannot load external resources")
+        delivery = review_files_for_delivery(
+            files,
+            acceptance_contract=acceptance_contract,
+            success_criteria=success_criteria,
+        )
         checks: list[dict[str, object]] = [
             {"name": "frozen-file-set", "passed": True},
             {"name": "size-limit", "passed": True, "bytes": total},
@@ -52,9 +61,27 @@ class StaticAppPublisher:
                 "name": "observation-hook",
                 "passed": "data-regent-event" in files["index.html"],
             },
+            {
+                "name": "delivery-review-v1",
+                "passed": delivery.passed,
+                "summary": delivery.summary,
+                "checks": [
+                    {"name": c.name, "passed": c.passed, "detail": c.detail}
+                    for c in delivery.checks
+                ],
+            },
         ]
         if not all(bool(item["passed"]) for item in checks):
-            raise DomainError(ErrorCode.INVALID_STATE, "generated preview failed verification")
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "delivery-review-v1 rejected non-deliverable surface: "
+                f"{delivery.summary}; "
+                + "; ".join(
+                    f"{c.name}: {c.detail or 'failed'}"
+                    for c in delivery.checks
+                    if not c.passed
+                ),
+            )
         manifest = {
             name: hashlib.sha256(content.encode("utf-8")).hexdigest()
             for name, content in sorted(files.items())

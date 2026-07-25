@@ -1,0 +1,72 @@
+[
+  {
+    "project_id": "edc67d01-f7df-4301-a093-bd1868a34849",
+    "goal_id": "6dc62bcb-58d5-46d3-bef6-46cb067943a9",
+    "idea": "做一个内部团队周报汇总 Web 工具，支持粘贴文本并生成结构化摘要页",
+    "status": "ACTIVE",
+    "execution_stage": "PREVIEW_SUCCEEDED",
+    "awaiting_authorized_sources": false,
+    "capability_resolution": {
+      "method": "REUSE",
+      "capability_id": "f15e6f98-bd9c-401c-b681-be0368daa684",
+      "capability_name": "allowlisted-http-source-v1",
+      "bound_from_round_id": "ca7b7e71-6474-4c22-82a6-d7aef97f6d68",
+      "default_feeds_from_capability": [
+        "https://techcrunch.com/feed/",
+        "https://hnrss.org/frontpage",
+        "https://www.theverge.com/rss/index.xml"
+      ]
+    },
+    "last_preview_endpoint": "http://118.31.171.159:8000/preview/4138e5cc-968a-40ef-ac08-602f40480892/2eeb62c5-5200-4750-ba43-451ef73599fc/",
+    "last_gate_status": "INSUFFICIENT_EVIDENCE",
+    "last_iteration_decision": null,
+    "authorized_source_urls": [
+      "https://techcrunch.com/feed/",
+      "https://hnrss.org/frontpage",
+      "https://www.theverge.com/rss/index.xml"
+    ],
+    "elapsed_sec": 357.9
+  },
+  {
+    "project_id": "107e2feb-8096-4d0d-b37c-433ee8efafa6",
+    "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+    "idea": "做一个无敏感数据的静态产品反馈收集页，用户可提交建议并看到确认",
+    "status": "ACTIVE",
+    "execution_stage": "PREVIEW_SUCCEEDED",
+    "awaiting_authorized_sources": null,
+    "capability_resolution": null,
+    "last_preview_endpoint": "http://118.31.171.159:8000/preview/5390d368-399e-4e2f-be5c-a584ff8b71d4/3edf0893-ecaf-4887-ac17-bbc96dddd6bc/",
+    "last_gate_status": "INSUFFICIENT_EVIDENCE",
+    "last_iteration_decision": null,
+    "authorized_source_urls": null,
+    "elapsed_sec": 179.0
+  },
+  {
+    "project_id": "2c923acb-5623-4313-bc36-d2c69db85a1a",
+    "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+    "idea": "做一个轻量 Web MVP：展示公开科技资讯列表并支持按关键词过滤",
+    "status": "ACTIVE",
+    "execution_stage": "PREVIEW_SUCCEEDED",
+    "awaiting_authorized_sources": false,
+    "capability_resolution": {
+      "method": "REUSE",
+      "capability_id": "f15e6f98-bd9c-401c-b681-be0368daa684",
+      "capability_name": "allowlisted-http-source-v1",
+      "bound_from_round_id": "0d33d88f-fc5f-4d17-a8b5-dab47243fd3c",
+      "default_feeds_from_capability": [
+        "https://techcrunch.com/feed/",
+        "https://hnrss.org/frontpage",
+        "https://www.theverge.com/rss/index.xml"
+      ]
+    },
+    "last_preview_endpoint": "http://118.31.171.159:8000/preview/21d22289-7bfe-46b2-a514-d42b1453ff7b/66174470-48b1-4ac2-9c2a-0ec0b963efd1/",
+    "last_gate_status": "INSUFFICIENT_EVIDENCE",
+    "last_iteration_decision": null,
+    "authorized_source_urls": [
+      "https://techcrunch.com/feed/",
+      "https://hnrss.org/frontpage",
+      "https://www.theverge.com/rss/index.xml"
+    ],
+    "elapsed_sec": 358.1
+  }
+]

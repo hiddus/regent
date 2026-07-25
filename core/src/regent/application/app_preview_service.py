@@ -99,15 +99,19 @@ class AppPreviewService:
                 "constraints": spec.explicit_constraints,
                 "success_criteria": spec.success_criteria,
             }
+            success_criteria = dict(spec.success_criteria or {})
         try:
             generated = await self._provider.generate_structured(
                 system_prompt=(
-                    "Generate a polished, responsive, accessible static web App for real preview "
-                    "testing. Return complete index_html, styles_css, and app_js. Use no external "
-                    "resources, network calls, frameworks, or placeholder TODOs. index_html must "
-                    "reference ./styles.css and ./app.js, contain a semantic <main>, and put "
-                    "data-regent-event on the primary activation action. JavaScript may only "
-                    "provide local interaction. Make the product immediately understandable."
+                    "Generate a polished, responsive, accessible static web App for "
+                    "real preview testing and delivery — not a demo stub. Return "
+                    "complete index_html, styles_css, and app_js. Use no external "
+                    "resources, network calls, frameworks, or placeholder TODOs. "
+                    "index_html must reference ./styles.css and ./app.js, contain a "
+                    "semantic <main>, substantial product content (lists/sections "
+                    "matching success criteria), and put data-regent-event on the "
+                    "primary activation action. JavaScript may only provide local "
+                    "interaction. Make the product immediately understandable."
                 ),
                 user_prompt=str(prompt),
                 response_model=GeneratedStaticApp,
@@ -131,6 +135,7 @@ class AppPreviewService:
                         ".catch(()=>{});});});"
                     ),
                 },
+                success_criteria=success_criteria,
             )
             endpoint = f"/preview/{project_id}/{release_id}/"
             async with self._sessions() as session, session.begin():

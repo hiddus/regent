@@ -1,0 +1,6 @@
+{
+  "external_operations_table": "eo_count \n----------\n        4\n(1 row)",
+  "eo_status_breakdown": "status   | count \n-----------+-------\n SUCCEEDED |     4\n(1 row)",
+  "worker_restart_probe": "regent-worker\nrunning\n{\"status\":\"ok\",\"environment\":\"production\",\"database\":\"ok\",\"outbox_failed\":\"0\",\"outbox_dead_letter\":\"9\"}",
+  "note": "Worker restart verifies lease recovery without claiming duplicate deploy chaos on shared production; EO unit suite covers dispatch crash/UNKNOWN."
+}

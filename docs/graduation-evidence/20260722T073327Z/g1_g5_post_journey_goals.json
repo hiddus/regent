@@ -1,0 +1,87 @@
+{
+  "collected_at": "2026-07-22T08:00:02.438642+00:00",
+  "goals": [
+    {
+      "goal_id": "6dc62bcb-58d5-46d3-bef6-46cb067943a9",
+      "status": "ACTIVE",
+      "execution_stage": "PREVIEW_SUCCEEDED",
+      "last_gate_status": "PASSED",
+      "last_iteration_decision": "CONTINUE",
+      "last_deployment_id": "37a83652-54f3-4b4e-9889-2c899ba35dc4",
+      "last_preview_endpoint": "http://118.31.171.159:8000/preview/4138e5cc-968a-40ef-ac08-602f40480892/2eeb62c5-5200-4750-ba43-451ef73599fc/",
+      "capability_resolution": {
+        "method": "REUSE",
+        "capability_id": "f15e6f98-bd9c-401c-b681-be0368daa684",
+        "capability_name": "allowlisted-http-source-v1",
+        "bound_from_round_id": "ca7b7e71-6474-4c22-82a6-d7aef97f6d68",
+        "default_feeds_from_capability": [
+          "https://techcrunch.com/feed/",
+          "https://hnrss.org/frontpage",
+          "https://www.theverge.com/rss/index.xml"
+        ]
+      },
+      "deployment_snapshot": {
+        "status": "SUCCEEDED",
+        "gate_status": null,
+        "decision": null
+      }
+    },
+    {
+      "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+      "status": "ACTIVE",
+      "execution_stage": "PREVIEW_SUCCEEDED",
+      "last_gate_status": "PASSED",
+      "last_iteration_decision": "CONTINUE",
+      "last_deployment_id": "7203f3cf-32b2-4567-bd66-011daefc870b",
+      "last_preview_endpoint": "http://118.31.171.159:8000/preview/5390d368-399e-4e2f-be5c-a584ff8b71d4/3edf0893-ecaf-4887-ac17-bbc96dddd6bc/",
+      "capability_resolution": null,
+      "deployment_snapshot": {
+        "status": "SUCCEEDED",
+        "gate_status": null,
+        "decision": null
+      }
+    },
+    {
+      "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+      "status": "ACTIVE",
+      "execution_stage": "PREVIEW_SUCCEEDED",
+      "last_gate_status": "PASSED",
+      "last_iteration_decision": "CONTINUE",
+      "last_deployment_id": "769de2ef-853e-4bcb-92e8-211694e8fdc7",
+      "last_preview_endpoint": "http://118.31.171.159:8000/preview/21d22289-7bfe-46b2-a514-d42b1453ff7b/66174470-48b1-4ac2-9c2a-0ec0b963efd1/",
+      "capability_resolution": {
+        "method": "REUSE",
+        "capability_id": "f15e6f98-bd9c-401c-b681-be0368daa684",
+        "capability_name": "allowlisted-http-source-v1",
+        "bound_from_round_id": "0d33d88f-fc5f-4d17-a8b5-dab47243fd3c",
+        "default_feeds_from_capability": [
+          "https://techcrunch.com/feed/",
+          "https://hnrss.org/frontpage",
+          "https://www.theverge.com/rss/index.xml"
+        ]
+      },
+      "deployment_snapshot": {
+        "status": "SUCCEEDED",
+        "gate_status": null,
+        "decision": null
+      }
+    },
+    {
+      "goal_id": "74abfc0e-632e-496f-aeac-3af058f45a06",
+      "status": "ACTIVE",
+      "execution_stage": "PREVIEW_SUCCEEDED",
+      "last_gate_status": "PASSED",
+      "last_iteration_decision": "CONTINUE",
+      "last_deployment_id": "311b762b-ae7d-426a-9785-abd4c103967f",
+      "last_preview_endpoint": "http://118.31.171.159:8000/preview/9f476fc8-d9fc-4dfd-b02f-b16d07ce6396/50944077-47df-411f-86f5-dbad9771043f/",
+      "capability_resolution": null,
+      "deployment_snapshot": {
+        "status": "SUCCEEDED",
+        "gate_status": null,
+        "decision": null
+      }
+    }
+  ],
+  "preview_succeeded": 4,
+  "with_decision": 4
+}

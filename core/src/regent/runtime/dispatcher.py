@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,15 +24,25 @@ class ClaimedEvent:
 
 
 def claim_statement(limit: int) -> Select[tuple[OutboxEventModel]]:
+    """Claim PENDING/FAILED due events, and reclaim expired DISPATCHING leases."""
     return (
         select(OutboxEventModel)
         .where(
-            OutboxEventModel.status.in_(("PENDING", "FAILED")),
-            OutboxEventModel.available_at <= func.now(),
             or_(
-                OutboxEventModel.lease_expires_at.is_(None),
-                OutboxEventModel.lease_expires_at < func.now(),
-            ),
+                and_(
+                    OutboxEventModel.status.in_(("PENDING", "FAILED")),
+                    OutboxEventModel.available_at <= func.now(),
+                    or_(
+                        OutboxEventModel.lease_expires_at.is_(None),
+                        OutboxEventModel.lease_expires_at < func.now(),
+                    ),
+                ),
+                and_(
+                    OutboxEventModel.status == "DISPATCHING",
+                    OutboxEventModel.lease_expires_at.is_not(None),
+                    OutboxEventModel.lease_expires_at < func.now(),
+                ),
+            )
         )
         .order_by(OutboxEventModel.available_at, OutboxEventModel.occurred_at)
         .with_for_update(skip_locked=True)
@@ -118,7 +128,28 @@ class OutboxDispatcher:
                     )
                 ),
             )
-            self._require_owned_lease(result.rowcount, event_id)
+            if result.rowcount == 1:
+                return
+            # Handler succeeded after lease expiry: still finalize to avoid re-dispatch.
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(OutboxEventModel)
+                    .where(
+                        OutboxEventModel.id == event_id,
+                        OutboxEventModel.status == "DISPATCHING",
+                    )
+                    .values(
+                        status="DISPATCHED",
+                        dispatched_at=func.now(),
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                ),
+            )
+            if result.rowcount != 1:
+                # Already DISPATCHED/FAILED by reclaim — treat as success.
+                return
 
     async def fail(self, event_id: uuid.UUID, worker_id: str, error: str) -> None:
         async with self._sessions() as session, session.begin():
@@ -149,8 +180,10 @@ class OutboxDispatcher:
                     )
                 ),
             )
+            # Lease may expire during long handlers; do not crash the worker loop.
+            if result.rowcount != 1:
+                return
 
-            self._require_owned_lease(result.rowcount, event_id)
     @staticmethod
     async def _database_now(session: AsyncSession) -> datetime:
         value = await session.scalar(select(func.now()))

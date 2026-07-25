@@ -1,0 +1,9 @@
+{
+  "at": "2026-07-22T08:28:51.357351+00:00",
+  "deployment_id": "7203f3cf-32b2-4567-bd66-011daefc870b",
+  "decision": "REVISE",
+  "discovery_round_id": "5861cc88-ebaf-4ffd-a088-8ddfeb5759ef",
+  "observation_id": "88ce208c-50e3-4bbf-9539-e6d32db9e6fd",
+  "release": "20260722-p1-loop-r35",
+  "note": "Employee-style rejection entered system and opened new discovery round"
+}

@@ -2,7 +2,11 @@ import asyncio
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
+import tempfile
 import uuid
+import zipfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -170,6 +174,171 @@ class DockerSandboxDriver:
             evidence_artifact_uri=evidence.resolve().as_uri(),
             evidence_hash=hashlib.sha256(evidence.read_bytes()).hexdigest(),
         )
+
+
+class LocalSandboxDriver:
+    """Build verification that runs natively (no Docker-in-Docker needed).
+
+    Mirrors the logic of capabilities/bootstrap/sandbox/main.py:
+    extract source + deps, compileall, optional pytest, produce artifact.
+    """
+
+    def __init__(self, *, root: Path) -> None:
+        self._root = root.resolve()
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._results: dict[str, SandboxBuildResult] = {}
+
+    async def build(self, request: SandboxBuildRequest) -> SandboxBuildResult:
+        operation_id = uuid.uuid4().hex
+        operation = self._root / operation_id
+        output_dir = operation / "output"
+        output_dir.mkdir(parents=True)
+
+        source_path = self._local_artifact(request.workspace_snapshot_uri)
+        bundle_path = self._local_artifact(request.dependency_bundle_uri)
+        bundle_hash = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+        if bundle_hash != request.dependency_bundle_hash:
+            raise ValueError("dependency bundle hash mismatch")
+
+        checks: list[dict[str, Any]] = []
+        status = "PASSED"
+        error_msg: str | None = None
+
+        work = Path(tempfile.mkdtemp(prefix="regent-build-"))
+        try:
+            # Extract source
+            with zipfile.ZipFile(source_path) as archive:
+                for member in archive.infolist():
+                    target = (work / member.filename).resolve()
+                    if work.resolve() not in target.parents:
+                        raise ValueError("source archive path escape")
+                archive.extractall(work)
+
+            # Extract dependencies
+            deps_dir = work / ".deps"
+            with zipfile.ZipFile(bundle_path) as archive:
+                for member in archive.infolist():
+                    target = (deps_dir / member.filename).resolve()
+                    if deps_dir.resolve() not in target.parents:
+                        raise ValueError("dependency bundle path escape")
+                archive.extractall(deps_dir)
+
+            # compileall check
+            compile_cmd = [sys.executable, "-m", "compileall", "-q", str(work)]
+            compile_result = subprocess.run(
+                compile_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=str(work),
+            )
+            checks.append({
+                "command": compile_cmd,
+                "exit_code": compile_result.returncode,
+                "stdout": compile_result.stdout[-4000:],
+                "stderr": compile_result.stderr[-4000:],
+            })
+            if compile_result.returncode != 0:
+                status = "FAILED"
+                error_msg = "compileall failed"
+
+            # pytest if tests exist
+            has_tests = (
+                (work / "tests").is_dir()
+                or any(work.rglob("test_*.py"))
+                or any(work.rglob("*_test.py"))
+            )
+            if has_tests and status == "PASSED":
+                test_cmd = [sys.executable, "-m", "pytest", "-q"]
+                test_result = subprocess.run(
+                    test_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    cwd=str(work),
+                    env={
+                        "PATH": subprocess.os.environ.get("PATH", ""),
+                        "PYTHONPATH": str(work / "src") + subprocess.os.pathsep + str(work),
+                        "HOME": tempfile.gettempdir(),
+                    },
+                )
+                checks.append({
+                    "command": test_cmd,
+                    "exit_code": test_result.returncode,
+                    "stdout": test_result.stdout[-4000:],
+                    "stderr": test_result.stderr[-4000:],
+                })
+                # pytest exit code 5 = no tests collected
+                if test_result.returncode not in (0, 5):
+                    status = "FAILED"
+                    error_msg = "pytest failed"
+
+            # Produce build artifact (source zip without .deps/__pycache__)
+            artifact = output_dir / "app-source.zip"
+            with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as zf:
+                for path in sorted(
+                    p for p in work.rglob("*") if p.is_file()
+                    and ".deps" not in p.parts
+                    and "__pycache__" not in p.parts
+                ):
+                    zf.write(path, path.relative_to(work).as_posix())
+
+            # Write evidence
+            evidence = output_dir / "verification.json"
+            evidence_data = {"checks": checks}
+            if error_msg:
+                evidence_data["error"] = error_msg
+            evidence.write_text(
+                json.dumps(evidence_data, sort_keys=True), encoding="utf-8"
+            )
+
+            result = SandboxBuildResult(
+                external_request_id=operation_id,
+                status=status,
+                evidence_artifact_uri=evidence.resolve().as_uri(),
+                evidence_hash=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+                build_artifact_uri=artifact.resolve().as_uri()
+                if status == "PASSED"
+                else None,
+                build_artifact_hash=hashlib.sha256(artifact.read_bytes()).hexdigest()
+                if status == "PASSED"
+                else None,
+                checks=checks,
+            )
+        except Exception as exc:
+            evidence = output_dir / "verification.json"
+            evidence.write_text(
+                json.dumps({"checks": checks, "error": str(exc)}, sort_keys=True),
+                encoding="utf-8",
+            )
+            result = SandboxBuildResult(
+                external_request_id=operation_id,
+                status="FAILED",
+                evidence_artifact_uri=evidence.resolve().as_uri(),
+                evidence_hash=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+                checks=checks,
+            )
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+        self._results[operation_id] = result
+        return result
+
+    async def query(self, external_request_id: str) -> SandboxBuildResult:
+        if external_request_id not in self._results:
+            raise LookupError("unknown sandbox operation")
+        return self._results[external_request_id]
+
+    @staticmethod
+    def _local_artifact(uri: str) -> Path:
+        parsed = urlparse(uri)
+        if parsed.scheme != "file":
+            raise ValueError("sandbox accepts local immutable artifacts only")
+        raw = parsed.path[1:] if len(parsed.path) > 2 and parsed.path[2] == ":" else parsed.path
+        path = Path(raw).resolve()
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("sandbox input artifact is invalid")
+        return path
 
 
 class DockerDependencyMaterializer:

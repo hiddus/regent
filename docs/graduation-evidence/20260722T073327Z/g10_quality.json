@@ -1,0 +1,12 @@
+{
+  "ruff": {
+    "returncode": 0,
+    "stdout_tail": "\u001b[1;32mAll checks passed!\u001b[0m\n",
+    "stderr_tail": ""
+  },
+  "pytest_g0": {
+    "returncode": 0,
+    "stdout_tail": "............                                                             [100%]\n",
+    "stderr_tail": ""
+  }
+}

@@ -7,30 +7,66 @@ import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from regent.application.delivery_review_service import review_html_for_delivery
 from regent.application.p1_ports import (
     DeploymentRequest,
     DeploymentResult,
 )
 
-_ACTIVATION_SNIPPET = """
-<script>
+_ACTIVATION_JS = """
 (function(){
   var btn=document.querySelector('[data-regent-event]');
   if(!btn){return;}
   btn.addEventListener('click', function(){
     var meta=document.querySelector('meta[name="regent-deployment-id"]');
-    if(!meta){return;}
-    fetch('/v1/deployments/'+meta.content+'/events',{
+    var q=new URLSearchParams(location.search).get('deployment_id');
+    var id=(meta && meta.content) || q || '';
+    if(!id){
+      document.documentElement.setAttribute('data-regent-obs','missing-id');
+      return;
+    }
+    fetch('/v1/deployments/'+id+'/events',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({event_id:'click-'+Date.now(),event_name:'activation'})
-    }).catch(function(){});
+    }).then(function(r){
+      document.documentElement.setAttribute('data-regent-obs', r.ok ? 'ok' : 'err');
+    }).catch(function(){
+      document.documentElement.setAttribute('data-regent-obs','err');
+    });
   });
 })();
-</script>
 """
 
+_ACTIVATION_SCRIPT_TAG = '<script src="./regent-preview.js"></script>\n'
 
+
+def stamp_preview_deployment_id(
+    preview_root: Path,
+    *,
+    project_key: str,
+    release_key: str,
+    deployment_id: str,
+) -> None:
+    """Write the real deployment UUID into published preview HTML for browser events."""
+    index_path = (preview_root / project_key / release_key / "index.html").resolve()
+    root = preview_root.resolve()
+    if root not in index_path.parents or not index_path.is_file():
+        raise ValueError("preview index.html not found for stamping")
+    html = index_path.read_text(encoding="utf-8")
+    marker = '<meta name="regent-deployment-id" content="'
+    if marker in html:
+        start = html.index(marker) + len(marker)
+        end = html.index('"', start)
+        html = html[:start] + deployment_id + html[end:]
+    else:
+        html = html.replace(
+            "<head>",
+            f'<head>\n<meta name="regent-deployment-id" content="{deployment_id}">',
+            1,
+        )
+    index_path.write_text(html, encoding="utf-8")
+    (index_path.parent / "regent-preview.js").write_text(_ACTIVATION_JS, encoding="utf-8")
 class StaticPreviewDeploymentProvider:
     """Deploy build artifacts as static previews served by the API /preview/ route.
 
@@ -85,11 +121,20 @@ class StaticPreviewDeploymentProvider:
                     "preview requires data-regent-event in index.html; "
                     "refusing to inject synthetic task controls"
                 )
-            snippet = _ACTIVATION_SNIPPET
-            if "</body>" in html:
-                html = html.replace("</body>", snippet + "</body>", 1)
-            else:
-                html += snippet
+            # delivery-review-v1: fail-closed against demo-only pages.
+            review = review_html_for_delivery(
+                html,
+                acceptance_contract=request.acceptance_contract,
+                success_criteria=request.success_criteria,
+            )
+            if not review.passed:
+                review.raise_if_failed()
+            (target_dir / "regent-preview.js").write_text(_ACTIVATION_JS, encoding="utf-8")
+            if "regent-preview.js" not in html:
+                if "</body>" in html:
+                    html = html.replace("</body>", _ACTIVATION_SCRIPT_TAG + "</body>", 1)
+                else:
+                    html += _ACTIVATION_SCRIPT_TAG
             if '<meta name="regent-deployment-id"' not in html:
                 html = html.replace(
                     "<head>",
@@ -109,6 +154,15 @@ class StaticPreviewDeploymentProvider:
                     "release_key": str(release_key),
                     "artifact_hash": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
                     "runtime": "static-html",
+                    "delivery_review": {
+                        "capability": review.capability,
+                        "passed": True,
+                        "summary": review.summary,
+                        "checks": [
+                            {"name": c.name, "passed": c.passed, "detail": c.detail}
+                            for c in review.checks
+                        ],
+                    },
                 },
             )
         except Exception as exc:

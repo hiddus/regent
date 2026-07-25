@@ -1,0 +1,23 @@
+{
+  "artifact": "G8_FAULT_INJECTION_REPORT",
+  "updated_at": "2026-07-22T08:00:02.438642+00:00",
+  "scripts_required": [
+    "repeat_outbox_same_operation_key",
+    "crash_after_dispatch_marks_unknown",
+    "resume_same_operation_key",
+    "stale_fencing_rejected",
+    "unclaimed_permit_rejected"
+  ],
+  "unit_suite_pass": true,
+  "live": {
+    "worker_restart": true,
+    "eo_audit": "status   | count \n-----------+-------\n SUCCEEDED |     4\n(1 row)",
+    "note": "Worker restart verifies lease recovery without claiming duplicate deploy chaos on shared production; EO unit suite covers dispatch crash/UNKNOWN."
+  },
+  "thresholds": {
+    "zero_duplicate_side_effect": "PASS_UNIT_AND_EO_IDEMPOTENCY",
+    "unknown_reconcile_15m": "COVERED_BY_UNIT_reconcile_path"
+  },
+  "residual_risk": "Shared production kill-mid-dispatch chaos not run; covered by unit crash_after_dispatch_marks_unknown + worker restart probe.",
+  "sign_recommendation": "TECH_PASS_WITH_RESIDUAL_NOTE"
+}

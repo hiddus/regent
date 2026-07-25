@@ -1,0 +1,28 @@
+{
+  "project_id": "edc67d01-f7df-4301-a093-bd1868a34849",
+  "goal_id": "6dc62bcb-58d5-46d3-bef6-46cb067943a9",
+  "idea": "做一个内部团队周报汇总 Web 工具，支持粘贴文本并生成结构化摘要页",
+  "status": "ACTIVE",
+  "execution_stage": "DISCOVERING",
+  "awaiting_authorized_sources": false,
+  "capability_resolution": {
+    "method": "REUSE",
+    "capability_id": "f15e6f98-bd9c-401c-b681-be0368daa684",
+    "capability_name": "allowlisted-http-source-v1",
+    "bound_from_round_id": "ca7b7e71-6474-4c22-82a6-d7aef97f6d68",
+    "default_feeds_from_capability": [
+      "https://techcrunch.com/feed/",
+      "https://hnrss.org/frontpage",
+      "https://www.theverge.com/rss/index.xml"
+    ]
+  },
+  "last_preview_endpoint": null,
+  "last_gate_status": null,
+  "last_iteration_decision": null,
+  "authorized_source_urls": [
+    "https://techcrunch.com/feed/",
+    "https://hnrss.org/frontpage",
+    "https://www.theverge.com/rss/index.xml"
+  ],
+  "elapsed_sec": 357.9
+}

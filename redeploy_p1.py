@@ -12,7 +12,7 @@ def _load_deploy_config() -> tuple[str, str, str, str]:
     server = os.environ.get("SERVER_IP", "")
     user = os.environ.get("LOGIN_USER", "")
     password = os.environ.get("LOGIN_PASSWORD", "")
-    release_tag = os.environ.get("REGENT_RELEASE_TAG", "20260721-p1-0022-r18")
+    release_tag = os.environ.get("REGENT_RELEASE_TAG", "20260722-p1-0025-r36")
 
     if not all([server, user, password]):
         env_path = Path(__file__).resolve().parent / ".env"
@@ -97,7 +97,7 @@ def main() -> None:
     print("\nBuilding Docker images...")
     ssh_exec(
         client,
-        f"cd {release_dir} && docker build "
+        f"cd {release_dir} && docker build --no-cache "
         f"--build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ "
         f"-t {image_tag} -f core/Dockerfile .",
         timeout=600,
@@ -148,15 +148,26 @@ REGENT_OBSERVATION_SIGNING_KEY={obs_key}
 REGENT_EXPERIMENT_SIGNING_KEY={exp_key}
 REGENT_MODEL_API_KEY={api_key}
 REGENT_DEPENDENCY_EGRESS_PROXY=http://regent-egress:3128
+REGENT_PUBLIC_BASE_URL=http://118.31.171.159:8000
+REGENT_EVIDENCE_EGRESS_PROXY=http://regent-egress:3128
+# Platform safety allowlist only (not product feed seeds). Fetch happens only when Goal authorizes URLs.
+REGENT_EVIDENCE_ALLOWED_DOMAINS=techcrunch.com,theverge.com,feeds.bbci.co.uk,hnrss.org,www.reddit.com,rss.cnn.com,pypi.org,pythonhosted.org,files.pythonhosted.org,github.com,githubusercontent.com,aliyun.com,aliyuncs.com,36kr.com,www.36kr.com,jiqizhixin.com,www.jiqizhixin.com,techweb.com.cn,www.techweb.com.cn
+REGENT_SCHEDULER_ENABLED=true
 """
     ssh_exec(client, f"cat > {REMOTE_DIR}/.env << 'ENVEOF'\n{env_content}ENVEOF")
 
-    # Ensure dependency egress proxy is available on regent-net
+    # Ensure dependency/evidence egress proxy is available on regent-net
     ssh_exec(client, "docker rm -f regent-egress 2>/dev/null || true")
+    ssh_exec(client, f"mkdir -p {REMOTE_DIR}/egress")
+    ssh_exec(
+        client,
+        f"cp {release_dir}/deploy/squid/squid.conf {REMOTE_DIR}/egress/squid.conf",
+    )
     ssh_exec(
         client,
         "docker run -d --name regent-egress --network regent-net "
         "--restart unless-stopped "
+        f"-v {REMOTE_DIR}/egress/squid.conf:/etc/squid/squid.conf:ro "
         "sameersbn/squid:3.5.27-2",
         timeout=180,
     )

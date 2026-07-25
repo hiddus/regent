@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -139,6 +140,9 @@ class WorkModel(Timestamped, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, default=dict, nullable=False
     )
+    # P1-B: link to SubGoal from decompose() and explicit work-level dependencies
+    sub_goal_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    depends_on_work_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
 
     goal: Mapped[GoalModel] = relationship(back_populates="works")
     runs: Mapped[list["RunModel"]] = relationship(back_populates="work")
@@ -445,6 +449,8 @@ class CapabilityModel(Base):
     )
     description: Mapped[str] = mapped_column(Text, nullable=False)
     verification: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    source_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -1389,5 +1395,276 @@ class SelfImprovementRunModel(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExternalOperationModel(Timestamped, Base):
+    """G0 durable external effect control object (appendix Durable-Execution)."""
+
+    __tablename__ = "external_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PREPARED','DISPATCHING','SUCCEEDED','FAILED_TERMINAL',"
+            "'UNKNOWN','RECONCILING','MANUAL_REVIEW')",
+            name="ck_external_operations_status",
+        ),
+        CheckConstraint("dispatch_generation >= 0", name="ck_external_operations_generation"),
+        UniqueConstraint("operation_key", name="uq_external_operations_operation_key"),
+        UniqueConstraint("permit_id", name="uq_external_operations_permit_id"),
+        Index("ix_external_operations_status", "status"),
+        Index("ix_external_operations_provider", "provider"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    operation_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    action: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PREPARED")
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    permit_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("execution_permits.id", ondelete="RESTRICT"), nullable=False
+    )
+    local_fencing_token: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    dispatch_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_lease_token: Mapped[str | None] = mapped_column(String(255))
+    external_id: Mapped[str | None] = mapped_column(String(512))
+    result_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    goal_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("goals.id", ondelete="SET NULL"))
+    correlation_id: Mapped[str | None] = mapped_column(String(255))
+    causation_id: Mapped[str | None] = mapped_column(String(255))
+    failure_code: Mapped[str | None] = mapped_column(String(128))
+    reconcile_attempts: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    reconcile_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GoalPriorityPolicyModel(Base):
+    """P2-1 priority / aging policy version (appendix §13)."""
+
+    __tablename__ = "goal_priority_policies"
+    __table_args__ = (UniqueConstraint("version", name="uq_goal_priority_policies_version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    params_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ResourceQuotaModel(Timestamped, Base):
+    __tablename__ = "resource_quotas"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_key",
+            "resource_name",
+            "price_book_version",
+            name="uq_resource_quotas_org_resource_book",
+        ),
+        CheckConstraint("limit_amount >= 0", name="ck_resource_quotas_limit"),
+        CheckConstraint("held_amount >= 0", name="ck_resource_quotas_held"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    resource_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    price_book_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    limit_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    held_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ExecutionQueueEntryModel(Timestamped, Base):
+    __tablename__ = "execution_queue_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('QUEUED','SCHEDULED','COMPLETED','CANCELLED')",
+            name="ck_execution_queue_entries_status",
+        ),
+        Index("ix_execution_queue_entries_status_aging", "status", "aging_score"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    work_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("works.id", ondelete="SET NULL")
+    )
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")
+    base_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    aging_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enqueued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resource_request: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, default=dict, nullable=False
+    )
+
+
+class SchedulingDecisionModel(Base):
+    __tablename__ = "scheduling_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    price_book_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    queue_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    quota_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    output_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    random_seed: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ResourceReservationModel(Timestamped, Base):
+    __tablename__ = "resource_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('REQUESTED','HELD','RELEASED','PREEMPTED','EXPIRED','FAILED')",
+            name="ck_resource_reservations_status",
+        ),
+        CheckConstraint("amount > 0", name="ck_resource_reservations_amount"),
+        Index("ix_resource_reservations_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    queue_entry_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("execution_queue_entries.id", ondelete="CASCADE"), nullable=False
+    )
+    scheduling_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("scheduling_decisions.id", ondelete="SET NULL")
+    )
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    price_book_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="REQUESTED")
+
+
+class BudgetLedgerEntryModel(Base):
+    __tablename__ = "budget_ledger_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "entry_type IN ('DEBIT','CREDIT')", name="ck_budget_ledger_entries_type"
+        ),
+        CheckConstraint("amount > 0", name="ck_budget_ledger_entries_amount"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    price_book_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    ref_type: Mapped[str | None] = mapped_column(String(64))
+    ref_id: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class RuntimeProfileModel(Timestamped, Base):
+    __tablename__ = "runtime_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT','CERTIFIED','DEPRECATED','REVOKED')",
+            name="ck_runtime_profiles_status",
+        ),
+        UniqueConstraint("name", "version", name="uq_runtime_profiles_name_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT")
+    abi_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    sandbox_image: Mapped[str | None] = mapped_column(String(255))
+    resolver_image: Mapped[str | None] = mapped_column(String(255))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class EvalRunModel(Timestamped, Base):
+    __tablename__ = "eval_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT','FROZEN','RUNNING','SCORED','DECIDED','INVALIDATED')",
+            name="ck_eval_runs_status",
+        ),
+        Index("ix_eval_runs_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT")
+    task_set_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    task_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    baseline_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    budget_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    seed: Mapped[str] = mapped_column(String(64), nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    scores_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    decision: Mapped[str | None] = mapped_column(String(64))
+    decision_rationale: Mapped[str | None] = mapped_column(Text)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class MemoryRecordModel(Timestamped, Base):
+    __tablename__ = "memory_records"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('CANDIDATE','VERIFIED','SUPERSEDED','REVOKED','EXPIRED')",
+            name="ck_memory_records_status",
+        ),
+        Index("ix_memory_records_org_status", "org_key", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    goal_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("goals.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="CANDIDATE")
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_refs: Mapped[list[Any]] = mapped_column(JSONB, default=list, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class PreemptionRecordModel(Base):
+    __tablename__ = "preemption_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    queue_entry_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("execution_queue_entries.id", ondelete="CASCADE"), nullable=False
+    )
+    reservation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("resource_reservations.id", ondelete="SET NULL")
+    )
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    safe: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class SchedulerCheckpointModel(Base):
+    __tablename__ = "scheduler_checkpoints"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    scheduling_decision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("scheduling_decisions.id", ondelete="CASCADE"), nullable=False
+    )
+    input_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

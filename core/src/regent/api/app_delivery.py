@@ -26,7 +26,11 @@ from regent.config import get_settings
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.code_generator import ArtifactBackedCodeGenerator, ArtifactUriResolver
 from regent.infrastructure.deployment import StaticPreviewDeploymentProvider
-from regent.infrastructure.sandbox import DockerDependencyMaterializer, DockerSandboxDriver
+from regent.infrastructure.sandbox import (
+    DockerDependencyMaterializer,
+    DockerSandboxDriver,
+    LocalSandboxDriver,
+)
 from regent.infrastructure.workspace_writer import WorkspaceWriter
 from regent.model.factory import build_model_provider
 
@@ -177,6 +181,10 @@ def build_service(request: Request) -> BuildService:
         await permits.consume(claimed.id, nonce=claimed.nonce)
 
     root = Path(settings.build_root)
+    if settings.sandbox_mode == "local":
+        sandbox = LocalSandboxDriver(root=root / "sandbox")
+    else:
+        sandbox = DockerSandboxDriver(root=root / "sandbox", image=settings.sandbox_image)
     return BuildService(
         request.app.state.sessions,
         DockerDependencyMaterializer(
@@ -185,7 +193,7 @@ def build_service(request: Request) -> BuildService:
             egress_proxy=settings.dependency_egress_proxy,
             permit_validator=validate_permit,
         ),
-        DockerSandboxDriver(root=root / "sandbox", image=settings.sandbox_image),
+        sandbox,
     )
 
 
@@ -354,11 +362,22 @@ async def get_deployment(
 
 class DeploymentEventBody(BaseModel):
     event_id: str = Field(min_length=1, max_length=255)
-    event_name: str = Field(default="activation", pattern=r"^activation$")
+    event_name: str = Field(
+        default="activation",
+        pattern=r"^(activation|product_rejection)$",
+    )
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class DeploymentEvaluateBody(BaseModel):
     actor: str = Field(min_length=1, max_length=255)
+
+
+class ProductRejectionBody(BaseModel):
+    actor: str = Field(min_length=1, max_length=255)
+    reason: str = Field(min_length=1, max_length=2000)
+    primary_hypothesis: str = Field(default="intent_mismatch", min_length=1, max_length=120)
+    event_id: str | None = Field(default=None, max_length=255)
 
 
 @router.post("/v1/deployments/{deployment_id}/events", status_code=status.HTTP_201_CREATED)
@@ -407,8 +426,12 @@ async def ingest_deployment_event(
     item = ObservationInput(
         event_id=f"deployment:{deployment_id}:{payload.event_id}",
         goal_id=goal_id,
-        metric_name="task_completion_count",
-        metric_value={"value": 1.0},
+        metric_name=(
+            "product_rejection_count"
+            if payload.event_name == "product_rejection"
+            else "task_completion_count"
+        ),
+        metric_value={"value": 1.0, **({"reason": payload.reason} if payload.reason else {})},
         source="product-analytics",
         definition_version="v1",
         is_bot=False,
@@ -416,6 +439,49 @@ async def ingest_deployment_event(
         observed_at=datetime.now(UTC),
     )
     return {"observation_id": await observations.ingest(item, observations.sign(item))}
+
+
+@router.post("/v1/deployments/{deployment_id}/product-rejection")
+async def report_product_rejection(
+    deployment_id: uuid.UUID,
+    payload: ProductRejectionBody,
+    request: Request,
+) -> dict[str, object]:
+    """Record dissatisfaction and trigger REVISE → new discovery (evolution loop)."""
+    from sqlalchemy import select
+
+    from regent.application.iteration_loop_service import IterationLoopService
+    from regent.domain.errors import DomainError, ErrorCode
+    from regent.infrastructure.models import DeploymentModel, GoalModel
+
+    async with request.app.state.sessions() as session:
+        deployment = await session.get(DeploymentModel, deployment_id)
+        if deployment is None or deployment.status != "SUCCEEDED":
+            raise DomainError(ErrorCode.INVALID_STATE, "succeeded deployment is required")
+        goal = await session.scalar(
+            select(GoalModel).where(
+                GoalModel.metadata_json["last_deployment_id"].as_string() == str(deployment_id)
+            )
+        )
+        if goal is None:
+            try:
+                corr = uuid.UUID(str(deployment.correlation_id))
+            except ValueError as exc:
+                raise DomainError(ErrorCode.NOT_FOUND, "goal not found for deployment") from exc
+            goal = await session.scalar(select(GoalModel).where(GoalModel.correlation_id == corr))
+        if goal is None:
+            raise DomainError(ErrorCode.NOT_FOUND, "goal not found for deployment")
+        goal_id = goal.id
+
+    loop = IterationLoopService(request.app.state.sessions)
+    return await loop.revise_from_product_rejection(
+        goal_id,
+        deployment_id,
+        actor=payload.actor,
+        reason=payload.reason,
+        primary_hypothesis=payload.primary_hypothesis,
+        event_id=payload.event_id,
+    )
 
 
 @router.post("/v1/deployments/{deployment_id}/evaluate")

@@ -1,0 +1,16 @@
+{
+  "name": "product-surface-v1",
+  "status": "VERIFIED",
+  "description": "Certified product-surface delivery capability. Bound when a generated app fails goal-attainment / delivery review. Guides regeneration toward a shippable independent app that satisfies GoalSpec success criteria — not a demo dump.",
+  "verification": {
+    "protocol": "product-surface-v1",
+    "fail_closed": true,
+    "target": "goal_attainment",
+    "generation_guidance": [
+      "Validate against GoalSpec success_criteria and first_deliverable before claiming done.",
+      "Ship a designed product UI (stylesheet + layout + typography), never browser-default dumps.",
+      "If observed evidence exists, render it as the primary product content with clear source labels and outbound links.",
+      "If the Goal cannot be met with current capabilities, fail closed for publish and let Core organize more capabilities — do not emit an unreliable surface."
+    ]
+  }
+}

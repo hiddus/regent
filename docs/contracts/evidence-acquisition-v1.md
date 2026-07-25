@@ -40,7 +40,8 @@ Product Discovery 只能使用被授权来源快照、用户提供材料和已�
 - 摘要和结论保留引用映射；
 - 研究结论区分 observed、inferred、assumed、unknown；
 - 禁止超出授权范围抓取；
-- 个人信息遵循最小化、保留期和删除要求。
+- 个人信息遵循最小化、保留期和删除要求；
+- Core 只提供受限 Evidence Connector **端口**与平台域名策略，不内置产品级 RSS/新闻源目录；抓取目标必须由 Goal、约束或已认证能力授权。
 
 ## Product Discovery 门槛
 

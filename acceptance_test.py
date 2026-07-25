@@ -50,7 +50,7 @@ def test_create_draft() -> dict:
     """Create an app project draft (triggers goal creation + spec generation)."""
     print("\n=== 2. Create App Draft ===")
     result = api_post("/v1/app-projects/drafts", {
-        "idea": "A simple Python Flask web app that displays a hello world page with the current timestamp",
+        "idea": "A Python Flask news digest web application that displays a curated list of at least 5 technology news headlines with source labels, brief summaries, and outbound links to the original articles. Include a styled header with the digest title, a navigation bar, and a footer with publication date.",
         "actor": "p1-acceptance-tester",
     })
     print(f"  Project ID: {result['project']['id']}")

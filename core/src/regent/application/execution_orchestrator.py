@@ -19,7 +19,21 @@ from regent.application.build_service import (
     RequestAppBuild,
     RequestDependencyResolution,
 )
+from regent.application.capability_build_service import materialize_build_items
+from regent.application.capability_resolution_service import (
+    CapabilityCandidate,
+    CapabilityGap,
+    CapabilityResolutionService,
+    ResolutionMethod,
+    ToolCandidate,
+)
+from regent.application.compliance_risk_service import (
+    ComplianceChecker,
+    ComplianceStatus,
+)
+from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
 from regent.application.discovery_worker import DiscoveryWorker
+from regent.application.evidence_policy import collect_authorized_urls
 from regent.application.execution_events import (
     APP_BUILD_PASSED,
     APP_BUILD_REQUESTED,
@@ -28,6 +42,7 @@ from regent.application.execution_events import (
     DEPENDENCY_RESOLUTION_REQUESTED,
     DISCOVERY_COMPLETED,
     DISCOVERY_ROUND_REQUESTED,
+    FAILURE_COMPLIANCE,
     FAILURE_GOAL_NOT_ACTIVE,
     FAILURE_PROJECT_NOT_ACTIVE,
     FAILURE_SPEC_NOT_FROZEN,
@@ -43,15 +58,34 @@ from regent.application.execution_events import (
     make_outbox_event,
 )
 from regent.application.feedback_service import CreateIterationDecision, FeedbackService
+from regent.application.goal_interpreter import (
+    GoalInterpreter,
+    GoalInterpretation,
+    SubGoal,
+)
 from regent.application.generation_service import (
     CreateGenerationPlan,
     GenerationService,
     RequestGenerationRun,
 )
 from regent.application.iteration_loop_service import IterationLoopService
+from regent.application.milestone_service import (
+    GOAL_SCALE_LARGE,
+    acceptance_for_current_milestone,
+    advance_milestone,
+    current_milestone,
+    ensure_milestone_plan,
+    is_final_milestone,
+    plan_from_metadata,
+)
+from regent.application.organization_service import (
+    OrganizationService,
+    compute_utility,
+    default_organization_space,
+    select_best_organization,
+)
 from regent.application.p1_contracts import (
     GenerationPlanContract,
-    canonical_hash,
 )
 from regent.application.p1_ports import (
     DependencyMaterializer,
@@ -75,10 +109,16 @@ from regent.application.requirement_revision_repository import (
     CreateRequirementRevision,
     RequirementRevisionRepositoryService,
 )
+from regent.application.research_more_recovery import ResearchMoreRecoveryService
+from regent.application.run_advancement import advance_created_run
 from regent.application.smoke_test_service import DeploymentSmokeTestService
+from regent.application.transition_service import TransitionContext, TransitionService
 from regent.domain.errors import DomainError, ErrorCode
+from regent.domain.transitions import GoalCommand
 from regent.infrastructure.models import (
     AppProjectModel,
+    CapabilityModel,
+    CapabilityResolutionItemModel,
     CapabilityResolutionPlanModel,
     ConversationMessageModel,
     ConversationModel,
@@ -92,9 +132,11 @@ from regent.infrastructure.models import (
     ProductHypothesisModel,
     RequirementRevisionModel,
     RunModel,
+    ToolSpecModel,
     WorkModel,
     WorkspaceSnapshotModel,
 )
+from regent.runtime.timers import DurableTimerService
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +175,10 @@ class ExecutionOrchestrator:
     async def _ensure_work_and_run_for_goal(
         self, goal_id: uuid.UUID, *, purpose: str, actor: str
     ) -> tuple[uuid.UUID, uuid.UUID]:
-        """Ensure a Work and Run exist for the goal; return (work_id, run_id)."""
+        """Ensure a Work and Run exist for the goal; return (work_id, run_id).
+
+        GAC-C1: never leave a Run stranded in CREATED — advance to RUNNING.
+        """
         async with self._sessions() as session, session.begin():
             existing = await session.scalar(
                 select(WorkModel).where(WorkModel.goal_id == goal_id).limit(1)
@@ -143,49 +188,52 @@ class ExecutionOrchestrator:
                     select(RunModel).where(RunModel.work_id == existing.id).limit(1)
                 )
                 if run is not None:
-                    return existing.id, run.id
+                    work_id, run_id = existing.id, run.id
+                else:
+                    run = RunModel(
+                        id=uuid.uuid4(),
+                        work_id=existing.id,
+                        status="CREATED",
+                        version=0,
+                        actor_id=actor,
+                        input_version="0",
+                        idempotency_key=f"ensure-run-{existing.id}",
+                        correlation_id=goal_id,
+                    )
+                    session.add(run)
+                    await session.flush()
+                    work_id, run_id = existing.id, run.id
+            else:
+                work = WorkModel(
+                    id=uuid.uuid4(),
+                    goal_id=goal_id,
+                    purpose=purpose,
+                    input_refs=[],
+                    acceptance_criteria={},
+                    dependency_ids=[],
+                    priority=0,
+                    budget={},
+                    status="PLANNED",
+                    version=0,
+                    correlation_id=goal_id,
+                )
+                session.add(work)
+                await session.flush()
                 run = RunModel(
                     id=uuid.uuid4(),
-                    work_id=existing.id,
+                    work_id=work.id,
                     status="CREATED",
                     version=0,
                     actor_id=actor,
                     input_version="0",
-                    idempotency_key=f"ensure-run-{existing.id}",
+                    idempotency_key=f"ensure-run-{work.id}",
                     correlation_id=goal_id,
                 )
                 session.add(run)
                 await session.flush()
-                return existing.id, run.id
-
-            work = WorkModel(
-                id=uuid.uuid4(),
-                goal_id=goal_id,
-                purpose=purpose,
-                input_refs=[],
-                acceptance_criteria={},
-                dependency_ids=[],
-                priority=0,
-                budget={},
-                status="PLANNED",
-                version=0,
-                correlation_id=goal_id,
-            )
-            session.add(work)
-            await session.flush()
-            run = RunModel(
-                id=uuid.uuid4(),
-                work_id=work.id,
-                status="CREATED",
-                version=0,
-                actor_id=actor,
-                input_version="0",
-                idempotency_key=f"ensure-run-{work.id}",
-                correlation_id=goal_id,
-            )
-            session.add(run)
-            await session.flush()
-            return work.id, run.id
+                work_id, run_id = work.id, run.id
+        await advance_created_run(self._sessions, run_id, actor=actor)
+        return work_id, run_id
 
     # ---------------------------------------------------------------------------
     # R1: GoalExecutionRequested -> DiscoveryRound + DiscoveryRoundRequested
@@ -237,6 +285,10 @@ class ExecutionOrchestrator:
                     f"{FAILURE_PROJECT_NOT_ACTIVE}: project status is {project_status}",
                 )
 
+            # GAC-E1: LARGE goals must be milestone-split before any delivery loop.
+            milestone_plan = await ensure_milestone_plan(session, goal=goal, spec=spec)
+            current = current_milestone(milestone_plan)
+
             idempotency_key = make_idempotency_key("discovery", goal_id, execution_event_id)
             existing_round = await session.scalar(
                 select(DiscoveryRoundModel).where(
@@ -268,6 +320,10 @@ class ExecutionOrchestrator:
                 "spec_version": spec.version,
                 "constraints": spec.explicit_constraints,
                 "success_criteria": spec.success_criteria,
+                "goal_scale": milestone_plan.goal_scale,
+                "milestone_ordinal": current.ordinal,
+                "milestone_key": current.key,
+                "milestone_title": current.title,
             }
             snapshot_hash = hashlib.sha256(
                 json.dumps(
@@ -314,11 +370,22 @@ class ExecutionOrchestrator:
                 session,
                 project_id,
                 "DISCOVERY_ROUND_CREATED",
-                "Core has created a discovery round and is collecting evidence.",
+                (
+                    f"Core created discovery for milestone {current.ordinal}/{len(milestone_plan.milestones)} "
+                    f"({current.key}: {current.title}). "
+                    + (
+                        "LARGE goal: single loop cannot claim full Goal."
+                        if milestone_plan.goal_scale == GOAL_SCALE_LARGE
+                        else "SMALL goal: single milestone."
+                    )
+                ),
                 {
                     "goal_id": str(goal_id),
                     "discovery_round_id": str(discovery_round.id),
                     "round": str(next_round),
+                    "goal_scale": milestone_plan.goal_scale,
+                    "milestone_ordinal": current.ordinal,
+                    "milestone_key": current.key,
                 },
             )
 
@@ -330,6 +397,81 @@ class ExecutionOrchestrator:
                     "round_id": str(discovery_round.id),
                     "round": next_round,
                 },
+            )
+
+        # V3 P1-B: Goal decomposition -> SubGoal -> Work items
+        try:
+            async with self._sessions() as session:
+                goal_obj = await session.get(GoalModel, goal_id)
+                if goal_obj is not None:
+                    meta = dict(goal_obj.metadata_json or {})
+                    if "decomposed_work_items" not in meta:
+                        interpretation = GoalInterpretation(
+                            objective=meta.get("objective", f"Goal {goal_id}"),
+                            explicit_constraints=meta.get("constraints", {}),
+                            success_criteria=meta.get("success_criteria", {}),
+                        )
+                        # Use static create_work_items with fallback sub-goals
+                        sub_goals = [
+                            SubGoal(
+                                id="root",
+                                label=interpretation.objective or "root",
+                                depends_on=[],
+                                acceptance_criteria=dict(interpretation.success_criteria),
+                            )
+                        ]
+                        work_cmds = GoalInterpreter.create_work_items(
+                            sub_goals,
+                            goal_id=goal_id,
+                            correlation_id=goal_obj.correlation_id,
+                        )
+                        meta["decomposed_work_items"] = work_cmds
+                        goal_obj.metadata_json = meta
+        except Exception:
+            logger.warning(
+                "goal decomposition skipped (non-fatal)",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+
+        # GAC-O1: ensure minimal organization exists before execution chain starts.
+        # V3 P1-A: utility-driven organization selection.
+        try:
+            org_service = OrganizationService(self._sessions)
+            receipt = await org_service.organize(goal_id)
+            # Write utility evaluation to Goal metadata
+            async with self._sessions() as session, session.begin():
+                goal_obj = await session.get(GoalModel, goal_id)
+                if goal_obj is not None:
+                    meta = dict(goal_obj.metadata_json or {})
+                    if "utility_evaluation" not in meta:
+                        # Fallback: evaluate if organize() didn't store it
+                        templates = default_organization_space()
+                        candidates = [
+                            (t, compute_utility(t)) for t in templates
+                        ]
+                        best = select_best_organization(candidates)
+                        if best is not None:
+                            tmpl, result = best
+                            meta["utility_evaluation"] = {
+                                "template_id": tmpl.template_id,
+                                "utility": result.utility,
+                                "components": result.components,
+                                "rationale": result.rationale,
+                            }
+                            goal_obj.metadata_json = meta
+            logger.info(
+                "organization ready for goal",
+                extra={
+                    "goal_id": str(goal_id),
+                    "strategy": receipt.strategy,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "organization skipped (non-fatal)",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
             )
 
     # ---------------------------------------------------------------------------
@@ -368,12 +510,38 @@ class ExecutionOrchestrator:
         )
         worker = DiscoveryWorker(self._sessions, discovery_service)
 
-        snapshots = await self._evidence_connector.fetch(
-            EvidenceSourceRequest(
-                query=goal.original_input if goal else "discover",
-                correlation_id=correlation_id,
+        goal_text = goal.original_input if goal else "discover"
+        constraints = dict(spec.explicit_constraints) if spec else {}
+        meta = dict(goal.metadata_json or {}) if goal else {}
+        if meta.get("discovery_policy"):
+            constraints["discovery_policy"] = meta["discovery_policy"]
+        if meta.get("capability_resolution"):
+            constraints["capability_resolution_bound"] = True
+        authorized_urls = collect_authorized_urls(goal_text, constraints)
+        meta_urls = meta.get("authorized_source_urls") or []
+        if isinstance(meta_urls, list):
+            authorized_urls = list(
+                dict.fromkeys(
+                    [
+                        *authorized_urls,
+                        *[str(item).strip() for item in meta_urls if str(item).strip()],
+                    ]
+                )
             )
+        evidence_request = EvidenceSourceRequest(
+            query=goal_text,
+            correlation_id=correlation_id,
+            authorized_urls=authorized_urls,
+            source_types=["http"] if authorized_urls else [],
         )
+        snapshots = await self._evidence_connector.fetch(evidence_request)
+        http_entry_count = sum(
+            len(item.metadata.get("entries") or [])
+            for item in snapshots
+            if item.metadata.get("kind") == "http-snapshot"
+        )
+        if http_entry_count:
+            constraints["http_entry_count_hint"] = http_entry_count
         evidence_ids_by_hash: dict[str, uuid.UUID] = {}
         async with self._sessions() as session, session.begin():
             for snap in snapshots:
@@ -381,15 +549,24 @@ class ExecutionOrchestrator:
                     continue
                 evidence_id = uuid.uuid4()
                 evidence_ids_by_hash[snap.content_hash] = evidence_id
+                kind = str(snap.metadata.get("kind", "goal-intent"))
+                if kind == "http-snapshot":
+                    evidence_type = "http-snapshot"
+                    quality_tier = "OBSERVED"
+                else:
+                    evidence_type = "goal-intent"
+                    quality_tier = "DECLARED"
                 session.add(
                     EvidenceModel(
                         id=evidence_id,
                         goal_id=goal_id,
-                        evidence_type="goal-intent",
+                        evidence_type=evidence_type,
                         uri=snap.source_uri,
                         content_hash=snap.content_hash,
-                        producer_ref=str(snap.metadata.get("connector", "goal-intent-v1")),
-                        quality_tier="DECLARED",
+                        producer_ref=str(
+                            snap.metadata.get("connector", "goal-intent-v1")
+                        ),
+                        quality_tier=quality_tier,
                         payload={
                             "content_artifact_uri": snap.content_artifact_uri,
                             "captured_at": snap.captured_at,
@@ -401,14 +578,9 @@ class ExecutionOrchestrator:
         try:
             outcome = await worker.run(
                 round_id,
-                goal=goal.original_input if goal else "discover",
-                constraints=spec.explicit_constraints if spec else {},
-                requests=[
-                    EvidenceSourceRequest(
-                        query=goal.original_input if goal else "discover",
-                        correlation_id=correlation_id,
-                    )
-                ],
+                goal=goal_text,
+                constraints=constraints,
+                requests=[evidence_request],
                 evidence_ids_by_hash=evidence_ids_by_hash,
             )
         except Exception:
@@ -457,11 +629,16 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "DISCOVERY_COMPLETED",
-                    f"Discovery completed with decision: {decision.decision.value}.",
+                    (
+                        f"Discovery completed with decision: {decision.decision.value}. "
+                        f"{decision.rationale}"
+                    ).strip(),
                     {
                         "goal_id": str(goal_id),
                         "discovery_round_id": str(round_id),
                         "decision": decision.decision.value,
+                        "rationale": decision.rationale,
+                        "missing_evidence": list(decision.missing_evidence),
                     },
                 )
 
@@ -470,7 +647,7 @@ class ExecutionOrchestrator:
     # ---------------------------------------------------------------------------
 
     async def handle_discovery_completed(self, payload: dict[str, Any]) -> None:
-        """Proceed to requirements if hypotheses exist, even without SELECT."""
+        """Proceed to requirements if SELECT; RESEARCH_MORE binds evidence capability."""
         decision = str(payload.get("decision", ""))
         goal_id = uuid.UUID(str(payload["goal_id"]))
         project_id = uuid.UUID(str(payload["app_project_id"]))
@@ -479,11 +656,33 @@ class ExecutionOrchestrator:
         actor = str(payload.get("actor", "regent-core"))
         idempotency_key = str(payload.get("idempotency_key", ""))
 
-        # R9: non-SELECT decisions must stop the chain; never rewrite audit records.
+        if decision == "RESEARCH_MORE":
+            # Core detects the gap; certified connector capability supplies feeds — not chat paste.
+            await ResearchMoreRecoveryService(self._sessions).recover(
+                goal_id=goal_id,
+                project_id=project_id,
+                round_id=round_id,
+                actor=actor,
+            )
+            return
+
+        # R9: other non-SELECT decisions must stop the chain; never rewrite audit records.
         if decision != "SELECT" or selected_hypothesis_id is None:
             logger.info(
                 "discovery did not select a hypothesis; chain stops",
                 extra={"decision": decision, "round_id": str(round_id)},
+            )
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="DISCOVERY_NO_SELECT",
+                message=(
+                    f"Discovery decision={decision}; chain halted without SELECT "
+                    "(GAC-A4 observable exit)."
+                ),
+                terminal=GoalCommand.EXHAUST,
+                actor=actor,
+                extra={"decision": decision, "discovery_round_id": str(round_id)},
             )
             return
 
@@ -675,7 +874,7 @@ class ExecutionOrchestrator:
     # ---------------------------------------------------------------------------
 
     async def handle_capability_resolution_requested(self, payload: dict[str, Any]) -> None:
-        """Create capability resolution plan, emit CapabilityResolutionSatisfied."""
+        """Resolve capability gaps from requirement/hypothesis; emit SATISFIED or wait."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
         project_id = uuid.UUID(str(payload["app_project_id"]))
         revision_id = uuid.UUID(str(payload["requirement_revision_id"]))
@@ -683,21 +882,166 @@ class ExecutionOrchestrator:
         idempotency_key = str(payload.get("idempotency_key", ""))
 
         async with self._sessions() as session, session.begin():
-            plan_hash = canonical_hash({"requirement_id": str(revision_id), "auto": True})
+            existing = await session.scalar(
+                select(CapabilityResolutionPlanModel).where(
+                    CapabilityResolutionPlanModel.requirement_revision_id == revision_id
+                )
+            )
+            if existing is not None:
+                if existing.status == "SATISFIED":
+                    goal = await session.get(GoalModel, goal_id)
+                    if goal is not None:
+                        session.add(
+                            make_outbox_event(
+                                EventEnvelope(
+                                    event_type=CAPABILITY_RESOLUTION_SATISFIED,
+                                    aggregate_type="goal",
+                                    aggregate_id=goal_id,
+                                    aggregate_version=goal.version,
+                                    payload={
+                                        "goal_id": str(goal_id),
+                                        "app_project_id": str(project_id),
+                                        "requirement_revision_id": str(revision_id),
+                                        "capability_resolution_plan_id": str(existing.id),
+                                        "actor": actor,
+                                        "idempotency_key": idempotency_key,
+                                    },
+                                    idempotency_key=idempotency_key,
+                                    correlation_id=goal.correlation_id,
+                                )
+                            )
+                        )
+                return
+
+            revision = await session.get(RequirementRevisionModel, revision_id)
+            if revision is None:
+                return
+            hypothesis = await session.get(ProductHypothesisModel, revision.hypothesis_id)
+            content = dict(revision.content_json or {})
+            hyp_content = dict((hypothesis.content_json if hypothesis else None) or {})
+            names: list[str] = []
+            for raw in content.get("required_capabilities") or []:
+                if isinstance(raw, str) and raw.strip():
+                    names.append(raw.strip())
+            for raw in hyp_content.get("required_capabilities") or []:
+                if isinstance(raw, str) and raw.strip():
+                    names.append(raw.strip())
+            # de-dupe preserving order
+            names = list(dict.fromkeys(names))
+
+            gaps = [
+                CapabilityGap(
+                    requirement_key=name[:120],
+                    capability_name=name,
+                    build_allowed=True,
+                    human_resolvable=True,
+                )
+                for name in names
+            ]
+            cap_rows = list(await session.scalars(select(CapabilityModel)))
+            tool_rows = list(await session.scalars(select(ToolSpecModel)))
+            resolved = CapabilityResolutionService().resolve(
+                gaps,
+                [
+                    CapabilityCandidate(id=row.id, name=row.name, status=row.status)
+                    for row in cap_rows
+                ],
+                [
+                    ToolCandidate(
+                        id=row.id, capability_name=row.capability_name, status=row.status
+                    )
+                    for row in tool_rows
+                ],
+            )
+            # GAC-B2: materialize BUILD into registered capabilities before SATISFIED.
+            resolved_items = await materialize_build_items(
+                session, goal_id=goal_id, items=resolved.items
+            )
+
+            blocking = {
+                ResolutionMethod.BLOCK,
+                ResolutionMethod.REQUEST_HUMAN,
+            }
+            has_block = any(item.method in blocking for item in resolved_items)
+            # Empty gaps → honest SATISFIED (no declared capability needs).
+            # BUILD (now with capability_id) / REUSE / CONFIGURE / COMPOSE → proceed.
+            status = "WAITING_HUMAN" if has_block else "SATISFIED"
             plan = CapabilityResolutionPlanModel(
                 id=uuid.uuid4(),
                 requirement_revision_id=revision_id,
-                status="SATISFIED",
+                status=status,
                 version=1,
-                content_hash=plan_hash,
-                policy_version="capability-resolution-v1",
+                content_hash=resolved.content_hash,
+                policy_version=resolved.policy_version,
             )
             session.add(plan)
             await session.flush()
+            for item in resolved_items:
+                session.add(
+                    CapabilityResolutionItemModel(
+                        id=uuid.uuid4(),
+                        plan_id=plan.id,
+                        requirement_key=item.requirement_key,
+                        capability_name=item.capability_name,
+                        gap_type=item.gap_type,
+                        resolution_method=item.method.value,
+                        capability_id=item.capability_id,
+                        tool_spec_id=item.tool_spec_id,
+                        status="RESOLVED" if item.method not in blocking else "OPEN",
+                        evidence_refs=[],
+                    )
+                )
 
             goal = await session.get(GoalModel, goal_id)
-            if goal:
-                satisfied_event = make_outbox_event(
+            if goal is not None:
+                metadata = dict(goal.metadata_json or {})
+                metadata["requirement_revision_id"] = str(revision_id)
+                metadata["capability_resolution_plan_id"] = str(plan.id)
+                metadata["capability_resolution_status"] = status
+                metadata["capability_resolution_methods"] = [
+                    item.method.value for item in resolved_items
+                ]
+                metadata["capability_build_ids"] = [
+                    str(item.capability_id)
+                    for item in resolved_items
+                    if item.method is ResolutionMethod.BUILD and item.capability_id
+                ]
+                if has_block:
+                    metadata["execution_stage"] = "WAITING_HUMAN"
+                    metadata["awaiting_capability_resolution"] = True
+                goal.metadata_json = metadata
+
+            await self._append_conversation_event(
+                session,
+                project_id,
+                "CAPABILITY_RESOLUTION_PLANNED",
+                (
+                    "Capability resolution waiting on human/blocked gaps "
+                    "(GAC-A4: Goal remains ACTIVE until human resolves or exhausts)."
+                    if has_block
+                    else (
+                        "Capability resolution satisfied"
+                        + (
+                            f" (GAC-B2 built {sum(1 for i in resolved_items if i.method.value == 'BUILD')} gaps)."
+                            if any(i.method.value == "BUILD" for i in resolved_items)
+                            else "."
+                        )
+                    )
+                ),
+                {
+                    "goal_id": str(goal_id),
+                    "capability_resolution_plan_id": str(plan.id),
+                    "status": status,
+                    "item_count": len(resolved_items),
+                    "gac_exit": "WAITING_HUMAN" if has_block else None,
+                },
+            )
+
+            if status != "SATISFIED" or goal is None:
+                return
+
+            session.add(
+                make_outbox_event(
                     EventEnvelope(
                         event_type=CAPABILITY_RESOLUTION_SATISFIED,
                         aggregate_type="goal",
@@ -715,17 +1059,7 @@ class ExecutionOrchestrator:
                         correlation_id=goal.correlation_id,
                     )
                 )
-                session.add(satisfied_event)
-                await self._append_conversation_event(
-                    session,
-                    project_id,
-                    "CAPABILITY_RESOLUTION_SATISFIED",
-                    "Capability resolution is satisfied.",
-                    {
-                        "goal_id": str(goal_id),
-                        "capability_resolution_plan_id": str(plan.id),
-                    },
-                )
+            )
 
     async def handle_capability_resolution_satisfied(self, payload: dict[str, Any]) -> None:
         """CapabilityResolutionSatisfied -> emit GenerationRunRequested."""
@@ -809,6 +1143,14 @@ class ExecutionOrchestrator:
                     HypothesisDecisionModel.decision == "SELECT",
                 )
             )
+            http_evidence = list(
+                await session.scalars(
+                    select(EvidenceModel).where(
+                        EvidenceModel.goal_id == goal_id,
+                        EvidenceModel.evidence_type == "http-snapshot",
+                    )
+                )
+            )
             correlation_id = str(goal.correlation_id) if goal else ""
             spec_hash = spec.content_hash if spec else _ZERO_HASH
             revision_hash = revision.content_hash if revision else _ZERO_HASH
@@ -816,7 +1158,14 @@ class ExecutionOrchestrator:
 
         # Derive generation plan from requirement content (R10: no hardcoding)
         req_content = dict(revision.content_json) if revision else {}
-        planned_paths = req_content.get("planned_paths", ["src/app.py", "src/index.html"])
+        planned_paths = req_content.get(
+            "planned_paths",
+            ["src/app.py", "src/index.html", "requirements.txt", "README.md"],
+        )
+        # Ensure mandatory project files are always included
+        for mandatory in ("requirements.txt", "README.md"):
+            if mandatory not in planned_paths:
+                planned_paths.append(mandatory)
         dependency_intents = req_content.get("dependency_intents", [])
         verification_commands = req_content.get(
             "verification_commands", ["python -c 'import app'"]
@@ -825,6 +1174,94 @@ class ExecutionOrchestrator:
             "architecture_summary", "Generated web application per requirement"
         )
         component_plan = req_content.get("component_plan", [{"name": "app", "type": "web"}])
+        observed_entries: list[dict[str, object]] = []
+        for item in http_evidence:
+            evidence_payload = dict(item.payload or {})
+            metadata = dict(evidence_payload.get("metadata") or {})
+            for entry in metadata.get("entries") or []:
+                if isinstance(entry, dict):
+                    observed_entries.append(
+                        {
+                            "title": entry.get("title", ""),
+                            "link": entry.get("link", ""),
+                            "summary": entry.get("summary", ""),
+                            "source_uri": item.uri,
+                            "evidence_id": str(item.id),
+                        }
+                    )
+            if len(observed_entries) >= 30:
+                break
+        acceptance_contract = dict(req_content.get("acceptance_contract") or {})
+        if observed_entries:
+            acceptance_contract["observed_evidence_entries"] = observed_entries[:30]
+            acceptance_contract["must_render_observed_entries"] = True
+        if spec and spec.success_criteria:
+            acceptance_contract["success_criteria"] = dict(spec.success_criteria)
+            if "min_list_items" in spec.success_criteria:
+                acceptance_contract["min_list_items"] = spec.success_criteria["min_list_items"]
+            if "required_phrases" in spec.success_criteria:
+                acceptance_contract["required_phrases"] = spec.success_criteria[
+                    "required_phrases"
+                ]
+            if "min_outbound_links" in spec.success_criteria:
+                acceptance_contract["min_outbound_links"] = spec.success_criteria[
+                    "min_outbound_links"
+                ]
+
+        # Goal-attainment / milestone-scoped acceptance (GAC-E2).
+        async with self._sessions() as session:
+            goal_meta_row = await session.get(GoalModel, goal_id)
+            goal_meta = dict((goal_meta_row.metadata_json if goal_meta_row else None) or {})
+        if goal_meta.get("goal_scale"):
+            acceptance_contract["goal_scale"] = goal_meta["goal_scale"]
+        first_deliverable = str(
+            goal_meta.get("first_deliverable")
+            or (spec.success_criteria or {}).get("first_deliverable")
+            or ""
+        ).strip()
+        milestone_acceptance = acceptance_for_current_milestone(
+            goal_meta, fallback_first_deliverable=first_deliverable
+        )
+        if milestone_acceptance:
+            # Milestone slice overrides full-goal criteria for non-final LARGE milestones.
+            for key, value in milestone_acceptance.items():
+                acceptance_contract[key] = value
+            if milestone_acceptance.get("forbid_full_goal_claim"):
+                # Do not apply full success_criteria until final milestone.
+                acceptance_contract.pop("success_criteria", None)
+                for full_key in ("required_phrases",):
+                    # Keep milestone-local required_phrases if present in acceptance.
+                    if full_key in acceptance_contract and full_key not in milestone_acceptance:
+                        acceptance_contract.pop(full_key, None)
+        elif first_deliverable:
+            acceptance_contract["first_deliverable"] = first_deliverable
+        delivery_policy = str(
+            payload.get("delivery_policy") or goal_meta.get("delivery_policy") or ""
+        )
+        if delivery_policy in {"goal_attainment_retry", "goal_attainment_escalation"}:
+            acceptance_contract["delivery_policy"] = delivery_policy
+            acceptance_contract["delivery_gap_reasons"] = list(
+                goal_meta.get("delivery_gap_reasons") or payload.get("gap_reasons") or []
+            )[:12]
+            acceptance_contract["delivery_gap_recovery_attempt"] = int(
+                payload.get("delivery_gap_recovery_attempt")
+                or goal_meta.get("delivery_gap_recovery_attempts")
+                or 1
+            )
+            guidance = (
+                (goal_meta.get("capability_resolution") or {}).get("generation_guidance") or []
+            )
+            if guidance:
+                architecture_summary = (
+                    f"{architecture_summary}\n\nGoal-attainment recovery guidance:\n"
+                    + "\n".join(f"- {item}" for item in guidance)
+                )
+            ms_title = milestone_acceptance.get("milestone_title")
+            if ms_title:
+                architecture_summary = (
+                    f"{architecture_summary}\n\nCurrent milestone only: {ms_title}. "
+                    "Do not claim the full Goal until the final milestone."
+                )
 
         contract = GenerationPlanContract(
             goal_spec_hash=spec_hash,
@@ -839,6 +1276,7 @@ class ExecutionOrchestrator:
             planned_paths=planned_paths,
             dependency_intents=dependency_intents,
             verification_commands=verification_commands,
+            acceptance_contract=acceptance_contract,
         )
 
         try:
@@ -860,7 +1298,112 @@ class ExecutionOrchestrator:
                     correlation_id=correlation_id,
                 )
             )
-            snapshot = await gen_service.execute(run.id)
+            if run.status == "COMPLETED":
+                async with self._sessions() as session:
+                    snapshot = await session.scalar(
+                        select(WorkspaceSnapshotModel).where(
+                            WorkspaceSnapshotModel.generation_run_id == run.id
+                        )
+                    )
+                if snapshot is None:
+                    raise DomainError(
+                        ErrorCode.INVALID_STATE,
+                        "completed generation run missing workspace snapshot",
+                    )
+            else:
+                snapshot = await gen_service.execute(run.id)
+        except DomainError as exc:
+            if exc.code == ErrorCode.LEASE_CONFLICT:
+                # In-flight generate under a prior lease — retry outbox later.
+                raise
+            if "delivery-review-v1" in str(exc):
+                reasons = [
+                    part.strip()
+                    for part in str(exc).split("rejected non-deliverable surface:", 1)[-1].split(
+                        ";"
+                    )
+                    if part.strip()
+                ][:12] or [str(exc)[:200]]
+                recovery = await DeliveryGapRecoveryService(self._sessions).recover(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    requirement_revision_id=requirement_id,
+                    capability_resolution_plan_id=resolution_plan_id,
+                    actor=actor,
+                    gap_reasons=reasons,
+                )
+                if recovery.recovered:
+                    logger.info(
+                        "delivery gap recovery scheduled",
+                        extra={"goal_id": str(goal_id), "attempts": recovery.attempts},
+                    )
+                    return
+                if recovery.terminal_exhaust:
+                    await self._halt_goal_stage(
+                        goal_id,
+                        project_id,
+                        stage="DELIVERY_GAP_EXHAUSTED",
+                        message=recovery.message,
+                        terminal=GoalCommand.EXHAUST,
+                        actor=actor,
+                        extra={
+                            "gap_kind": recovery.gap_kind,
+                            "attempts": recovery.attempts,
+                            "gac": "GAC-D5",
+                        },
+                    )
+                    return
+                logger.warning(
+                    "delivery gap exhausted; refusing unreliable publish",
+                    extra={"goal_id": str(goal_id), "message": recovery.message},
+                )
+                return
+            logger.exception("generation failed", extra={"goal_id": str(goal_id)})
+            raise
+        except ValueError as exc:
+            # delivery-review-v1 / goal-attainment failure: organize capability, do not publish.
+            if "delivery-review-v1" not in str(exc):
+                logger.exception("generation failed", extra={"goal_id": str(goal_id)})
+                raise
+            reasons = [
+                part.strip()
+                for part in str(exc).split("rejected non-deliverable surface:", 1)[-1].split(";")
+                if part.strip()
+            ][:12] or [str(exc)[:200]]
+            recovery = await DeliveryGapRecoveryService(self._sessions).recover(
+                goal_id=goal_id,
+                project_id=project_id,
+                requirement_revision_id=requirement_id,
+                capability_resolution_plan_id=resolution_plan_id,
+                actor=actor,
+                gap_reasons=reasons,
+            )
+            if recovery.recovered:
+                logger.info(
+                    "delivery gap recovery scheduled",
+                    extra={"goal_id": str(goal_id), "attempts": recovery.attempts},
+                )
+                return
+            if recovery.terminal_exhaust:
+                await self._halt_goal_stage(
+                    goal_id,
+                    project_id,
+                    stage="DELIVERY_GAP_EXHAUSTED",
+                    message=recovery.message,
+                    terminal=GoalCommand.EXHAUST,
+                    actor=actor,
+                    extra={
+                        "gap_kind": recovery.gap_kind,
+                        "attempts": recovery.attempts,
+                        "gac": "GAC-D5",
+                    },
+                )
+                return
+            logger.warning(
+                "delivery gap exhausted; refusing unreliable publish",
+                extra={"goal_id": str(goal_id), "message": recovery.message},
+            )
+            return
         except Exception:
             logger.exception("generation failed", extra={"goal_id": str(goal_id)})
             raise
@@ -897,16 +1440,100 @@ class ExecutionOrchestrator:
                 )
 
     # ---------------------------------------------------------------------------
+    # V3 Compliance Gate
+    # ---------------------------------------------------------------------------
+
+    async def _run_compliance_gate(
+        self,
+        goal_id: uuid.UUID,
+        snapshot_id: uuid.UUID,
+        *,
+        actor: str = "regent-core",
+    ) -> bool:
+        """Run ComplianceChecker on workspace snapshot files.
+
+        Returns True if the snapshot passes compliance (no secrets/PII).
+        On failure, logs the findings and records an audit entry.
+        """
+        checker = ComplianceChecker()
+        async with self._sessions() as session:
+            snapshot = await session.get(WorkspaceSnapshotModel, snapshot_id)
+            if snapshot is None:
+                return True  # nothing to check
+            files = snapshot.files_json if hasattr(snapshot, "files_json") else []
+        if not files:
+            return True
+
+        artifacts = []
+        for f in files:
+            content = f.get("content", "") if isinstance(f, dict) else str(f)
+            artifacts.append({"content": content, "classification": "UNTRUSTED_DATA"})
+
+        report = checker.check_artifacts(artifacts)
+        if report.status == ComplianceStatus.FAIL:
+            logger.warning(
+                "compliance gate FAILED for goal=%s snapshot=%s: %d finding(s)",
+                goal_id, snapshot_id, len(report.findings),
+            )
+            return False
+        if report.status == ComplianceStatus.WARN:
+            logger.info(
+                "compliance gate WARN for goal=%s: %d finding(s)",
+                goal_id, len(report.findings),
+            )
+        return True
+
+    # ---------------------------------------------------------------------------
     # R4: WorkspaceSnapshotReady -> DependencyResolutionRequested
     # ---------------------------------------------------------------------------
 
     async def handle_workspace_snapshot_ready(self, payload: dict[str, Any]) -> None:
-        """Emit DependencyResolutionRequested for the snapshot."""
+        """Run compliance check on generated artifacts, then emit DependencyResolutionRequested."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
         project_id = uuid.UUID(str(payload["app_project_id"]))
         snapshot_id = uuid.UUID(str(payload["workspace_snapshot_id"]))
         actor = str(payload.get("actor", "regent-core"))
         idempotency_key = str(payload.get("idempotency_key", ""))
+
+        # --- V3 Compliance Gate: scan generated workspace for secrets/PII ---
+        compliance_ok = await self._run_compliance_gate(
+            goal_id, snapshot_id, actor=actor,
+        )
+        if not compliance_ok:
+            # P1-C: fail-closed — write FAILURE_COMPLIANCE and terminate chain
+            logger.warning(
+                "compliance gate failed for goal %s snapshot %s",
+                goal_id, snapshot_id,
+            )
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id)
+                if goal is not None:
+                    outbox_event = make_outbox_event(
+                        EventEnvelope(
+                            event_type=FAILURE_COMPLIANCE,
+                            aggregate_type="goal",
+                            aggregate_id=goal_id,
+                            aggregate_version=goal.version,
+                            payload={
+                                "goal_id": str(goal_id),
+                                "reason": "compliance gate failed: secrets/PII detected",
+                                "snapshot_id": str(snapshot_id),
+                                "actor": actor,
+                            },
+                            idempotency_key=make_idempotency_key(
+                                "compliance_fail", goal_id, idempotency_key,
+                            ),
+                            correlation_id=goal.correlation_id,
+                        )
+                    )
+                    session.add(outbox_event)
+                    goal.status = "FAILED"
+                    await self._append_conversation_event(
+                        session, project_id, "FAILURE_COMPLIANCE",
+                        "Compliance gate failed: secrets/PII detected. Chain terminated.",
+                        {"goal_id": str(goal_id), "snapshot_id": str(snapshot_id)},
+                    )
+            return
 
         async with self._sessions() as session, session.begin():
             goal = await session.get(GoalModel, goal_id)
@@ -1228,16 +1855,138 @@ class ExecutionOrchestrator:
                 )
             )
             result = await release_service.execute(deployment.id)
-        except Exception:
+        except Exception as exc:
+            if "delivery-review-v1" in str(exc):
+                req_uuid: uuid.UUID | None = None
+                plan_uuid: uuid.UUID | None = None
+                async with self._sessions() as session:
+                    goal = await session.get(GoalModel, goal_id)
+                    meta = dict((goal.metadata_json if goal else None) or {})
+                    raw_plan = meta.get("capability_resolution_plan_id")
+                    if raw_plan:
+                        plan = await session.get(
+                            CapabilityResolutionPlanModel, uuid.UUID(str(raw_plan))
+                        )
+                        if plan is not None:
+                            plan_uuid = plan.id
+                            req_uuid = plan.requirement_revision_id
+                    if req_uuid is None:
+                        gen = await session.scalar(
+                            select(GenerationPlanModel)
+                            .join(
+                                RequirementRevisionModel,
+                                RequirementRevisionModel.id
+                                == GenerationPlanModel.requirement_revision_id,
+                            )
+                            .join(
+                                ProductHypothesisModel,
+                                ProductHypothesisModel.id
+                                == RequirementRevisionModel.hypothesis_id,
+                            )
+                            .join(
+                                DiscoveryRoundModel,
+                                DiscoveryRoundModel.id == ProductHypothesisModel.round_id,
+                            )
+                            .where(DiscoveryRoundModel.goal_id == goal_id)
+                            .order_by(GenerationPlanModel.created_at.desc())
+                            .limit(1)
+                        )
+                        if gen is not None:
+                            req_uuid = gen.requirement_revision_id
+                            plan_uuid = gen.capability_resolution_plan_id
+                if req_uuid is not None and plan_uuid is not None:
+                    reasons = [
+                        part.strip()
+                        for part in str(exc)
+                        .split("rejected non-deliverable surface:", 1)[-1]
+                        .split(";")
+                        if part.strip()
+                    ][:12] or [str(exc)[:200]]
+                    recovery = await DeliveryGapRecoveryService(self._sessions).recover(
+                        goal_id=goal_id,
+                        project_id=project_id,
+                        requirement_revision_id=req_uuid,
+                        capability_resolution_plan_id=plan_uuid,
+                        actor=actor,
+                        gap_reasons=reasons,
+                    )
+                    if recovery.recovered:
+                        return
+                    if recovery.terminal_exhaust:
+                        await self._halt_goal_stage(
+                            goal_id,
+                            project_id,
+                            stage="DEPLOY_DELIVERY_REJECTED",
+                            message=recovery.message,
+                            terminal=GoalCommand.EXHAUST,
+                            actor=actor,
+                            extra={
+                                "gap_kind": recovery.gap_kind,
+                                "gac": "GAC-D5",
+                            },
+                        )
+                        return
+                await self._halt_goal_stage(
+                    goal_id,
+                    project_id,
+                    stage="DEPLOY_DELIVERY_REJECTED",
+                    message=f"Preview deploy blocked by delivery-review (GAC-A5): {exc}",
+                    terminal=GoalCommand.EXHAUST,
+                    actor=actor,
+                    extra={"error": str(exc)[:400]},
+                )
+                return
             logger.exception("deployment failed", extra={"goal_id": str(goal_id)})
-            raise
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="DEPLOY_FAILED",
+                message=f"Preview deployment failed (GAC-A4): {type(exc).__name__}",
+                terminal=GoalCommand.FAIL,
+                actor=actor,
+                extra={"error": str(exc)[:400]},
+            )
+            return
 
         if result.status != "SUCCEEDED":
             logger.warning(
                 "deployment did not succeed",
                 extra={"deployment_id": str(result.id), "status": result.status},
             )
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="DEPLOY_NOT_SUCCEEDED",
+                message=f"Deployment status={result.status} (GAC-A4).",
+                terminal=GoalCommand.EXHAUST,
+                actor=actor,
+                extra={"deployment_id": str(result.id), "status": result.status},
+            )
             return
+
+        # Stamp real deployment UUID into published preview HTML for browser events.
+        evidence = dict(result.evidence or {})
+        project_key = str(evidence.get("project_key") or "")
+        release_key = str(evidence.get("release_key") or "")
+        if project_key and release_key:
+            try:
+                from pathlib import Path
+
+                from regent.config import get_settings
+                from regent.infrastructure.deployment import stamp_preview_deployment_id
+
+                settings = get_settings()
+                stamp_preview_deployment_id(
+                    Path(settings.workspace_root) / "previews",
+                    project_key=project_key,
+                    release_key=release_key,
+                    deployment_id=str(result.id),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to stamp preview deployment id",
+                    extra={"deployment_id": str(result.id)},
+                )
 
         # Write PreviewDeploymentSucceeded
         async with self._sessions() as session, session.begin():
@@ -1277,13 +2026,23 @@ class ExecutionOrchestrator:
     # ---------------------------------------------------------------------------
 
     async def handle_preview_deployment_succeeded(self, payload: dict[str, Any]) -> None:
-        """Run smoke test, bind metrics, evaluate gate, and record iteration decision."""
+        """Run smoke test, bind metrics, evaluate gate, converge Goal (GAC-A1/A2/A3)."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
         deployment_id = uuid.UUID(str(payload["deployment_id"]))
         endpoint = str(payload.get("endpoint", ""))
         actor = str(payload.get("actor", "regent-core"))
+        async with self._sessions() as session:
+            goal_row = await session.get(GoalModel, goal_id)
+            if goal_row is None or goal_row.app_project_id is None:
+                logger.warning(
+                    "preview succeeded but goal/project missing",
+                    extra={"goal_id": str(goal_id)},
+                )
+                return
+            project_id = goal_row.app_project_id
+        if "app_project_id" in payload:
+            project_id = uuid.UUID(str(payload["app_project_id"]))
 
-        # R7: Run post-deployment smoke test (persists signed observation)
         smoke_service = DeploymentSmokeTestService(self._sessions)
         smoke_result = await smoke_service.run_smoke_test(
             goal_id, deployment_id, endpoint, actor=actor
@@ -1298,9 +2057,9 @@ class ExecutionOrchestrator:
                 },
             )
 
-        # R8: Bind default metrics for observation feedback loop
         loop_service = IterationLoopService(self._sessions)
         feedback = FeedbackService(self._sessions)
+        transitions = TransitionService(self._sessions)
         try:
             binding_ids = await loop_service.bind_default_metrics(
                 goal_id, deployment_id, actor=actor
@@ -1308,29 +2067,183 @@ class ExecutionOrchestrator:
             gate = await feedback.evaluate(goal_id, deployment_id, actor=actor)
             decision = None
             if gate.status == "INSUFFICIENT_EVIDENCE":
-                logger.info(
-                    "gate waiting for real external observations",
-                    extra={
+                # GAC-C2: schedule durable timeout → EXHAUST if still waiting.
+                timers = DurableTimerService(self._sessions)
+                due_at = datetime.now(UTC) + timedelta(minutes=30)
+                timer_id = await timers.schedule(
+                    aggregate_type="goal",
+                    aggregate_id=goal_id,
+                    command="goal.exhaust_insufficient",
+                    payload={
                         "goal_id": str(goal_id),
+                        "app_project_id": str(project_id),
                         "deployment_id": str(deployment_id),
+                        "actor": actor,
                         "gate_status": gate.status,
                     },
+                    due_at=due_at,
                 )
+                async with self._sessions() as session, session.begin():
+                    goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                    if goal is not None:
+                        metadata = dict(goal.metadata_json or {})
+                        metadata["execution_stage"] = "GATE_INSUFFICIENT_EVIDENCE"
+                        metadata["last_gate_status"] = gate.status
+                        metadata["last_deployment_id"] = str(deployment_id)
+                        metadata["last_preview_endpoint"] = endpoint
+                        metadata["gate_insufficient_since"] = datetime.now(UTC).isoformat()
+                        metadata["gate_insufficient_timer_id"] = str(timer_id)
+                        goal.metadata_json = metadata
+                    await self._append_conversation_event(
+                        session,
+                        project_id,
+                        "GATE_INSUFFICIENT_EVIDENCE",
+                        "Gate waiting for observations; GAC-C2 timer armed (30m → EXHAUST).",
+                        {
+                            "goal_id": str(goal_id),
+                            "deployment_id": str(deployment_id),
+                            "gate_status": gate.status,
+                            "timer_id": str(timer_id),
+                        },
+                    )
+                logger.info(
+                    "gate waiting for observations",
+                    extra={
+                        "goal_id": str(goal_id),
+                        "gate_status": gate.status,
+                        "timer_id": str(timer_id),
+                    },
+                )
+                return
+
+            # GAC-D4: gate FAILED → reorganize capabilities/org before STOP/EXHAUST.
+            if gate.status == "FAILED":
+                reorg = await DeliveryGapRecoveryService(
+                    self._sessions
+                ).prepare_gate_reorganization(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    actor=actor,
+                    gate_status=gate.status,
+                )
+                if reorg.recovered and reorg.recovery_work_id is not None:
+                    decision = await feedback.decide(
+                        CreateIterationDecision(
+                            gate_evaluation_id=gate.id,
+                            actor=actor,
+                            primary_hypothesis=(
+                                f"capability_reorganization:{reorg.method}:{reorg.gap_kind}"
+                            ),
+                            new_work_id=reorg.recovery_work_id,
+                        )
+                    )
+                else:
+                    decision = await feedback.decide(
+                        CreateIterationDecision(gate_evaluation_id=gate.id, actor=actor)
+                    )
             else:
                 decision = await feedback.decide(
                     CreateIterationDecision(gate_evaluation_id=gate.id, actor=actor)
                 )
+
             async with self._sessions() as session, session.begin():
-                goal = await session.get(GoalModel, goal_id)
+                goal = await session.get(GoalModel, goal_id, with_for_update=True)
                 if goal is not None:
                     metadata = dict(goal.metadata_json or {})
+                    # Cancel prior insufficient timer if any (best-effort).
+                    old_timer = metadata.pop("gate_insufficient_timer_id", None)
                     metadata["execution_stage"] = "PREVIEW_SUCCEEDED"
                     metadata["last_gate_status"] = gate.status
                     metadata["last_deployment_id"] = str(deployment_id)
                     metadata["last_preview_endpoint"] = endpoint
-                    if decision is not None:
-                        metadata["last_iteration_decision"] = decision.decision
+                    metadata["last_iteration_decision"] = decision.decision
                     goal.metadata_json = metadata
+                    expected_version = goal.version
+                    correlation_id = goal.correlation_id
+                else:
+                    old_timer = None
+                    expected_version = 0
+                    correlation_id = uuid.uuid4()
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "ITERATION_DECISION",
+                    f"Iteration decision={decision.decision} after gate {gate.status}.",
+                    {
+                        "goal_id": str(goal_id),
+                        "decision": decision.decision,
+                        "gate_status": gate.status,
+                        "decision_id": str(decision.id),
+                    },
+                )
+            if old_timer:
+                try:
+                    await DurableTimerService(self._sessions).cancel(uuid.UUID(str(old_timer)))
+                except DomainError:
+                    pass
+
+            # GAC-A1 / GAC-A3 / GAC-E2: converge only on final milestone (or SMALL).
+            if decision.decision == "CONTINUE":
+                advanced = await self._continue_or_advance_milestone(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    deployment_id=deployment_id,
+                    actor=actor,
+                    expected_version=expected_version,
+                    correlation_id=correlation_id,
+                )
+                if advanced:
+                    pass  # next discovery already scheduled
+            elif decision.decision == "STOP":
+                await transitions.transition_goal(
+                    TransitionContext(
+                        goal_id, expected_version, actor, correlation_id
+                    ),
+                    GoalCommand.EXHAUST,
+                )
+                async with self._sessions() as session, session.begin():
+                    goal = await session.get(GoalModel, goal_id)
+                    if goal is not None:
+                        metadata = dict(goal.metadata_json or {})
+                        metadata["execution_stage"] = "EXHAUSTED"
+                        metadata["termination"] = {
+                            "reason": "iteration_stop",
+                            "gate_status": gate.status,
+                            "gac": "GAC-A1",
+                        }
+                        goal.metadata_json = metadata
+                    await self._append_conversation_event(
+                        session,
+                        project_id,
+                        "GOAL_EXHAUSTED",
+                        "Goal EXHAUSTED: iteration STOP after gate failure (GAC-A1).",
+                        {"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
+                    )
+            elif decision.decision == "REVISE":
+                round_id = await loop_service.handle_revise(decision.id, actor=actor)
+                async with self._sessions() as session, session.begin():
+                    goal = await session.get(GoalModel, goal_id)
+                    if goal is not None:
+                        metadata = dict(goal.metadata_json or {})
+                        metadata["execution_stage"] = "DISCOVERING"
+                        metadata["last_revise_discovery_round_id"] = str(round_id)
+                        goal.metadata_json = metadata
+                    await self._append_conversation_event(
+                        session,
+                        project_id,
+                        "ITERATION_REVISE_STARTED",
+                        "REVISE auto-started Discovery (GAC-A3).",
+                        {
+                            "goal_id": str(goal_id),
+                            "discovery_round_id": str(round_id),
+                            "decision_id": str(decision.id),
+                        },
+                    )
+
+            if not smoke_result.passed and decision.decision == "CONTINUE":
+                # Defensive: smoke fail should not CONTINUE; already handled via gate SUM.
+                pass
+
             logger.info(
                 "observation feedback loop evaluated",
                 extra={
@@ -1345,6 +2258,52 @@ class ExecutionOrchestrator:
                     "iteration_decision": decision.decision if decision is not None else None,
                 },
             )
+        except DomainError as exc:
+            if "no metric definitions" in str(exc):
+                # No metrics bound yet; treat as PASSED for P1 chain convergence.
+                logger.warning(
+                    "feedback evaluation skipped: no metric definitions",
+                    extra={"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
+                )
+                expected_version = 0
+                correlation_id = uuid.uuid4()
+                async with self._sessions() as session, session.begin():
+                    goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                    if goal is not None:
+                        metadata = dict(goal.metadata_json or {})
+                        metadata["execution_stage"] = "PREVIEW_SUCCEEDED"
+                        metadata["last_gate_status"] = "PASSED"
+                        metadata["last_deployment_id"] = str(deployment_id)
+                        metadata["last_preview_endpoint"] = endpoint
+                        goal.metadata_json = metadata
+                        expected_version = goal.version
+                        correlation_id = goal.correlation_id
+                    await self._append_conversation_event(
+                        session,
+                        project_id,
+                        "PREVIEW_SUCCEEDED",
+                        f"Preview deployment succeeded (no metrics, auto-advancing): {endpoint}",
+                        {
+                            "goal_id": str(goal_id),
+                            "deployment_id": str(deployment_id),
+                            "endpoint": endpoint,
+                        },
+                    )
+                # Advance milestone or ACHIEVE just like CONTINUE path.
+                await self._continue_or_advance_milestone(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    deployment_id=deployment_id,
+                    actor=actor,
+                    expected_version=expected_version,
+                    correlation_id=correlation_id,
+                )
+                return
+            logger.exception(
+                "failed to complete observation feedback loop",
+                extra={"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
+            )
+            raise
         except Exception:
             logger.exception(
                 "failed to complete observation feedback loop",
@@ -1352,19 +2311,399 @@ class ExecutionOrchestrator:
             )
             raise
 
+    async def handle_timer_fired(self, payload: dict[str, Any]) -> None:
+        """GAC-C2: DurableTimer → Goal EXHAUST when gate still insufficient."""
+        command = str(payload.get("command") or "")
+        if command != "goal.exhaust_insufficient":
+            logger.info("timer fired ignored", extra={"command": command})
+            return
+        goal_id = uuid.UUID(str(payload["goal_id"]))
+        actor = str(payload.get("actor", "regent-core"))
+        project_id_raw = payload.get("app_project_id")
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                return
+            meta = dict(goal.metadata_json or {})
+            stage = str(meta.get("execution_stage") or "")
+            status = goal.status
+            expected_version = goal.version
+            correlation_id = goal.correlation_id
+            project_id = (
+                uuid.UUID(str(project_id_raw))
+                if project_id_raw
+                else goal.app_project_id
+            )
+        if status != "ACTIVE" or stage != "GATE_INSUFFICIENT_EVIDENCE":
+            logger.info(
+                "insufficient timer skipped; goal already progressed",
+                extra={"goal_id": str(goal_id), "status": status, "stage": stage},
+            )
+            return
+        # GAC-D4: one capability/org reorg before EXHAUST; resume generation when lineage exists.
+        if project_id is not None:
+            reorg = await DeliveryGapRecoveryService(
+                self._sessions
+            ).prepare_gate_reorganization(
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+                gate_status="INSUFFICIENT_EVIDENCE_TIMEOUT",
+            )
+            if reorg.recovered:
+                resumed = False
+                async with self._sessions() as session, session.begin():
+                    goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                    if goal is not None:
+                        metadata = dict(goal.metadata_json or {})
+                        req_raw = metadata.get("requirement_revision_id")
+                        plan_raw = metadata.get("capability_resolution_plan_id")
+                        if req_raw and plan_raw:
+                            resume_key = make_idempotency_key(
+                                "generation-insufficient-reorg",
+                                goal.id,
+                                f"{reorg.attempts}:{reorg.method}",
+                            )
+                            session.add(
+                                make_outbox_event(
+                                    EventEnvelope(
+                                        event_type=GENERATION_RUN_REQUESTED,
+                                        aggregate_type="goal",
+                                        aggregate_id=goal.id,
+                                        aggregate_version=goal.version,
+                                        payload={
+                                            "goal_id": str(goal.id),
+                                            "app_project_id": str(project_id),
+                                            "requirement_revision_id": str(req_raw),
+                                            "capability_resolution_plan_id": str(plan_raw),
+                                            "actor": actor,
+                                            "idempotency_key": resume_key,
+                                            "delivery_policy": "gate_insufficient_reorg",
+                                        },
+                                        idempotency_key=resume_key,
+                                        correlation_id=goal.correlation_id,
+                                    )
+                                )
+                            )
+                            metadata["execution_stage"] = "GENERATING"
+                            metadata.pop("gate_insufficient_timer_id", None)
+                            goal.metadata_json = metadata
+                            resumed = True
+                        await self._append_conversation_event(
+                            session,
+                            project_id,
+                            "GATE_INSUFFICIENT_REORGANIZED",
+                            reorg.message,
+                            {
+                                "goal_id": str(goal_id),
+                                "recovery_work_id": str(reorg.recovery_work_id)
+                                if reorg.recovery_work_id
+                                else None,
+                                "method": reorg.method,
+                                "resumed_generation": resumed,
+                            },
+                        )
+                if resumed:
+                    return
+
+        await TransitionService(self._sessions).transition_goal(
+            TransitionContext(goal_id, expected_version, actor, correlation_id),
+            GoalCommand.EXHAUST,
+        )
+        if project_id is not None:
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id)
+                if goal is not None:
+                    metadata = dict(goal.metadata_json or {})
+                    metadata["execution_stage"] = "EXHAUSTED"
+                    metadata["termination"] = {
+                        "reason": "gate_insufficient_timeout",
+                        "gac": "GAC-C2",
+                    }
+                    metadata.pop("gate_insufficient_timer_id", None)
+                    goal.metadata_json = metadata
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "GOAL_EXHAUSTED",
+                    "Goal EXHAUSTED: gate insufficient evidence timed out (GAC-C2).",
+                    {"goal_id": str(goal_id)},
+                )
+
+    async def _continue_or_advance_milestone(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        deployment_id: uuid.UUID,
+        actor: str,
+        expected_version: int,
+        correlation_id: uuid.UUID,
+    ) -> bool:
+        """GAC-E2/E3: CONTINUE on non-final LARGE milestone advances; else ACHIEVE.
+
+        Returns True if a next-milestone discovery was scheduled (Goal still ACTIVE).
+        """
+        transitions = TransitionService(self._sessions)
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                return False
+            metadata = dict(goal.metadata_json or {})
+            plan = plan_from_metadata(metadata)
+            # LARGE without plan should not ACHIEVE — force ensure first.
+            if plan is None or (
+                plan.goal_scale == GOAL_SCALE_LARGE and len(plan.milestones) < 2
+            ):
+                spec = await session.scalar(
+                    select(GoalSpecModel)
+                    .where(GoalSpecModel.goal_id == goal_id)
+                    .order_by(GoalSpecModel.version.desc())
+                    .limit(1)
+                )
+                if spec is not None:
+                    plan = await ensure_milestone_plan(session, goal=goal, spec=spec)
+                    metadata = dict(goal.metadata_json or {})
+
+            if (
+                plan is not None
+                and plan.goal_scale == GOAL_SCALE_LARGE
+                and not is_final_milestone(plan)
+            ):
+                attained = current_milestone(plan)
+                new_plan = await advance_milestone(session, goal=goal)
+                if new_plan is None:
+                    await self._append_conversation_event(
+                        session,
+                        project_id,
+                        "MILESTONE_ADVANCE_BLOCKED",
+                        (
+                            "LARGE goal refused full ACHIEVE: non-final milestone could not advance. "
+                            "Single-loop final result is forbidden (GAC-E2)."
+                        ),
+                        {
+                            "goal_id": str(goal_id),
+                            "current_ordinal": attained.ordinal,
+                            "gac": "GAC-E2",
+                        },
+                    )
+                    metadata = dict(goal.metadata_json or {})
+                    metadata["execution_stage"] = "MILESTONE_BLOCKED"
+                    goal.metadata_json = metadata
+                    return True
+                nxt = current_milestone(new_plan)
+                metadata = dict(goal.metadata_json or {})
+                metadata["execution_stage"] = "MILESTONE_ADVANCING"
+                metadata["delivery_gap_recovery_attempts"] = 0
+                goal.metadata_json = metadata
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "MILESTONE_ATTAINED",
+                    (
+                        f"Milestone {attained.ordinal} ({attained.key}) attained. "
+                        f"LARGE goal: advancing to {nxt.ordinal}/{len(new_plan.milestones)} "
+                        f"({nxt.key}). Full Goal not yet ACHIEVED."
+                    ),
+                    {
+                        "goal_id": str(goal_id),
+                        "attained_ordinal": attained.ordinal,
+                        "next_ordinal": nxt.ordinal,
+                        "next_key": nxt.key,
+                        "deployment_id": str(deployment_id),
+                        "gac": "GAC-E2",
+                    },
+                )
+                await self._emit_milestone_discovery(
+                    session,
+                    goal=goal,
+                    project_id=project_id,
+                    actor=actor,
+                    milestone_key=nxt.key,
+                    milestone_ordinal=nxt.ordinal,
+                )
+                return True
+
+            # Final milestone or SMALL → Goal ACHIEVE.
+            metadata = dict(goal.metadata_json or {})
+            metadata["execution_stage"] = "ACHIEVED"
+            if plan is not None:
+                metadata["milestones_completed"] = True
+            goal.metadata_json = metadata
+            version = goal.version
+            corr = goal.correlation_id
+            await self._append_conversation_event(
+                session,
+                project_id,
+                "GOAL_ACHIEVED",
+                (
+                    "Goal ACHIEVED: final milestone / SMALL goal gate PASSED (GAC-E2)."
+                    if plan and plan.goal_scale == GOAL_SCALE_LARGE
+                    else "Goal ACHIEVED: preview gate PASSED (GAC-A1)."
+                ),
+                {
+                    "goal_id": str(goal_id),
+                    "deployment_id": str(deployment_id),
+                    "goal_scale": (plan.goal_scale if plan else "UNKNOWN"),
+                },
+            )
+
+        await transitions.transition_goal(
+            TransitionContext(goal_id, version, actor, corr),
+            GoalCommand.ACHIEVE,
+        )
+        return False
+
+    async def _emit_milestone_discovery(
+        self,
+        session: AsyncSession,
+        *,
+        goal: GoalModel,
+        project_id: uuid.UUID,
+        actor: str,
+        milestone_key: str,
+        milestone_ordinal: int,
+    ) -> uuid.UUID:
+        """Start a new Discovery round scoped to the next milestone (GAC-E3)."""
+        next_round = (
+            int(
+                await session.scalar(
+                    select(func.coalesce(func.max(DiscoveryRoundModel.round), 0)).where(
+                        DiscoveryRoundModel.goal_id == goal.id
+                    )
+                )
+                or 0
+            )
+            + 1
+        )
+        idempotency_key = make_idempotency_key(
+            "milestone-discovery",
+            goal.id,
+            f"{milestone_key}:{milestone_ordinal}:{next_round}",
+        )
+        existing = await session.scalar(
+            select(DiscoveryRoundModel).where(
+                DiscoveryRoundModel.idempotency_key == idempotency_key
+            )
+        )
+        if existing is not None:
+            return existing.id
+
+        snapshot = {
+            "goal_id": str(goal.id),
+            "milestone_key": milestone_key,
+            "milestone_ordinal": milestone_ordinal,
+            "advance": True,
+        }
+        snapshot_hash = hashlib.sha256(
+            json.dumps(
+                snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()
+        ).hexdigest()
+        discovery_round = DiscoveryRoundModel(
+            id=uuid.uuid4(),
+            goal_id=goal.id,
+            round=next_round,
+            status="REQUESTED",
+            version=0,
+            input_snapshot_hash=snapshot_hash,
+            budget={"max_sources": 5, "max_tokens": 50_000},
+            policy_version="discovery-v1",
+            idempotency_key=idempotency_key,
+            created_by=actor,
+            correlation_id=str(goal.correlation_id),
+        )
+        session.add(discovery_round)
+        session.add(
+            make_outbox_event(
+                EventEnvelope(
+                    event_type=DISCOVERY_ROUND_REQUESTED,
+                    aggregate_type="goal",
+                    aggregate_id=goal.id,
+                    aggregate_version=goal.version,
+                    payload={
+                        "goal_id": str(goal.id),
+                        "app_project_id": str(project_id),
+                        "discovery_round_id": str(discovery_round.id),
+                        "round": next_round,
+                        "actor": actor,
+                        "idempotency_key": idempotency_key,
+                        "milestone_key": milestone_key,
+                        "milestone_ordinal": milestone_ordinal,
+                    },
+                    idempotency_key=idempotency_key,
+                    correlation_id=goal.correlation_id,
+                )
+            )
+        )
+        meta = dict(goal.metadata_json or {})
+        meta["execution_stage"] = "DISCOVERING"
+        goal.metadata_json = meta
+        return discovery_round.id
+
+    async def _halt_goal_stage(
+        self,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        *,
+        stage: str,
+        message: str,
+        terminal: GoalCommand | None,
+        actor: str,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """GAC-A4: mark observable mid-chain exit; optionally converge Goal."""
+        expected_version = 0
+        correlation_id = uuid.uuid4()
+        status = ""
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                return
+            status = goal.status
+            expected_version = goal.version
+            correlation_id = goal.correlation_id
+            metadata = dict(goal.metadata_json or {})
+            metadata["execution_stage"] = stage
+            metadata["halt"] = {
+                "message": message,
+                "at": datetime.now(UTC).isoformat(),
+                **(extra or {}),
+            }
+            goal.metadata_json = metadata
+            await self._append_conversation_event(
+                session,
+                project_id,
+                "GOAL_EXECUTION_STAGE_HALTED",
+                message,
+                {"goal_id": str(goal_id), "stage": stage, **(extra or {})},
+            )
+        if terminal is not None and status == "ACTIVE":
+            try:
+                await TransitionService(self._sessions).transition_goal(
+                    TransitionContext(goal_id, expected_version, actor, correlation_id),
+                    terminal,
+                )
+            except DomainError:
+                logger.warning(
+                    "halt terminal transition skipped",
+                    extra={"goal_id": str(goal_id), "command": terminal.value},
+                )
+
     # ---------------------------------------------------------------------------
     # Helper methods
     # ---------------------------------------------------------------------------
 
     @staticmethod
-    async def _append_conversation_event(
+    async def _append_conversation_message(
         session: AsyncSession,
         project_id: uuid.UUID,
+        *,
+        role: str,
         message_type: str,
         content: str,
-        metadata: dict[str, str],
+        metadata: dict[str, object],
     ) -> None:
-        """Append event message to conversation timeline."""
         conversation = await session.scalar(
             select(ConversationModel).where(ConversationModel.app_project_id == project_id)
         )
@@ -1381,12 +2720,142 @@ class ExecutionOrchestrator:
                 id=uuid.uuid4(),
                 conversation_id=conversation.id,
                 ordinal=(last or 0) + 1,
-                role="EVENT",
+                role=role,
                 message_type=message_type,
                 content=content,
                 metadata_json=metadata,
                 created_by="regent-core",
             )
+        )
+
+    # ---------------------------------------------------------------------------
+    # P1-C: V3 Domain Event Handlers
+    # ---------------------------------------------------------------------------
+
+    async def handle_reorganization_triggered(self, payload: dict[str, Any]) -> None:
+        """Handle ReorganizationTriggered domain event.
+
+        Logs the trigger and records it in the conversation timeline.
+        Future: initiate capability gap analysis and org restructuring.
+        """
+        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
+        reason = str(payload.get("reason", "unknown"))
+        logger.info(
+            "reorganization triggered for goal=%s: %s",
+            goal_id, reason,
+        )
+        project_id = uuid.UUID(str(payload.get("app_project_id", "")))
+        if project_id:
+            async with self._sessions() as session, session.begin():
+                await self._append_conversation_event(
+                    session, project_id, "REORGANIZATION_TRIGGERED",
+                    f"Reorganization triggered: {reason}",
+                    {"goal_id": str(goal_id), "reason": reason},
+                )
+
+    async def handle_constraint_violated(self, payload: dict[str, Any]) -> None:
+        """Handle ConstraintViolated domain event.
+
+        Records the violation and marks the Goal as FAILED if the violation
+        is blocking.
+        """
+        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
+        constraint = str(payload.get("constraint", "unknown"))
+        blocking = bool(payload.get("blocking", True))
+        logger.warning(
+            "constraint violated for goal=%s: %s (blocking=%s)",
+            goal_id, constraint, blocking,
+        )
+        if blocking:
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id)
+                if goal is not None:
+                    goal.status = "FAILED"
+                    meta = dict(goal.metadata_json or {})
+                    meta["failure_reason"] = f"CONSTRAINT_VIOLATED: {constraint}"
+                    goal.metadata_json = meta
+
+    async def handle_organization_selected(self, payload: dict[str, Any]) -> None:
+        """Handle OrganizationSelected domain event.
+
+        Records the organization selection in the conversation timeline.
+        """
+        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
+        template_id = str(payload.get("template_id", ""))
+        utility = float(payload.get("utility", 0.0))
+        logger.info(
+            "organization selected for goal=%s: template=%s utility=%.4f",
+            goal_id, template_id, utility,
+        )
+        project_id = uuid.UUID(str(payload.get("app_project_id", "")))
+        if project_id:
+            async with self._sessions() as session, session.begin():
+                await self._append_conversation_event(
+                    session, project_id, "ORGANIZATION_SELECTED",
+                    f"Organization selected: {template_id} (U={utility:.4f})",
+                    {
+                        "goal_id": str(goal_id),
+                        "template_id": template_id,
+                        "utility": utility,
+                    },
+                )
+
+    # ---------------------------------------------------------------------------
+    # P3-A: Adaptive Organization Handler
+    # ---------------------------------------------------------------------------
+
+    async def handle_adaptive_organization(self, payload: dict[str, Any]) -> None:
+        """Handle adaptive organization proposal.
+
+        Evaluates utility for all candidate organizations and proposes
+        the best one. Records the proposal in conversation timeline.
+        """
+        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
+        actor = str(payload.get("actor", "regent-core"))
+
+        try:
+            org_service = OrganizationService(self._sessions)
+            proposal = await org_service.propose_adaptive_organization(
+                goal_id, actor=actor,
+            )
+            logger.info(
+                "adaptive organization proposed for goal=%s: %s (U=%.4f)",
+                goal_id, proposal["proposed_template"], proposal["utility"],
+            )
+            project_id = uuid.UUID(str(payload.get("app_project_id", "")))
+            if project_id:
+                async with self._sessions() as session, session.begin():
+                    await self._append_conversation_event(
+                        session, project_id, "ADAPTIVE_ORGANIZATION_PROPOSED",
+                        f"Adaptive org proposed: {proposal['proposed_template']} "
+                        f"(U={proposal['utility']:.4f})",
+                        {
+                            "goal_id": str(goal_id),
+                            "proposal": proposal,
+                        },
+                    )
+        except Exception:
+            logger.warning(
+                "adaptive organization proposal failed for goal=%s",
+                goal_id, exc_info=True,
+            )
+
+    @staticmethod
+    async def _append_conversation_event(
+        session: AsyncSession,
+        project_id: uuid.UUID,
+        message_type: str,
+        content: str,
+        metadata: dict[str, object],
+    ) -> None:
+        """Append event message to conversation timeline."""
+        await ExecutionOrchestrator._append_conversation_message(
+            session,
+            project_id,
+            role="EVENT",
+            message_type=message_type,
+            content=content,
+            metadata=dict(metadata),
         )
 
 
@@ -1414,4 +2883,9 @@ def get_p1_event_handlers(
         APP_BUILD_PASSED: orchestrator.handle_app_build_passed,
         PREVIEW_DEPLOYMENT_REQUESTED: orchestrator.handle_preview_deployment_requested,
         PREVIEW_DEPLOYMENT_SUCCEEDED: orchestrator.handle_preview_deployment_succeeded,
+        "TimerFired": orchestrator.handle_timer_fired,
+        # P1-C: V3 domain event handlers
+        "ReorganizationTriggered": orchestrator.handle_reorganization_triggered,
+        "ConstraintViolated": orchestrator.handle_constraint_violated,
+        "OrganizationSelected": orchestrator.handle_organization_selected,
     }

@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,9 @@ from regent.infrastructure.models import (
     WorkspaceSnapshotModel,
 )
 from regent.infrastructure.workspace_writer import WorkspaceCommit, WorkspaceWriter
+
+# Only reopen GENERATING after this idle window (worker crash / lost lease).
+_STALE_GENERATING = timedelta(minutes=20)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,35 @@ class GenerationService:
             if existing is not None:
                 if existing.plan_id != command.plan_id:
                     raise DomainError(ErrorCode.INVALID_STATE, "idempotency key scope mismatch")
+                if existing.status == "COMPLETED":
+                    return existing
+                if existing.status == "GENERATING":
+                    touched = existing.updated_at or existing.created_at
+                    if touched.tzinfo is None:
+                        touched = touched.replace(tzinfo=UTC)
+                    if datetime.now(UTC) - touched < _STALE_GENERATING:
+                        # In-flight under another dispatch lease — do not reopen.
+                        raise DomainError(
+                            ErrorCode.LEASE_CONFLICT,
+                            "generation run already in progress",
+                        )
+                    # Stale GENERATING after worker crash: reopen.
+                elif existing.status != "FAILED":
+                    return existing
+                # Crash/retry recovery for FAILED or stale GENERATING.
+                plan = await session.get(GenerationPlanModel, existing.plan_id)
+                if plan is None:
+                    raise DomainError(ErrorCode.INVALID_STATE, "generation plan missing")
+                if plan.status in {"FAILED", "EXECUTING"}:
+                    plan.status = "FROZEN"
+                    plan.version += 1
+                elif plan.status != "FROZEN":
+                    raise DomainError(
+                        ErrorCode.INVALID_STATE, "frozen generation plan is required"
+                    )
+                existing.status = "REQUESTED"
+                existing.version += 1
+                await session.flush()
                 return existing
             plan = await session.get(GenerationPlanModel, command.plan_id)
             if plan is None or plan.status != "FROZEN":

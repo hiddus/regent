@@ -1,0 +1,14 @@
+{
+  "project_id": "107e2feb-8096-4d0d-b37c-433ee8efafa6",
+  "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+  "idea": "做一个无敏感数据的静态产品反馈收集页，用户可提交建议并看到确认",
+  "status": "ACTIVE",
+  "execution_stage": "PREVIEW_SUCCEEDED",
+  "awaiting_authorized_sources": null,
+  "capability_resolution": null,
+  "last_preview_endpoint": "http://118.31.171.159:8000/preview/5390d368-399e-4e2f-be5c-a584ff8b71d4/3edf0893-ecaf-4887-ac17-bbc96dddd6bc/",
+  "last_gate_status": "INSUFFICIENT_EVIDENCE",
+  "last_iteration_decision": null,
+  "authorized_source_urls": null,
+  "elapsed_sec": 179.0
+}

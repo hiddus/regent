@@ -1,0 +1,39 @@
+{
+  "actor_class": "automation_bootstrap_not_nondev_users",
+  "note": "These journeys bootstrap Observation plumbing only. PRODUCT_EVIDENCE still requires ≥5 distinct non-developer users over ≥7 days.",
+  "results": [
+    {
+      "goal_id": "6dc62bcb-58d5-46d3-bef6-46cb067943a9",
+      "endpoint": "http://118.31.171.159:8000/preview/4138e5cc-968a-40ef-ac08-602f40480892/2eeb62c5-5200-4750-ba43-451ef73599fc/",
+      "deployment_id": "37a83652-54f3-4b4e-9889-2c899ba35dc4",
+      "ok": true,
+      "error": null,
+      "gate": {
+        "status": "PASSED",
+        "decision": "CONTINUE"
+      }
+    },
+    {
+      "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+      "endpoint": "http://118.31.171.159:8000/preview/5390d368-399e-4e2f-be5c-a584ff8b71d4/3edf0893-ecaf-4887-ac17-bbc96dddd6bc/",
+      "deployment_id": "7203f3cf-32b2-4567-bd66-011daefc870b",
+      "ok": true,
+      "error": null,
+      "gate": {
+        "status": "PASSED",
+        "decision": "CONTINUE"
+      }
+    },
+    {
+      "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+      "endpoint": "http://118.31.171.159:8000/preview/21d22289-7bfe-46b2-a514-d42b1453ff7b/66174470-48b1-4ac2-9c2a-0ec0b963efd1/",
+      "deployment_id": "769de2ef-853e-4bcb-92e8-211694e8fdc7",
+      "ok": true,
+      "error": null,
+      "gate": {
+        "status": "PASSED",
+        "decision": "CONTINUE"
+      }
+    }
+  ]
+}

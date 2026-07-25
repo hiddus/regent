@@ -1,0 +1,96 @@
+{
+  "record_type": "GraduationDecisionRecord",
+  "updated_at": "2026-07-22T16:05:15.578826+00:00",
+  "definition_id": "REGENT-DEFINITION-1.0",
+  "SYSTEM_GRADUATED": {
+    "status": "PASSED",
+    "blockers": [],
+    "g1_goals_with_preview": 4,
+    "g1_goals_with_decision": 4,
+    "g8": "TECH_PASS_WITH_RESIDUAL_NOTE",
+    "g9_secret_scan_pass": true,
+    "g10": true,
+    "g11_release": "20260722-p1-g0-eo-r34",
+    "g12_pack": "DoD_Evidence_Pack.json",
+    "evidence_dir": "docs\\graduation-evidence\\20260722T073327Z",
+    "tech_sign": {
+      "status": "RECOMMENDED_PASS",
+      "signer_role": "技术",
+      "signed_at": "2026-07-22T08:00:02.438642+00:00",
+      "note": "Auto-assembled evidence; human countersign still required for formal close."
+    },
+    "product_sign": {
+      "status": "PASSED",
+      "signer_role": "产品 Owner",
+      "signed_at": "2026-07-22T16:05:15.578826+00:00",
+      "note": "Owner authorized while starting P2 coding"
+    },
+    "security_sign": {
+      "status": "PASSED",
+      "signer_role": "安全（Owner 代签 G9 扫描通过）",
+      "signed_at": "2026-07-22T16:05:15.578826+00:00"
+    }
+  },
+  "PRODUCT_EVIDENCE_GRADUATED": {
+    "status": "PASSED",
+    "policy": "PRODUCT_EVOLUTION_GATE.md",
+    "meaning": "Continuous evolution loop proven; no 7-day wait",
+    "g6": "PASS_TWO_INDEPENDENT_REVISE_PATHS",
+    "g7": "PASS_REVISE_WITH_GE3_OBSERVATIONS",
+    "evidence": "g6_g7_prewindow_evidence.json",
+    "explicitly_not_required": [
+      "calendar_days_ge_7",
+      "user_satisfaction",
+      "apps_meet_expectations"
+    ],
+    "product_sign": {
+      "status": "OWNER_AUTHORIZED_VIA_POLICY_CHANGE",
+      "at": "2026-07-22T16:00:05.475770+00:00",
+      "note": "Owner abolished calendar wait; loop evidence accepted"
+    },
+    "paths": [
+      {
+        "path_id": "P1_reject_revise_feedback",
+        "goal_id": "9c0088b4-06f2-42ad-b5fd-4bc790354e95",
+        "deployment_id": "7203f3cf-32b2-4567-bd66-011daefc870b",
+        "decision": "REVISE",
+        "discovery_round_id": "5861cc88-ebaf-4ffd-a088-8ddfeb5759ef",
+        "observation_id": "88ce208c-50e3-4bbf-9539-e6d32db9e6fd"
+      },
+      {
+        "path_id": "P2_reject_revise_news",
+        "goal_id": "2c3a3e77-09c8-4026-ba8e-f4d0ee283306",
+        "deployment_id": "769de2ef-853e-4bcb-92e8-211694e8fdc7",
+        "decision": "REVISE",
+        "discovery_round_id": "b324e4a7-38bf-4cd4-ae82-8fa8c49f6641",
+        "observation_id": "28f5f627-a321-445a-a9a2-ea58006cb124"
+      }
+    ],
+    "observation_ids": [
+      "88ce208c-50e3-4bbf-9539-e6d32db9e6fd",
+      "28f5f627-a321-445a-a9a2-ea58006cb124",
+      "1a8e6fa2-0965-40eb-a4d6-583de0307fbf",
+      "7f0eec37-384b-4288-9837-4ad12d2935bf"
+    ]
+  },
+  "P2StartDecisionRecord": {
+    "status": "PASSED",
+    "signed_at": "2026-07-22T16:05:15.578826+00:00",
+    "definition_id": "REGENT-DEFINITION-1.0",
+    "authorized_batches": [
+      "p2-scheduler-01"
+    ],
+    "blocked_until_eval": [
+      "p2-adaptive-org-01",
+      "p2-scheduler depends on P2-4 for multi-agent"
+    ],
+    "reason": "SYSTEM+PRODUCT graduated; docs CURRENT; Owner start P2",
+    "signer": "product-owner"
+  },
+  "p1_end_verdict": {
+    "complete": true,
+    "completed_at": "2026-07-22T16:05:15.578826+00:00",
+    "reason": "Dual graduation + CURRENT + P2Start; evolution gate (no calendar wait)"
+  },
+  "g11_release_note": "20260722-p1-loop-r35"
+}
