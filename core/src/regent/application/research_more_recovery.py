@@ -203,7 +203,13 @@ class ResearchMoreRecoveryService:
     ) -> ResearchMoreRecoveryResult:
         """DEFINITION: do not block Goal progress waiting for optional human URL paste."""
         metadata = dict(goal.metadata_json or {})
-        if metadata.get("research_more_adapted"):
+        existing_urls = [
+            str(u).strip()
+            for u in (metadata.get("authorized_source_urls") or [])
+            if str(u).strip()
+        ]
+        if metadata.get("research_more_adapted") and existing_urls:
+            # Already adapted AND have URLs but still no evidence — truly exhausted.
             metadata["execution_stage"] = "BLOCKED"
             metadata["awaiting_authorized_sources"] = False
             metadata["termination"] = {
@@ -227,7 +233,17 @@ class ResearchMoreRecoveryService:
                 False, "STOP", capability_id, (), message
             )
 
-        merged = self._merge_urls(goal, spec, metadata, package_feeds)
+        # If authorized_source_urls is empty but we have package_feeds,
+        # use the package feeds — don't give up without trying them.
+        if not existing_urls and package_feeds:
+            merged = list(dict.fromkeys(package_feeds))
+            logger.info(
+                "authorized_source_urls empty; falling back to %d package feeds",
+                len(merged),
+                extra={"goal_id": str(goal.id)},
+            )
+        else:
+            merged = self._merge_urls(goal, spec, metadata, package_feeds)
         prefix = note or (
             "自动能力恢复已达轮次上限。按 REGENT-DEFINITION-1.0: "
             "不以等人粘贴 URL 为默认路径; 改用已有外部证据自适应缩小范围并继续推进。"
