@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,3 +232,78 @@ def validate_goal_alignment(
         score=score,
         details=details,
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM-based semantic alignment validation
+# ---------------------------------------------------------------------------
+
+class _SemanticAlignmentResponse(BaseModel):
+    """LLM response for semantic goal alignment check."""
+    aligned: bool = Field(description="Whether the HTML achieves the user's goal")
+    reasoning: str = Field(default="", description="Brief explanation")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Confidence 0-1")
+
+
+_SEMANTIC_ALIGNMENT_PROMPT = """You are a quality assurance evaluator. Your job is to determine
+whether a generated web page ACTUALLY ACHIEVES the user's original goal.
+
+You will receive:
+1. The user's ORIGINAL GOAL
+2. The FIRST DELIVERABLE description
+3. The generated HTML content
+
+Evaluate whether the HTML content genuinely serves the user's goal. Consider:
+- Does the page content match what the goal describes?
+- Would a user looking at this page feel their goal was achieved?
+- Are the key concepts/features from the goal present in the page?
+
+Be strict but fair. A page about "timestamp" that shows a clock is aligned.
+A page about "timestamp" that shows a contact form is NOT aligned.
+A page about "AI community" that shows a Japanese chatbot is NOT aligned.
+
+Return your assessment as a JSON object with:
+- aligned: true/false
+- reasoning: brief explanation
+- confidence: 0.0-1.0"""
+
+
+async def validate_goal_alignment_semantic(
+    html: str,
+    goal_text: str,
+    *,
+    provider: Any,
+    first_deliverable: str = "",
+) -> GoalAlignmentResult:
+    """Use an LLM to semantically validate HTML against the original goal.
+
+    This is a slower but much more accurate check than keyword-based
+    ``validate_goal_alignment``.  Call it when keyword check is borderline
+    or as a final gate before delivery.
+    """
+    user_content = f"ORIGINAL GOAL:\n{goal_text}\n"
+    if first_deliverable:
+        user_content += f"\nFIRST DELIVERABLE:\n{first_deliverable}\n"
+    # Truncate HTML to avoid token limits — first 8000 chars is enough
+    # for the LLM to understand the page structure and content.
+    user_content += f"\nGENERATED HTML (truncated):\n{html[:8000]}"
+
+    try:
+        response = await provider.generate_structured(
+            system_prompt=_SEMANTIC_ALIGNMENT_PROMPT,
+            user_prompt=user_content,
+            response_model=_SemanticAlignmentResponse,
+        )
+        result = response.output
+        score = result.confidence if result.aligned else (1.0 - result.confidence) * 0.3
+        details = [f"LLM semantic check: {result.reasoning}"]
+        return GoalAlignmentResult(
+            aligned=result.aligned,
+            score=max(0.0, min(1.0, score)),
+            details=details,
+        )
+    except Exception:
+        # If the LLM check fails, fall back to keyword-based validation
+        return validate_goal_alignment(
+            html, goal_text, first_deliverable=first_deliverable,
+        )

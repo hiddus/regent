@@ -778,6 +778,9 @@ class ExecutionOrchestrator:
             response = await req_service.propose(
                 hypothesis=proposal_obj,
                 root_constraints=root_constraints,
+                # GAC-GA: pass original goal text to requirement phase
+                # so the requirement LLM can see what the user actually asked for.
+                goal_text=goal.original_input if goal else "",
             )
             proposal = response.output
         except Exception:

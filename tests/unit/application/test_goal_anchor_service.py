@@ -1,10 +1,13 @@
 """Tests for GoalAnchorService — 目标锚点机制."""
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from regent.application.goal_anchor_service import (
     build_goal_anchored_prompt,
     extract_goal_keywords,
     validate_goal_alignment,
+    validate_goal_alignment_semantic,
+    _SemanticAlignmentResponse,
 )
 
 
@@ -185,3 +188,81 @@ class TestValidateGoalAlignment:
             "Show current timestamp",
         )
         assert len(result.details) > 0
+
+
+class TestValidateGoalAlignmentSemantic:
+    """Tests for LLM-based semantic alignment validation."""
+
+    @pytest.mark.asyncio
+    async def test_aligned_html_passes(self):
+        """LLM says aligned=True -> result.aligned=True."""
+        mock_response = MagicMock()
+        mock_response.output = _SemanticAlignmentResponse(
+            aligned=True, reasoning="Page shows a live timestamp", confidence=0.9,
+        )
+        provider = AsyncMock()
+        provider.generate_structured.return_value = mock_response
+
+        result = await validate_goal_alignment_semantic(
+            "<html><title>Clock</title><body><h1>Current Time</h1></body></html>",
+            "Show current timestamp in a web page",
+            provider=provider,
+            first_deliverable="A live timestamp page",
+        )
+        assert result.aligned is True
+        assert result.score > 0.5
+        provider.generate_structured.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_misaligned_html_rejected(self):
+        """LLM says aligned=False -> result.aligned=False."""
+        mock_response = MagicMock()
+        mock_response.output = _SemanticAlignmentResponse(
+            aligned=False, reasoning="Page shows a contact form, not a timestamp", confidence=0.85,
+        )
+        provider = AsyncMock()
+        provider.generate_structured.return_value = mock_response
+
+        result = await validate_goal_alignment_semantic(
+            "<html><title>Contact</title><body><form>...</form></body></html>",
+            "Show current timestamp in a web page",
+            provider=provider,
+        )
+        assert result.aligned is False
+        assert result.score < 0.5
+
+    @pytest.mark.asyncio
+    async def test_provider_error_falls_back(self):
+        """If LLM call fails, fall back to keyword-based check."""
+        provider = AsyncMock()
+        provider.generate_structured.side_effect = RuntimeError("LLM unavailable")
+
+        # This HTML has keyword overlap so keyword check should pass
+        result = await validate_goal_alignment_semantic(
+            "<html><title>Timestamp</title><body><h1>Show timestamp</h1></body></html>",
+            "Show current timestamp",
+            provider=provider,
+        )
+        # Falls back to keyword check which should pass
+        assert result.aligned is True
+
+    @pytest.mark.asyncio
+    async def test_goal_text_included_in_prompt(self):
+        """Verify the goal text is passed to the LLM."""
+        mock_response = MagicMock()
+        mock_response.output = _SemanticAlignmentResponse(
+            aligned=True, reasoning="ok", confidence=0.8,
+        )
+        provider = AsyncMock()
+        provider.generate_structured.return_value = mock_response
+
+        await validate_goal_alignment_semantic(
+            "<html><body>test</body></html>",
+            "Show current timestamp",
+            provider=provider,
+            first_deliverable="A live clock page",
+        )
+        call_args = provider.generate_structured.call_args
+        user_prompt = call_args.kwargs.get("user_prompt") or call_args[1].get("user_prompt", "")
+        assert "Show current timestamp" in user_prompt
+        assert "A live clock page" in user_prompt

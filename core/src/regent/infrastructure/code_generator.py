@@ -16,7 +16,7 @@ from regent.application.p1_contracts import (
 )
 from regent.application.p1_ports import GeneratedFileChangeSet
 from regent.infrastructure.artifact_store import FileArtifactStore
-from regent.application.goal_anchor_service import build_goal_anchored_prompt
+from regent.application.goal_anchor_service import build_goal_anchored_prompt, validate_goal_alignment_semantic
 from regent.infrastructure.html_evidence import (
     ensure_semantic_main,
     inject_observed_entries,
@@ -52,7 +52,40 @@ class GeneratedSourceBundle(BaseModel):
     files: list[GeneratedSourceFile] = Field(min_length=1)
 
 
-_PROMPT = """You are Regent Code Generation Adapter v2. Generate complete UTF-8 source files for
+def _build_system_prompt(
+    *,
+    goal_text: str = "",
+    first_deliverable: str = "",
+    success_criteria: dict | None = None,
+) -> str:
+    """Build a goal-aware system prompt.  The original user goal is placed at
+    the very top so the LLM understands *what* it is building before reading
+    structural constraints.
+    """
+    goal_block = ""
+    if goal_text:
+        goal_block = (
+            "══════ PRIMARY OBJECTIVE ══════\n"
+            f"The user's original goal: {goal_text}\n"
+        )
+        if first_deliverable:
+            goal_block += f"First deliverable: {first_deliverable}\n"
+        if success_criteria:
+            criteria_lines = "\n".join(
+                f"  - {k}: {v}" for k, v in success_criteria.items()
+            )
+            goal_block += f"Success criteria:\n{criteria_lines}\n"
+        goal_block += (
+            "Every file you generate MUST directly serve this goal. "
+            "If the goal says 'timestamp', the page MUST show a timestamp. "
+            "If the goal says 'news digest', the page MUST show news items. "
+            "Do NOT generate unrelated templates, forms, or demo stubs.\n"
+            "══════════════════════════════════\n\n"
+        )
+    return goal_block + _BASE_PROMPT
+
+
+_BASE_PROMPT = """You are Regent Code Generation Adapter v2. Generate complete UTF-8 source files for
 the frozen python-web-v1 plan. Return only the requested structured object. Do not emit patches,
 shell commands, artifact URIs, secrets, or files outside planned_paths. DELETE has no content.
 REPLACE must include expected_previous_hash. Generated code must not import Regent Core.
@@ -113,27 +146,38 @@ class ArtifactBackedCodeGenerator:
             raise ValueError("generation plan must freeze planned paths")
         # GAC-GA: GoalAnchor — inject original goal text into user prompt
         # so the LLM cannot ignore what the user actually asked for.
-        user_prompt = json.dumps(plan, ensure_ascii=False)
+        acceptance = plan.get("acceptance_contract") or {}
         goal_text = plan.get("goal_anchor_text") or ""
+        first_deliverable = str(
+            acceptance.get("first_deliverable") or ""
+        )
+        success_criteria = acceptance.get("success_criteria")
+        # Build a goal-aware system prompt: original goal at the top,
+        # then structural constraints.
+        system_prompt = _build_system_prompt(
+            goal_text=goal_text,
+            first_deliverable=first_deliverable,
+            success_criteria=success_criteria,
+        )
+        user_prompt = json.dumps(plan, ensure_ascii=False)
         if goal_text:
-            acceptance = plan.get("acceptance_contract") or {}
             user_prompt = build_goal_anchored_prompt(
                 user_prompt,
                 goal_text=goal_text,
-                success_criteria=acceptance.get("success_criteria"),
-                first_deliverable=str(
-                    acceptance.get("first_deliverable") or ""
-                ),
+                success_criteria=success_criteria,
+                first_deliverable=first_deliverable,
                 retry_context=self._build_retry_context(acceptance),
             )
         response = await self._provider.generate_structured(
-            system_prompt=_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_model=GeneratedSourceBundle,
         )
         scope = uuid.UUID(str(plan["hypothesis_decision_id"]))
         changes: list[FileChange] = []
         seen: set[str] = set()
+        # Collect generated HTML for semantic alignment check
+        generated_htmls: list[str] = []
         for generated in response.output.files:
             normalized = generated.relative_path.replace("\\", "/")
             if normalized not in planned_paths:
@@ -163,6 +207,7 @@ class ArtifactBackedCodeGenerator:
                     text = inject_observed_entries(text, list(entries))
                 text = ensure_semantic_main(text)
                 content_bytes = text.encode("utf-8")
+                generated_htmls.append(text)
             content = content_bytes
             digest = hashlib.sha256(content).hexdigest()
             artifact = self._artifacts.put(scope, f"generated/{digest[:2]}/{digest}", content)
@@ -178,6 +223,24 @@ class ArtifactBackedCodeGenerator:
                     rationale=generated.rationale,
                 )
             )
+        # GAC-GA: LLM semantic alignment check — validate generated HTML
+        # against the original goal BEFORE committing to artifacts.
+        # If the output is semantically unrelated to the goal, raise
+        # ValueError to trigger the delivery gap recovery retry.
+        if goal_text and generated_htmls:
+            combined_html = "\n".join(generated_htmls)
+            semantic_result = await validate_goal_alignment_semantic(
+                combined_html,
+                goal_text,
+                provider=self._provider,
+                first_deliverable=first_deliverable,
+            )
+            if not semantic_result.aligned:
+                reason = "; ".join(semantic_result.details[:2])
+                raise ValueError(
+                    f"delivery-review-v1 rejected non-deliverable surface: "
+                    f"goal-semantic-alignment: score={semantic_result.score:.0%} — {reason}"
+                )
         change_set = FileChangeSet(
             changes=changes,
             generator_ref="artifact-backed-code-generator-v1",

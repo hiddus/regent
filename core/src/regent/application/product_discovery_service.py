@@ -252,6 +252,22 @@ preview to render those observed headlines/sources (or a clearly labeled subset)
 placeholder news. Do not generate code, choose tools, or execute side effects."""
 
 
+def _build_requirement_prompt(goal_text: str = "") -> str:
+    """Optionally prepend the user's original goal so the requirement LLM
+    cannot drift away from what was actually requested."""
+    if not goal_text:
+        return _REQUIREMENT_PROMPT
+    return (
+        "The user's ORIGINAL GOAL (ground truth — your requirement MUST serve this):\n"
+        f"  {goal_text}\n\n"
+        "CRITICAL: The requirement's product_outcome, first_deliverable, and "
+        "success_criteria must directly reflect this goal. Do not over-abstract "
+        "or replace it with a generic interpretation.\n\n"
+        "---\n\n"
+        + _REQUIREMENT_PROMPT
+    )
+
+
 class RequirementRevisionService:
     def __init__(self, provider: ModelProvider) -> None:
         self._provider = provider
@@ -262,10 +278,11 @@ class RequirementRevisionService:
         hypothesis: ProductHypothesisProposal,
         root_constraints: dict[str, Any],
         proposed_constraints: dict[str, Any] | None = None,
+        goal_text: str = "",
     ) -> StructuredModelResponse[AppRequirementProposal]:
         constraints = inherit_constraints(root_constraints, proposed_constraints or {})
         response = await self._provider.generate_structured(
-            system_prompt=_REQUIREMENT_PROMPT,
+            system_prompt=_build_requirement_prompt(goal_text=goal_text),
             user_prompt=json.dumps(
                 {
                     "selected_hypothesis": hypothesis.model_dump(mode="json"),
