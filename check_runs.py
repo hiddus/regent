@@ -1,31 +1,72 @@
-"""Check generation runs."""
 import paramiko
 
-SERVER = "118.31.171.159"
+HOST = "118.31.171.159"
 USER = "root"
 PASSWORD = "080900.UI"
 
-client = paramiko.SSHClient()
-client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-client.connect(SERVER, username=USER, password=PASSWORD, timeout=15)
-PSQL = "docker exec regent-postgres psql -U regent -d regent -t -A"
+ssh = paramiko.SSHClient()
+ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+ssh.connect(HOST, port=22, username=USER, password=PASSWORD)
 
-def q(sql):
-    _, o, e = client.exec_command(f'{PSQL} -c "{sql}"', timeout=30)
-    return o.read().decode().strip()
+def ssh_cmd(cmd, timeout=30):
+    stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+    return stdout.read().decode('utf-8', errors='replace'), stderr.read().decode('utf-8', errors='replace')
 
-print("=== Latest Generation Runs ===")
-print(q("SELECT id, plan_id, status, failure_code, attempt, correlation_id FROM generation_runs ORDER BY created_at DESC LIMIT 10"))
+# Check runs schema
+db_cmd = """docker exec regent-postgres psql -U regent -d regent -c "
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_name='runs'
+ORDER BY ordinal_position;
+" """
+out, err = ssh_cmd(db_cmd)
+print("=== RUNS SCHEMA ===")
+print(out)
 
-print("\n=== Generation Plans (latest) ===")
-print(q("SELECT id, status, version FROM generation_plans ORDER BY created_at DESC LIMIT 5"))
+# Check works schema (for work_status)
+db_cmd = """docker exec regent-postgres psql -U regent -d regent -c "
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_name='works'
+ORDER BY ordinal_position;
+" """
+out, err = ssh_cmd(db_cmd)
+print("=== WORKS SCHEMA ===")
+print(out)
 
-print("\n=== File Change Sets (latest) ===")
-print(q("SELECT id, generation_run_id, generator_ref FROM file_change_sets ORDER BY created_at DESC LIMIT 5"))
+# Check current run statuses
+db_cmd = """docker exec regent-postgres psql -U regent -d regent -c "
+SELECT status, COUNT(*) FROM runs GROUP BY status ORDER BY COUNT(*) DESC;
+" """
+out, err = ssh_cmd(db_cmd)
+print("=== RUN STATUSES ===")
+print(out)
 
-# Check the failed generation plan's runs
-plan_id = "e95ba492-c266-4dbf-ab6f-80ef49d97067"
-print(f"\n=== Runs for plan {plan_id} ===")
-print(q(f"SELECT id, status, failure_code FROM generation_runs WHERE plan_id='{plan_id}'"))
+# Check RUNNING runs detail - do they have lease?
+db_cmd = """docker exec regent-postgres psql -U regent -d regent -c "
+SELECT
+    COUNT(*) as total,
+    COUNT(*) FILTER (WHERE lease_expires_at IS NOT NULL) as with_lease,
+    COUNT(*) FILTER (WHERE lease_expires_at < NOW()) as lease_expired,
+    COUNT(*) FILTER (WHERE started_at < NOW() - INTERVAL '1 hour') as over_1h
+FROM runs
+WHERE status='RUNNING';
+" """
+out, err = ssh_cmd(db_cmd)
+print("=== RUNNING RUNS DETAIL ===")
+print(out)
 
-client.close()
+# Sample of RUNNING runs
+db_cmd = """docker exec regent-postgres psql -U regent -d regent -c "
+SELECT r.id, r.status, r.work_id, r.lease_expires_at::text, r.started_at::text,
+       w.status as work_status, w.goal_id
+FROM runs r
+JOIN works w ON r.work_id = w.id
+WHERE r.status='RUNNING'
+LIMIT 10;
+" """
+out, err = ssh_cmd(db_cmd)
+print("=== RUNNING RUNS SAMPLE ===")
+print(out)
+
+ssh.close()

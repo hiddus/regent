@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
+from typing import Any
 
 from regent import __version__
 from regent.api.app_delivery import router as app_delivery_router
@@ -95,7 +96,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/health/ready", tags=["operations"])
-    async def readiness() -> dict[str, str]:
+    async def readiness() -> dict[str, Any]:
         try:
             async with app.state.sessions() as session:
                 value = await session.scalar(text("SELECT 1"))
@@ -105,6 +106,24 @@ def create_app() -> FastAPI:
                 dead_letters = await session.scalar(
                     text("SELECT count(*) FROM outbox_events WHERE status = 'DEAD_LETTER'")
                 )
+                pending_events = await session.scalar(
+                    text("SELECT count(*) FROM outbox_events WHERE status = 'PENDING'")
+                )
+                running_runs = await session.scalar(
+                    text("SELECT count(*) FROM runs WHERE status = 'RUNNING'")
+                )
+                leaked_runs = await session.scalar(
+                    text(
+                        "SELECT count(*) FROM runs WHERE status = 'RUNNING' "
+                        "AND (started_at IS NULL OR started_at < NOW() - INTERVAL '1 hour')"
+                    )
+                )
+                active_goals = await session.scalar(
+                    text("SELECT count(*) FROM goals WHERE status = 'ACTIVE'")
+                )
+                achieved_goals = await session.scalar(
+                    text("SELECT count(*) FROM goals WHERE status = 'ACHIEVED'")
+                )
             if value != 1:
                 raise RuntimeError("database probe returned an unexpected value")
         except Exception as exc:
@@ -113,8 +132,72 @@ def create_app() -> FastAPI:
             "status": "ok",
             "environment": settings.environment,
             "database": "ok",
+            "outbox_pending": str(pending_events or 0),
             "outbox_failed": str(failed_events or 0),
             "outbox_dead_letter": str(dead_letters or 0),
+            "runs_running": str(running_runs or 0),
+            "runs_leaked": str(leaked_runs or 0),
+            "goals_active": str(active_goals or 0),
+            "goals_achieved": str(achieved_goals or 0),
+        }
+
+    @app.get("/v1/health", tags=["operations"])
+    async def system_health() -> dict[str, Any]:
+        """Comprehensive system health including stage distribution and leak detection."""
+        try:
+            async with app.state.sessions() as session:
+                stage_rows = await session.execute(
+                    text(
+                        "SELECT COALESCE(metadata->>'execution_stage', 'NULL') as stage, "
+                        "COUNT(*) as cnt FROM goals WHERE status='ACTIVE' "
+                        "GROUP BY stage ORDER BY cnt DESC"
+                    )
+                )
+                stages = {row.stage: row.cnt for row in stage_rows}
+                dead_letter_types = await session.execute(
+                    text(
+                        "SELECT event_type, COUNT(*) FROM outbox_events "
+                        "WHERE status='DEAD_LETTER' GROUP BY event_type"
+                    )
+                )
+                dl_by_type = {row.event_type: row.cnt for row in dead_letter_types}
+                pending_events = await session.scalar(
+                    text("SELECT count(*) FROM outbox_events WHERE status = 'PENDING'")
+                )
+                dead_letters = await session.scalar(
+                    text("SELECT count(*) FROM outbox_events WHERE status = 'DEAD_LETTER'")
+                )
+                running_runs = await session.scalar(
+                    text("SELECT count(*) FROM runs WHERE status = 'RUNNING'")
+                )
+                leaked_runs = await session.scalar(
+                    text(
+                        "SELECT count(*) FROM runs WHERE status = 'RUNNING' "
+                        "AND (started_at IS NULL OR started_at < NOW() - INTERVAL '1 hour')"
+                    )
+                )
+                active_goals = await session.scalar(
+                    text("SELECT count(*) FROM goals WHERE status = 'ACTIVE'")
+                )
+                achieved_goals = await session.scalar(
+                    text("SELECT count(*) FROM goals WHERE status = 'ACHIEVED'")
+                )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+        health = leaked_runs == 0 and dead_letters == 0 and pending_events is not None
+        return {
+            "status": "healthy" if health else "degraded",
+            "database": "ok",
+            "metrics": {
+                "goals_active": active_goals or 0,
+                "goals_achieved": achieved_goals or 0,
+                "runs_running": running_runs or 0,
+                "runs_leaked": leaked_runs or 0,
+                "outbox_pending": pending_events or 0,
+                "outbox_dead_letters": dead_letters or 0,
+            },
+            "active_goal_stages": stages,
+            "dead_letters_by_type": dl_by_type,
         }
 
     console_path = Path("/app/apps/regent-console")

@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Regent 项目综合改进分析 — 多维度差距评估</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --bg2: #f8f9fa;
+  --text: #1a1a2e;
+  --text2: #4a4a6a;
+  --border: #e0e0e0;
+  --red: #e74c3c;
+  --orange: #f39c12;
+  --green: #27ae60;
+  --blue: #2980b9;
+  --purple: #8e44ad;
+  --cyan: #00bcd4;
+  --red-bg: #fdf0ed;
+  --orange-bg: #fef5e7;
+  --green-bg: #eafaf1;
+  --blue-bg: #eaf2f8;
+  --purple-bg: #f4ecf7;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg2); color: var(--text); line-height: 1.7; }
+.container { max-width: 1100px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 28px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+h1 .sub { font-size: 16px; font-weight: 400; color: var(--text2); display: block; margin-top: 4px; }
+h2 { font-size: 20px; font-weight: 700; margin: 36px 0 16px; padding-bottom: 8px; border-bottom: 2px solid var(--border); }
+h3 { font-size: 16px; font-weight: 600; margin: 20px 0 8px; }
+
+.summary-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 24px 0; }
+.card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 18px; text-align: center; }
+.card .num { font-size: 32px; font-weight: 800; }
+.card .label { font-size: 13px; color: var(--text2); margin-top: 4px; }
+.card.red .num { color: var(--red); }
+.card.orange .num { color: var(--orange); }
+.card.green .num { color: var(--green); }
+.card.blue .num { color: var(--blue); }
+
+.pillar { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin: 20px 0; }
+.pillar-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.pillar-icon { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; color: #fff; }
+.pillar-icon.red { background: var(--red); }
+.pillar-icon.orange { background: var(--orange); }
+.pillar-icon.green { background: var(--green); }
+.pillar-icon.blue { background: var(--blue); }
+.pillar-icon.purple { background: var(--purple); }
+.pillar-icon.cyan { background: var(--cyan); }
+.pillar-title { font-size: 18px; font-weight: 700; }
+
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+.badge.critical { background: var(--red-bg); color: var(--red); }
+.badge.high { background: var(--orange-bg); color: #d35400; }
+.badge.medium { background: #e8f8f5; color: #16a085; }
+.badge.low { background: var(--blue-bg); color: var(--blue); }
+
+.gap-list { list-style: none; }
+.gap-list li { padding: 10px 16px; margin: 6px 0; border-radius: 8px; border-left: 4px solid; }
+.gap-list li.critical { background: var(--red-bg); border-color: var(--red); }
+.gap-list li.high { background: var(--orange-bg); border-color: var(--orange); }
+.gap-list li.medium { background: #e8f8f5; border-color: #16a085; }
+.gap-list li.low { background: var(--blue-bg); border-color: var(--blue); }
+
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+th { background: var(--bg2); padding: 10px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid var(--border); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+tr:hover { background: var(--bg2); }
+
+.progress-bar { height: 8px; border-radius: 4px; background: var(--border); margin-top: 6px; }
+.progress-fill { height: 100%; border-radius: 4px; }
+
+.priority-section { margin: 30px 0; padding: 20px; border-radius: 12px; }
+.priority-section.immediate { background: var(--red-bg); border: 1px solid #f5c6cb; }
+.priority-section.short { background: var(--orange-bg); border: 1px solid #ffeaa7; }
+.priority-section.medium-term { background: #e8f8f5; border: 1px solid #a3e4d7; }
+.priority-section.long-term { background: var(--blue-bg); border: 1px solid #bee5eb; }
+
+.conclusion { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; border-radius: 14px; padding: 36px; margin: 40px 0; }
+.conclusion h2 { color: #fff; border-bottom-color: rgba(255,255,255,.3); }
+.conclusion ul { margin: 16px 0; padding-left: 24px; }
+.conclusion li { margin: 8px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Regent 项目综合改进分析
+  <span class="sub">基于 PRD v2、Technical Spec v2、Plan、现场运行数据 — 2026-07-26</span>
+</h1>
+
+<!-- === Summary Cards === -->
+<div class="summary-cards">
+  <div class="card red">
+    <div class="num">30</div>
+    <div class="label">卡死 ACTIVE 目标（NULL 阶段）</div>
+  </div>
+  <div class="card orange">
+    <div class="num">28</div>
+    <div class="label">PREVIEW_SUCCEEDED 等待中</div>
+  </div>
+  <div class="card orange">
+    <div class="num">10</div>
+    <div class="label">死信事件未恢复</div>
+  </div>
+  <div class="card orange">
+    <div class="num">64</div>
+    <div class="label">RUNNING 运行泄露未回收</div>
+  </div>
+  <div class="card green">
+    <div class="num">13/102</div>
+    <div class="label">ACHIEVED 率 12.7%</div>
+  </div>
+  <div class="card blue">
+    <div class="num">82%</div>
+    <div class="label">能力缺口自动补齐率</div>
+  </div>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 1: 产品完整性 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon red">P1</div>
+  <div class="pillar-title">角度一：产品完整性 — P1 Graduation 验收矩阵差距</div>
+</div>
+
+<p style="margin-bottom:16px;">PRD v2 第 5 节定义了严格的 P1 Graduation 两层验收矩阵。当前系统处于 P1 实现中期，<strong>尚未达到 SYSTEM_GRADUATED</strong>。</p>
+
+<h3>SYSTEM_GRADUATED 验收状态</h3>
+<table>
+<tr><th>门禁</th><th>要求</th><th>当前状态</th><th>差距</th></tr>
+<tr>
+  <td><strong>G1</strong> 未知 Goal</td>
+  <td>≥3 独立未知 Goal，14 天到达 Decision</td>
+  <td><span class="badge high">部分</span> 有多个 Goal 但多数卡死</td>
+  <td>需冻结测试集，完整端到端验证</td>
+</tr>
+<tr>
+  <td><strong>G2</strong> 外部证据</td>
+  <td>≥2 独立 sourced-observation</td>
+  <td><span class="badge critical">阻塞</span> 证据源 HTTP 403 ProxyError</td>
+  <td>Egress Proxy 未正确配置；185 条 Evidence 但类型受限</td>
+</tr>
+<tr>
+  <td><strong>G3</strong> 不同假设</td>
+  <td>同轮 ≥2 Hypothesis，差异维度可机器列出</td>
+  <td><span class="badge medium">基本具备</span> 221 ProductHypotheses</td>
+  <td>需盲评验证假设质量差异</td>
+</tr>
+<tr>
+  <td><strong>G4</strong> 需求驱动生成</td>
+  <td>Plan 哈希含 Requirement 摘要</td>
+  <td><span class="badge green">就绪</span> 75 VALIDATED Requirements</td>
+  <td>需独立评价确认</td>
+</tr>
+<tr>
+  <td><strong>G5</strong> 可复现构建</td>
+  <td>隔离 Build + 锁文件，同输入重放一致</td>
+  <td><span class="badge high">部分</span> 70 PASSED Builds，但 Worker 无权启动 Sandbox</td>
+  <td>需配置独立 Build Provider</td>
+</tr>
+<tr>
+  <td><strong>G8</strong> 耐久副作用</td>
+  <td>ExternalOperation 故障剧本，0 重复副作用</td>
+  <td><span class="badge critical">未达标</span> G0 ExternalOperation 未完成</td>
+  <td>operation_key 幂等和对账机制待实现</td>
+</tr>
+<tr>
+  <td><strong>G9</strong> 凭据治理</td>
+  <td>0 明文密钥</td>
+  <td><span class="badge critical">需验证</span></td>
+  <td>需仓库+镜像扫描确认</td>
+</tr>
+<tr>
+  <td><strong>G10</strong> 质量门禁</td>
+  <td>Ruff/mypy/Pytest/迁移 全绿</td>
+  <td><span class="badge high">部分</span> 迁移手动 stamp，非标准链</td>
+  <td>需建立自动化 CI 门禁</td>
+</tr>
+</table>
+
+<h3>PRODUCT_EVIDENCE_GRADUATED 验收状态</h3>
+<table>
+<tr><th>门禁</th><th>要求</th><th>当前状态</th></tr>
+<tr>
+  <td><strong>G6</strong> 演进闭环</td>
+  <td>≥1 次拒绝→REVISE→新 Discovery；≥1 次独立路径</td>
+  <td><span class="badge high">部分</span> 有 5 REVISE 决策，但闭环不完整</td>
+</tr>
+<tr>
+  <td><strong>G7</strong> 真实 Observation</td>
+  <td>≥1 CONTINUE/REVISE/STOP with ≥3 合格 Observation</td>
+  <td><span class="badge high">部分</span> 25 INSUFFICIENT_EVIDENCE Gate</td>
+</tr>
+</table>
+
+<div style="margin-top:16px;">
+<strong>关键发现</strong>：25/51 Gate 评估为 INSUFFICIENT_EVIDENCE（49%），说明证据收集是系统性瓶颈。这直接阻塞 G6/G7，因为 Gate 需要足够 Observation 才能通过。
+</div>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 2: 执行链可靠性 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon orange">E2</div>
+  <div class="pillar-title">角度二：执行链可靠性 — P1 执行链断裂点分析</div>
+</div>
+
+<h3>执行链 8 个阶段健康度</h3>
+<table>
+<tr><th>阶段</th><th>数据量</th><th>完成率</th><th>问题</th></tr>
+<tr><td><strong>1. Discovery</strong></td>
+  <td>109 DiscoveryRounds, 107 DECIDED</td>
+  <td style="color:var(--green)">98%</td>
+  <td>2 FAILED；多数为 DISCOVERY_NO_SELECT 导致 EXHAUSTED</td></tr>
+<tr><td><strong>2. Requirements</strong></td>
+  <td>75 VALIDATED</td>
+  <td style="color:var(--green)">100%</td>
+  <td>通过率正常</td></tr>
+<tr><td><strong>3. Capability</strong></td>
+  <td>75 SATISFIED</td>
+  <td style="color:var(--green)">100%</td>
+  <td>全量补齐成功</td></tr>
+<tr><td><strong>4. Generation</strong></td>
+  <td>84 COMPLETED / 9 FAILED</td>
+  <td style="color:var(--green)">90%</td>
+  <td>1 dead letter (GenerationRunRequested)</td></tr>
+<tr><td><strong>5. Build</strong></td>
+  <td>70 PASSED / 5 UNKNOWN / 2 FAILED</td>
+  <td style="color:var(--orange)">90%</td>
+  <td>5 UNKNOWN 需对账；Docker Sandbox 部分环境不可用</td></tr>
+<tr><td><strong>6. Preview</strong></td>
+  <td>46 SUCCEEDED / 15 UNKNOWN / 7 FAILED</td>
+  <td style="color:var(--orange)">68%</td>
+  <td>68% 部署成功率偏低；4 DELIVERY_REJECTED 导致 EXHAUSTED</td></tr>
+<tr><td><strong>7. Gate</strong></td>
+  <td>20 PASSED / 25 INSUFF_EVID / 6 FAILED</td>
+  <td style="color:var(--red)">39%</td>
+  <td><strong>关键瓶颈</strong>：49% 证据不足</td></tr>
+<tr><td><strong>8. Converge</strong></td>
+  <td>20 CONTINUE / 5 REVISE / 1 STOP</td>
+  <td style="color:var(--orange)">77%</td>
+  <td>28 CONTINUE 目标未执行 _continue_or_advance_milestone（旧事件）</td></tr>
+</table>
+
+<ul class="gap-list">
+  <li class="critical"><strong>P0 — Gate 证据瓶颈</strong>：25 个 Gate 评估返回 INSUFFICIENT_EVIDENCE。根本原因是 HTTP Evidence Source 返回 403 ProxyError，导致无法从外部获取真实观测数据。同时 28 个 ACTIVE 目标卡在 PREVIEW_SUCCEEDED 阶段，Worker 无 PENDING 事件可处理。</li>
+  <li class="critical"><strong>P0 — 64 个 RUNNING 运行泄露</strong>：64 个 Run 处于 RUNNING 状态但 Worker 已空闲，这是 Lease 超时后 Run 未被正确收敛到 EXECUTED/FAILED/UNKNOWN 的 bug。需要定时对账机制。</li>
+  <li class="high"><strong>P1 — DELIVERY_REJECTED 导致过早 EXHAUST</strong>：目标 6a286e4e 经过 4 轮 BUILD 重试后因 presentation 质量被拒绝并 EXHAUSTED。Delivery Review 阈值可能需要根据 goal_scale 进一步校准。</li>
+  <li class="high"><strong>P1 — 30 个 ACTIVE 目标 NULL 阶段</strong>：这 30 个目标处于 ACTIVE 但无 execution_stage，是早期 API 路径创建的遗留数据，与当前 P1 执行链不兼容。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 3: 治理与安全 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon purple">G3</div>
+  <div class="pillar-title">角度三：治理与安全 — 受治理执行的可信度</div>
+</div>
+
+<table>
+<tr><th>治理能力</th><th>PRD 要求</th><th>当前状态</th><th>差距</th></tr>
+<tr>
+  <td><strong>ExecutionPermit</strong></td>
+  <td>REQUESTED→GRANTED→CLAIMED→CONSUMED 全生命周期</td>
+  <td>155 条 Permit 记录，85 EXPIRED, 69 CONSUMED, 1 REVOKED</td>
+  <td><span class="badge high">P1</span> 缺乏活跃 GRANTED/REQUESTED 状态验证；Permit 撤销后副作用停止能力未测试</td>
+</tr>
+<tr>
+  <td><strong>HumanTask</strong></td>
+  <td>暂停不占 Worker，超时自动决策</td>
+  <td>仅 1 条 COMPLETED HumanTask</td>
+  <td><span class="badge critical">P0</span> 人机协同几乎未经过真实测试；HumanTask 超时策略未验证</td>
+</tr>
+<tr>
+  <td><strong>副作用治理 (G0)</strong></td>
+  <td>ExternalOperation + operation_key 幂等 + 对账</td>
+  <td>45 条 ExternalOperation 记录，但 G0 未完成</td>
+  <td><span class="badge critical">P0</span> 阻塞 P2-1 调度器；UNKNOWN 对账和重复副作用防护未验证</td>
+</tr>
+<tr>
+  <td><strong>Audit 完整性</strong></td>
+  <td>所有状态变更可审计</td>
+  <td>549 条 AuditRecord</td>
+  <td><span class="badge low">P3</span> 数量充足但需抽查完整性</td>
+</tr>
+<tr>
+  <td><strong>凭据安全 (G9)</strong></td>
+  <td>0 明文密钥</td>
+  <td>未扫描</td>
+  <td><span class="badge critical">P0</span> 阻塞 SYSTEM_GRADUATED</td>
+</tr>
+</table>
+
+<ul class="gap-list">
+  <li class="critical"><strong>G0 ExternalOperation 是 P1/P2 的关键阻塞点</strong>：Technical Spec 明确要求完整 ExternalOperation / operation_key / dispatch_generation 必须在 G0 实现。当前 45 条记录存在但缺少幂等键语义、对账探活和故障注入测试。</li>
+  <li class="high"><strong>HumanTask 流程未经验证</strong>：55% 的 P0 能力（第 3 节 #9）要求 "人工输入与审批使用独立 HumanTask"。仅 1 条 HumanTask 记录表明这条路几乎没有被走过。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 4: 组织与自适应 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon blue">O4</div>
+  <div class="pillar-title">角度四：组织与自适应 — 动态组织的验证基础</div>
+</div>
+
+<table>
+<tr><th>维度</th><th>要求</th><th>当前状态</th><th>差距</th></tr>
+<tr>
+  <td><strong>Organization Engine</strong></td>
+  <td>SINGLE_AGENT / MULTI_SPECIALIST / HIERARCHICAL 策略</td>
+  <td>8+ 组织，策略为 SINGLE_AGENT 和 MULTI_SPECIALIST</td>
+  <td><span class="badge medium">P2</span> Engine 基本可用；HIERARCHICAL 未实现</td>
+</tr>
+<tr>
+  <td><strong>Agent Specs</strong></td>
+  <td>27 ACTIVE + 5 CANDIDATE</td>
+  <td>Agent 注册与发现已就绪</td>
+  <td><span class="badge low">P3</span> Agent 能力认证链需扩展</td>
+</tr>
+<tr>
+  <td><strong>组织 U 函数</strong></td>
+  <td>量化 success/cost/latency/human_burden/risk</td>
+  <td>日志显示 U 函数评估已运行（均返回 1.0）</td>
+  <td><span class="badge high">P1</span> U 函数返回固定值 1.0——未接入真实成本/延迟度量；Phase 1b 需实现 β 权重更新</td>
+</tr>
+<tr>
+  <td><strong>A/B/C 对照实验</strong></td>
+  <td>冻结任务集 30+，盲评，统计 Gate</td>
+  <td>270 ExperimentRuns 记录但无结论</td>
+  <td><span class="badge critical">P0</span> 对照实验是 P0 完成定义 #5 的必要条件，当前无 ProductDecisionRecord</td>
+</tr>
+<tr>
+  <td><strong>组织收缩与替换</strong></td>
+  <td>P0 能力 #5</td>
+  <td>未测试</td>
+  <td><span class="badge high">P1</span> MULTI_SPECIALIST 策略创建后无可见的收缩/替换操作</td>
+</tr>
+</table>
+
+<ul class="gap-list">
+  <li class="critical"><strong>A/B/C 对照实验未执行</strong>：P0 完成定义第 5 条要求"完成 A/B/C 冻结任务集的首轮对照实验，形成继续/转向/停止 DecisionRecord"。270 条 ExperimentRun 记录说明实验框架已搭建，但无实验设计冻结、无真值标签、无盲评、无统计 Gate、无 ProductDecisionRecord。</li>
+  <li class="high"><strong>组织效能不可度量</strong>：U 函数返回固定值 1.0 表明组织决策缺乏成本/延迟/风险的真实反馈。没有 BudgetLedger 数据验证，无法证明 MULTI_SPECIALIST 比 SINGLE_AGENT 更优。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 5: 证据与反馈闭环 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon cyan">E5</div>
+  <div class="pillar-title">角度五：证据与反馈闭环 — "依据可验证的外部结果调整"</div>
+</div>
+
+<p style="margin-bottom:12px;">Regent 永久定义属性 6 要求"依据可验证的外部 Evidence 与 Observation 调整计划、能力和组织"。以下是闭环健康度：</p>
+
+<ul class="gap-list">
+  <li class="critical"><strong>P0 — 外部证据源不可用</strong>：Worker 日志持续输出 <code>httpx.ProxyError: 403 Forbidden</code>，证据源 HTTP 请求被 Egress Proxy 拒绝。这阻断了采集"可验证外部结果"的通道，25 个 Gate 因此返回 INSUFFICIENT_EVIDENCE。</li>
+  <li class="critical"><strong>P0 — 28 个目标卡在 PREVIEW_SUCCEEDED 无后续</strong>：这些目标通过了 Build/Deploy/Preview/Smoke 测试，但因为证据不足（或修复前的 bug）没有被推进到 Gate→Converge。修复代码（_continue_or_advance_milestone）已部署但不会对历史事件生效，除非手动合成新事件。</li>
+  <li class="high"><strong>P1 — Observation 多样性不足</strong>：Observation 表包含 <code>is_bot</code> 和 <code>is_internal</code> 字段（符合设计），但实际数据量和多样性有限。G7 要求 ≥3 条合格 Observation，其中需包含 product_rejection 类型。</li>
+  <li class="high"><strong>P1 — REVISE→Discovery 闭环不完整</strong>：5 个 REVISE 决策已产生，但对应的新 Discovery 是否成功闭环不可查。需验证 REVISE 后的新 Hypothesis→Generation→Build→Preview→Gate 完整链路。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 6: 系统稳定性 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon red">S6</div>
+  <div class="pillar-title">角度六：系统稳定性 — 运行态一致性与恢复能力</div>
+</div>
+
+<ul class="gap-list">
+  <li class="critical"><strong>P0 — Worker 空闲 + 0 PENDING ≠ 系统正常</strong>：当前 0 PENDING 事件、10 DEAD_LETTER、Worker 空闲的状态，不代表所有工作已完成。28 个 ACTIVE PREVIEW_SUCCEEDED 和 30 个 NULL-stage ACTIVE 目标都是"悬空"状态。需要定时探活机制将卡死的目标推进或标记为需要人工干预。</li>
+  <li class="critical"><strong>P0 — 64 个 RUNNING Run 泄露</strong>：Run 的 Lease 到期后未被正确收敛。Worker Lease 机制依赖定期心跳，但 Lease 过期后的清理逻辑缺失。应增加定时任务扫描超时 Run 并根据其 Permit 状态对账收敛。</li>
+  <li class="high"><strong>P1 — 死信自动恢复</strong>：10 个死信中有 8 个是可自动重放的（如 GenerationRunRequested 语义错误），但当前死信重放需手动操作。应增加：死信分类器、自动重放策略配置和重放阈值。</li>
+  <li class="high"><strong>P1 — Outbox 事件幂等投递</strong>：1588 条 DISPATCHED 事件说明 Outbox 投递量巨大，但无重复投递检测机制。Technical Spec §5 要求"Worker 崩溃后新 Worker 先对账，不得凭 Lease 到期直接重复副作用"。</li>
+  <li class="medium"><strong>P2 — 迁移链完整性</strong>：DB 唯一约束变更（uq_metric_bindings）通过手动 SQL 执行，Alembic 迁移通过 <code>stamp</code> 而非 <code>upgrade</code> 跳过重复列。需要清理迁移链，创建正式 migration 文件记录当前数据库完整 DDL。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 7: 质量保障 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon purple">Q7</div>
+  <div class="pillar-title">角度七：质量保障 — 测试、CI/CD 与代码门禁</div>
+</div>
+
+<table>
+<tr><th>G10 门禁项</th><th>要求</th><th>当前状态</th></tr>
+<tr><td>Ruff (格式/lint)</td><td>合并前全绿</td><td><span class="badge high">未知</span> 本地代码修改后未确认 CI 状态</td></tr>
+<tr><td>mypy strict</td><td>合并前全绿</td><td><span class="badge high">未知</span></td></tr>
+<tr><td>Pytest</td><td>全量通过</td><td><span class="badge high">未知</span> 本地代码修改后未运行全量测试</td></tr>
+<tr><td>迁移检查</td><td>单一迁移链，无断裂</td><td><span class="badge critical">破损</span> 手动 stamp 绕过，需重建</td></tr>
+<tr><td>版本标签</td><td>Git tag + 可回滚部署</td><td><span class="badge medium">部分</span> Docker image 有版本号但非 Git tag 驱动</td></tr>
+</table>
+
+<ul class="gap-list">
+  <li class="critical"><strong>P0 — 无自动化 CI/CD 门禁</strong>：当前 Docker 镜像通过手动构建和部署，无自动化流水线。G10 要求的 Ruff/mypy/Pytest/迁移检查合并门禁未配置。15+ 个 Docker 镜像版本表明频繁迭代但缺乏受控发布流程。</li>
+  <li class="high"><strong>P1 — 迁移链需重建</strong>：0028 和 0029 两个迁移因手动 SQL 被 stamp 跳过。应执行：dump 当前 schema → 创建基线 migration → 从基线开始重建干净迁移链。</li>
+  <li class="medium"><strong>P2 — 测试覆盖率不足</strong>：P0 Plan §11 要求"先写失败测试，再做最小实现"。当前无法确认测试覆盖率，但多轮代码修复（UniqueViolation、no-metrics 路径）说明关键路径缺少回归测试。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 8: 可观测性 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon cyan">O8</div>
+  <div class="pillar-title">角度八：可观测性与运维 — 从"能跑"到"可运维"</div>
+</div>
+
+<ul class="gap-list">
+  <li class="critical"><strong>P0 — 无异常告警</strong>：Worker 空闲 + 10 死信 + 64 RUNNING 泄露 + Evidence 403 错误——四项系统级异常无一触发告警。当前只能通过人工 SSH 检查发现。</li>
+  <li class="high"><strong>P1 — 无结构化 Health Check</strong>：<code>/v1/health</code> 返回 404，健康检查端点不存在。PRD v2 §7.2 护栏要求"重复副作用 >0 立即停"，但无监控手段。</li>
+  <li class="high"><strong>P1 — Outbox 事件无可视化管理界面</strong>：1588 条 DISPATCHED 和 10 条 DEAD_LETTER 事件只能通过 SQL 查询。缺少：事件列表、死信详情、重放操作、事件链路追踪。</li>
+  <li class="medium"><strong>P2 — Goal 执行进度不透明</strong>：目标 6a286e4e 执行了 4 轮 BUILD 重试后 EXHAUSTED，但过程中无中间状态暴露给用户。PRD §4.1 要求"每一步向用户展示当前状态解释、已有证据引用、下一步可操作命令"。</li>
+  <li class="medium"><strong>P2 — 日志聚合与查询</strong>：当前通过 <code>docker logs --since</code> 查看日志，无结构化日志平台，日志保留周期短、查询能力弱。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PILLAR 9: 架构与技术债务 -->
+<!-- ============================================ -->
+<div class="pillar">
+<div class="pillar-header">
+  <div class="pillar-icon orange">A9</div>
+  <div class="pillar-title">角度九：架构与技术债务 — 当前实现的偏离与收敛</div>
+</div>
+
+<table>
+<tr><th>规范要求</th><th>当前偏离</th><th>严重程度</th></tr>
+<tr>
+  <td>P0 切片 S4：单 Agent 是默认路径</td>
+  <td>部分 Goal 自动选择 MULTI_SPECIALIST（如 CAPABILITY_ESCALATION 策略），未先记录预期收益和停止条件</td>
+  <td><span class="badge high">P1</span> 违反 Plan §10 约束</td>
+</tr>
+<tr>
+  <td>Outbox 指数退避 + 最大尝试 + DEAD_LETTER</td>
+  <td>已实现但退避参数和阈值未配置化</td>
+  <td><span class="badge medium">P2</span></td>
+</tr>
+<tr>
+  <td>Build Provider 隔离</td>
+  <td>Worker 无权启动 Docker Sandbox；需独立 Build Provider</td>
+  <td><span class="badge high">P1</span> 技术规范明确要求</td>
+</tr>
+<tr>
+  <td>SSE/实时进度推送</td>
+  <td>Plan 0023 明确"不提前引入 SSE"；当前用短轮询</td>
+  <td><span class="badge low">P3</span> 按计划延后</td>
+</tr>
+<tr>
+  <td>多 Goal 并发调度 (P2-1)</td>
+  <td>单 Worker 串行处理 Outbox，无优先级/抢占/防饥饿</td>
+  <td><span class="badge medium">P2-1</span> 计划中</td>
+</tr>
+<tr>
+  <td>Eval Harness (P2-4)</td>
+  <td>ExperimentRuns 表存在但 Eval Runner 未实现</td>
+  <td><span class="badge critical">P0</span> 阻塞 P0 对照实验</td>
+</tr>
+</table>
+
+<ul class="gap-list">
+  <li class="critical"><strong>P0 — 未冻结 A/B/C 实验任务集</strong>：Measurement Framework 要求≥30 冻结任务（能力充足 10、可组合 10、真缺口 10），并冻结真值标签、Rubric 和预算。当前 270 条 ExperimentRun 是系统自动生成的运行记录，不是设计好的对照实验。</li>
+  <li class="high"><strong>P1 — Docker 镜像版本管理混乱</strong>：15+ 个 image tag（如 r35, r36, r44, r45, r46...）无清晰语义。应统一为 semver + git tag 驱动。</li>
+  <li class="medium"><strong>P2 — 数据库 62 张表但部分表为空或极少使用</strong>：scheduling_decisions (0)、preemption_records (0)、budget_ledger_entries (0)、experience_records (0) 等表未填充。要么移除，要么实现填充逻辑。</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- PRIORITY SUMMARY -->
+<!-- ============================================ -->
+
+<h2 style="margin-top:48px;">改进优先级总览</h2>
+
+<div class="priority-section immediate">
+<h3 style="margin-top:0;">🔴 立即修复（阻塞 P1 Graduation）</h3>
+<ul class="gap-list">
+  <li class="critical"><strong>Egress Proxy 403 修复</strong>：证据源 HTTP 请求被拒绝，阻断了全部外部 Evidence 采集，导致 25 个 Gate INSUFFICIENT_EVIDENCE 和 28 个目标卡死。</li>
+  <li class="critical"><strong>64 个 RUNNING Run 泄露修复</strong>：增加 Lease 超时对账定时任务，将超时 Run 收敛到 EXECUTED/FAILED/UNKNOWN。</li>
+  <li class="critical"><strong>30 个 NULL-stage ACTIVE 目标清理</strong>：识别并修复这些遗留目标的状态（降级为 EXHAUSTED 或重建执行链）。</li>
+  <li class="critical"><strong>G0 ExternalOperation 完成</strong>：实现 operation_key 幂等、UNKNOWN 对账、故障注入测试。</li>
+  <li class="critical"><strong>A/B/C 对照实验设计冻结</strong>：冻结 30+ 任务集、真值标签、Rubric、预算，启动 Eval Harness。</li>
+</ul>
+</div>
+
+<div class="priority-section short">
+<h3 style="margin-top:0;">🟠 短期推进（解锁 SYSTEM_GRADUATED）</h3>
+<ul class="gap-list">
+  <li class="high">10 个死信分类与自动重放策略</li>
+  <li class="high">28 个 PREVIEW_SUCCEEDED 目标的观察窗口推进（合成事件或手动推进）</li>
+  <li class="high">HumanTask 流程端到端测试（创建→审批→超时→恢复）</li>
+  <li class="high">健康检查端点 (GET /v1/health) 实现</li>
+  <li class="high">凭据安全扫描 (G9)</li>
+  <li class="high">CI/CD 管道搭建（Ruff + mypy + Pytest + 迁移检查）</li>
+  <li class="high">Alembic 迁移链重建</li>
+  <li class="medium">U 函数接入真实 BudgetLedger 数据（不再返回固定 1.0）</li>
+  <li class="medium">独立 Build Provider 配置（解决 Worker 无权启动 Sandbox）</li>
+</ul>
+</div>
+
+<div class="priority-section medium-term">
+<h3 style="margin-top:0;">🟢 中期完善（PRODUCT_EVIDENCE_GRADUATED 后）</h3>
+<ul class="gap-list">
+  <li class="medium">Goal 执行进度实时可视化（当前状态 + 证据引用 + 下一步）</li>
+  <li class="medium">Outbox 事件管理 Dashboard</li>
+  <li class="medium">结构化日志平台 + 异常告警</li>
+  <li class="medium">Delivery Review 阈值基于 goal_scale 的进一步校准</li>
+  <li class="low">Agent 能力认证链扩展</li>
+</ul>
+</div>
+
+<div class="priority-section long-term">
+<h3 style="margin-top:0;">🔵 P2 及长期（DecisionRecord 激活后）</h3>
+<ul class="gap-list">
+  <li class="low">P2-1 多 Goal 并发调度（优先级、抢占、防饥饿）</li>
+  <li class="low">P2-2 多 Runtime Profile</li>
+  <li class="low">P2-4 Eval Harness 完整实现</li>
+  <li class="low">P2-5 自适应组织（需 P2-4 统计 Gate 通过）</li>
+  <li class="low">Docker 镜像版本管理规范化为 semver</li>
+</ul>
+</div>
+
+<!-- ============================================ -->
+<!-- CONCLUSION -->
+<!-- ============================================ -->
+<div class="conclusion">
+<h2>总结：当前阶段的核心矛盾</h2>
+<p style="margin-bottom:16px;">Regent 目前处于 <strong>P1 实现中期</strong>。执行链的主要骨架已打通（Discovery→Requirements→Capability→Generation→Build→Preview→Gate→Converge），但存在<strong>三个结构性瓶颈</strong>：</p>
+<ol>
+  <li><strong>证据闭环断裂</strong>：Egress Proxy 403 阻断外部 Evidence，导致 Gate 评估无法通过。没有真实 Observation，Regent 的"依据外部结果调整"定义属性无法兑现。</li>
+  <li><strong>稳定态缺失</strong>：64 个 RUNNING 泄露 + 30 个 NULL-stage 目标 + 28 个 PREVIEW_SUCCEEDED 卡死 = 超过 60% 的 ACTIVE 目标处于非健康状态。系统缺乏自愈机制。</li>
+  <li><strong>实验基础设施空白</strong>：P0 完成定义要求 A/B/C 对照实验形成产品决策，但冻结任务集、Eval Harness 和统计 Gate 均未就绪。</li>
+</ol>
+<p style="margin-top:16px;">解决这三个瓶颈后，P1 Graduation 的 SYSTEM_GRADUATED 层可在 2-4 周内完成验证。PRODUCT_EVIDENCE_GRADUATED 层需要至少 1 个完整的拒绝→REVISE→新 Discovery 闭环，取决于真实用户参与度。</p>
+</div>
+
+</div>
+</body>
+</html>

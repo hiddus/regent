@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>Demo Feed</title>
+<item><title>Observed Headline One</title><link>https://techcrunch.com/a</link>
+<description>Summary one</description></item>
+<item><title>Observed Headline Two</title><link>https://techcrunch.com/b</link>
+<description>Summary two</description></item>
+</channel></rss>
