@@ -1,0 +1,59 @@
+{
+  "record_type": "AAR1CodingReadinessDecisionRecord",
+  "record_version": "1.1",
+  "status": "PASSED",
+  "decided_at": "2026-07-27T00:00:00+08:00",
+  "updated_at": "2026-07-27T22:23:00+08:00",
+  "definition_id": "REGENT-DEFINITION-1.0",
+  "scope": "AAR-1 Foundation",
+  "build_gate": "BUILD_ALLOWED",
+  "rollout_gate": "ROLLOUT_NOT_ALLOWED",
+  "authorized_batches": [
+    "aar1-m1-expand",
+    "aar1-m2-dual-write-shadow",
+    "aar1-m3-read-switch",
+    "aar1-m4-enforce-after-fault-gate",
+    "aar1-m5-contract",
+    "aar1-m6-memory-path-contract"
+  ],
+  "not_authorized": [
+    "adaptive-organization-as-default",
+    "free-form-generated-topology",
+    "production-champion-challenger-rollout"
+  ],
+  "authorization_amendment": {
+    "amended_at": "2026-07-27T22:23:00+08:00",
+    "source": "user_explicit_authorization_m5_m6",
+    "removed_from_not_authorized": [
+      "aar1-m5-contract-before-read-switch-observation"
+    ],
+    "added_to_authorized_batches": [
+      "aar1-m5-contract",
+      "aar1-m6-memory-path-contract"
+    ],
+    "note": "Prior NOT_AUTHORIZED on M5 Contract (observation-window gate) is superseded by explicit user authorization on 2026-07-27. M6 has no separate Coding Plan batch; it maps to Contract memory-path removal under Technical Spec M5."
+  },
+  "rollout_activation_required": "P2-4 Eval DecisionRecord satisfying Regent-Measurement-Decision-Framework.md",
+  "normative_documents": [
+    "Regent-AAR1-PRD.md",
+    "Regent-AAR1-Technical-Spec.md",
+    "Regent-Measurement-Decision-Framework.md"
+  ],
+  "decisions_closed": [
+    "constitution_scope_and_deny_precedence",
+    "org_key_not_security_identity",
+    "stable_organization_plus_immutable_versions",
+    "finite_certified_candidate_space",
+    "feasibility_before_utility",
+    "inflight_work_version_semantics",
+    "same_cluster_durable_a2a_scope",
+    "mcp_initial_allowlist_and_side_effect_reuse",
+    "agent_spec_version_deployment_identity",
+    "hmac_envelope_v1_and_rotation",
+    "retired_deployment_is_terminal",
+    "rollback_and_emergency_owner_switch",
+    "capacity_and_slo_baseline"
+  ],
+  "signer": "product-owner-by-request",
+  "note": "Foundation coding including M5/M6 Contract is complete (PASSED). Adaptive multi-Agent rollout remains gated by independent statistical evidence."
+}

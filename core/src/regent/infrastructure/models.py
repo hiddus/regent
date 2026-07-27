@@ -494,6 +494,10 @@ class OrganizationModel(Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     max_agents: Mapped[int] = mapped_column(Integer, nullable=False)
+    # AAR-1 Expand + Contract: required after M5; historical rows remain readable.
+    current_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -993,6 +997,67 @@ class WorkspaceSnapshotModel(Base):
     runtime_profile_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class DeliveryBatchModel(Base):
+    """Incremental delivery unit: generate → verify → merge onto prior workspace."""
+
+    __tablename__ = "delivery_batches"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PLANNED','GENERATING','VERIFYING','MERGED','REJECTED','CANCELLED')",
+            name="ck_delivery_batches_status",
+        ),
+        CheckConstraint("batch_ordinal >= 1", name="ck_delivery_batches_ordinal"),
+        CheckConstraint("attempt >= 1", name="ck_delivery_batches_attempt"),
+        CheckConstraint("version >= 0", name="ck_delivery_batches_version"),
+        UniqueConstraint(
+            "generation_run_id",
+            "batch_key",
+            name="uq_delivery_batches_run_key",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    app_project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("app_projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("generation_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    milestone_key: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    milestone_ordinal: Mapped[int | None] = mapped_column(Integer)
+    batch_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    batch_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PLANNED")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    scope_paths: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    acceptance_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    base_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workspace_snapshots.id", ondelete="SET NULL"), nullable=True
+    )
+    result_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workspace_snapshots.id", ondelete="SET NULL"), nullable=True
+    )
+    workspace_locator: Mapped[str | None] = mapped_column(String(1024))
+    verification_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    correlation_id: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
@@ -1665,6 +1730,38 @@ class SchedulerCheckpointModel(Base):
     )
     input_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AgentTranscriptModel(Base):
+    """Per-turn agent tool/chat audit trail for agentic-generation-v1."""
+
+    __tablename__ = "agent_transcripts"
+    __table_args__ = (
+        UniqueConstraint(
+            "generation_run_id",
+            "turn",
+            "seq",
+            name="uq_agent_transcripts_run_turn_seq",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    generation_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("generation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    turn: Mapped[int] = mapped_column(Integer, nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    content: Mapped[str | None] = mapped_column(Text)
+    tool_name: Mapped[str | None] = mapped_column(String(128))
+    tool_call_id: Mapped[str | None] = mapped_column(String(128))
+    tool_arguments: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    tool_result: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

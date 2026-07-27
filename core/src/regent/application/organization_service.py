@@ -120,7 +120,7 @@ _V1_TEMPLATES: list[OrganizationTemplate] = [
                 constraints={"goal_scope_only": True, "max_delegation_depth": 0},
             )
         ],
-        description="默认最小组织：单一 Agent 负责规划、生成、验证全部工作。",
+        description="默认最小组织: 单一 Agent 负责规划、生成、验证全部工作。",
     ),
     OrganizationTemplate(
         template_id="pm-dev-qa-v1",
@@ -144,8 +144,8 @@ _V1_TEMPLATES: list[OrganizationTemplate] = [
             ),
         ],
         description=(
-            "固定三角色模板：PM 负责需求评审与验收，Dev 负责产品构建，"
-            "QA 负责交付审查与证据采集。适合 LARGE 目标。"
+            "固定三角色模板: PM 负责需求评审与验收, Dev 负责产品构建, "
+            "QA 负责交付审查与证据采集. 适合 LARGE 目标."
         ),
     ),
 ]
@@ -236,6 +236,11 @@ class OrganizationReceipt:
     capability_gaps: list[str]
     assignment_count: int
     replayed: bool
+    # AAR-1 M3 Read-switch fields (optional until dual-write/backfill)
+    organization_version_id: uuid.UUID | None = None
+    decision_id: uuid.UUID | None = None
+    constitution_version_id: uuid.UUID | None = None
+    shadow_compare: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +359,7 @@ class OrganizationService:
         if org is None:
             org_id = uuid.uuid4()
             coordinator_id = uuid.uuid4()
+            version_id = uuid.uuid4()
             session.add(
                 AgentSpecModel(
                     id=coordinator_id,
@@ -375,7 +381,16 @@ class OrganizationService:
                     rationale=rationale,
                     status="ACTIVE",
                     max_agents=4,
+                    current_version_id=version_id,
                 )
+            )
+            await self._write_contract_projection_version(
+                session,
+                organization_id=org_id,
+                version_id=version_id,
+                strategy=strategy,
+                rationale=rationale,
+                version_number=1,
             )
             await session.flush()
             for work in [*works, recovery_work]:
@@ -407,6 +422,12 @@ class OrganizationService:
             org.strategy = "SINGLE_AGENT"
         org.rationale = rationale
         org.status = "ACTIVE"
+        await self._append_reorg_version(
+            session,
+            organization=org,
+            strategy=org.strategy,
+            rationale=rationale,
+        )
         session.add(
             AssignmentModel(
                 id=uuid.uuid4(),
@@ -469,7 +490,6 @@ class OrganizationService:
             )
 
         gaps = sorted(set(required) - verified)
-        agent_count_estimate = max(1, len(works))
 
         candidates: list[tuple[OrganizationTemplate, UtilityResult]] = []
         for tmpl in templates:
@@ -533,7 +553,23 @@ class OrganizationService:
 
         gaps = sorted(set(required) - verified)
 
-        # --- V3 P1-A: utility-driven organization selection ---
+        from regent.application.aar1_contract import (
+            engine_is_primary_writer,
+            legacy_org_writes_allowed,
+        )
+        from regent.config import get_settings
+
+        phase = get_settings().aar1_phase
+        if engine_is_primary_writer(phase):
+            return await self._organize_contract(goal_id, works=works, gaps=gaps)
+
+        # --- Pre-Contract: legacy utility selection + dual-write Version ---
+        if not legacy_org_writes_allowed(phase):
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                f"unexpected aar1_phase={phase} for legacy organize path",
+            )
+
         best_template, utility_result = await self.select_org(goal_id)
         strategy = best_template.strategy
         rationale = (
@@ -542,6 +578,7 @@ class OrganizationService:
         )
 
         organization_id, agent_spec_id = uuid.uuid4(), uuid.uuid4()
+        version_id = uuid.uuid4()
         async with self._sessions() as session, session.begin():
             session.add(
                 AgentSpecModel(
@@ -575,9 +612,9 @@ class OrganizationService:
                     rationale=rationale,
                     status="ACTIVE",
                     max_agents=max(len(best_template.roles), 4),
+                    current_version_id=version_id,
                 )
             )
-            # Store utility evaluation in goal metadata
             goal_obj = await session.get(GoalModel, goal_id)
             if goal_obj is not None:
                 meta = dict(goal_obj.metadata_json or {})
@@ -602,7 +639,331 @@ class OrganizationService:
                         ),
                     )
                 )
+            aar1_meta = await self._dual_write_organization(
+                session,
+                organization_id=organization_id,
+                goal_id=goal_id,
+                strategy=strategy,
+                best_template_id=best_template.template_id,
+                utility=utility_result.utility,
+                gaps=gaps,
+                version_id=version_id,
+            )
+            if goal_obj is not None and aar1_meta:
+                meta = dict(goal_obj.metadata_json or {})
+                meta["aar1"] = aar1_meta
+                goal_obj.metadata_json = meta
         return await self._receipt(organization_id, replayed=False)
+
+    async def _organize_contract(
+        self,
+        goal_id: uuid.UUID,
+        *,
+        works: list[Any],
+        gaps: list[str],
+    ) -> OrganizationReceipt:
+        """M5 Contract: OrganizationEngine is the sole topology writer.
+
+        Legacy mutable strategy/rationale are projections of the active Version only.
+        Dual-write / fail-open legacy selection is not used.
+        """
+        from regent.application.organization_engine import OrganizationEngine
+
+        caps = sorted(
+            {
+                str(capability)
+                for work in works
+                for capability in work.metadata_json.get("required_capabilities", [])
+            }
+        )
+        organization_id, agent_spec_id = uuid.uuid4(), uuid.uuid4()
+        version_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            session.add(
+                AgentSpecModel(
+                    id=agent_spec_id,
+                    name="goal-single-agent",
+                    version=1,
+                    status="CANDIDATE" if gaps else "ACTIVE",
+                    scope_goal_id=goal_id,
+                    capability_names=caps,
+                    model_ref="configured-model",
+                    tool_refs=[],
+                    constraints={"goal_scope_only": True, "max_delegation_depth": 0},
+                )
+            )
+            for gap in gaps:
+                session.add(
+                    CapabilityModel(
+                        id=uuid.uuid4(),
+                        name=gap,
+                        status="CANDIDATE",
+                        scope_goal_id=goal_id,
+                        description=f"Goal-scoped candidate capability for {gap}",
+                        verification={"required_tests": 1, "passed_tests": 0},
+                    )
+                )
+            session.add(
+                OrganizationModel(
+                    id=organization_id,
+                    goal_id=goal_id,
+                    strategy="PENDING_CONTRACT",
+                    rationale="pending OrganizationEngine decision",
+                    status="ACTIVE",
+                    max_agents=4,
+                    current_version_id=version_id,
+                )
+            )
+            await session.flush()
+
+            engine = OrganizationEngine(self._sessions, enforce_cvr=True)
+            bundle = await engine.decide_and_persist(
+                session,
+                goal_id=goal_id,
+                organization_id=organization_id,
+                trigger="INITIAL",
+                available_capabilities=set() if gaps else {"*"},
+                activate=True,
+                version_id=version_id,
+            )
+
+            org = await session.get(OrganizationModel, organization_id)
+            selected = bundle.decision_json.get("selected") or {}
+            topology = dict(selected.get("topology") or {})
+            template_id = str(selected.get("template_id") or "single-agent-v1")
+            strategy = str(topology.get("strategy") or "SINGLE_AGENT")
+            if org is None or org.current_version_id is None:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "contract organize did not set current_version_id",
+                )
+            # Projection only — Version remains the immutable truth source.
+            org.strategy = strategy
+            org.rationale = (
+                f"contract:{template_id} | "
+                f"decision={bundle.decision_id} | "
+                f"utility={bundle.predicted_utility}"
+            )
+            org.max_agents = max(len(topology.get("roles") or []), 4)
+
+            for work in works:
+                session.add(
+                    AssignmentModel(
+                        id=uuid.uuid4(),
+                        organization_id=organization_id,
+                        work_id=work.id,
+                        agent_spec_id=agent_spec_id,
+                        role="executor",
+                        delegated_capabilities=list(
+                            work.metadata_json.get("required_capabilities", [])
+                        ),
+                    )
+                )
+
+            goal_obj = await session.get(GoalModel, goal_id)
+            if goal_obj is not None:
+                meta = dict(goal_obj.metadata_json or {})
+                meta["utility_evaluation"] = {
+                    "template_id": template_id,
+                    "utility": bundle.predicted_utility,
+                    "components": (selected.get("components") or {}),
+                    "rationale": selected.get("rationale") or org.rationale,
+                    "writer": "organization_engine",
+                    "phase": "contract",
+                }
+                meta["aar1"] = {
+                    "organization_version_id": str(org.current_version_id),
+                    "decision_id": str(bundle.decision_id),
+                    "phase": "contract",
+                    "engine_selected": template_id,
+                    "legacy_dual_write": False,
+                }
+                goal_obj.metadata_json = meta
+
+        return await self._receipt(organization_id, replayed=False)
+
+    @staticmethod
+    async def _write_contract_projection_version(
+        session: AsyncSession,
+        *,
+        organization_id: uuid.UUID,
+        version_id: uuid.UUID,
+        strategy: str,
+        rationale: str,
+        version_number: int = 1,
+        predecessor_id: uuid.UUID | None = None,
+    ) -> None:
+        """Persist an OrganizationVersion that strategy/rationale project from."""
+        from datetime import UTC, datetime
+
+        from regent.infrastructure.aar1_models import OrganizationVersionModel
+
+        session.add(
+            OrganizationVersionModel(
+                id=version_id,
+                organization_id=organization_id,
+                version=version_number,
+                predecessor_id=predecessor_id,
+                decision_id=None,
+                topology_json={
+                    "template_id": (
+                        "single-agent-v1"
+                        if strategy in {"SINGLE_AGENT", "single-agent-v1"}
+                        else strategy
+                    ),
+                    "strategy": strategy,
+                    "roles": [{"role": "executor", "capabilities": []}],
+                    "rationale": rationale,
+                    "projection": True,
+                },
+                status="ACTIVE",
+                activated_at=datetime.now(UTC),
+            )
+        )
+
+    async def _append_reorg_version(
+        self,
+        session: AsyncSession,
+        *,
+        organization: OrganizationModel,
+        strategy: str,
+        rationale: str,
+    ) -> None:
+        """Contract: do not mutate org topology without a new Version row."""
+        from datetime import UTC, datetime
+
+        from regent.infrastructure.aar1_models import OrganizationVersionModel
+
+        pred = organization.current_version_id
+        next_version = 1
+        if pred is not None:
+            current = await session.get(OrganizationVersionModel, pred)
+            if current is not None and current.status == "ACTIVE":
+                current.status = "SUPERSEDED"
+                current.retired_at = datetime.now(UTC)
+                next_version = current.version + 1
+        new_id = uuid.uuid4()
+        await self._write_contract_projection_version(
+            session,
+            organization_id=organization.id,
+            version_id=new_id,
+            strategy=strategy,
+            rationale=rationale,
+            version_number=next_version,
+            predecessor_id=pred,
+        )
+        organization.current_version_id = new_id
+
+    async def _dual_write_organization(
+        self,
+        session: Any,
+        *,
+        organization_id: uuid.UUID,
+        goal_id: uuid.UUID,
+        strategy: str,
+        best_template_id: str,
+        utility: float,
+        gaps: list[str],
+        version_id: uuid.UUID | None = None,
+    ) -> dict[str, Any] | None:
+        """Pre-Contract dual-write — never blocks legacy organize on shadow divergence.
+
+        Forbidden in ``contract`` phase (caller must use ``_organize_contract``).
+        """
+        from regent.application.aar1_contract import is_contract_phase
+        from regent.config import get_settings
+
+        settings = get_settings()
+        if is_contract_phase(settings.aar1_phase):
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "legacy dual-write forbidden in contract phase",
+            )
+        try:
+            from regent.application.organization_engine import (
+                OrganizationEngine,
+                compute_heuristic_utility_v1,
+                shadow_compare,
+            )
+            from regent.infrastructure.aar1_models import OrganizationVersionModel
+
+            phase = settings.aar1_phase
+            engine = OrganizationEngine(
+                self._sessions,
+                enforce_cvr=phase in {"read_switch", "enforce"},
+            )
+            certified = await engine.list_certified_templates(session)
+            payloads = [
+                {
+                    "name": t.name,
+                    "topology_json": {
+                        **dict(t.topology_json),
+                        "template_id": t.topology_json.get("template_id") or t.name,
+                    },
+                }
+                for t in certified
+            ]
+            if not payloads:
+                payloads = [
+                    {
+                        "name": "single-agent-v1",
+                        "topology_json": {
+                            "template_id": "single-agent-v1",
+                            "strategy": "SINGLE_AGENT",
+                            "roles": [{"role": "executor", "capabilities": []}],
+                        },
+                    }
+                ]
+            bundle = engine.evaluate_candidates(
+                payloads, available_capabilities=set() if gaps else {"*"}
+            )
+            if gaps:
+                bundle = engine.evaluate_candidates(
+                    payloads, available_capabilities=set()
+                )
+
+            compare = shadow_compare(strategy, bundle)
+            topology = {
+                "template_id": best_template_id,
+                "strategy": strategy,
+                "roles": [{"role": "executor", "capabilities": []}],
+                "legacy_utility": utility,
+                "heuristic": compute_heuristic_utility_v1(
+                    {"strategy": strategy, "roles": [{"role": "executor"}]}
+                ).rationale,
+            }
+            vid = version_id or uuid.uuid4()
+            version = OrganizationVersionModel(
+                id=vid,
+                organization_id=organization_id,
+                version=1,
+                predecessor_id=None,
+                decision_id=bundle.decision_id if phase != "expand" else None,
+                topology_json=topology,
+                status="ACTIVE",
+                activated_at=__import__("datetime").datetime.now(
+                    __import__("datetime").UTC
+                ),
+            )
+            session.add(version)
+            org = await session.get(OrganizationModel, organization_id)
+            if org is not None:
+                org.current_version_id = version.id
+
+            return {
+                "organization_version_id": str(version.id),
+                "decision_id": str(bundle.decision_id),
+                "shadow": compare,
+                "phase": phase,
+                "engine_selected": (bundle.decision_json.get("selected") or {}).get(
+                    "template_id"
+                ),
+            }
+        except Exception as exc:
+            return {
+                "dual_write_error": str(exc),
+                "phase": "failed_open_legacy",
+            }
 
     async def get_organization(self, goal_id: uuid.UUID) -> OrganizationReceipt:
         """Return the current organisation receipt for a Goal, or raise NOT_FOUND."""
@@ -651,6 +1012,9 @@ class OrganizationService:
                 )
             )
         )
+        meta = await _goal_aar1_meta(session, organization.goal_id)
+        decision_raw = (meta or {}).get("decision_id")
+        decision_id = uuid.UUID(decision_raw) if decision_raw else None
         return OrganizationReceipt(
             organization_id=organization.id,
             goal_id=organization.goal_id,
@@ -661,10 +1025,14 @@ class OrganizationService:
             capability_gaps=sorted(candidates),
             assignment_count=len(assignments),
             replayed=replayed,
+            organization_version_id=organization.current_version_id,
+            decision_id=decision_id,
+            constitution_version_id=None,
+            shadow_compare=(meta or {}).get("shadow") if meta else None,
         )
 
     # ------------------------------------------------------------------
-    # P3-A: Adaptive organization proposal
+    # P3-A: Adaptive organization proposal (proposal only — ROLLOUT gated)
     # ------------------------------------------------------------------
 
     async def propose_adaptive_organization(
@@ -678,6 +1046,7 @@ class OrganizationService:
 
         Evaluates all candidate templates and returns a proposal dict
         with the best organization, utility scores, and rationale.
+        Does NOT activate adaptive multi-agent as default (ROLLOUT_NOT_ALLOWED).
         """
         best_template, utility_result = await self.select_org(goal_id, weights=weights)
 
@@ -698,5 +1067,14 @@ class OrganizationService:
             "utility_components": utility_result.components,
             "utility_rationale": utility_result.rationale,
             "proposed_by": actor,
+            "rollout_gate": "ROLLOUT_NOT_ALLOWED",
         }
         return proposal
+
+
+async def _goal_aar1_meta(session: AsyncSession, goal_id: uuid.UUID) -> dict[str, Any] | None:
+    goal = await session.get(GoalModel, goal_id)
+    if goal is None:
+        return None
+    aar1 = (goal.metadata_json or {}).get("aar1")
+    return dict(aar1) if isinstance(aar1, dict) else None

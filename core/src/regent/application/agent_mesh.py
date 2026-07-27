@@ -187,19 +187,43 @@ class MCPClient:
 class AgentMesh:
     """High-level facade combining A2A delegation and MCP tool sharing.
 
-    Usage::
-
-        mesh = AgentMesh()
-        mesh.mcp.register_tool(
-            MCPToolDefinition(tool_id="search", name="search", description="..."),
-        )
-        task = mesh.delegate_task("agent-a", "agent-b", "find info")
-        result = mesh.call_tool("agent-a", "search", {"query": "test"})
+    M3 Read-switch: when a durable ``AgentTaskService`` is attached, delegations
+    are forwarded there. M6 Contract closes production in-memory A2A entirely
+    (override ``use_memory=True`` only for unit tests).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        durable_tasks: Any | None = None,
+        use_memory: bool | None = None,
+    ) -> None:
+        from regent.application.aar1_contract import is_contract_phase, memory_a2a_allowed
+        from regent.config import get_settings
+
         self.a2a = A2AProtocol()
         self.mcp = MCPClient()
+        self._durable = durable_tasks
+        phase = get_settings().aar1_phase
+        if use_memory is None and phase == "enforce" and durable_tasks is not None:
+            self._use_memory = False
+        else:
+            self._use_memory = memory_a2a_allowed(
+                phase=phase, use_memory_override=use_memory
+            )
+        self._phase = phase
+        self._contract = is_contract_phase(phase)
+
+    def _reject_memory_if_closed(self) -> None:
+        if self._use_memory:
+            return
+        if self._durable is not None:
+            raise RuntimeError(
+                "memory A2A path closed; use AgentTaskService.offer_task"
+            )
+        raise RuntimeError(
+            "memory A2A path closed in contract phase; wire AgentTaskService"
+        )
 
     def delegate_task(
         self,
@@ -208,6 +232,7 @@ class AgentMesh:
         description: str,
     ) -> A2ATask:
         """Create a delegation task via the A2A protocol."""
+        self._reject_memory_if_closed()
         return self.a2a.create_delegation(from_agent, to_agent, description)
 
     def call_tool(
@@ -255,6 +280,8 @@ class AgentMesh:
 
         if not isinstance(envelope, AgentEnvelope):
             raise TypeError(f"expected AgentEnvelope, got {type(envelope)}")
+
+        self._reject_memory_if_closed()
 
         # Verify content trust
         if not envelope.verify_trust():

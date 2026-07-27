@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # Comma-separated org keys for worker scheduler ticks; empty = discover from queue.
     scheduler_org_keys: str = ""
     scheduler_enabled: bool = True
+    # AAR-1 Foundation phase (Expand->Dual-write->Read-switch->Enforce->Contract).
+    # ROLLOUT_NOT_ALLOWED: adaptive multi-agent must never become default via this flag.
+    aar1_phase: Literal[
+        "expand", "dual_write", "read_switch", "enforce", "contract"
+    ] = "contract"
+    aar1_envelope_hmac_key: SecretStr | None = None
+    aar1_shadow_log_divergences: bool = True
 
 
 @lru_cache

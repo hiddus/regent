@@ -100,7 +100,7 @@ class TestAgentMeshRouteWithEnvelope:
 
     def test_route_with_envelope_creates_task(self) -> None:
         """Routing an envelope creates an A2A task with metadata."""
-        mesh = AgentMesh()
+        mesh = AgentMesh(use_memory=True)
         env = create_envelope(
             "agent-a", "agent-b",
             capabilities=["read", "write"],
@@ -116,13 +116,13 @@ class TestAgentMeshRouteWithEnvelope:
 
     def test_route_rejects_non_envelope(self) -> None:
         """route_with_envelope rejects non-AgentEnvelope objects."""
-        mesh = AgentMesh()
+        mesh = AgentMesh(use_memory=True)
         with pytest.raises(TypeError):
             mesh.route_with_envelope("not-an-envelope")
 
     def test_route_propagates_capability_scope(self) -> None:
         """Capability scope is propagated to task metadata."""
-        mesh = AgentMesh()
+        mesh = AgentMesh(use_memory=True)
         env = create_envelope(
             "pm", "dev",
             capabilities=["code-review", "test"],

@@ -2,15 +2,16 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
-from typing import Any
 
 from regent import __version__
+from regent.api.aar1_v2 import router as aar1_v2_router
 from regent.api.app_delivery import router as app_delivery_router
 from regent.api.app_guidance import router as app_guidance_router
 from regent.api.app_previews import router as app_previews_router
@@ -245,6 +246,7 @@ def create_app() -> FastAPI:
         return RedirectResponse("/console/")
 
     app.include_router(goals_router)
+    app.include_router(aar1_v2_router)
     app.include_router(baselines_router)
     app.include_router(conversations_router)
     app.include_router(app_delivery_router)

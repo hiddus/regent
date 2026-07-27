@@ -1,0 +1,56 @@
+{
+  "record_type": "AAR1MilestoneDecisionRecord",
+  "record_version": "1.1",
+  "status": "PASSED",
+  "decided_at": "2026-07-27T22:45:00+08:00",
+  "definition_id": "REGENT-DEFINITION-1.0",
+  "scope": "AAR-1 Foundation M1-M6 (Contract)",
+  "parent_gate": "docs/AAR1CodingReadinessDecisionRecord.json",
+  "authorization": {
+    "source": "user_explicit_verbal_and_written",
+    "authorized_at": "2026-07-27T22:23:00+08:00",
+    "authorized_batches": [
+      "aar1-m5-contract",
+      "aar1-m6-memory-path-contract"
+    ],
+    "overrides": [
+      {
+        "previous": "aar1-m5-contract:NOT_AUTHORIZED",
+        "now": "PASSED",
+        "reason": "User explicitly authorized M5 and M6 coding on 2026-07-27; prior NOT_AUTHORIZED and observation-window gate superseded for Contract implementation only. Gate tests green."
+      }
+    ],
+    "note": "Coding Plan defines only M1–M5. User-requested M6 mapped to Contract memory-path removal (remove-in-memory-a2a-without-durable-wiring), which Technical Spec places under M5 Contract. This does NOT authorize adaptive-organization-as-default, free-form topology, or production Champion/Challenger rollout."
+  },
+  "milestones": {
+    "aar1-m1-expand": "PASSED",
+    "aar1-m2-dual-write-shadow": "PASSED",
+    "aar1-m3-read-switch": "PASSED",
+    "aar1-m4-enforce-after-fault-gate": "PASSED",
+    "aar1-m5-contract": "PASSED",
+    "aar1-m6-memory-path-contract": "PASSED"
+  },
+  "rollout_gate": "ROLLOUT_NOT_ALLOWED",
+  "default_champion": "single-agent-v1",
+  "certified_templates": [
+    "single-agent-v1",
+    "pm-dev-independent-qa-v1"
+  ],
+  "gate_evidence": {
+    "tests": [
+      "tests/unit/application/test_aar1_contract.py",
+      "tests/unit/application/test_aar1_foundation.py",
+      "tests/unit/application/test_agent_envelope.py",
+      "tests/integration/test_adaptive_organization.py"
+    ],
+    "result": "PASSED",
+    "verified_at": "2026-07-27T22:45:00+08:00"
+  },
+  "not_done": [
+    "adaptive-organization-as-default",
+    "free-form-generated-topology",
+    "production-champion-challenger-rollout",
+    "p2-4-eval-decision-record"
+  ],
+  "notes": "M5 Contract (stop legacy dual-write; OrganizationVersion primary; migration 0033) and M6 memory-path Contract (AgentMesh closes in-memory A2A under phase=contract) PASSED. Rollout remains closed."
+}

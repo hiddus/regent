@@ -99,7 +99,7 @@ class TestRouteWithEnvelope:
 
     def test_route_with_valid_envelope(self) -> None:
         """Valid envelope routes to A2A delegation."""
-        mesh = AgentMesh()
+        mesh = AgentMesh(use_memory=True)
         env = create_envelope(
             source="orchestrator",
             dest="worker-1",
@@ -114,7 +114,7 @@ class TestRouteWithEnvelope:
 
     def test_route_with_tampered_envelope_rejected(self) -> None:
         """Tampered envelope is rejected by trust verification."""
-        mesh = AgentMesh()
+        mesh = AgentMesh(use_memory=True)
         env = AgentEnvelope(
             envelope_id=uuid.uuid4(),
             source_agent="attacker",
@@ -129,7 +129,7 @@ class TestRouteWithEnvelope:
 
     def test_route_rejects_non_envelope(self) -> None:
         """route_with_envelope rejects non-AgentEnvelope objects."""
-        mesh = AgentMesh()
+        mesh = AgentMesh(use_memory=True)
         with pytest.raises(TypeError, match="AgentEnvelope"):
             mesh.route_with_envelope({"not": "an envelope"})  # type: ignore[arg-type]
 

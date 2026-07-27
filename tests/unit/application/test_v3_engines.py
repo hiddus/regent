@@ -253,7 +253,7 @@ class TestMCPClient:
 
 class TestAgentMesh:
     def test_delegate_and_call(self) -> None:
-        mesh = AgentMesh()
+        mesh = AgentMesh(use_memory=True)
         mesh.mcp.register_tool(MCPToolDefinition(
             tool_id="search", name="search", description="search",
         ))

@@ -20,7 +20,7 @@ def compile_table(model: type[Base]) -> str:
 
 
 def test_kernel_metadata_contains_required_tables() -> None:
-    assert set(Base.metadata.tables) == {
+    required = {
         "app_projects",
         "goals",
         "goal_specs",
@@ -87,7 +87,39 @@ def test_kernel_metadata_contains_required_tables() -> None:
         "memory_records",
         # P2-4 Eval
         "eval_runs",
+        # Delivery quality
+        "agent_transcripts",
+        "delivery_batches",
     }
+    # AAR-1 tables register when aar1_models is imported (alembic env / services).
+    import regent.infrastructure.aar1_models  # noqa: F401
+
+    aar1_required = {
+        "constitutions",
+        "constitution_versions",
+        "policy_bindings",
+        "policy_evaluations",
+        "organization_templates",
+        "organization_snapshots",
+        "organization_decisions",
+        "organization_candidates",
+        "organization_candidate_checks",
+        "organization_versions",
+        "agent_spec_versions",
+        "agent_deployments",
+        "agent_lifecycle_events",
+        "agent_relationships",
+        "agent_tasks",
+        "envelope_nonces",
+        "envelope_signing_keys",
+        "mcp_servers",
+        "mcp_tool_bindings",
+        "mcp_invocations",
+        "aar1_backfill_reports",
+    }
+    tables = set(Base.metadata.tables)
+    assert required.issubset(tables)
+    assert aar1_required.issubset(tables)
 
 
 def test_goal_spec_version_is_unique_per_goal() -> None:
