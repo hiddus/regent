@@ -33,7 +33,10 @@ from regent.application.compliance_risk_service import (
 )
 from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
 from regent.application.discovery_worker import DiscoveryWorker
-from regent.application.evidence_policy import collect_authorized_urls, goal_requires_external_evidence
+from regent.application.evidence_policy import (
+    collect_authorized_urls,
+    goal_requires_external_evidence,
+)
 from regent.application.execution_events import (
     APP_BUILD_PASSED,
     APP_BUILD_REQUESTED,
@@ -50,6 +53,8 @@ from regent.application.execution_events import (
     GOAL_EXECUTION_REQUESTED,
     PREVIEW_DEPLOYMENT_REQUESTED,
     PREVIEW_DEPLOYMENT_SUCCEEDED,
+    QUALITY_APPROVAL_COMPLETED,
+    QUALITY_APPROVAL_REQUESTED,
     REQUIREMENT_REQUESTED,
     REQUIREMENT_VALIDATED,
     WORKSPACE_SNAPSHOT_READY,
@@ -58,15 +63,15 @@ from regent.application.execution_events import (
     make_outbox_event,
 )
 from regent.application.feedback_service import CreateIterationDecision, FeedbackService
-from regent.application.goal_interpreter import (
-    GoalInterpreter,
-    GoalInterpretation,
-    SubGoal,
-)
 from regent.application.generation_service import (
     CreateGenerationPlan,
     GenerationService,
     RequestGenerationRun,
+)
+from regent.application.goal_interpreter import (
+    GoalInterpretation,
+    GoalInterpreter,
+    SubGoal,
 )
 from regent.application.iteration_loop_service import IterationLoopService
 from regent.application.milestone_service import (
@@ -371,12 +376,11 @@ class ExecutionOrchestrator:
                 project_id,
                 "DISCOVERY_ROUND_CREATED",
                 (
-                    f"Core created discovery for milestone {current.ordinal}/{len(milestone_plan.milestones)} "
-                    f"({current.key}: {current.title}). "
+                    f"正在分析第 {current.ordinal}/{len(milestone_plan.milestones)} 阶段需求：{current.title}。"
                     + (
-                        "LARGE goal: single loop cannot claim full Goal."
+                        "项目规模较大，将分阶段推进。"
                         if milestone_plan.goal_scale == GOAL_SCALE_LARGE
-                        else "SMALL goal: single milestone."
+                        else "项目规模适中，单阶段即可完成。"
                     )
                 ),
                 {
@@ -492,7 +496,8 @@ class ExecutionOrchestrator:
 
         async with self._sessions() as session:
             rnd = await session.get(DiscoveryRoundModel, round_id)
-            if rnd is None or rnd.status != "REQUESTED":
+            # REQUESTED = fresh; RESEARCHING = worker crashed mid-run — allow reclaim.
+            if rnd is None or rnd.status not in {"REQUESTED", "RESEARCHING"}:
                 logger.info("discovery round not requestable", extra={"round_id": str(round_id)})
                 return
             goal = await session.get(GoalModel, goal_id)
@@ -649,7 +654,7 @@ class ExecutionOrchestrator:
                     project_id,
                     "DISCOVERY_COMPLETED",
                     (
-                        f"Discovery completed with decision: {decision.decision.value}. "
+                        f"需求分析完成，决策：{decision.decision.value}。"
                         f"{decision.rationale}"
                     ).strip(),
                     {
@@ -733,7 +738,7 @@ class ExecutionOrchestrator:
                 session,
                 project_id,
                 "REQUIREMENT_REQUESTED",
-                "Core is generating requirements from the selected hypothesis.",
+                "正在根据选定的方案生成产品需求。",
                 {"goal_id": str(goal_id), "hypothesis_id": str(selected_hypothesis_id)},
             )
 
@@ -834,7 +839,7 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "REQUIREMENT_VALIDATED",
-                    "Requirements have been validated.",
+                    "产品需求已验证通过。",
                     {
                         "goal_id": str(goal_id),
                         "requirement_revision_id": str(revision.id),
@@ -884,7 +889,7 @@ class ExecutionOrchestrator:
                 session,
                 project_id,
                 "CAPABILITY_RESOLUTION_REQUESTED",
-                "Core is resolving capability requirements.",
+                "正在分析实现所需的技术能力。",
                 {
                     "goal_id": str(goal_id),
                     "requirement_revision_id": str(revision_id),
@@ -1038,15 +1043,14 @@ class ExecutionOrchestrator:
                 project_id,
                 "CAPABILITY_RESOLUTION_PLANNED",
                 (
-                    "Capability resolution waiting on human/blocked gaps "
-                    "(GAC-A4: Goal remains ACTIVE until human resolves or exhausts)."
+                    "部分能力需要人工确认，等待处理中。"
                     if has_block
                     else (
-                        "Capability resolution satisfied"
+                        "技术能力已就绪"
                         + (
-                            f" (GAC-B2 built {sum(1 for i in resolved_items if i.method.value == 'BUILD')} gaps)."
+                            f"，已自动构建 {sum(1 for i in resolved_items if i.method.value == 'BUILD')} 项能力。"
                             if any(i.method.value == "BUILD" for i in resolved_items)
-                            else "."
+                            else "。"
                         )
                     )
                 ),
@@ -1120,7 +1124,7 @@ class ExecutionOrchestrator:
                 session,
                 project_id,
                 "GENERATION_RUN_REQUESTED",
-                "Core is generating the application source code.",
+                "正在生成应用源代码。",
                 {"goal_id": str(goal_id)},
             )
 
@@ -1249,16 +1253,30 @@ class ExecutionOrchestrator:
             goal_meta, fallback_first_deliverable=first_deliverable
         )
         if milestone_acceptance:
-            # Milestone slice overrides full-goal criteria for non-final LARGE milestones.
+            # Milestone slice adds current-milestone acceptance; full goal success
+            # criteria stay visible (P0-4: never dilute global acceptance).
+            full_success = acceptance_contract.get("success_criteria")
             for key, value in milestone_acceptance.items():
                 acceptance_contract[key] = value
             if milestone_acceptance.get("forbid_full_goal_claim"):
-                # Do not apply full success_criteria until final milestone.
-                acceptance_contract.pop("success_criteria", None)
-                for full_key in ("required_phrases",):
-                    # Keep milestone-local required_phrases if present in acceptance.
-                    if full_key in acceptance_contract and full_key not in milestone_acceptance:
-                        acceptance_contract.pop(full_key, None)
+                # Mark this round as a subset check, but keep full criteria attached.
+                acceptance_contract["acceptance_scope"] = "milestone_subset"
+                if full_success is not None:
+                    acceptance_contract["success_criteria"] = full_success
+                    acceptance_contract["full_goal_success_criteria"] = full_success
+                acceptance_contract["milestone_acceptance_subset"] = {
+                    k: v
+                    for k, v in milestone_acceptance.items()
+                    if k
+                    not in {
+                        "forbid_full_goal_claim",
+                        "milestone_ordinal",
+                        "milestone_key",
+                        "milestone_title",
+                        "goal_scale",
+                        "milestone_count",
+                    }
+                }
         elif first_deliverable:
             acceptance_contract["first_deliverable"] = first_deliverable
         delivery_policy = str(
@@ -1289,6 +1307,20 @@ class ExecutionOrchestrator:
                     "Do not claim the full Goal until the final milestone."
                 )
 
+        acceptance_contract["app_project_id"] = str(project_id)
+        acceptance_contract["goal_id"] = str(goal_id)
+        acceptance_contract.setdefault("org_key", "default")
+
+        from regent.config import get_settings
+
+        settings = get_settings()
+        if settings.generation_strategy == "agentic":
+            generator_ref = "agentic-generation-v1"
+            prompt_version = "agentic-generation-v1"
+        else:
+            generator_ref = "artifact-backed-code-generator-v1"
+            prompt_version = "code-generation-v1"
+
         contract = GenerationPlanContract(
             goal_spec_hash=spec_hash,
             hypothesis_decision_id=decision_id,
@@ -1296,9 +1328,9 @@ class ExecutionOrchestrator:
             capability_resolution_hash=_ZERO_HASH,
             runtime_profile_hash=_RUNTIME_PROFILE_HASH,
             evidence_bundle_digest=_ZERO_HASH,
-            generator_ref="artifact-backed-code-generator-v1",
+            generator_ref=generator_ref,
             model_ref="p1-model",
-            prompt_version="code-generation-v1",
+            prompt_version=prompt_version,
             planned_paths=planned_paths,
             dependency_intents=dependency_intents,
             verification_commands=verification_commands,
@@ -1464,7 +1496,7 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "WORKSPACE_SNAPSHOT_READY",
-                    "Source code has been generated and snapshot created.",
+                    "源代码已生成完毕。",
                     {"goal_id": str(goal_id), "snapshot_id": str(snapshot.id)},
                 )
 
@@ -1559,7 +1591,7 @@ class ExecutionOrchestrator:
                     goal.status = "FAILED"
                     await self._append_conversation_event(
                         session, project_id, "FAILURE_COMPLIANCE",
-                        "Compliance gate failed: secrets/PII detected. Chain terminated.",
+                        "安全检查未通过：检测到敏感信息，已终止流程。",
                         {"goal_id": str(goal_id), "snapshot_id": str(snapshot_id)},
                     )
             return
@@ -1669,7 +1701,7 @@ class ExecutionOrchestrator:
                 session,
                 project_id,
                 "APP_BUILD_REQUESTED",
-                "Dependencies resolved, starting application build.",
+                "依赖已解决，正在构建应用。",
                 {"goal_id": str(goal_id), "resolution_id": str(resolution.id)},
             )
 
@@ -1779,7 +1811,7 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "APP_BUILD_PASSED",
-                    "Application build has passed verification.",
+                    "应用构建成功，已通过验证。",
                     {"goal_id": str(goal_id), "build_id": str(result_build.id)},
                 )
 
@@ -2021,6 +2053,17 @@ class ExecutionOrchestrator:
         async with self._sessions() as session, session.begin():
             goal = await session.get(GoalModel, goal_id)
             if goal:
+                metadata = dict(goal.metadata_json or {})
+                verification = evidence.get("delivery_verification") or {}
+                if verification:
+                    metadata["delivery_verification"] = verification
+                elif evidence.get("delivery_review", {}).get("passed"):
+                    metadata["delivery_verification"] = {
+                        "verdict": "PASS",
+                        "capability": evidence.get("delivery_review", {}).get("capability"),
+                        "summary": evidence.get("delivery_review", {}).get("summary"),
+                    }
+                goal.metadata_json = metadata
                 outbox_event = make_outbox_event(
                     EventEnvelope(
                         event_type=PREVIEW_DEPLOYMENT_SUCCEEDED,
@@ -2033,6 +2076,7 @@ class ExecutionOrchestrator:
                             "deployment_id": str(result.id),
                             "endpoint": result.endpoint or "",
                             "actor": actor,
+                            "delivery_verification": metadata.get("delivery_verification"),
                         },
                         correlation_id=goal.correlation_id,
                     )
@@ -2042,11 +2086,12 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "PREVIEW_DEPLOYMENT_SUCCEEDED",
-                    f"Preview deployment succeeded: {result.endpoint or 'N/A'}",
+                    f"预览环境已部署成功：{result.endpoint or 'N/A'}",
                     {
                         "goal_id": str(goal_id),
                         "deployment_id": str(result.id),
                         "endpoint": result.endpoint or "",
+                        "delivery_verification": metadata.get("delivery_verification"),
                     },
                 )
 
@@ -2127,7 +2172,7 @@ class ExecutionOrchestrator:
                         session,
                         project_id,
                         "GATE_INSUFFICIENT_EVIDENCE",
-                        "Gate waiting for observations; GAC-C2 timer armed (30m → EXHAUST).",
+                        "正在收集运行数据以评估质量，请耐心等待。",
                         {
                             "goal_id": str(goal_id),
                             "deployment_id": str(deployment_id),
@@ -2197,7 +2242,7 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "ITERATION_DECISION",
-                    f"Iteration decision={decision.decision} after gate {gate.status}.",
+                    f"质量评估完成，决策：{decision.decision}。",
                     {
                         "goal_id": str(goal_id),
                         "decision": decision.decision,
@@ -2245,7 +2290,7 @@ class ExecutionOrchestrator:
                         session,
                         project_id,
                         "GOAL_EXHAUSTED",
-                        "Goal EXHAUSTED: iteration STOP after gate failure (GAC-A1).",
+                        "目标执行已终止：质量评估未通过。",
                         {"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
                     )
             elif decision.decision == "REVISE":
@@ -2261,7 +2306,7 @@ class ExecutionOrchestrator:
                         session,
                         project_id,
                         "ITERATION_REVISE_STARTED",
-                        "REVISE auto-started Discovery (GAC-A3).",
+                        "正在重新分析需求，优化方案。",
                         {
                             "goal_id": str(goal_id),
                             "discovery_round_id": str(round_id),
@@ -2339,6 +2384,90 @@ class ExecutionOrchestrator:
                 extra={"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
             )
             raise
+
+    async def handle_quality_approval_completed(self, payload: dict[str, Any]) -> None:
+        """GAC-Q1: QualityApprovalCompleted → ACHIEVE or EXHAUST the goal."""
+        goal_id = uuid.UUID(str(payload["goal_id"]))
+        actor = str(payload.get("actor", "regent-core"))
+        approved = bool(payload.get("approved", True))
+        feedback_text = str(payload.get("feedback", ""))
+
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                logger.warning("quality approval: goal not found", extra={"goal_id": str(goal_id)})
+                return
+            project_id = goal.app_project_id
+            status = goal.status
+            expected_version = goal.version
+            correlation_id = goal.correlation_id
+
+        if status != "ACTIVE":
+            logger.info(
+                "quality approval skipped: goal not active",
+                extra={"goal_id": str(goal_id), "status": status},
+            )
+            return
+
+        if not approved:
+            # User rejected → EXHAUST with feedback
+            await TransitionService(self._sessions).transition_goal(
+                TransitionContext(goal_id, expected_version, actor, correlation_id),
+                GoalCommand.EXHAUST,
+            )
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id)
+                if goal is not None:
+                    metadata = dict(goal.metadata_json or {})
+                    metadata["execution_stage"] = "EXHAUSTED"
+                    metadata["termination"] = {
+                        "reason": "quality_rejected",
+                        "feedback": feedback_text,
+                        "gac": "GAC-Q1",
+                    }
+                    goal.metadata_json = metadata
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "GOAL_EXHAUSTED",
+                    f"目标执行已终止：质量未通过。反馈：{feedback_text}",
+                    {"goal_id": str(goal_id), "feedback": feedback_text},
+                )
+            return
+
+        # Approved → ACHIEVE
+        await TransitionService(self._sessions).transition_goal(
+            TransitionContext(goal_id, expected_version, actor, correlation_id),
+            GoalCommand.ACHIEVE,
+        )
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id)
+            if goal is not None:
+                metadata = dict(goal.metadata_json or {})
+                metadata["execution_stage"] = "ACHIEVED"
+                metadata["quality_approved_by"] = actor
+                metadata["quality_feedback"] = feedback_text
+                goal.metadata_json = metadata
+            await self._append_conversation_event(
+                session,
+                project_id,
+                "GOAL_ACHIEVED",
+                "目标已完成！",
+                {"goal_id": str(goal_id)},
+            )
+        logger.info(
+            "goal achieved after quality approval",
+            extra={"goal_id": str(goal_id), "actor": actor},
+        )
+
+    async def handle_quality_approval_requested(self, payload: dict[str, Any]) -> None:
+        """GAC-Q1: QualityApprovalRequested — goal waits for user confirmation."""
+        goal_id = uuid.UUID(str(payload["goal_id"]))
+        task_id = str(payload.get("task_id", ""))
+        logger.info(
+            "quality approval requested",
+            extra={"goal_id": str(goal_id), "task_id": task_id},
+        )
 
     async def handle_timer_fired(self, payload: dict[str, Any]) -> None:
         """GAC-C2: DurableTimer → Goal EXHAUST when gate still insufficient."""
@@ -2455,7 +2584,7 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "GOAL_EXHAUSTED",
-                    "Goal EXHAUSTED: gate insufficient evidence timed out (GAC-C2).",
+                    "目标执行已终止：等待数据超时。",
                     {"goal_id": str(goal_id)},
                 )
 
@@ -2506,10 +2635,7 @@ class ExecutionOrchestrator:
                         session,
                         project_id,
                         "MILESTONE_ADVANCE_BLOCKED",
-                        (
-                            "LARGE goal refused full ACHIEVE: non-final milestone could not advance. "
-                            "Single-loop final result is forbidden (GAC-E2)."
-                        ),
+                        "项目规模较大，当前阶段无法直接完成，需要继续推进下一阶段。",
                         {
                             "goal_id": str(goal_id),
                             "current_ordinal": attained.ordinal,
@@ -2530,9 +2656,8 @@ class ExecutionOrchestrator:
                     project_id,
                     "MILESTONE_ATTAINED",
                     (
-                        f"Milestone {attained.ordinal} ({attained.key}) attained. "
-                        f"LARGE goal: advancing to {nxt.ordinal}/{len(new_plan.milestones)} "
-                        f"({nxt.key}). Full Goal not yet ACHIEVED."
+                        f"第 {attained.ordinal} 阶段已完成：{attained.title}。"
+                        f"正在进入第 {nxt.ordinal}/{len(new_plan.milestones)} 阶段：{nxt.title}。"
                     ),
                     {
                         "goal_id": str(goal_id),
@@ -2553,33 +2678,92 @@ class ExecutionOrchestrator:
                 )
                 return True
 
-            # Final milestone or SMALL → Goal ACHIEVE.
+            # Final milestone or SMALL → require verification PASS before ACHIEVE (P0-4).
             metadata = dict(goal.metadata_json or {})
-            metadata["execution_stage"] = "ACHIEVED"
-            if plan is not None:
-                metadata["milestones_completed"] = True
-            goal.metadata_json = metadata
-            version = goal.version
-            corr = goal.correlation_id
+            verification = dict(metadata.get("delivery_verification") or {})
+            verdict = str(verification.get("verdict") or "").upper()
+            if verdict != "PASS":
+                metadata["execution_stage"] = "WAITING_HUMAN_VERIFICATION"
+                metadata["awaiting_verification"] = True
+                goal.metadata_json = metadata
+                version = goal.version
+                corr = goal.correlation_id
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "VERIFICATION_REQUIRED",
+                    "交付验证未通过或缺失，已请求人工裁决，不能标记为目标达成。",
+                    {
+                        "goal_id": str(goal_id),
+                        "deployment_id": str(deployment_id),
+                        "delivery_verification": verification or None,
+                        "gac": "P0-4",
+                    },
+                )
+                # Exit transaction before transition (same pattern as ACHIEVE below).
+            else:
+                metadata["execution_stage"] = "ACHIEVING"
+                if plan is not None:
+                    metadata["milestones_completed"] = True
+                goal.metadata_json = metadata
+                version = goal.version
+                corr = goal.correlation_id
+
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "QUALITY_SELF_VERIFIED",
+                    "对抗式交付验证通过，正在完成目标。",
+                    {
+                        "goal_id": str(goal_id),
+                        "deployment_id": str(deployment_id),
+                        "goal_scale": (plan.goal_scale if plan else "UNKNOWN"),
+                        "delivery_verification": verification,
+                        "gac": "P0-4",
+                    },
+                )
+
+        if verdict != "PASS":
+            await transitions.transition_goal(
+                TransitionContext(goal_id, version, actor, corr),
+                GoalCommand.WAIT_FOR_HUMAN,
+            )
+            logger.warning(
+                "ACHIEVE blocked: verification missing or failed",
+                extra={
+                    "goal_id": str(goal_id),
+                    "verdict": verdict or "MISSING",
+                    "deployment_id": str(deployment_id),
+                },
+            )
+            return False
+
+        # Accepting Agent ACHIEVEs only with Verification PASS evidence.
+        await transitions.transition_goal(
+            TransitionContext(goal_id, version, actor, corr),
+            GoalCommand.ACHIEVE,
+        )
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id)
+            if goal is not None:
+                metadata = dict(goal.metadata_json or {})
+                metadata["execution_stage"] = "ACHIEVED"
+                metadata["quality_verified_by"] = actor
+                goal.metadata_json = metadata
             await self._append_conversation_event(
                 session,
                 project_id,
                 "GOAL_ACHIEVED",
-                (
-                    "Goal ACHIEVED: final milestone / SMALL goal gate PASSED (GAC-E2)."
-                    if plan and plan.goal_scale == GOAL_SCALE_LARGE
-                    else "Goal ACHIEVED: preview gate PASSED (GAC-A1)."
-                ),
+                "目标已完成！",
                 {
                     "goal_id": str(goal_id),
                     "deployment_id": str(deployment_id),
-                    "goal_scale": (plan.goal_scale if plan else "UNKNOWN"),
+                    "delivery_verification": verification,
                 },
             )
-
-        await transitions.transition_goal(
-            TransitionContext(goal_id, version, actor, corr),
-            GoalCommand.ACHIEVE,
+        logger.info(
+            "goal achieved with verification PASS",
+            extra={"goal_id": str(goal_id), "actor": actor},
         )
         return False
 
@@ -2912,6 +3096,8 @@ def get_p1_event_handlers(
         APP_BUILD_PASSED: orchestrator.handle_app_build_passed,
         PREVIEW_DEPLOYMENT_REQUESTED: orchestrator.handle_preview_deployment_requested,
         PREVIEW_DEPLOYMENT_SUCCEEDED: orchestrator.handle_preview_deployment_succeeded,
+        QUALITY_APPROVAL_REQUESTED: orchestrator.handle_quality_approval_requested,
+        QUALITY_APPROVAL_COMPLETED: orchestrator.handle_quality_approval_completed,
         "TimerFired": orchestrator.handle_timer_fired,
         # P1-C: V3 domain event handlers
         "ReorganizationTriggered": orchestrator.handle_reorganization_triggered,

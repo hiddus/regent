@@ -517,10 +517,10 @@ class OrganizationService:
             goal = await session.get(GoalModel, goal_id)
             if goal is None:
                 raise DomainError(ErrorCode.NOT_FOUND, f"goal {goal_id} not found")
-            if goal.status not in {"READY", "ACTIVE"}:
+            if goal.status not in {"DRAFT", "READY", "ACTIVE"}:
                 raise DomainError(
                     ErrorCode.INVALID_STATE,
-                    "goal must be confirmed before organization",
+                    "goal is not open for organization",
                 )
             works = list(
                 await session.scalars(select(WorkModel).where(WorkModel.goal_id == goal_id))
@@ -714,6 +714,8 @@ class OrganizationService:
                     current_version_id=version_id,
                 )
             )
+            # current_version_id FK is DEFERRABLE INITIALLY DEFERRED (0034), so the
+            # Organization row may flush before OrganizationVersion exists.
             await session.flush()
 
             engine = OrganizationEngine(self._sessions, enforce_cvr=True)

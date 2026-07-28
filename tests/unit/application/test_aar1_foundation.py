@@ -211,6 +211,29 @@ class TestOrganizationEngineF3:
         assert fancy["feasible"] is False
         assert fancy["c"] == "FAIL"
 
+    def test_selected_candidate_id_is_decision_scoped(self) -> None:
+        """Regression: template-only uuid5 collided across goals (UniqueViolation)."""
+        engine = OrganizationEngine.__new__(OrganizationEngine)
+        engine._policy = PolicyEngine()
+        engine._enforce_cvr = True
+        templates = [
+            {
+                "name": "single-agent-v1",
+                "topology_json": {
+                    "template_id": "single-agent-v1",
+                    "strategy": "SINGLE_AGENT",
+                    "roles": [{"role": "executor", "capabilities": []}],
+                },
+            }
+        ]
+        a = engine.evaluate_candidates(templates, available_capabilities=set())
+        b = engine.evaluate_candidates(templates, available_capabilities=set())
+        assert a.status == "ACCEPTED" and b.status == "ACCEPTED"
+        assert a.selected_candidate_id != b.selected_candidate_id
+        assert a.selected_candidate_id == uuid.uuid5(
+            uuid.NAMESPACE_URL, f"{a.decision_id}:single-agent-v1"
+        )
+
     def test_unknown_resource_not_admitted(self) -> None:
         report = feasibility_cvr(
             {"template_id": "x", "roles": [{"role": "executor", "capabilities": []}]},

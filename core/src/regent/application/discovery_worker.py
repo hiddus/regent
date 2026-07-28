@@ -56,10 +56,12 @@ class DiscoveryWorker:
             )
             if model is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "discovery round not found")
-            if model.status != "REQUESTED":
+            if model.status not in {"REQUESTED", "RESEARCHING"}:
                 raise DomainError(ErrorCode.INVALID_STATE, "discovery round is not requestable")
+            # Reclaim after worker crash: RESEARCHING -> RESEARCHING (version bump).
             model.status = "RESEARCHING"
             model.version += 1
+            model.failure_code = None
 
     async def _commit_outcome(self, round_id: uuid.UUID, outcome: DiscoveryOutcome) -> None:
         async with self._sessions() as session, session.begin():

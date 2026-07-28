@@ -387,7 +387,10 @@ class OrganizationEngine:
         feasible_n = sum(1 for _, __, rep, ___ in scored if rep.feasible)
         return OrganizationDecisionBundle(
             decision_id=decision_id,
-            selected_candidate_id=uuid.uuid5(uuid.NAMESPACE_URL, sel_id),
+            # Must be decision-scoped: template-only uuid5 collides across goals.
+            selected_candidate_id=uuid.uuid5(
+                uuid.NAMESPACE_URL, f"{decision_id}:{sel_id}"
+            ),
             feasible_count=feasible_n,
             infeasible_count=len(scored) - feasible_n,
             predicted_utility=sel_util.value,
@@ -471,6 +474,7 @@ class OrganizationEngine:
         )
         session.add(resource_snap)
         session.add(state_snap)
+        await session.flush()
 
         decision = OrganizationDecisionModel(
             id=bundle.decision_id,
@@ -487,18 +491,15 @@ class OrganizationEngine:
             created_by=actor,
         )
         session.add(decision)
+        await session.flush()
 
         template_by_name = {t.name: t for t in templates}
+        check_rows: list[tuple[uuid.UUID, dict[str, Any]]] = []
         for cand in bundle.decision_json["candidates"]:
             name = cand["template_id"]
             tmpl = template_by_name.get(name)
             topology = (tmpl.topology_json if tmpl else {}) or {}
             cand_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{bundle.decision_id}:{name}")
-            if bundle.selected_candidate_id and name == (
-                bundle.decision_json.get("selected") or {}
-            ).get("template_id"):
-                # Keep selected id stable with evaluate_candidates
-                cand_id = bundle.selected_candidate_id
             status = (
                 "SELECTED"
                 if bundle.decision_json.get("selected")
@@ -519,6 +520,11 @@ class OrganizationEngine:
                     utility_components_json=cand["utility_components"],
                 )
             )
+            check_rows.append((cand_id, cand))
+
+        # Flush candidates before checks to satisfy FK (autoflush order is not reliable).
+        await session.flush()
+        for cand_id, cand in check_rows:
             snap_hash = canonical_hash(cand)
             for check_type, result in (("C", cand["c"]), ("V", cand["v"]), ("R", cand["r"])):
                 session.add(
