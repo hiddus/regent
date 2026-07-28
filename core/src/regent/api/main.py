@@ -18,6 +18,7 @@ from regent.api.app_previews import router as app_previews_router
 from regent.api.app_projects import router as app_projects_router
 from regent.api.baselines import router as baselines_router
 from regent.api.conversations import router as conversations_router
+from regent.api.events import router as events_router
 from regent.api.eval_runs import router as eval_runs_router
 from regent.api.experiments import router as experiments_router
 from regent.api.feedback import router as feedback_router
@@ -32,6 +33,7 @@ from regent.api.self_improvement import router as self_improvement_router
 from regent.api.side_effects import router as side_effects_router
 from regent.api.tools import router as tools_router
 from regent.api.works import router as works_router
+from regent.api.preview_security import PREVIEW_CONTENT_SECURITY_POLICY
 from regent.application.runtime_profile_service import RuntimeProfileService
 from regent.config import get_settings
 from regent.domain.errors import DomainError, ErrorCode
@@ -222,10 +224,7 @@ def create_app() -> FastAPI:
             path,
             media_type=allowed[filename],
             headers={
-                "Content-Security-Policy": (
-                    "default-src 'self'; script-src 'self'; style-src 'self'; "
-                    "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'"
-                ),
+                "Content-Security-Policy": PREVIEW_CONTENT_SECURITY_POLICY,
                 "X-Content-Type-Options": "nosniff",
                 "Referrer-Policy": "no-referrer",
             },
@@ -249,6 +248,7 @@ def create_app() -> FastAPI:
     app.include_router(aar1_v2_router)
     app.include_router(baselines_router)
     app.include_router(conversations_router)
+    app.include_router(events_router)
     app.include_router(app_delivery_router)
     app.include_router(app_guidance_router)
     app.include_router(app_projects_router)
