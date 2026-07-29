@@ -55,14 +55,16 @@ rm -rf /tmp/console-stage
 mkdir -p /tmp/console-stage
 tar -xzf /tmp/regent-console-dist.tgz -C /tmp/console-stage
 
-# Copy into regent-api container at the dist/ path main.py expects
+# Clean old assets then copy fresh
+docker exec regent-api sh -c 'rm -rf /app/apps/regent-console/dist/assets /app/apps/regent-console/dist/index.html'
 docker exec regent-api mkdir -p /app/apps/regent-console/dist
 docker cp /tmp/console-stage/dist/. regent-api:/app/apps/regent-console/dist/
 
 # Also copy to site-packages path for persistence
 REL=$(readlink -f /opt/regent/current)
 mkdir -p "$REL/apps/regent-console"
-cp -a /tmp/console-stage/dist/. "$REL/apps/regent-console/"
+rm -rf "$REL/apps/regent-console/dist"
+cp -a /tmp/console-stage/dist "$REL/apps/regent-console/"
 
 echo COPY_OK
 """)
