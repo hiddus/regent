@@ -103,6 +103,31 @@ class TestM5StopLegacyWrites:
         # Fresh settings instance (bypass lru cache of get_settings)
         s = Settings(_env_file=None)
         assert s.aar1_phase == "contract"
+        assert s.aar1_certified_hive is False
+
+    def test_certified_hive_helpers(self) -> None:
+        from regent.application.aar1_contract import (
+            CERTIFIED_HIVE_TEMPLATE_ID,
+            certified_hive_preferred,
+            is_certified_hive_topology,
+        )
+
+        assert certified_hive_preferred(enabled=False) is None
+        assert certified_hive_preferred(enabled=True) == CERTIFIED_HIVE_TEMPLATE_ID
+        assert is_certified_hive_topology(
+            {
+                "template_id": CERTIFIED_HIVE_TEMPLATE_ID,
+                "strategy": "FIXED_TEMPLATE",
+                "roles": [
+                    {"role": "pm"},
+                    {"role": "dev"},
+                    {"role": "qa", "independent_reviewer": True},
+                ],
+            }
+        )
+        assert not is_certified_hive_topology(
+            {"template_id": "single-agent-v1", "strategy": "SINGLE_AGENT"}
+        )
 
 
 def test_contract_migration_revision_chain() -> None:

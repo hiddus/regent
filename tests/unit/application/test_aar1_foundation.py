@@ -288,6 +288,119 @@ class TestOrganizationEngineF3:
         assert util.policy_version == UTILITY_POLICY_VERSION
         assert "not calibrated" in util.rationale
 
+    def test_star_wildcard_does_not_satisfy_capabilities(self) -> None:
+        report = feasibility_cvr(
+            {
+                "template_id": "pm-dev-independent-qa-v1",
+                "strategy": "FIXED_TEMPLATE",
+                "roles": [
+                    {"role": "pm", "capabilities": ["delivery-review-v1"]},
+                    {"role": "dev", "capabilities": ["product-surface-v1"]},
+                    {
+                        "role": "qa",
+                        "capabilities": ["delivery-review-v1"],
+                        "independent_reviewer": True,
+                    },
+                ],
+                "invariants": ["producer_reviewer_separation"],
+            },
+            available_capabilities={"*"},
+        )
+        assert report.c == "FAIL"
+        assert any(r.startswith("CAPABILITY_GAP:") for r in report.reason_codes)
+
+    def test_concrete_caps_admit_certified_hive(self) -> None:
+        engine = OrganizationEngine.__new__(OrganizationEngine)
+        engine._policy = PolicyEngine()
+        engine._enforce_cvr = True
+        templates = [
+            {
+                "name": "single-agent-v1",
+                "topology_json": {
+                    "template_id": "single-agent-v1",
+                    "strategy": "SINGLE_AGENT",
+                    "roles": [{"role": "executor", "capabilities": []}],
+                },
+            },
+            {
+                "name": "pm-dev-independent-qa-v1",
+                "topology_json": {
+                    "template_id": "pm-dev-independent-qa-v1",
+                    "strategy": "FIXED_TEMPLATE",
+                    "roles": [
+                        {"role": "pm", "capabilities": ["delivery-review-v1"]},
+                        {"role": "dev", "capabilities": ["product-surface-v1"]},
+                        {
+                            "role": "qa",
+                            "capabilities": ["delivery-review-v1"],
+                            "independent_reviewer": True,
+                        },
+                    ],
+                    "invariants": ["producer_reviewer_separation"],
+                },
+            },
+        ]
+        caps = {"delivery-review-v1", "product-surface-v1"}
+        # Default champion remains single-agent when both feasible.
+        default = engine.evaluate_candidates(templates, available_capabilities=caps)
+        assert default.status == "ACCEPTED"
+        assert default.decision_json["selected"]["template_id"] == "single-agent-v1"
+        hive = next(
+            c
+            for c in default.decision_json["candidates"]
+            if c["template_id"] == "pm-dev-independent-qa-v1"
+        )
+        assert hive["feasible"] is True
+
+        preferred = engine.evaluate_candidates(
+            templates,
+            available_capabilities=caps,
+            preferred_template_id="pm-dev-independent-qa-v1",
+        )
+        assert preferred.status == "ACCEPTED"
+        assert preferred.decision_json["selected"]["template_id"] == (
+            "pm-dev-independent-qa-v1"
+        )
+
+    def test_preferred_hive_falls_back_when_infeasible(self) -> None:
+        engine = OrganizationEngine.__new__(OrganizationEngine)
+        engine._policy = PolicyEngine()
+        engine._enforce_cvr = True
+        templates = [
+            {
+                "name": "single-agent-v1",
+                "topology_json": {
+                    "template_id": "single-agent-v1",
+                    "strategy": "SINGLE_AGENT",
+                    "roles": [{"role": "executor", "capabilities": []}],
+                },
+            },
+            {
+                "name": "pm-dev-independent-qa-v1",
+                "topology_json": {
+                    "template_id": "pm-dev-independent-qa-v1",
+                    "strategy": "FIXED_TEMPLATE",
+                    "roles": [
+                        {"role": "pm", "capabilities": ["delivery-review-v1"]},
+                        {"role": "dev", "capabilities": ["product-surface-v1"]},
+                        {
+                            "role": "qa",
+                            "capabilities": ["delivery-review-v1"],
+                            "independent_reviewer": True,
+                        },
+                    ],
+                    "invariants": ["producer_reviewer_separation"],
+                },
+            },
+        ]
+        bundle = engine.evaluate_candidates(
+            templates,
+            available_capabilities=set(),
+            preferred_template_id="pm-dev-independent-qa-v1",
+        )
+        assert bundle.status == "ACCEPTED"
+        assert bundle.decision_json["selected"]["template_id"] == "single-agent-v1"
+
     def test_shadow_compare_explains_divergence(self) -> None:
         bundle = OrganizationDecisionBundle(
             decision_id=uuid.uuid4(),

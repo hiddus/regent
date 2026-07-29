@@ -3,6 +3,7 @@
 import uuid
 from pathlib import Path
 
+import pytest
 from regent.application.execution_events import (
     APP_BUILD_PASSED,
     APP_BUILD_REQUESTED,
@@ -16,6 +17,8 @@ from regent.application.execution_events import (
     P1_MAIN_CHAIN_EVENTS,
     PREVIEW_DEPLOYMENT_REQUESTED,
     PREVIEW_DEPLOYMENT_SUCCEEDED,
+    QUALITY_APPROVAL_COMPLETED,
+    QUALITY_APPROVAL_REQUESTED,
     REQUIREMENT_REQUESTED,
     REQUIREMENT_VALIDATED,
     WORKSPACE_SNAPSHOT_READY,
@@ -30,9 +33,9 @@ from regent.application.execution_orchestrator import (
 from regent.infrastructure.models import OutboxEventModel
 
 
-def test_p1_main_chain_events_has_14_events() -> None:
-    """P1 main chain event catalog contains 14 event types."""
-    assert len(P1_MAIN_CHAIN_EVENTS) == 14
+def test_p1_main_chain_events_has_16_events() -> None:
+    """P1 main chain event catalog contains 16 event types (incl. quality approval)."""
+    assert len(P1_MAIN_CHAIN_EVENTS) == 16
 
 
 def test_p1_main_chain_events_contains_all_expected_events() -> None:
@@ -52,6 +55,8 @@ def test_p1_main_chain_events_contains_all_expected_events() -> None:
         APP_BUILD_PASSED,
         PREVIEW_DEPLOYMENT_REQUESTED,
         PREVIEW_DEPLOYMENT_SUCCEEDED,
+        QUALITY_APPROVAL_REQUESTED,
+        QUALITY_APPROVAL_COMPLETED,
     }
     assert set(P1_MAIN_CHAIN_EVENTS) == expected
 
@@ -203,3 +208,274 @@ def test_orchestrator_imports_all_services() -> None:
     assert "ReleaseService" in source
     assert "IterationLoopService" in source
     assert "DeploymentSmokeTestService" in source
+
+
+def test_deploy_failure_does_not_fake_complete_or_achieve() -> None:
+    """GAC-A4: deploy miss must recover / wait-human — never ACHIEVE or FAIL/EXHAUST halt."""
+    source = Path(
+        "core/src/regent/application/execution_orchestrator.py"
+    ).read_text(encoding="utf-8")
+    assert "_recover_or_wait_after_deploy_gap" in source
+    assert "ATTAINMENT_RECOVERY_STARTED" in source
+    # Deploy status miss routes through recovery helper, not terminal FAIL/EXHAUST.
+    assert "Deployment status=" in source
+    deploy_block_start = source.index("if result.status != \"SUCCEEDED\":")
+    deploy_block = source[deploy_block_start : deploy_block_start + 600]
+    assert "_recover_or_wait_after_deploy_gap" in deploy_block
+    assert "GoalCommand.FAIL" not in deploy_block
+    assert "GoalCommand.EXHAUST" not in deploy_block
+    assert "GoalCommand.ACHIEVE" not in deploy_block
+    # Helper itself must wait for human when ladder exhausted — not ACHIEVE.
+    helper_start = source.index("async def _recover_or_wait_after_deploy_gap")
+    helper = source[helper_start : helper_start + 2500]
+    assert "GoalCommand.WAIT_FOR_HUMAN" in helper
+    assert "GoalCommand.ACHIEVE" not in helper
+    assert "DeliveryGapRecoveryService" in helper
+
+
+@pytest.mark.asyncio
+async def test_recover_or_wait_after_deploy_gap_schedules_recovery() -> None:
+    """Deploy gap with generation ids schedules DeliveryGapRecovery — no ACHIEVE."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from regent.application.delivery_gap_recovery import DeliveryGapRecoveryResult
+    from regent.domain.transitions import GoalCommand
+
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    orchestrator = ExecutionOrchestrator(sessions=MagicMock())
+    orchestrator._halt_goal_stage = AsyncMock()
+    orchestrator._resolve_generation_ids = AsyncMock(return_value=(req_id, plan_id))
+
+    recovery = DeliveryGapRecoveryResult(
+        True, "REUSE", "scheduled", 1, "product_surface"
+    )
+    with patch(
+        "regent.application.execution_orchestrator.DeliveryGapRecoveryService"
+    ) as svc_cls:
+        svc_cls.return_value.recover = AsyncMock(return_value=recovery)
+        await orchestrator._recover_or_wait_after_deploy_gap(
+            goal_id,
+            project_id,
+            actor="test",
+            stage="DEPLOY_NOT_SUCCEEDED",
+            message="Deployment status=FAILED (GAC-A4).",
+            gap_reasons=["deployment-status: FAILED"],
+            extra={"status": "FAILED"},
+        )
+
+    orchestrator._halt_goal_stage.assert_awaited_once()
+    halt_kwargs = orchestrator._halt_goal_stage.await_args.kwargs
+    assert halt_kwargs["terminal"] is None
+    assert halt_kwargs["event_type"] == "ATTAINMENT_RECOVERY_STARTED"
+    svc_cls.return_value.recover.assert_awaited_once()
+    # Must not transition to ACHIEVE / FAIL / EXHAUST on recoverable path.
+    assert halt_kwargs["terminal"] not in {
+        GoalCommand.ACHIEVE,
+        GoalCommand.FAIL,
+        GoalCommand.EXHAUST,
+    }
+
+
+@pytest.mark.asyncio
+async def test_recover_or_wait_after_deploy_gap_waits_human_when_exhausted() -> None:
+    """When recovery ladder is exhausted, enter WAITING_HUMAN — not ACHIEVED/伪完成."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from regent.application.delivery_gap_recovery import DeliveryGapRecoveryResult
+    from regent.domain.transitions import GoalCommand
+
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    orchestrator = ExecutionOrchestrator(sessions=MagicMock())
+    orchestrator._halt_goal_stage = AsyncMock()
+    orchestrator._resolve_generation_ids = AsyncMock(
+        return_value=(uuid.uuid4(), uuid.uuid4())
+    )
+    recovery = DeliveryGapRecoveryResult(
+        False,
+        "STOP",
+        "ladder exhausted",
+        3,
+        "product_surface",
+        terminal_exhaust=True,
+    )
+    with patch(
+        "regent.application.execution_orchestrator.DeliveryGapRecoveryService"
+    ) as svc_cls:
+        svc_cls.return_value.recover = AsyncMock(return_value=recovery)
+        await orchestrator._recover_or_wait_after_deploy_gap(
+            goal_id,
+            project_id,
+            actor="test",
+            stage="DEPLOY_FAILED",
+            message="Preview deployment failed (GAC-A4): RuntimeError",
+            gap_reasons=["deployment-failed: RuntimeError"],
+        )
+
+    assert orchestrator._halt_goal_stage.await_count == 2
+    final_kwargs = orchestrator._halt_goal_stage.await_args_list[-1].kwargs
+    assert final_kwargs["terminal"] == GoalCommand.WAIT_FOR_HUMAN
+    assert final_kwargs["event_type"] == "HUMAN_TASK_REQUIRED"
+    assert final_kwargs["terminal"] != GoalCommand.ACHIEVE
+    assert "NEEDS_HUMAN" in final_kwargs["stage"]
+
+
+def test_progress_nodes_do_not_title_failed_outcome_as_complete() -> None:
+    """Console progressNodes: failed/waiting halt must not keep the static title「完成」."""
+    source = Path("apps/regent-console/src/lib/progressNodes.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "ATTAINMENT_RECOVERY_STARTED" in source
+    assert "node.title = '未达成'" in source
+    assert "node.title = '需要处理'" in source
+    assert "node.title = '完成'" in source
+    # Recovery events belong on generate, not outcome-as-complete.
+    assert "目标未达成，正在重新规划并继续生成" in source
+    # Exhausted / halted must be waiting (needs human), not calm「完成」.
+    assert "GOAL_EXHAUSTED: { status: 'waiting'" in source
+    assert "GOAL_EXECUTION_STAGE_HALTED: { status: 'waiting'" in source
+    assert "自动路径已用尽，需要你介入后继续" in source
+
+
+def test_orchestrator_has_no_unmet_goal_exhaust_commands() -> None:
+    """Unmet delivery/goal paths must not call GoalCommand.EXHAUST."""
+    source = Path(
+        "core/src/regent/application/execution_orchestrator.py"
+    ).read_text(encoding="utf-8")
+    assert "GoalCommand.EXHAUST" not in source
+    assert "DISCOVERY_NO_SELECT_NEEDS_HUMAN" in source
+    assert "RESEARCH_MORE_NEEDS_HUMAN" in source
+    assert "quality_rejected_needs_human" in source
+    assert "gate_insufficient_timeout_needs_human" in source
+    # Discovery non-SELECT recovers before human handoff.
+    discovery_start = source.index("async def handle_discovery_completed")
+    discovery = source[discovery_start : discovery_start + 3500]
+    assert "ResearchMoreRecoveryService" in discovery
+    assert "WAIT_FOR_HUMAN" in discovery
+    assert "ATTAINMENT_RECOVERY_STARTED" in discovery
+
+
+@pytest.mark.asyncio
+async def test_discovery_no_select_waits_human_not_exhaust() -> None:
+    """Non-SELECT discovery: try research-more, then WAITING_HUMAN — never EXHAUST."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from regent.application.research_more_recovery import ResearchMoreRecoveryResult
+    from regent.domain.transitions import GoalCommand
+
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    round_id = uuid.uuid4()
+    orchestrator = ExecutionOrchestrator(sessions=MagicMock())
+    orchestrator._halt_goal_stage = AsyncMock()
+
+    research = ResearchMoreRecoveryResult(
+        False, "STOP", None, (), "need human sources"
+    )
+    with patch(
+        "regent.application.execution_orchestrator.ResearchMoreRecoveryService"
+    ) as svc_cls:
+        svc_cls.return_value.recover = AsyncMock(return_value=research)
+        await orchestrator.handle_discovery_completed(
+            {
+                "goal_id": str(goal_id),
+                "app_project_id": str(project_id),
+                "discovery_round_id": str(round_id),
+                "decision": "REJECT",
+                "selected_hypothesis_id": None,
+                "actor": "test",
+                "idempotency_key": "k1",
+            }
+        )
+
+    assert orchestrator._halt_goal_stage.await_count == 2
+    first = orchestrator._halt_goal_stage.await_args_list[0].kwargs
+    assert first["terminal"] is None
+    assert first["event_type"] == "ATTAINMENT_RECOVERY_STARTED"
+    final = orchestrator._halt_goal_stage.await_args_list[-1].kwargs
+    assert final["terminal"] == GoalCommand.WAIT_FOR_HUMAN
+    assert final["event_type"] == "HUMAN_TASK_REQUIRED"
+    assert "NEEDS_HUMAN" in final["stage"]
+    assert final["terminal"] != GoalCommand.EXHAUST
+
+
+@pytest.mark.asyncio
+async def test_timer_insufficient_waits_human_not_exhaust() -> None:
+    """Gate insufficient timeout → WAITING_HUMAN after recovery, never EXHAUST."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from regent.application.delivery_gap_recovery import DeliveryGapRecoveryResult
+    from regent.domain.transitions import GoalCommand
+    from regent.infrastructure.models import GoalModel
+
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=3,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        app_project_id=project_id,
+        metadata_json={"execution_stage": "GATE_INSUFFICIENT_EVIDENCE"},
+    )
+
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=goal)
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+    tx = AsyncMock()
+    tx.__aenter__.return_value = None
+    tx.__aexit__.return_value = None
+    session.begin = MagicMock(return_value=tx)
+    sessions = MagicMock(return_value=session_context)
+
+    orchestrator = ExecutionOrchestrator(sessions=sessions)
+    orchestrator._append_conversation_event = AsyncMock()
+    orchestrator._resolve_generation_ids = AsyncMock(return_value=(None, None))
+
+    reorg = DeliveryGapRecoveryResult(
+        False, "STOP", "gate reorg exhausted", 6, "gate_failed", True
+    )
+    with (
+        patch(
+            "regent.application.execution_orchestrator.DeliveryGapRecoveryService"
+        ) as svc_cls,
+        patch(
+            "regent.application.execution_orchestrator.TransitionService"
+        ) as transition_cls,
+    ):
+        svc_cls.return_value.prepare_gate_reorganization = AsyncMock(return_value=reorg)
+        transition_cls.return_value.transition_goal = AsyncMock()
+        await orchestrator.handle_timer_fired(
+            {
+                "command": "goal.exhaust_insufficient",
+                "goal_id": str(goal_id),
+                "app_project_id": str(project_id),
+                "actor": "test",
+            }
+        )
+
+    transition_cls.return_value.transition_goal.assert_awaited_once()
+    cmd = transition_cls.return_value.transition_goal.await_args.args[1]
+    assert cmd == GoalCommand.WAIT_FOR_HUMAN
+    assert cmd != GoalCommand.EXHAUST
+    assert goal.metadata_json.get("execution_stage") == "WAITING_HUMAN"
+    assert goal.metadata_json.get("termination", {}).get("handoff") == "WAITING_HUMAN"
+
+
+def test_sidebar_exhausted_is_not_complete_label() -> None:
+    """Sidebar must not present EXHAUSTED as completed work."""
+    source = Path("apps/regent-console/src/components/Sidebar.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "EXHAUSTED: '需要介入'" in source
+    assert "EXHAUSTED: '已完成'" not in source
+    assert "继续尝试" in source
+    assert "DEPLOY_NOT_SUCCEEDED: '部署未成功，正在重试'" in source
+    assert "DEPLOY_NOT_SUCCEEDED_NEEDS_HUMAN: '部署失败，需要你介入'" in source

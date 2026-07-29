@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.budget_ledger import COST_MODEL_INPUT, COST_MODEL_OUTPUT, BudgetLedger
 from regent.application.build_service import (
     BuildService,
     RequestAppBuild,
@@ -120,7 +121,9 @@ from regent.application.smoke_test_service import DeploymentSmokeTestService
 from regent.application.transition_service import TransitionContext, TransitionService
 from regent.domain.errors import DomainError, ErrorCode
 from regent.domain.transitions import GoalCommand
+from regent.infrastructure.browser_journey import BrowserJourneyRunner
 from regent.infrastructure.models import (
+    AppBuildModel,
     AppProjectModel,
     CapabilityModel,
     CapabilityResolutionItemModel,
@@ -138,6 +141,7 @@ from regent.infrastructure.models import (
     RequirementRevisionModel,
     RunModel,
     ToolSpecModel,
+    VerificationReportModel,
     WorkModel,
     WorkspaceSnapshotModel,
 )
@@ -166,6 +170,7 @@ class ExecutionOrchestrator:
         materializer: DependencyMaterializer | None = None,
         deployment_provider: DeploymentProvider | None = None,
         permits: PermitService | None = None,
+        budget_ledger: BudgetLedger | None = None,
     ) -> None:
         self._sessions = sessions
         self._evidence_connector = evidence_connector
@@ -176,6 +181,7 @@ class ExecutionOrchestrator:
         self._materializer = materializer
         self._deployment_provider = deployment_provider
         self._permits = permits
+        self._budget_ledger = budget_ledger
 
     async def _ensure_work_and_run_for_goal(
         self, goal_id: uuid.UUID, *, purpose: str, actor: str
@@ -682,18 +688,33 @@ class ExecutionOrchestrator:
 
         if decision == "RESEARCH_MORE":
             # Core detects the gap; certified connector capability supplies feeds — not chat paste.
-            await ResearchMoreRecoveryService(self._sessions).recover(
+            result = await ResearchMoreRecoveryService(self._sessions).recover(
                 goal_id=goal_id,
                 project_id=project_id,
                 round_id=round_id,
                 actor=actor,
             )
+            if not result.recovered and result.method == "STOP":
+                await self._halt_goal_stage(
+                    goal_id,
+                    project_id,
+                    stage="RESEARCH_MORE_NEEDS_HUMAN",
+                    message=result.message,
+                    terminal=GoalCommand.WAIT_FOR_HUMAN,
+                    actor=actor,
+                    event_type="HUMAN_TASK_REQUIRED",
+                    extra={
+                        "decision": decision,
+                        "discovery_round_id": str(round_id),
+                        "gac": "GAC-A4",
+                    },
+                )
             return
 
-        # R9: other non-SELECT decisions must stop the chain; never rewrite audit records.
+        # Non-SELECT: try another discovery round via RESEARCH_MORE recovery before human.
         if decision != "SELECT" or selected_hypothesis_id is None:
             logger.info(
-                "discovery did not select a hypothesis; chain stops",
+                "discovery did not select; attempting research-more recovery",
                 extra={"decision": decision, "round_id": str(round_id)},
             )
             await self._halt_goal_stage(
@@ -701,12 +722,38 @@ class ExecutionOrchestrator:
                 project_id,
                 stage="DISCOVERY_NO_SELECT",
                 message=(
-                    f"Discovery decision={decision}; chain halted without SELECT "
-                    "(GAC-A4 observable exit)."
+                    f"Discovery decision={decision}；未选定假设，正在穷举取证/重发现路径 "
+                    "（不会因不达标而结束）。"
                 ),
-                terminal=GoalCommand.EXHAUST,
+                terminal=None,
                 actor=actor,
+                event_type="ATTAINMENT_RECOVERY_STARTED",
                 extra={"decision": decision, "discovery_round_id": str(round_id)},
+            )
+            result = await ResearchMoreRecoveryService(self._sessions).recover(
+                goal_id=goal_id,
+                project_id=project_id,
+                round_id=round_id,
+                actor=actor,
+            )
+            if result.recovered:
+                return
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="DISCOVERY_NO_SELECT_NEEDS_HUMAN",
+                message=(
+                    f"Discovery decision={decision}；自动取证/重发现已用尽。"
+                    f"{result.message} 需要你补充方向或授权来源后继续，不会标记为已完成。"
+                ),
+                terminal=GoalCommand.WAIT_FOR_HUMAN,
+                actor=actor,
+                event_type="HUMAN_TASK_REQUIRED",
+                extra={
+                    "decision": decision,
+                    "discovery_round_id": str(round_id),
+                    "gac": "GAC-A4",
+                },
             )
             return
 
@@ -1359,6 +1406,32 @@ class ExecutionOrchestrator:
                     correlation_id=correlation_id,
                 )
             )
+            # Certified hive: durable PM→Dev→QA AgentTasks for this generation run.
+            try:
+                from regent.application.hive_runtime import maybe_offer_generation_hive_chain
+
+                hive_chain = await maybe_offer_generation_hive_chain(
+                    self._sessions,
+                    goal_id=goal_id,
+                    generation_run_id=run.id,
+                    correlation_id=str(correlation_id),
+                )
+                if hive_chain is not None:
+                    logger.info(
+                        "certified hive AgentTasks offered for generation",
+                        extra={
+                            "goal_id": str(goal_id),
+                            "generation_run_id": str(run.id),
+                            "dev_task_id": str(hive_chain.dev_task.id),
+                            "qa_task_id": str(hive_chain.qa_task.id),
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "hive AgentTask offer skipped (non-fatal)",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
             if run.status == "COMPLETED":
                 async with self._sessions() as session:
                     snapshot = await session.scalar(
@@ -1373,6 +1446,8 @@ class ExecutionOrchestrator:
                     )
             else:
                 snapshot = await gen_service.execute(run.id)
+            # Phase 2.3: Record generation token costs in BudgetLedger
+            await self._record_generation_costs(goal_id, run.id)
         except DomainError as exc:
             if exc.code == ErrorCode.LEASE_CONFLICT:
                 # In-flight generate under a prior lease — retry outbox later.
@@ -1405,8 +1480,9 @@ class ExecutionOrchestrator:
                         project_id,
                         stage="DELIVERY_GAP_EXHAUSTED",
                         message=recovery.message,
-                        terminal=GoalCommand.EXHAUST,
+                        terminal=GoalCommand.WAIT_FOR_HUMAN,
                         actor=actor,
+                        event_type="HUMAN_TASK_REQUIRED",
                         extra={
                             "gap_kind": recovery.gap_kind,
                             "attempts": recovery.attempts,
@@ -1451,8 +1527,9 @@ class ExecutionOrchestrator:
                     project_id,
                     stage="DELIVERY_GAP_EXHAUSTED",
                     message=recovery.message,
-                    terminal=GoalCommand.EXHAUST,
+                    terminal=GoalCommand.WAIT_FOR_HUMAN,
                     actor=actor,
+                    event_type="HUMAN_TASK_REQUIRED",
                     extra={
                         "gap_kind": recovery.gap_kind,
                         "attempts": recovery.attempts,
@@ -1499,6 +1576,53 @@ class ExecutionOrchestrator:
                     "源代码已生成完毕。",
                     {"goal_id": str(goal_id), "snapshot_id": str(snapshot.id)},
                 )
+
+    # ---------------------------------------------------------------------------
+    # BudgetLedger integration (Phase 2.3)
+    # ---------------------------------------------------------------------------
+
+    async def _record_generation_costs(
+        self, goal_id: uuid.UUID, run_id: uuid.UUID
+    ) -> None:
+        """Record generation run token costs in BudgetLedger and check budget limits."""
+        if self._budget_ledger is None:
+            return
+        try:
+            async with self._sessions() as session:
+                run = await session.get(GenerationRunModel, run_id)
+                if run is None or run.status != "COMPLETED":
+                    return
+                input_tokens = getattr(run, "input_tokens", 0) or 0
+                output_tokens = getattr(run, "output_tokens", 0) or 0
+            if input_tokens > 0:
+                await self._budget_ledger.record_cost(
+                    goal_id,
+                    run_id,
+                    cost_type=COST_MODEL_INPUT,
+                    amount=float(input_tokens),
+                    description="generation input tokens",
+                )
+            if output_tokens > 0:
+                await self._budget_ledger.record_cost(
+                    goal_id,
+                    run_id,
+                    cost_type=COST_MODEL_OUTPUT,
+                    amount=float(output_tokens),
+                    description="generation output tokens",
+                )
+            # Check budget limit after recording costs
+            status = await self._budget_ledger.check_budget_limit(goal_id)
+            if status.is_blocked:
+                logger.warning(
+                    "goal blocked: budget limit exceeded",
+                    extra={"goal_id": str(goal_id), "total_cost": status.total_cost},
+                )
+        except Exception:
+            logger.warning(
+                "budget ledger cost recording failed (non-fatal)",
+                extra={"goal_id": str(goal_id), "run_id": str(run_id)},
+                exc_info=True,
+            )
 
     # ---------------------------------------------------------------------------
     # V3 Compliance Gate
@@ -1783,6 +1907,54 @@ class ExecutionOrchestrator:
                 "build did not pass",
                 extra={"build_id": str(result_build.id), "status": result_build.status},
             )
+            failure_reason = await self._summarize_build_failure(result_build.id)
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="BUILD_FAILED",
+                message=f"应用构建未通过验证：{failure_reason}",
+                terminal=None,
+                actor=actor,
+                event_type="ATTAINMENT_RECOVERY_STARTED",
+                extra={
+                    "build_id": str(result_build.id),
+                    "status": result_build.status,
+                    "log_uri": result_build.log_uri or "",
+                    "failure_code": result_build.failure_code or "",
+                },
+            )
+            # Prefer regenerating over leaving the console stuck on "正在构建".
+            req_uuid, plan_uuid = await self._resolve_generation_ids(goal_id)
+            if req_uuid is not None and plan_uuid is not None:
+                recovery = await DeliveryGapRecoveryService(self._sessions).recover(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    requirement_revision_id=req_uuid,
+                    capability_resolution_plan_id=plan_uuid,
+                    actor=actor,
+                    gap_reasons=[f"build-verification: {failure_reason}"],
+                )
+                if recovery.recovered:
+                    logger.info(
+                        "build failure recovery scheduled",
+                        extra={"goal_id": str(goal_id), "attempts": recovery.attempts},
+                    )
+                    return
+                if recovery.terminal_exhaust:
+                    await self._halt_goal_stage(
+                        goal_id,
+                        project_id,
+                        stage="BUILD_DELIVERY_GAP_EXHAUSTED",
+                        message=recovery.message,
+                        terminal=GoalCommand.WAIT_FOR_HUMAN,
+                        actor=actor,
+                        event_type="HUMAN_TASK_REQUIRED",
+                        extra={
+                            "gap_kind": recovery.gap_kind,
+                            "attempts": recovery.attempts,
+                            "build_id": str(result_build.id),
+                        },
+                    )
             return
 
         # Write AppBuildPassed
@@ -1979,8 +2151,9 @@ class ExecutionOrchestrator:
                             project_id,
                             stage="DEPLOY_DELIVERY_REJECTED",
                             message=recovery.message,
-                            terminal=GoalCommand.EXHAUST,
+                            terminal=GoalCommand.WAIT_FOR_HUMAN,
                             actor=actor,
+                            event_type="HUMAN_TASK_REQUIRED",
                             extra={
                                 "gap_kind": recovery.gap_kind,
                                 "gac": "GAC-D5",
@@ -1991,20 +2164,24 @@ class ExecutionOrchestrator:
                     goal_id,
                     project_id,
                     stage="DEPLOY_DELIVERY_REJECTED",
-                    message=f"Preview deploy blocked by delivery-review (GAC-A5): {exc}",
-                    terminal=GoalCommand.EXHAUST,
+                    message=(
+                        "预览部署被交付审查拦截，且无法自动恢复；"
+                        f"需要你介入（GAC-A5）：{exc}"
+                    ),
+                    terminal=GoalCommand.WAIT_FOR_HUMAN,
                     actor=actor,
+                    event_type="HUMAN_TASK_REQUIRED",
                     extra={"error": str(exc)[:400]},
                 )
                 return
             logger.exception("deployment failed", extra={"goal_id": str(goal_id)})
-            await self._halt_goal_stage(
+            await self._recover_or_wait_after_deploy_gap(
                 goal_id,
                 project_id,
+                actor=actor,
                 stage="DEPLOY_FAILED",
                 message=f"Preview deployment failed (GAC-A4): {type(exc).__name__}",
-                terminal=GoalCommand.FAIL,
-                actor=actor,
+                gap_reasons=[f"deployment-failed: {type(exc).__name__}"],
                 extra={"error": str(exc)[:400]},
             )
             return
@@ -2014,13 +2191,13 @@ class ExecutionOrchestrator:
                 "deployment did not succeed",
                 extra={"deployment_id": str(result.id), "status": result.status},
             )
-            await self._halt_goal_stage(
+            await self._recover_or_wait_after_deploy_gap(
                 goal_id,
                 project_id,
+                actor=actor,
                 stage="DEPLOY_NOT_SUCCEEDED",
                 message=f"Deployment status={result.status} (GAC-A4).",
-                terminal=GoalCommand.EXHAUST,
-                actor=actor,
+                gap_reasons=[f"deployment-status: {result.status}"],
                 extra={"deployment_id": str(result.id), "status": result.status},
             )
             return
@@ -2117,7 +2294,9 @@ class ExecutionOrchestrator:
         if "app_project_id" in payload:
             project_id = uuid.UUID(str(payload["app_project_id"]))
 
-        smoke_service = DeploymentSmokeTestService(self._sessions)
+        smoke_service = DeploymentSmokeTestService(
+            self._sessions, journey_runner=BrowserJourneyRunner()
+        )
         smoke_result = await smoke_service.run_smoke_test(
             goal_id, deployment_id, endpoint, actor=actor
         )
@@ -2269,19 +2448,20 @@ class ExecutionOrchestrator:
                 if advanced:
                     pass  # next discovery already scheduled
             elif decision.decision == "STOP":
+                # Gate failed and reorganization exhausted: need human, not fake "完成".
                 await transitions.transition_goal(
                     TransitionContext(
                         goal_id, expected_version, actor, correlation_id
                     ),
-                    GoalCommand.EXHAUST,
+                    GoalCommand.WAIT_FOR_HUMAN,
                 )
                 async with self._sessions() as session, session.begin():
                     goal = await session.get(GoalModel, goal_id)
                     if goal is not None:
                         metadata = dict(goal.metadata_json or {})
-                        metadata["execution_stage"] = "EXHAUSTED"
+                        metadata["execution_stage"] = "WAITING_HUMAN"
                         metadata["termination"] = {
-                            "reason": "iteration_stop",
+                            "reason": "iteration_stop_needs_human",
                             "gate_status": gate.status,
                             "gac": "GAC-A1",
                         }
@@ -2289,9 +2469,13 @@ class ExecutionOrchestrator:
                     await self._append_conversation_event(
                         session,
                         project_id,
-                        "GOAL_EXHAUSTED",
-                        "目标执行已终止：质量评估未通过。",
-                        {"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
+                        "HUMAN_TASK_REQUIRED",
+                        "质量评估未通过，自动修复预算已用尽，需要你介入后继续。",
+                        {
+                            "goal_id": str(goal_id),
+                            "deployment_id": str(deployment_id),
+                            "gate_status": gate.status,
+                        },
                     )
             elif decision.decision == "REVISE":
                 round_id = await loop_service.handle_revise(decision.id, actor=actor)
@@ -2386,7 +2570,7 @@ class ExecutionOrchestrator:
             raise
 
     async def handle_quality_approval_completed(self, payload: dict[str, Any]) -> None:
-        """GAC-Q1: QualityApprovalCompleted → ACHIEVE or EXHAUST the goal."""
+        """GAC-Q1: QualityApprovalCompleted → ACHIEVE or WAITING_HUMAN (never calm EXHAUST)."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
         actor = str(payload.get("actor", "regent-core"))
         approved = bool(payload.get("approved", True))
@@ -2410,27 +2594,33 @@ class ExecutionOrchestrator:
             return
 
         if not approved:
-            # User rejected → EXHAUST with feedback
+            # User rejected quality — wait for direction, do not calm-EXHAUST as "任务结束".
             await TransitionService(self._sessions).transition_goal(
                 TransitionContext(goal_id, expected_version, actor, correlation_id),
-                GoalCommand.EXHAUST,
+                GoalCommand.WAIT_FOR_HUMAN,
             )
             async with self._sessions() as session, session.begin():
                 goal = await session.get(GoalModel, goal_id)
                 if goal is not None:
                     metadata = dict(goal.metadata_json or {})
-                    metadata["execution_stage"] = "EXHAUSTED"
+                    metadata["execution_stage"] = "WAITING_HUMAN"
+                    metadata["awaiting_human_intervention"] = True
                     metadata["termination"] = {
-                        "reason": "quality_rejected",
+                        "reason": "quality_rejected_needs_human",
                         "feedback": feedback_text,
                         "gac": "GAC-Q1",
+                        "handoff": "WAITING_HUMAN",
                     }
                     goal.metadata_json = metadata
                 await self._append_conversation_event(
                     session,
                     project_id,
-                    "GOAL_EXHAUSTED",
-                    f"目标执行已终止：质量未通过。反馈：{feedback_text}",
+                    "HUMAN_TASK_REQUIRED",
+                    (
+                        "质量未通过确认。"
+                        f"反馈：{feedback_text or '（无）'}。"
+                        "请补充修改方向后继续；不会标记为已完成。"
+                    ),
                     {"goal_id": str(goal_id), "feedback": feedback_text},
                 )
             return
@@ -2470,7 +2660,7 @@ class ExecutionOrchestrator:
         )
 
     async def handle_timer_fired(self, payload: dict[str, Any]) -> None:
-        """GAC-C2: DurableTimer → Goal EXHAUST when gate still insufficient."""
+        """GAC-C2: DurableTimer → continue recovery or WAITING_HUMAN (never calm EXHAUST)."""
         command = str(payload.get("command") or "")
         if command != "goal.exhaust_insufficient":
             logger.info("timer fired ignored", extra={"command": command})
@@ -2498,7 +2688,7 @@ class ExecutionOrchestrator:
                 extra={"goal_id": str(goal_id), "status": status, "stage": stage},
             )
             return
-        # GAC-D4: one capability/org reorg before EXHAUST; resume generation when lineage exists.
+        # GAC-D4: escalate capability/org; resume generation when lineage exists.
         if project_id is not None:
             reorg = await DeliveryGapRecoveryService(
                 self._sessions
@@ -2563,28 +2753,47 @@ class ExecutionOrchestrator:
                         )
                 if resumed:
                     return
+            # Also try full delivery-gap ladder when generation lineage exists.
+            req_uuid, plan_uuid = await self._resolve_generation_ids(goal_id)
+            if req_uuid is not None and plan_uuid is not None:
+                recovery = await DeliveryGapRecoveryService(self._sessions).recover(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    requirement_revision_id=req_uuid,
+                    capability_resolution_plan_id=plan_uuid,
+                    actor=actor,
+                    gap_reasons=["gate-insufficient-evidence-timeout"],
+                )
+                if recovery.recovered:
+                    return
 
+        # Auto paths exhausted → WAITING_HUMAN (not calm EXHAUSTED「任务结束」).
         await TransitionService(self._sessions).transition_goal(
             TransitionContext(goal_id, expected_version, actor, correlation_id),
-            GoalCommand.EXHAUST,
+            GoalCommand.WAIT_FOR_HUMAN,
         )
         if project_id is not None:
             async with self._sessions() as session, session.begin():
                 goal = await session.get(GoalModel, goal_id)
                 if goal is not None:
                     metadata = dict(goal.metadata_json or {})
-                    metadata["execution_stage"] = "EXHAUSTED"
+                    metadata["execution_stage"] = "WAITING_HUMAN"
+                    metadata["awaiting_human_intervention"] = True
                     metadata["termination"] = {
-                        "reason": "gate_insufficient_timeout",
+                        "reason": "gate_insufficient_timeout_needs_human",
                         "gac": "GAC-C2",
+                        "handoff": "WAITING_HUMAN",
                     }
                     metadata.pop("gate_insufficient_timer_id", None)
                     goal.metadata_json = metadata
                 await self._append_conversation_event(
                     session,
                     project_id,
-                    "GOAL_EXHAUSTED",
-                    "目标执行已终止：等待数据超时。",
+                    "HUMAN_TASK_REQUIRED",
+                    (
+                        "等待运行数据超时；自动重组与交付恢复已用尽。"
+                        "需要你补充观察数据、授权来源或修改方向后继续，不会标记为已完成。"
+                    ),
                     {"goal_id": str(goal_id)},
                 )
 
@@ -2854,6 +3063,156 @@ class ExecutionOrchestrator:
         goal.metadata_json = meta
         return discovery_round.id
 
+    async def _summarize_build_failure(self, build_id: uuid.UUID) -> str:
+        """Extract a short human-readable reason from verification evidence."""
+        async with self._sessions() as session:
+            report = await session.scalar(
+                select(VerificationReportModel)
+                .where(VerificationReportModel.app_build_id == build_id)
+                .limit(1)
+            )
+            build = await session.get(AppBuildModel, build_id)
+        if report is not None:
+            for check in report.checks or []:
+                stdout = str(check.get("stdout") or "")
+                stderr = str(check.get("stderr") or "")
+                blob = (stdout or stderr).strip()
+                if not blob:
+                    continue
+                # Prefer the first SyntaxError / Error compiling line.
+                for line in blob.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("*** Error") or "SyntaxError" in stripped:
+                        return stripped[:400]
+                return blob[:400]
+            if build is not None and build.failure_code:
+                return str(build.failure_code)
+            return "verification checks failed"
+        if build is not None:
+            if build.failure_code:
+                return str(build.failure_code)
+            if build.log_uri:
+                return f"status={build.status} log={build.log_uri}"
+            return f"status={build.status}"
+        return "unknown build failure"
+
+    async def _resolve_generation_ids(
+        self, goal_id: uuid.UUID
+    ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+        """Locate requirement + capability plan ids for recovery after build failure."""
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, goal_id)
+            meta = dict((goal.metadata_json if goal else None) or {})
+            raw_plan = meta.get("capability_resolution_plan_id")
+            raw_req = meta.get("requirement_revision_id")
+            if raw_plan and raw_req:
+                return uuid.UUID(str(raw_req)), uuid.UUID(str(raw_plan))
+            if raw_plan:
+                plan = await session.get(
+                    CapabilityResolutionPlanModel, uuid.UUID(str(raw_plan))
+                )
+                if plan is not None:
+                    return plan.requirement_revision_id, plan.id
+            gen = await session.scalar(
+                select(GenerationPlanModel)
+                .join(
+                    RequirementRevisionModel,
+                    RequirementRevisionModel.id
+                    == GenerationPlanModel.requirement_revision_id,
+                )
+                .join(
+                    ProductHypothesisModel,
+                    ProductHypothesisModel.id == RequirementRevisionModel.hypothesis_id,
+                )
+                .join(
+                    DiscoveryRoundModel,
+                    DiscoveryRoundModel.id == ProductHypothesisModel.round_id,
+                )
+                .where(DiscoveryRoundModel.goal_id == goal_id)
+                .order_by(GenerationPlanModel.created_at.desc())
+                .limit(1)
+            )
+            if gen is not None:
+                return gen.requirement_revision_id, gen.capability_resolution_plan_id
+        return None, None
+
+    async def _recover_or_wait_after_deploy_gap(
+        self,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        *,
+        actor: str,
+        stage: str,
+        message: str,
+        gap_reasons: list[str],
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """GAC-A4: deploy miss → recover/replan; never ACHIEVE or fake-complete STOP.
+
+        Prefer DeliveryGapRecovery (REUSE→COMPOSE→BUILD → regenerate). When the
+        ladder is exhausted or generation ids are missing, WAIT_FOR_HUMAN instead
+        of FAIL/EXHAUST so the UI does not present “完成/未通过”.
+        """
+        await self._halt_goal_stage(
+            goal_id,
+            project_id,
+            stage=stage,
+            message=message,
+            terminal=None,
+            actor=actor,
+            event_type="ATTAINMENT_RECOVERY_STARTED",
+            extra=extra,
+        )
+        req_uuid, plan_uuid = await self._resolve_generation_ids(goal_id)
+        if req_uuid is not None and plan_uuid is not None:
+            recovery = await DeliveryGapRecoveryService(self._sessions).recover(
+                goal_id=goal_id,
+                project_id=project_id,
+                requirement_revision_id=req_uuid,
+                capability_resolution_plan_id=plan_uuid,
+                actor=actor,
+                gap_reasons=gap_reasons,
+            )
+            if recovery.recovered:
+                logger.info(
+                    "deploy failure recovery scheduled",
+                    extra={
+                        "goal_id": str(goal_id),
+                        "attempts": recovery.attempts,
+                        "stage": stage,
+                    },
+                )
+                return
+            if recovery.terminal_exhaust:
+                await self._halt_goal_stage(
+                    goal_id,
+                    project_id,
+                    stage=f"{stage}_NEEDS_HUMAN",
+                    message=recovery.message,
+                    terminal=GoalCommand.WAIT_FOR_HUMAN,
+                    actor=actor,
+                    event_type="HUMAN_TASK_REQUIRED",
+                    extra={
+                        "gap_kind": recovery.gap_kind,
+                        "attempts": recovery.attempts,
+                        "gac": "GAC-A4",
+                        **(extra or {}),
+                    },
+                )
+                return
+        await self._halt_goal_stage(
+            goal_id,
+            project_id,
+            stage=f"{stage}_NEEDS_HUMAN",
+            message=(
+                f"{message} 无法自动重规划（缺少生成链路上下文），需要你介入后继续。"
+            ),
+            terminal=GoalCommand.WAIT_FOR_HUMAN,
+            actor=actor,
+            event_type="HUMAN_TASK_REQUIRED",
+            extra={"gac": "GAC-A4", **(extra or {})},
+        )
+
     async def _halt_goal_stage(
         self,
         goal_id: uuid.UUID,
@@ -2864,6 +3223,7 @@ class ExecutionOrchestrator:
         terminal: GoalCommand | None,
         actor: str,
         extra: dict[str, object] | None = None,
+        event_type: str = "GOAL_EXECUTION_STAGE_HALTED",
     ) -> None:
         """GAC-A4: mark observable mid-chain exit; optionally converge Goal."""
         expected_version = 0
@@ -2883,11 +3243,13 @@ class ExecutionOrchestrator:
                 "at": datetime.now(UTC).isoformat(),
                 **(extra or {}),
             }
+            if terminal == GoalCommand.WAIT_FOR_HUMAN:
+                metadata["awaiting_human_intervention"] = True
             goal.metadata_json = metadata
             await self._append_conversation_event(
                 session,
                 project_id,
-                "GOAL_EXECUTION_STAGE_HALTED",
+                event_type,
                 message,
                 {"goal_id": str(goal_id), "stage": stage, **(extra or {})},
             )

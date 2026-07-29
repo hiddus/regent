@@ -191,30 +191,33 @@ def test_block_when_nothing_allowed() -> None:
 
 
 def test_ladder_includes_acquire() -> None:
-    """The escalation ladder should include ACQUIRE after BUILD."""
+    """The escalation ladder should include ACQUIRE after BUILD in each cycle."""
     assert EscalationStep.ACQUIRE in EscalationStep
-    steps = [
-        EscalationStep.REUSE, EscalationStep.COMPOSE,
-        EscalationStep.BUILD, EscalationStep.ACQUIRE,
+    first_cycle = [
+        EscalationStep.REUSE,
+        EscalationStep.CONFIGURE,
+        EscalationStep.COMPOSE,
+        EscalationStep.BUILD,
+        EscalationStep.ACQUIRE,
     ]
-    for i, step in enumerate(steps):
+    for i, step in enumerate(first_cycle):
         plan = plan_escalation(i)
         assert plan.step == step
         assert not plan.exhausted
 
 
-def test_ladder_exhausted_after_acquire() -> None:
-    """After ACQUIRE attempt, the ladder should be exhausted."""
+def test_ladder_exhausted_after_two_cycles() -> None:
+    """After two full ladder cycles, the ladder should be exhausted (human handoff)."""
     plan = plan_escalation(MAX_ATTAINMENT_ESCALATION_ATTEMPTS)
     assert plan.exhausted
     assert plan.step == EscalationStep.STOP
 
 
-def test_acquire_is_fourth_step() -> None:
-    """ACQUIRE should be the 4th escalation step (index 3)."""
-    plan = plan_escalation(3)
+def test_acquire_is_fifth_step_in_first_cycle() -> None:
+    """ACQUIRE should be the 5th escalation step of cycle 1 (index 4)."""
+    plan = plan_escalation(4)
     assert plan.step == EscalationStep.ACQUIRE
-    assert plan.attempt == 4
+    assert plan.attempt == 5
     assert not plan.exhausted
 
 

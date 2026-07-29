@@ -411,7 +411,7 @@ class TestSubGoal:
 
 
 class TestKPIExtractor:
-    def test_extract_from_criteria(self) -> None:
+    async def test_extract_from_criteria(self) -> None:
         interp = GoalInterpretation(
             objective="test",
             success_criteria={"page_load_ms": 500, "error_rate": 0.01},
@@ -420,10 +420,7 @@ class TestKPIExtractor:
         # for direct extraction from structured criteria
         from unittest.mock import MagicMock
         extractor = KPIExtractor(MagicMock())
-        import asyncio
-        kpis = asyncio.get_event_loop().run_until_complete(
-            extractor.extract(interp)
-        )
+        kpis = await extractor.extract(interp)
         assert len(kpis) == 2
         names = {k.name for k in kpis}
         assert "page_load_ms" in names

@@ -118,3 +118,15 @@ def test_raise_if_failed() -> None:
     result = review_html_for_delivery("<html><body>hi</body></html>")
     with pytest.raises(ValueError, match="delivery-review-v1"):
         result.raise_if_failed()
+
+
+def test_unrendered_jinja_markers_are_rejected() -> None:
+    html = _styled_digest_html().replace(
+        "<h1>Daily Tech Digest</h1>",
+        "<h1>{{ digest_title }}</h1>",
+    )
+    result = review_html_for_delivery(html)
+    assert result.passed is False
+    assert any(
+        c.name == "forbid-unrendered-templates" and not c.passed for c in result.checks
+    )

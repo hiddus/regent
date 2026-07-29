@@ -10,6 +10,8 @@ from time import monotonic
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.budget_ledger import BudgetLedger
+from regent.application.event_engine import EventEngine
 from regent.application.execution_orchestrator import (
     ExecutionOrchestrator,
     get_p1_event_handlers,
@@ -62,6 +64,7 @@ class Worker:
         scheduler_org_keys: list[str] | None = None,
         poll_seconds: float,
         heartbeat_seconds: float,
+        event_engine: EventEngine | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.dispatcher = dispatcher
@@ -74,6 +77,7 @@ class Worker:
         self.scheduler_org_keys = list(scheduler_org_keys or [])
         self.poll_seconds = poll_seconds
         self.heartbeat_seconds = heartbeat_seconds
+        self.event_engine = event_engine
         self._stopping = asyncio.Event()
 
     async def serve(self) -> None:
@@ -83,6 +87,8 @@ class Worker:
         )
         next_heartbeat = monotonic() + self.heartbeat_seconds
         logger.info("worker lease acquired", extra={"worker_id": self.worker_id})
+        if self.event_engine is not None:
+            await self.event_engine.start()
         try:
             while not self._stopping.is_set():
                 if self.permits is not None:
@@ -113,6 +119,9 @@ class Worker:
                 except TimeoutError:
                     continue
         finally:
+            if self.event_engine is not None:
+                with suppress(Exception):
+                    await self.event_engine.stop()
             with suppress(Exception):
                 await self.leases.release(lease)
             logger.info("worker stopped", extra={"worker_id": self.worker_id})
@@ -224,6 +233,7 @@ def create_worker() -> tuple[Worker, object]:
         materializer=materializer,
         deployment_provider=deployment_provider,
         permits=permits,
+        budget_ledger=BudgetLedger(sessions),
     )
     p1_handlers = get_p1_event_handlers(orchestrator)
 
@@ -244,6 +254,9 @@ def create_worker() -> tuple[Worker, object]:
     scheduler_org_keys = [
         item.strip() for item in settings.scheduler_org_keys.split(",") if item.strip()
     ]
+    # Phase 3.3: EventEngine wraps OutboxDispatcher for unified event routing
+    event_engine = EventEngine(sessions)
+    event_engine.register_handlers(p1_handlers)
     worker = Worker(
         worker_id=worker_id,
         dispatcher=dispatcher,
@@ -256,6 +269,7 @@ def create_worker() -> tuple[Worker, object]:
         scheduler_org_keys=scheduler_org_keys,
         poll_seconds=settings.worker_poll_seconds,
         heartbeat_seconds=max(1.0, settings.worker_lease_seconds / 3),
+        event_engine=event_engine,
     )
     return worker, engine
 

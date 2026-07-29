@@ -35,8 +35,8 @@ def test_worker_registers_all_p1_main_chain_events() -> None:
 
 
 def test_event_catalog_contains_all_p1_events() -> None:
-    """Event catalog contains all 14 P1 main chain event types."""
-    assert len(P1_MAIN_CHAIN_EVENTS) == 14
+    """Event catalog contains all 16 P1 main chain event types."""
+    assert len(P1_MAIN_CHAIN_EVENTS) == 16
     expected = {
         "GoalExecutionRequested",
         "DiscoveryRoundRequested",
@@ -52,6 +52,8 @@ def test_event_catalog_contains_all_p1_events() -> None:
         "AppBuildPassed",
         "PreviewDeploymentRequested",
         "PreviewDeploymentSucceeded",
+        "QualityApprovalRequested",
+        "QualityApprovalCompleted",
     }
     assert set(P1_MAIN_CHAIN_EVENTS) == expected
 
@@ -116,8 +118,9 @@ def test_outbox_dead_letter_and_preview_failure_summary_are_persistent() -> None
 
 
 def test_console_starts_goal_and_polls_persistent_progress() -> None:
-    console = Path("apps/regent-console/index.html").read_text(encoding="utf-8")
-    assert "`/v1/goals/${goalId}/start`" in console
-    assert "execution_stage" in console
-    assert "await refresh()" in console
-    assert "},3000)" in console
+    api_src = Path("apps/regent-console/src/lib/api.ts").read_text(encoding="utf-8")
+    hooks_src = Path("apps/regent-console/src/hooks/useWorkspace.ts").read_text(encoding="utf-8")
+    assert "/v1/goals/${goalId}/start" in api_src
+    assert "execution_stage" in hooks_src
+    assert "refresh" in hooks_src
+    assert "3000" in hooks_src

@@ -11,20 +11,30 @@ from regent.application.capability_build_service import (
     build_implementation_package,
 )
 from regent.application.capability_ladder import (
+    ATTAINMENT_LADDER_CYCLES,
     MAX_ATTAINMENT_ESCALATION_ATTEMPTS,
     EscalationStep,
     plan_escalation,
 )
 
 
-def test_ladder_reuses_then_composes_then_builds_then_acquires() -> None:
+def test_ladder_runs_two_cycles_before_stop() -> None:
+    """Unmet goals enumerate a full REUSE→…→ACQUIRE cycle twice before human handoff."""
+    assert ATTAINMENT_LADDER_CYCLES == 2
+    assert MAX_ATTAINMENT_ESCALATION_ATTEMPTS == 10
     assert plan_escalation(0).step is EscalationStep.REUSE
-    assert plan_escalation(1).step is EscalationStep.COMPOSE
-    assert plan_escalation(2).step is EscalationStep.BUILD
-    assert plan_escalation(3).step is EscalationStep.ACQUIRE
-    assert plan_escalation(4).exhausted is True
-    assert plan_escalation(4).step is EscalationStep.STOP
-    assert MAX_ATTAINMENT_ESCALATION_ATTEMPTS == 4
+    assert plan_escalation(1).step is EscalationStep.CONFIGURE
+    assert plan_escalation(2).step is EscalationStep.COMPOSE
+    assert plan_escalation(3).step is EscalationStep.BUILD
+    assert plan_escalation(4).step is EscalationStep.ACQUIRE
+    # Second cycle
+    assert plan_escalation(5).step is EscalationStep.REUSE
+    assert plan_escalation(6).step is EscalationStep.CONFIGURE
+    assert plan_escalation(7).step is EscalationStep.COMPOSE
+    assert plan_escalation(8).step is EscalationStep.BUILD
+    assert plan_escalation(9).step is EscalationStep.ACQUIRE
+    assert plan_escalation(10).exhausted is True
+    assert plan_escalation(10).step is EscalationStep.STOP
 
 
 def test_build_implementation_package_is_verifiable() -> None:

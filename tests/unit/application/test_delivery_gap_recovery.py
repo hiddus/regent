@@ -147,7 +147,7 @@ async def test_recover_routes_evidence_to_http_capability() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recover_escalates_to_compose_on_second_attempt() -> None:
+async def test_recover_escalates_to_configure_on_second_attempt() -> None:
     goal_id = uuid.uuid4()
     composed_id = uuid.uuid4()
     goal = GoalModel(
@@ -193,9 +193,61 @@ async def test_recover_escalates_to_compose_on_second_attempt() -> None:
         )
 
     assert result.recovered is True
+    assert result.method == "CONFIGURE"
+    assert goal.metadata_json["capability_resolution"]["escalation_step"] == EscalationStep.CONFIGURE
+    assert result.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_recover_escalates_to_compose_on_third_attempt() -> None:
+    goal_id = uuid.uuid4()
+    composed_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=1,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        metadata_json={"delivery_gap_recovery_attempts": 2},
+    )
+    factory = _goal_session(goal, None)
+    reorg = _fake_reorg(goal_id)
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.build_attainment_capability",
+            AsyncMock(return_value=composed_id),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+    ):
+        svc = DeliveryGapRecoveryService(factory)
+        svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
+        result = await svc.recover(
+            goal_id=goal_id,
+            project_id=uuid.uuid4(),
+            requirement_revision_id=uuid.uuid4(),
+            capability_resolution_plan_id=uuid.uuid4(),
+            actor="test",
+            gap_reasons=["stylesheet-present: missing"],
+        )
+
+    assert result.recovered is True
     assert result.method == "COMPOSE"
     assert goal.metadata_json["capability_resolution"]["escalation_step"] == EscalationStep.COMPOSE
-    assert result.attempts == 2
+    assert result.attempts == 3
 
 
 @pytest.mark.asyncio
@@ -208,7 +260,7 @@ async def test_recover_stops_after_ladder_exhausted() -> None:
         version=1,
         created_by="test",
         correlation_id=uuid.uuid4(),
-        metadata_json={"delivery_gap_recovery_attempts": 4},
+        metadata_json={"delivery_gap_recovery_attempts": 10},
     )
     factory = _goal_session(goal, None)
 
@@ -239,6 +291,10 @@ async def test_recover_stops_after_ladder_exhausted() -> None:
     assert result.recovered is False
     assert result.terminal_exhaust is True
     assert result.method == "STOP"
+    assert "WAITING_HUMAN" in result.message or "需要你" in result.message
+    assert goal.metadata_json.get("execution_stage") == "WAITING_HUMAN"
+    assert goal.metadata_json.get("awaiting_human_intervention") is True
+    assert goal.metadata_json.get("termination", {}).get("handoff") == "WAITING_HUMAN"
 
 
 @pytest.mark.asyncio

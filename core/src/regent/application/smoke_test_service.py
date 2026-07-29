@@ -2,6 +2,8 @@
 
 Performs an HTTP reachability probe and records an internal observation.
 Internal smoke signals must not satisfy product metric gates.
+
+Phase 4.3: Extended with optional browser journey verification (G6).
 """
 
 import logging
@@ -15,6 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.application.observation_service import ObservationInput, ObservationService
 from regent.config import get_settings
+from regent.infrastructure.browser_journey import (
+    BrowserJourneyRunner,
+    JourneyStep,
+    JourneyStepKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +37,20 @@ class SmokeTestResult:
     checks: list[dict[str, Any]]
     errors: list[str]
     observation_id: uuid.UUID | None = None
+    journey_passed: bool | None = None
+    journey_detail: str = ""
 
 
 class DeploymentSmokeTestService:
     """Post-deployment smoke test for R7 experiential gate."""
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        journey_runner: BrowserJourneyRunner | None = None,
+    ) -> None:
         self._sessions = sessions
+        self._journey_runner = journey_runner
 
     async def run_smoke_test(
         self,
@@ -45,6 +59,7 @@ class DeploymentSmokeTestService:
         endpoint: str,
         *,
         actor: str = "regent-core",
+        journey_steps: list[JourneyStep] | None = None,
     ) -> SmokeTestResult:
         """Run post-deployment smoke test and record an internal observation."""
         checks: list[dict[str, Any]] = []
@@ -111,6 +126,46 @@ class DeploymentSmokeTestService:
         passed = len(errors) == 0
         observation_id: uuid.UUID | None = None
 
+        # Phase 4.3: Browser journey verification (G6)
+        journey_passed: bool | None = None
+        journey_detail = ""
+        if passed and endpoint and self._journey_runner is not None:
+            steps = journey_steps or [
+                JourneyStep(
+                    kind=JourneyStepKind.PAGE_LOAD,
+                    value=endpoint,
+                    description="Load the preview page",
+                ),
+                JourneyStep(
+                    kind=JourneyStepKind.ELEMENT_EXISTS,
+                    selector="main, #root, #app, body",
+                    description="Verify main content area exists",
+                ),
+            ]
+            try:
+                journey_result = await self._journey_runner.run_journey(endpoint, steps)
+                journey_passed = journey_result.passed
+                journey_detail = (
+                    f"{journey_result.passed_steps}/{journey_result.total_steps} steps passed"
+                )
+                if not journey_passed:
+                    errors.append(f"browser journey failed: {journey_detail}")
+                    passed = False
+                checks.append({
+                    "check": "browser_journey",
+                    "passed": journey_passed,
+                    "detail": journey_detail,
+                })
+            except Exception as exc:
+                journey_detail = f"journey error: {exc}"
+                checks.append({
+                    "check": "browser_journey",
+                    "passed": False,
+                    "detail": journey_detail,
+                })
+                errors.append(journey_detail)
+                passed = False
+
         try:
             observation_id = await self._record_observation(
                 goal_id=goal_id,
@@ -133,6 +188,8 @@ class DeploymentSmokeTestService:
             checks=checks,
             errors=errors,
             observation_id=observation_id,
+            journey_passed=journey_passed,
+            journey_detail=journey_detail,
         )
 
     @staticmethod
