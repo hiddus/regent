@@ -203,8 +203,10 @@ def create_app() -> FastAPI:
             "dead_letters_by_type": dl_by_type,
         }
 
-    console_path = Path("/app/apps/regent-console")
-    if console_path.exists():
+    console_path = Path("/app/apps/regent-console/dist")
+    if not console_path.exists():
+        console_path = Path("/app/apps/regent-console")
+    if console_path.exists() and (console_path / "index.html").exists():
         app.mount("/console", StaticFiles(directory=console_path, html=True), name="console")
 
     def preview_file(project_id: uuid.UUID, release_id: uuid.UUID, filename: str) -> FileResponse:
