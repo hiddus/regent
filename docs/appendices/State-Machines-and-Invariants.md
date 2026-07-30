@@ -1,7 +1,7 @@
 # 附录 1：State Machines and Invariants
 
 > 状态：CURRENT  
-> 配套：`Regent-Technical-Spec-v2.md` §5  
+> 配套：`Regent-Technical-Spec.md` §7  
 > 日期：2026-07-22（二次复审：补全实现级表）
 
 ## 1. 通用规则

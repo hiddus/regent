@@ -17,15 +17,16 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 
 ## 开发入口
 
-- [产品需求](./Regent-PRD.md)
+- [产品定义与需求](./Regent-PRD.md)（合并自 Definition-v3 + PRD-v2）
+- [技术架构与实施规范](./Regent-Technical-Spec.md)（合并自 TechSpec-v2 + Architecture-v3）
+- [测量与决策框架](./Regent-Measurement-Decision-Framework.md)
 - [交付计划](./Regent-Plan.md)
 - [P1 Core 能力需求](./docs/p1-core-capability-requirements.md)
-- [P1 最终技术规范](./docs/p1-core-final-technical-spec.md)
 - [AI 业内人员 App 验证合同](./docs/p1-ai-practitioner-validation-contract.md)
 - [文档索引](./docs/README.md)
 - [本地开发](./core/README.md)
 
-编码冲突时：产品语义以 PRD 为准，实现契约以 P1 最终技术规范为准，阶段顺序以 Plan 为准；任何冲突必须通过 ADR 或 DecisionRecord 解决。
+编码冲突时：产品语义以 PRD 为准，技术实现以 Technical-Spec 为准，阶段顺序以 Plan 为准；任何冲突必须通过 ADR 或 DecisionRecord 解决。
 
 ## 仓库结构
 

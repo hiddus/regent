@@ -3,7 +3,7 @@
 > 状态：CURRENT  
 > 日期：2026-07-22（文档收口：对齐定义保护与 P2 承诺层级）  
 > 产品身份：仅引用 [`docs/definitions/REGENT-DEFINITION-1.0.txt`](docs/definitions/REGENT-DEFINITION-1.0.txt)，不重新定义 Regent  
-> 配套：[`Regent-PRD-v2.md`](./Regent-PRD-v2.md) §8（承诺/条件/候选）、[`Regent-Technical-Spec-v2.md`](./Regent-Technical-Spec-v2.md)  
+> 配套：[`Regent-PRD.md`](./Regent-PRD.md) §9（承诺/条件/候选）、[`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md)  
 > 实现阶段：本框架合同服务 **P2-4（承诺）**；P2-5 自适应组织为**条件承诺**，须本框架 DecisionRecord 激活
 
 ## 1. 目的

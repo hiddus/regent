@@ -1,7 +1,7 @@
 # 附录 3：Security, Tenancy and Recovery
 
 > 状态：CURRENT  
-> 配套：`Regent-Technical-Spec-v2.md`、`Regent-PRD-v2.md` §6  
+> 配套：`Regent-Technical-Spec.md`、`Regent-PRD.md` §7  
 > 日期：2026-07-22（二次复审修订）
 
 ## 1. UNTRUSTED_DATA 元数据（强制）

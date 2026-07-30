@@ -2,8 +2,8 @@
 
 > 状态：CURRENT（P2 编码门禁已开）  
 > 日期：2026-07-23（Owner 升 CURRENT + P2Start）  
-> 产品基线：`Regent-PRD-v2.md`（CURRENT）  
-> 技术基线：`Regent-Technical-Spec-v2.md`（CURRENT）  
+> 产品基线：`Regent-PRD.md`（CURRENT）  
+> 技术基线：`Regent-Technical-Spec.md`（CURRENT）  
 > 测量：`Regent-Measurement-Decision-Framework.md`（CURRENT）  
 > 附录：`docs/appendices/*`  
 > P2Start：`docs/P2StartDecisionRecord.json`
@@ -79,7 +79,7 @@ P2-9  能力生态
 
 ## P2-2 … P2-9
 
-与 `Regent-PRD-v2.md` §8 一致。P2-5 依赖 P2-4 Eval（Measurement Framework §8）。P2-3 强制 Memory-delayed PI；P2-5 强制 Agent-to-Agent PI。
+与 `Regent-PRD.md` §9 一致。P2-5 依赖 P2-4 Eval（Measurement Framework §8）。P2-3 强制 Memory-delayed PI；P2-5 强制 Agent-to-Agent PI。
 
 ---
 

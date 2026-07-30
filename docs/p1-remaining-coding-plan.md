@@ -2,9 +2,9 @@
 
 > 状态：ACTIVE / 唯一编码执行清单（对齐 `REGENT-DEFINITION-1.0`）  
 > 日期：2026-07-22  
-> 永久定义：`Regent-PRD-v2.md` §1.1（`REGENT-DEFINITION-1.0`，不得改写）  
-> 产品/验收：`Regent-PRD-v2.md`（CONDITIONAL）§5 Graduation 矩阵  
-> 技术合同：`Regent-Technical-Spec-v2.md` + `docs/appendices/*`  
+> 永久定义：`docs/definitions/REGENT-DEFINITION-1.0.txt`（`REGENT-DEFINITION-1.0`，不得改写）  
+> 产品/验收：`Regent-PRD.md` §6 Graduation 矩阵  
+> 技术合同：`Regent-Technical-Spec.md` + `docs/appendices/*`  
 > 平台路线：`docs/p2-platform-plan.md`  
 > 测量：`Regent-Measurement-Decision-Framework.md`（P2-4，非本阶段开工）
 

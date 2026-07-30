@@ -1,7 +1,7 @@
 # 附录 2：Durable Execution and External Effects
 
 > 状态：CURRENT  
-> 配套：`Regent-Technical-Spec-v2.md` §6–§8  
+> 配套：`Regent-Technical-Spec.md` §8–§10  
 > 日期：2026-07-22（二次复审修订）  
 > **实现阶段：P1/G0（先于 Scheduler）** — 最小 ExternalOperation + Permit + 幂等 + 恢复必须在 Graduation G8 前合入
 

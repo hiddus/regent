@@ -2,6 +2,7 @@
 
 > 状态：唯一有效编码基线  
 > 配套需求：[Regent-PRD.md](./Regent-PRD.md)  
+> 技术规范：[Regent-Technical-Spec.md](./Regent-Technical-Spec.md)  
 > 测量框架：[Regent-Measurement-Decision-Framework.md](./Regent-Measurement-Decision-Framework.md)
 
 ## 1. 实现方式

@@ -9,9 +9,9 @@
 | 文档 | 状态 | 权限 |
 |---|---|---|
 | `definitions/REGENT-DEFINITION-1.0.txt` | FROZEN | 唯一规范定义源，不可原地修改 |
-| `Regent-PRD-v2.md` | CURRENT | 通用产品基线 |
+| `Regent-PRD.md` | CURRENT | 通用产品基线 |
 | `Regent-AAR1-PRD.md` | CURRENT | AAR-1 范围产品权威 |
-| `Regent-Technical-Spec-v2.md` | CURRENT | 通用技术基线 |
+| `Regent-Technical-Spec.md` | CURRENT | 通用技术基线 |
 | `Regent-AAR1-Technical-Spec.md` | CURRENT / CODING-READY | AAR-1 范围技术权威 |
 | `Regent-Measurement-Decision-Framework.md` | CURRENT | 通用 P2-4 测量基线 |
 | `Regent-AAR1-Measurement-Addendum.md` | CURRENT | AAR-1 统计和 Rollout Gate |
