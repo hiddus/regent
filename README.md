@@ -34,7 +34,7 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 |---|---|---|
 | `core/` | Regent 后端核心（FastAPI + Worker），源码包 `core/src/regent` | [core/README.md](./core/README.md) |
 | `capabilities/` | 认证能力池（引导声明 + 解析器/沙箱） | [capabilities/README.md](./capabilities/README.md) |
-| `apps/regent-console/` | Web 控制台（React 19 + Vite + TS） | [apps/regent-console/README.md](./apps/regent-console/README.md) |
+| `apps/regent-console/` | Web 控制台（React 19 + Vite + TS）；对话进度详略、右侧参与 Agent 名册 | [apps/regent-console/README.md](./apps/regent-console/README.md) |
 | `apps/regent-desktop/` | 桌面端封装（Tauri） | [apps/regent-desktop/README.md](./apps/regent-desktop/README.md) |
 | `tests/` | 三层测试：architecture / integration / unit | [tests/README.md](./tests/README.md) |
 | `fixtures/` | 测试与评测固定数据（eval_task_set_v1.json） | [fixtures/README.md](./fixtures/README.md) |

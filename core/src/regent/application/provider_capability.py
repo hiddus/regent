@@ -63,6 +63,16 @@ PROVIDER_CAPABILITY_MATRIX: dict[str, ProviderCapabilityProfile] = {
         ),
         irreversible=True,
     ),
+    "scheduler-dispatch-v1": ProviderCapabilityProfile(
+        name="scheduler-dispatch-v1",
+        capabilities=frozenset(
+            {
+                ProviderCapability.IDEMPOTENT_REPLAY,
+                ProviderCapability.QUERY_BY_OPERATION_KEY,
+            }
+        ),
+        irreversible=True,
+    ),
 }
 
 
