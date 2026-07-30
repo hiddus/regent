@@ -45,7 +45,7 @@ Make sure the Regent API server is running before using the desktop app:
 
 ```bash
 cd ../..
-docker-compose up -d  # or however you start the API server
+docker compose up -d  # or however you start the API server
 ```
 
 ## Features

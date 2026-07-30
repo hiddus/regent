@@ -72,7 +72,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_request: Request, error: DomainError) -> JSONResponse:
-        status_code = 404 if error.code is ErrorCode.NOT_FOUND else 409
+        if error.code is ErrorCode.NOT_FOUND:
+            status_code = 404
+        elif error.code is ErrorCode.FORBIDDEN:
+            status_code = 403
+        else:
+            status_code = 409
         return JSONResponse(
             status_code=status_code,
             content={"error": {"code": error.code.value, "message": error.message}},

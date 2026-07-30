@@ -24,8 +24,9 @@ Regent 的可治理、可审计、可恢复的自主产品生成核心（Python 
 | `operations/` | 运维操作层。 |
 | `experiments/` | 实验平台支撑。 |
 | `capabilities_bootstrap/` | 引导期能力声明 JSON（打包进 wheel，见 `pyproject.toml` 的 `force-include`）。 |
-| `migrations/` | Alembic 数据库迁移（`env.py` + `versions/`）。 |
 | 根 `config.py` | 配置：`get_settings()` 从环境变量读取运行时设置。 |
+
+> 注：Alembic 数据库迁移位于 `core/migrations/`（`env.py` + `versions/`），与 `src/` 同级，不属于 `src/regent` 包。
 
 ## 核心不变式
 

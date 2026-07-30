@@ -22,7 +22,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["mypy>=1.14,<2", "pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "ruff>=0.9,<1"]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.9,<1",
+  "aiosqlite>=0.20,<1",
+]
 
 [project.scripts]
 regent-api = "regent.api.main:run"
@@ -39,6 +45,14 @@ addopts = "-q --basetemp=.pytest_tmp"
 pythonpath = ["core/src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "governance: behavior tests through real governance pipelines (Goal/Work/Run/Evidence/Audit)",
+  "idempotency: replay and duplicate-effect safety",
+  "permit: Permit revoke/expire/fencing/claim behavior",
+  "recovery: lease reclaim, crash recovery, UNKNOWN reconciliation",
+  "eval: Eval harness scoring and DecisionRecord gates",
+  "sandbox: optional real Docker sandbox smoke (may skip without Docker)",
+]
 
 [tool.ruff]
 target-version = "py312"

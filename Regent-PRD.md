@@ -360,6 +360,9 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 - 为单个生成 App 向 Core 添加业务专用模型。
 - 未经认证的开放 Agent/Tool 市场。
 - 支付系统和完整商业化后台（除非作为独立 App Goal）。
+- **Tauri 桌面端**：仓库中若保留骨架，视为探索性非目标；产品交付面仍为 Core + Web Console，桌面端不计入 P0/P1/P2 验收。
+- **自适应自由拓扑 Hive**：默认关闭；仅 `REGENT_AAR1_CERTIFIED_HIVE` opt-in 的固定模板候选，不等于已验证的多 Agent 默认。
+- 下列能力**已登记但未实现**（不得宣称验收）：P2-3 Impact Graph（衰减/批量撤销/循环检测）、P2-5 AgentEnvelope HMAC、G0 ExternalOperation 完整 EO 闭环。
 
 ---
 

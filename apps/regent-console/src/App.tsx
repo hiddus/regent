@@ -152,6 +152,7 @@ export default function App() {
         <MessageList
           messages={ws.messages}
           currentProjectId={ws.currentProject?.id || null}
+          goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
           onConfirm={handleConfirm}
           onTaskAction={handleTaskAction}
         />
@@ -170,6 +171,7 @@ export default function App() {
         project={ws.currentProject}
         status={ws.status}
         messages={ws.messages}
+        liveAction={ws.liveActivity.liveAction}
       />
     </div>
   )

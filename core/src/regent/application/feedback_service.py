@@ -186,10 +186,47 @@ class FeedbackService:
                 status = "PASSED"
             else:
                 status = "FAILED"
+            # Spec §12 hard rule: operational-observation / declared-intent cannot satisfy
+            # a product Gate. Internal traffic that slipped into samples also fails closed.
+            from regent.application.evidence_policy import (
+                EVIDENCE_CLASS_DECLARED_INTENT,
+                EVIDENCE_CLASS_OPERATIONAL_OBSERVATION,
+                evidence_may_satisfy_product_gate,
+            )
+
+            gate_blocker = False
+            for binding in bindings:
+                definition = MetricDefinition.model_validate(binding.definition_json)
+                statement = select(ObservationModel).where(
+                    ObservationModel.goal_id == goal_id,
+                    ObservationModel.metric_name == definition.metric_key,
+                    ObservationModel.definition_version == definition.definition_version,
+                    ObservationModel.source == definition.observation_source,
+                )
+                for obs in await session.scalars(statement):
+                    source_l = str(obs.source or "").lower()
+                    class_hint = EVIDENCE_CLASS_OPERATIONAL_OBSERVATION if (
+                        obs.is_internal
+                        or "operational" in source_l
+                        or "smoke" in source_l
+                        or "monitor" in source_l
+                    ) else (
+                        EVIDENCE_CLASS_DECLARED_INTENT
+                        if "declared" in source_l or "goal-intent" in source_l
+                        else "sourced-observation"
+                    )
+                    if not evidence_may_satisfy_product_gate(class_hint):
+                        gate_blocker = True
+                        break
+                if gate_blocker:
+                    break
+            if status == "PASSED" and gate_blocker:
+                status = "FAILED"
             evidence_payload = {
                 "bindings": [item.definition_hash for item in bindings],
                 "observations": sorted(str(value) for value in observation_ids),
                 "results": results,
+                "product_gate_blocked_forbidden_evidence": gate_blocker,
             }
             input_digest = canonical_hash(
                 {"goal_id": str(goal_id), "deployment_id": str(deployment_id), **evidence_payload}

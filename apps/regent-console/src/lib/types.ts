@@ -31,6 +31,21 @@ export interface Message {
   created_at: string
 }
 
+export type AgentActivity = 'active' | 'ready' | 'waiting' | 'done' | 'failed' | 'idle'
+
+export interface WorkspaceAgent {
+  id: string
+  name: string
+  role: string
+  role_label: string
+  kind: 'core' | 'hive' | 'spec' | 'derived'
+  activity: AgentActivity
+  detail?: string | null
+  is_main?: boolean
+  deployment_status?: string
+  spec_status?: string
+}
+
 export interface GoalStatus {
   goal: {
     id: string
@@ -44,6 +59,7 @@ export interface GoalStatus {
     endpoint?: string
     failure_summary?: string
   } | null
+  agents?: WorkspaceAgent[]
 }
 
 export interface HealthStatus {

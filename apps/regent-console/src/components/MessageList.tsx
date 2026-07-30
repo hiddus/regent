@@ -9,6 +9,7 @@ import { ProgressNodeCard } from './ProgressNodeCard'
 interface MessageListProps {
   messages: Message[]
   currentProjectId?: string | null
+  goalStatus?: string | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onTaskAction: (taskId: string, approved: boolean) => void
 }
@@ -84,7 +85,7 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   )
 }
 
-export function MessageList({ messages, onConfirm, onTaskAction }: MessageListProps) {
+export function MessageList({ messages, goalStatus, onConfirm, onTaskAction }: MessageListProps) {
   if (messages.length === 0) {
     return (
       <section className="messages">
@@ -99,13 +100,20 @@ export function MessageList({ messages, onConfirm, onTaskAction }: MessageListPr
   }
 
   const timeline = buildTimeline(messages)
+  const liveMode = !goalStatus || ['ACTIVE', 'WAITING_HUMAN', 'PAUSED', 'READY', 'BLOCKED', 'EXHAUSTED'].includes(goalStatus)
 
   return (
     <section className="messages">
       <div className="stream">
         {timeline.map((item, idx) => {
           if (item.kind === 'node') {
-            return <ProgressNodeCard key={`node-${item.node.key}-${idx}`} node={item.node} />
+            return (
+              <ProgressNodeCard
+                key={`node-${item.node.key}-${idx}`}
+                node={item.node}
+                liveMode={liveMode}
+              />
+            )
           }
           return (
             <MessageItem

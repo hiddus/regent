@@ -1775,7 +1775,8 @@ class BudgetEntryModel(Base):
     __table_args__ = (
         CheckConstraint(
             "cost_type IN ('model_input_tokens','model_output_tokens',"
-            "'tool_invocation','infrastructure','external_operation')",
+            "'tool_invocation','infrastructure','external_operation',"
+            "'human_minutes','failure_recovery')",
             name="ck_budget_entries_cost_type",
         ),
         CheckConstraint("amount >= 0", name="ck_budget_entries_amount_non_negative"),
