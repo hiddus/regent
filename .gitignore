@@ -25,3 +25,62 @@ check_goal_events.py
 check_resolution.py
 _force_rebuild.py
 _logs.py
+
+# Test temporary data
+.pytest-tmp*/
+.pytest-tmp-*
+patch-test.tmp
+
+# Root-level diagnostic / one-off scripts (never commit)
+/check_*.py
+/_check_*.py
+/fix_*.py
+/debug_*.py
+/q[0-9]*.py
+/_*.py
+/verify_*.py
+/acceptance_*.py
+/archive_dl.py
+/comprehensive_check.py
+/deep_check*.py
+/deploy_health.py
+/detailed_check.py
+/dod_check.py
+/export_*.py
+/extra_data.py
+/final_*.py
+/finalize_*.py
+/full_status.py
+/g8_live_probe.py
+/graduation_harness.py
+/monitor_progress.py
+/product_journey_bootstrap.py
+/redeploy_p1.py
+/replay_deadletters.py
+/schema_check.py
+/setup_cron.py
+/start_*.py
+/status_check.py
+/sync_docs_to_server.py
+/synth_events.py
+
+# Screenshots and images (test artifacts)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+
+# HTML reports (generated artifacts)
+/*.html
+
+# Archive tarballs
+/*.tgz
+
+# Canvas reports at root level
+/console-restructure-report.canvas*
+/v3-freeze-summary.canvas*
+/regent-v3-gap-repair-summary.canvas*
+
+# Cleanup script
+/_cleanup_git.py
