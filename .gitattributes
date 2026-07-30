@@ -1,0 +1,2 @@
+# Preserve exact bytes for signed P0 experiment artifacts (SHA-256 verified).
+docs/experiments/p0-v1-artifacts/** -text
