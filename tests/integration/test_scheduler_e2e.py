@@ -1,172 +1,237 @@
-"""P2-A: Scheduler end-to-end acceptance tests.
+"""P2-A: Scheduler end-to-end acceptance tests (real DB, no AsyncMock session).
 
 Verifies:
-- 20 concurrent Goals within budget
-- High priority preemption
-- Resource exhaustion -> BLOCKED
-- 0 duplicate side effects (EO integration)
+- dispatch_with_eo creates a real ExternalOperation row (PREPARE→DISPATCHING)
+- preempt_with_eo_check refuses when target has DISPATCHING EO
+- preempt_with_eo_check succeeds with correct preempt(queue_entry_id, reason) args
+- Priority ordering helpers remain stable
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from regent.application.scheduler_service import (
-    DEFAULT_POLICY_VERSION,
-    DEFAULT_PRICE_BOOK,
+    SCHEDULER_EO_PROVIDER,
     EnqueueWork,
+    EnsureQuota,
     ScheduleOnce,
     SchedulerService,
+    compute_aging_score,
+)
+from regent.domain.scheduler_states import QueueEntryState
+from regent.domain.states import GoalState, RunState, WorkState
+from regent.infrastructure.models import (
+    ExecutionQueueEntryModel,
+    ExternalOperationModel,
+    GoalModel,
+    RunModel,
+    WorkModel,
 )
 
 
-def _make_mock_sessions():
-    """Create a mock session factory for scheduler tests."""
-    mock_session = AsyncMock()
-    mock_session.begin = MagicMock()
-    mock_session.begin.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.begin.return_value.__aexit__ = AsyncMock(return_value=False)
-
-    mock_sessions = MagicMock()
-    mock_sessions.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_sessions.return_value.__aexit__ = AsyncMock(return_value=False)
-    return mock_sessions, mock_session
+async def _seed_goal_work_run(
+    sessions, *, actor: str = "test-worker"
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    goal_id, work_id, run_id, corr = (uuid.uuid4() for _ in range(4))
+    async with sessions() as session, session.begin():
+        session.add_all(
+            (
+                GoalModel(
+                    id=goal_id,
+                    original_input="scheduler eo fixture",
+                    created_by=actor,
+                    correlation_id=corr,
+                    status=GoalState.ACTIVE.value,
+                    metadata_json={},
+                ),
+                WorkModel(
+                    id=work_id,
+                    goal_id=goal_id,
+                    purpose="scheduler work",
+                    input_refs=[],
+                    acceptance_criteria={},
+                    dependency_ids=[],
+                    priority=5,
+                    budget={},
+                    status=WorkState.RUNNING.value,
+                    correlation_id=corr,
+                    metadata_json={},
+                ),
+                RunModel(
+                    id=run_id,
+                    work_id=work_id,
+                    actor_id=actor,
+                    tool_ref="scheduler:v1",
+                    input_version="sha256:x",
+                    idempotency_key=f"run-{run_id}",
+                    resource_usage={},
+                    status=RunState.RUNNING.value,
+                    correlation_id=corr,
+                ),
+            )
+        )
+    return goal_id, work_id, run_id
 
 
 class TestSchedulerEOIntegration:
-    """P2-A: Scheduler dispatch_with_eo creates ExternalOperation."""
+    """P2-A: Scheduler dispatch_with_eo creates ExternalOperation in DB."""
 
     @pytest.mark.asyncio
-    async def test_dispatch_with_eo_no_entry_returns_not_scheduled(self) -> None:
-        """When no entry is selected, dispatch_with_eo returns not_scheduled."""
-        mock_sessions, mock_session = _make_mock_sessions()
-
-        # Mock schedule_once to return a decision with no selection
-        mock_decision = MagicMock()
-        mock_decision.id = uuid.uuid4()
-        mock_decision.output_json = {
-            "selected_queue_entry_id": None,
-            "reason": "no_schedulable_entry_or_insufficient_quota",
-        }
-
-        svc = SchedulerService(mock_sessions)
-        svc.schedule_once = AsyncMock(return_value=mock_decision)
-
+    async def test_dispatch_with_eo_no_entry_returns_not_scheduled(self, db_sessions) -> None:
+        svc = SchedulerService(db_sessions)
+        await svc.ensure_quota(EnsureQuota(org_key="test-org", resource_name="cpu", limit_amount=4))
         result = await svc.dispatch_with_eo(
             ScheduleOnce(org_key="test-org", actor="test-worker"),
-            operation_key="test-op-key",
+            operation_key="test-op-empty",
         )
         assert result["status"] == "not_scheduled"
         assert result["eo_id"] is None
 
     @pytest.mark.asyncio
-    async def test_dispatch_with_eo_creates_eo_on_success(self) -> None:
-        """When entry is selected, dispatch_with_eo records EO binding."""
-        mock_sessions, mock_session = _make_mock_sessions()
+    async def test_dispatch_with_eo_creates_eo_on_success(self, db_sessions) -> None:
+        actor = "test-worker"
+        goal_id, work_id, _run_id = await _seed_goal_work_run(db_sessions, actor=actor)
+        svc = SchedulerService(db_sessions)
+        await svc.ensure_quota(EnsureQuota(org_key="test-org", resource_name="cpu", limit_amount=8))
+        await svc.enqueue(
+            EnqueueWork(
+                goal_id=goal_id,
+                work_id=work_id,
+                org_key="test-org",
+                base_priority=10,
+                resource_request={"cpu": 1},
+                actor=actor,
+            )
+        )
 
-        decision_id = uuid.uuid4()
-        goal_id = uuid.uuid4()
-        mock_decision = MagicMock()
-        mock_decision.id = decision_id
-        mock_decision.output_json = {
-            "selected_queue_entry_id": str(uuid.uuid4()),
-            "goal_id": str(goal_id),
-            "reason": "scheduled",
-        }
-
-        svc = SchedulerService(mock_sessions)
-        svc.schedule_once = AsyncMock(return_value=mock_decision)
-
+        op_key = f"test-dispatch-{uuid.uuid4().hex[:8]}"
         result = await svc.dispatch_with_eo(
-            ScheduleOnce(org_key="test-org", actor="test-worker"),
-            operation_key="test-dispatch-key",
+            ScheduleOnce(org_key="test-org", actor=actor),
+            operation_key=op_key,
         )
         assert result["status"] == "dispatched_with_eo"
-        assert result["eo_operation_key"] == "test-dispatch-key"
-        assert result["decision_id"] == str(decision_id)
-        # Verify EO binding was recorded in decision output
-        assert mock_decision.output_json["eo_binding"]["bound"] is True
+        assert result["eo_operation_key"] == op_key
+        assert result["eo_provider"] == SCHEDULER_EO_PROVIDER
+        assert result["eo_id"] is not None
+
+        eo_id = uuid.UUID(str(result["eo_id"]))
+        async with db_sessions() as session:
+            eo = await session.get(ExternalOperationModel, eo_id)
+            assert eo is not None
+            assert eo.operation_key == op_key
+            assert eo.provider == SCHEDULER_EO_PROVIDER
+            assert eo.status == "DISPATCHING"
+            assert eo.goal_id == goal_id
+
+            decision = await svc.get_decision(uuid.UUID(str(result["decision_id"])))
+            binding = (decision.output_json or {}).get("eo_binding") or {}
+            assert binding.get("bound") is True
+            assert binding.get("eo_id") == str(eo_id)
+
+            entry = await session.scalar(
+                select(ExecutionQueueEntryModel).where(
+                    ExecutionQueueEntryModel.goal_id == goal_id
+                )
+            )
+            assert entry is not None
+            assert entry.status == QueueEntryState.SCHEDULED.value
 
 
 class TestPreemptWithEOCheck:
-    """P2-A: preempt_with_eo_check refuses if target has DISPATCHING EO."""
+    """P2-A: preempt_with_eo_check refuses DISPATCHING EO; otherwise calls preempt correctly."""
 
     @pytest.mark.asyncio
-    async def test_preempt_refused_when_dispatching_eo_exists(self) -> None:
-        """Preemption is refused when target goal has DISPATCHING EO."""
-        mock_sessions, mock_session = _make_mock_sessions()
+    async def test_preempt_refused_when_dispatching_eo_exists(self, db_sessions) -> None:
+        actor = "test-worker"
+        goal_id, work_id, _run_id = await _seed_goal_work_run(db_sessions, actor=actor)
+        svc = SchedulerService(db_sessions)
+        await svc.ensure_quota(EnsureQuota(org_key="test-org", resource_name="cpu", limit_amount=8))
+        await svc.enqueue(
+            EnqueueWork(
+                goal_id=goal_id,
+                work_id=work_id,
+                org_key="test-org",
+                base_priority=10,
+                resource_request={"cpu": 1},
+                actor=actor,
+            )
+        )
+        op_key = f"block-preempt-{uuid.uuid4().hex[:8]}"
+        dispatched = await svc.dispatch_with_eo(
+            ScheduleOnce(org_key="test-org", actor=actor),
+            operation_key=op_key,
+        )
+        assert dispatched["status"] == "dispatched_with_eo"
 
-        # Mock a DISPATCHING EO
-        mock_eo = MagicMock()
-        mock_eo.id = uuid.uuid4()
-
-        svc = SchedulerService(mock_sessions)
-        svc.list_dispatching_external_ops = AsyncMock(return_value=[mock_eo])
-
-        target_goal_id = uuid.uuid4()
         result = await svc.preempt_with_eo_check(
             org_key="test-org",
-            target_goal_id=target_goal_id,
+            target_goal_id=goal_id,
+            actor=actor,
         )
         assert result["preempted"] is False
         assert "DISPATCHING" in result["reason"]
-        assert result["blocking_ops_count"] == 1
+        assert result["blocking_ops_count"] >= 1
 
     @pytest.mark.asyncio
-    async def test_preempt_allowed_when_no_dispatching_eo(self) -> None:
-        """Preemption proceeds when no DISPATCHING EO exists."""
-        mock_sessions, mock_session = _make_mock_sessions()
+    async def test_preempt_allowed_when_no_dispatching_eo(self, db_sessions) -> None:
+        actor = "test-worker"
+        goal_id, work_id, _run_id = await _seed_goal_work_run(db_sessions, actor=actor)
+        svc = SchedulerService(db_sessions)
+        await svc.ensure_quota(EnsureQuota(org_key="test-org", resource_name="cpu", limit_amount=8))
+        await svc.enqueue(
+            EnqueueWork(
+                goal_id=goal_id,
+                work_id=work_id,
+                org_key="test-org",
+                base_priority=3,
+                resource_request={"cpu": 1},
+                actor=actor,
+            )
+        )
+        # Schedule without EO so entry is SCHEDULED but no DISPATCHING EO.
+        decision = await svc.schedule_once(ScheduleOnce(org_key="test-org", actor=actor))
+        assert (decision.output_json or {}).get("selected_queue_entry_id")
 
-        svc = SchedulerService(mock_sessions)
-        svc.list_dispatching_external_ops = AsyncMock(return_value=[])
-
-        mock_entry = MagicMock()
-        mock_entry.id = uuid.uuid4()
-        svc.preempt = AsyncMock(return_value=mock_entry)
-
-        target_goal_id = uuid.uuid4()
         result = await svc.preempt_with_eo_check(
             org_key="test-org",
-            target_goal_id=target_goal_id,
+            target_goal_id=goal_id,
+            actor=actor,
+            reason="test_preempt",
         )
         assert result["preempted"] is True
-        assert result["preempted_entry_id"] == str(mock_entry.id)
+        assert result.get("preempted_entry_id")
+
+        async with db_sessions() as session:
+            entry = await session.get(
+                ExecutionQueueEntryModel, uuid.UUID(str(result["preempted_entry_id"]))
+            )
+            assert entry is not None
+            assert entry.status == QueueEntryState.QUEUED.value
 
 
 class TestSchedulerConcurrency:
-    """P2-A: 20 concurrent Goals within budget."""
+    """P2-A: enqueue command shape for multi-goal budgets."""
 
     def test_scheduler_handles_20_goals_in_budget(self) -> None:
-        """Verify scheduler can enqueue 20 goals without errors."""
-        mock_sessions, mock_session = _make_mock_sessions()
-        svc = SchedulerService(mock_sessions)
-
-        # Verify the service can be instantiated
-        assert svc is not None
-
-        # Verify 20 enqueue commands can be created
-        commands = []
-        for i in range(20):
-            cmd = EnqueueWork(
+        commands = [
+            EnqueueWork(
                 goal_id=uuid.uuid4(),
                 work_id=uuid.uuid4(),
                 org_key="test-org",
                 base_priority=i % 5,
                 resource_request={"cpu": 1, "memory_mb": 256},
             )
-            commands.append(cmd)
+            for i in range(20)
+        ]
         assert len(commands) == 20
 
     def test_scheduler_priority_ordering(self) -> None:
-        """Higher priority goals should be scheduled first."""
-        from regent.application.scheduler_service import compute_aging_score
-
         now = datetime.now(UTC)
-        # Higher base_priority should yield higher aging score
         score_low = compute_aging_score(1, now, now=now, aging_per_minute=1)
         score_high = compute_aging_score(10, now, now=now, aging_per_minute=1)
         assert score_high > score_low

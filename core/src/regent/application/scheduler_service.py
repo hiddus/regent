@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.external_operation_service import ExternalOperationService
 from regent.application.p1_contracts import canonical_hash
 from regent.application.permit_service import PermitBinding, PermitService
 from regent.domain.errors import DomainError, ErrorCode
@@ -28,6 +29,8 @@ from regent.infrastructure.models import (
     SchedulingDecisionModel,
     WorkModel,
 )
+
+SCHEDULER_EO_PROVIDER = "scheduler-dispatch-v1"
 
 DEFAULT_POLICY_VERSION = "goal-priority-v1"
 DEFAULT_PRICE_BOOK = "price-book-v1"
@@ -691,15 +694,15 @@ class SchedulerService:
         command: ScheduleOnce,
         *,
         operation_key: str | None = None,
-        provider: str = "scheduler",
+        provider: str = SCHEDULER_EO_PROVIDER,
     ) -> dict[str, Any]:
-        """Schedule + record ExternalOperation binding in decision metadata.
+        """Schedule once, then create a real ExternalOperation row (G0).
 
-        Returns a dict with decision_id, eo binding info, and status.
-        If scheduling fails (no entry selected), returns decision info only.
+        Returns decision/eo status. Creates Permit → claim → prepare → begin_dispatch
+        so the EO is DISPATCHING and visible to preempt_with_eo_check.
         """
         decision = await self.schedule_once(command)
-        output = decision.output_json or {}
+        output = dict(decision.output_json or {})
         selected_id = output.get("selected_queue_entry_id")
         if not selected_id:
             return {
@@ -709,32 +712,126 @@ class SchedulerService:
                 "reason": output.get("reason"),
             }
 
-        # Record EO binding in decision output
-        goal_id_raw = output.get("goal_id")
-        op_key = operation_key or f"dispatch:{decision.id}"
-        import hashlib
+        work_raw = output.get("work_id")
+        goal_raw = output.get("goal_id")
+        if not work_raw or not goal_raw:
+            return {
+                "decision_id": str(decision.id),
+                "eo_id": None,
+                "status": "scheduled_without_eo",
+                "reason": "selected entry missing work_id/goal_id for EO binding",
+                "entry_id": str(selected_id),
+            }
 
-        request_digest = hashlib.sha256(
-            f"{op_key}:{decision.id}".encode()
-        ).hexdigest()[:64]
+        work_id = uuid.UUID(str(work_raw))
+        goal_id = uuid.UUID(str(goal_raw))
+        op_key = operation_key or f"scheduler-dispatch:{decision.id}"
+        eo_provider = provider or SCHEDULER_EO_PROVIDER
 
-        # Update decision output with EO binding info
-        decision.output_json = {
-            **output,
-            "eo_binding": {
-                "operation_key": op_key,
-                "provider": provider,
-                "request_digest": request_digest,
-                "bound": True,
-            },
+        existing = await ExternalOperationService(self._sessions).get_by_operation_key(op_key)
+        if existing is not None:
+            await self._persist_eo_binding(
+                decision_id=decision.id,
+                output=output,
+                eo_id=existing.id,
+                operation_key=op_key,
+                provider=existing.provider,
+                request_digest=existing.request_digest,
+            )
+            return {
+                "decision_id": str(decision.id),
+                "eo_id": str(existing.id),
+                "eo_operation_key": op_key,
+                "eo_provider": existing.provider,
+                "status": "dispatched_with_eo",
+                "idempotent": True,
+            }
+
+        permit_id_raw = await self._request_dispatch_permit(
+            work_id=work_id,
+            decision_id=decision.id,
+            actor=command.actor,
+        )
+        if permit_id_raw is None:
+            return {
+                "decision_id": str(decision.id),
+                "eo_id": None,
+                "status": "scheduled_without_eo",
+                "reason": "no active run for work; cannot bind EO permit",
+                "entry_id": str(selected_id),
+            }
+
+        permit_id = uuid.UUID(permit_id_raw)
+        permits = PermitService(self._sessions)
+        claimed = await permits.claim(permit_id, actor_id=command.actor)
+        payload = {
+            "decision_id": str(decision.id),
+            "queue_entry_id": str(selected_id),
+            "goal_id": str(goal_id),
+            "work_id": str(work_id),
+            "org_key": command.org_key,
         }
-
+        eos = ExternalOperationService(self._sessions)
+        prepared = await eos.prepare(
+            operation_key=op_key,
+            provider=eo_provider,
+            action="scheduler.dispatch",
+            permit_id=claimed.id,
+            local_fencing_token=claimed.nonce,
+            payload=payload,
+            goal_id=goal_id,
+            causation_id=str(decision.id),
+        )
+        dispatching = await eos.begin_dispatch(
+            prepared.id,
+            worker_lease_token=f"scheduler:{command.actor}:{decision.id}",
+            expected_fencing_token=claimed.nonce,
+        )
+        await self._persist_eo_binding(
+            decision_id=decision.id,
+            output=output,
+            eo_id=dispatching.id,
+            operation_key=op_key,
+            provider=eo_provider,
+            request_digest=None,
+        )
         return {
             "decision_id": str(decision.id),
+            "eo_id": str(dispatching.id),
             "eo_operation_key": op_key,
-            "eo_provider": provider,
+            "eo_provider": eo_provider,
             "status": "dispatched_with_eo",
+            "eo_status": dispatching.status,
         }
+
+    async def _persist_eo_binding(
+        self,
+        *,
+        decision_id: uuid.UUID,
+        output: dict[str, Any],
+        eo_id: uuid.UUID,
+        operation_key: str,
+        provider: str,
+        request_digest: str | None,
+    ) -> None:
+        async with self._sessions() as session, session.begin():
+            decision = await session.get(SchedulingDecisionModel, decision_id)
+            if decision is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "scheduling decision not found")
+            digest = request_digest
+            if digest is None:
+                eo = await session.get(ExternalOperationModel, eo_id)
+                digest = eo.request_digest if eo is not None else ""
+            decision.output_json = {
+                **output,
+                "eo_binding": {
+                    "eo_id": str(eo_id),
+                    "operation_key": operation_key,
+                    "provider": provider,
+                    "request_digest": digest,
+                    "bound": True,
+                },
+            }
 
     async def preempt_with_eo_check(
         self,
@@ -742,13 +839,9 @@ class SchedulerService:
         org_key: str,
         target_goal_id: uuid.UUID,
         actor: str = "worker:scheduler",
+        reason: str = "priority_preemption",
     ) -> dict[str, Any]:
-        """Preempt a lower-priority goal, but refuse if it has a DISPATCHING EO.
-
-        This prevents preempting a goal that is mid-dispatch (would cause
-        duplicate side effects).
-        """
-        # Check for DISPATCHING EOs on the target goal
+        """Preempt a SCHEDULED entry for goal, refuse if goal has DISPATCHING EO."""
         dispatching_ops = await self.list_dispatching_external_ops(goal_id=target_goal_id)
         if dispatching_ops:
             return {
@@ -758,18 +851,36 @@ class SchedulerService:
                 "blocking_op_ids": [str(op.id) for op in dispatching_ops],
             }
 
-        # Safe to preempt — delegate to existing preempt logic
+        async with self._sessions() as session:
+            entry = await session.scalar(
+                select(ExecutionQueueEntryModel)
+                .where(
+                    ExecutionQueueEntryModel.org_key == org_key,
+                    ExecutionQueueEntryModel.goal_id == target_goal_id,
+                    ExecutionQueueEntryModel.status == QueueEntryState.SCHEDULED.value,
+                )
+                .order_by(ExecutionQueueEntryModel.enqueued_at.desc())
+                .limit(1)
+            )
+        if entry is None:
+            return {
+                "preempted": False,
+                "reason": "no SCHEDULED queue entry for goal",
+            }
+
         try:
-            result = await self.preempt(
+            record = await self.preempt(
                 org_key=org_key,
-                target_goal_id=target_goal_id,
+                queue_entry_id=entry.id,
+                reason=reason,
                 actor=actor,
             )
             return {
                 "preempted": True,
-                "preempted_entry_id": str(result.id) if result else None,
+                "preempted_entry_id": str(record.queue_entry_id),
+                "preemption_record_id": str(record.id),
             }
-        except Exception as exc:
+        except DomainError as exc:
             return {
                 "preempted": False,
                 "reason": str(exc),

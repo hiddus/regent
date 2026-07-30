@@ -150,3 +150,30 @@ def test_runner_playwright_check() -> None:
     runner = BrowserJourneyRunner()
     # In test environment, Playwright may or may not be installed
     assert isinstance(runner.playwright_available, bool)
+
+
+@pytest.mark.asyncio
+async def test_real_playwright_journey_when_available(tmp_path) -> None:
+    """When Playwright+Chromium are installed, exercise a real browser gate (not dry-run)."""
+    runner = BrowserJourneyRunner()
+    if not runner.playwright_available:
+        pytest.skip("Playwright not installed; R7 remains dry-run (Spec §25 known limit)")
+
+    html = tmp_path / "preview.html"
+    html.write_text("<html><body><main id='app'>ok</main></body></html>", encoding="utf-8")
+    # file:// URLs work with Chromium for local fixture pages
+    preview_url = html.resolve().as_uri()
+    steps = [
+        JourneyStep(kind=JourneyStepKind.PAGE_LOAD, value=preview_url, description="load fixture"),
+        JourneyStep(
+            kind=JourneyStepKind.ELEMENT_EXISTS,
+            selector="main#app",
+            description="core content present",
+        ),
+    ]
+    result = await runner.run_journey(preview_url, steps)
+    assert result.passed is True
+    assert result.total_steps == 2
+    assert result.passed_steps == 2
+    for step_result in result.steps:
+        assert "dry-run" not in step_result.detail

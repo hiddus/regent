@@ -573,14 +573,14 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
 - **确认后自主执行闭环**：Confirm/Start 分离、Outbox 指数退避与死信（0022）。
 - **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 可经 `REGENT_AAR1_CERTIFIED_HIVE` 启用；**默认仍为强单 Agent**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
-- **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局，产物面板。
+- **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局；右侧以 `status.agents` + SSE/`live_action` 驱动参与 Agent 名册与对话进度卡详略，产物与预览为可折叠次要区（见 `apps/regent-console/README.md`）。
 - **桌面端（探索性）**：Tauri 桌面应用骨架存在于仓库；PRD 主交付范围为 Core + Web Console，桌面端未纳入 P0/P1 验收。
 
 ### 已知非阻塞限制
 
-1. ReleaseCandidate 在 P1 执行链上自动批准（跳过人工任务）。
-2. 完整浏览器级 R7 gate：无 Playwright 时 `browser_journey` 为 dry-run（步骤标记 passed，非真浏览器验收）。
-3. ExternalOperation 完整闭环需在 G0 合入。
+1. ReleaseCandidate 在 P1 执行链上自动批准（跳过人工任务）；人工批准 API 可用，默认不强制（见 `docs/registered-unimplemented-2026-07-30.md`）。
+2. 完整浏览器级 R7 gate：无 Playwright 时 `browser_journey` 为 dry-run（步骤标记 passed，非真浏览器验收）；有 Playwright 时执行真实旅程。
+3. ExternalOperation 完整闭环需在 G0 合入；调度路径 `dispatch_with_eo` 已创建真实 EO 行（`scheduler-dispatch-v1`），但不替代完整 provider 对账闭环。
 4. Eval Harness 已改为交付信号/Goal 证据评分（无 `hash%2` 桩），`decide` 写入签名 `product_decision_record`；北极星/护栏提供只读报告 API（`/v1/governance/north-star`）。P0 完成定义第 5 条仍要求冻结任务集上的真实 A/B/C 对照与唯一产品 DecisionRecord，不得仅凭模块存在或夹具信号宣称已满足。
 
 > 更正（2026-07-30）：此前误报「Evidence Connector 仍为空实现」「Deployment Provider 为内存实现」。现状为 `AllowlistedHttpEvidenceConnector` / `GoalIntentEvidenceConnector` 已接线；生产预览为 `StaticPreviewDeploymentProvider`（`InMemoryDeploymentProvider` 仅测试用）。
