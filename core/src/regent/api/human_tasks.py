@@ -8,16 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from regent.application.execution_events import (
-    QUALITY_APPROVAL_COMPLETED,
-    RELEASE_APPROVAL_COMPLETED,
-    EventEnvelope,
-    make_idempotency_key,
-    make_outbox_event,
-)
 from regent.application.human_task_service import HumanTaskService
 from regent.domain.errors import DomainError
-from regent.infrastructure.models import HumanTaskModel
+from regent.infrastructure.models import (
+    ConversationMessageModel,
+    ConversationModel,
+    GoalModel,
+    HumanTaskModel,
+)
 
 router = APIRouter(prefix="/v1", tags=["human-tasks"])
 
@@ -112,8 +110,8 @@ async def complete_human_task(
 ) -> HumanTaskResponse:
     """Complete a pending human task.
 
-    For QUALITY_APPROVAL tasks, emits a QUALITY_APPROVAL_COMPLETED event
-    so the orchestrator can ACHIEVE or EXHAUST the goal.
+    Side effects (outbox gate events + live_action) live in HumanTaskService.complete
+    so chat APPROVE and this HTTP path behave the same for RELEASE/QUALITY gates.
     """
     service = HumanTaskService(request.app.state.sessions)
     try:
@@ -127,74 +125,53 @@ async def complete_human_task(
             status_code=status.HTTP_409_CONFLICT,
             detail=exc.message,
         ) from exc
+
     async with request.app.state.sessions() as session:
         row = await session.get(HumanTaskModel, task_id)
         if row is None:
             raise HTTPException(status_code=404, detail="human task not found")
 
-        # GAC-Q1: Emit event for quality approval tasks
-        if row.task_type == "QUALITY_APPROVAL":
-            approved = bool(payload.response.get("approved", True))
-            feedback = str(payload.response.get("feedback", ""))
-            goal_id = row.goal_id
-            event_idempotency = make_idempotency_key(
-                "quality_approval_completed", goal_id, str(task_id)
+        # Record a chat-surface result so progress nodes / TaskCard clear after refresh.
+        decision = str(payload.response.get("decision", "")).upper()
+        approved = decision == "APPROVE" or bool(payload.response.get("approved", False))
+        if decision == "REJECT":
+            approved = False
+        goal = await session.get(GoalModel, row.goal_id)
+        project_id = goal.app_project_id if goal is not None else None
+        if project_id is not None:
+            conversation = await session.scalar(
+                select(ConversationModel).where(ConversationModel.app_project_id == project_id)
             )
-            outbox_event = make_outbox_event(
-                EventEnvelope(
-                    event_type=QUALITY_APPROVAL_COMPLETED,
-                    aggregate_type="goal",
-                    aggregate_id=goal_id,
-                    aggregate_version=0,
-                    payload={
-                        "goal_id": str(goal_id),
-                        "task_id": str(task_id),
-                        "approved": approved,
-                        "feedback": feedback,
-                        "actor": payload.assigned_to,
-                    },
-                    idempotency_key=event_idempotency,
-                    correlation_id=uuid.uuid4(),
+            if conversation is not None:
+                last = await session.scalar(
+                    select(ConversationMessageModel.ordinal)
+                    .where(ConversationMessageModel.conversation_id == conversation.id)
+                    .order_by(ConversationMessageModel.ordinal.desc())
+                    .limit(1)
                 )
-            )
-            session.add(outbox_event)
-
-        if row.task_type == "RELEASE_APPROVAL":
-            decision = str(payload.response.get("decision", "")).upper()
-            approved = decision == "APPROVE" or bool(payload.response.get("approved", False))
-            goal_id = row.goal_id
-            pending: dict[str, Any] = {}
-            from regent.infrastructure.models import GoalModel
-
-            goal = await session.get(GoalModel, goal_id)
-            if goal is not None:
-                pending = dict((goal.metadata_json or {}).get("pending_release") or {})
-            event_idempotency = make_idempotency_key(
-                "release_approval_completed", goal_id, str(task_id)
-            )
-            outbox_event = make_outbox_event(
-                EventEnvelope(
-                    event_type=RELEASE_APPROVAL_COMPLETED,
-                    aggregate_type="goal",
-                    aggregate_id=goal_id,
-                    aggregate_version=0,
-                    payload={
-                        "goal_id": str(goal_id),
-                        "task_id": str(task_id),
-                        "approved": approved,
-                        "actor": payload.assigned_to,
-                        "release_candidate_id": pending.get("release_candidate_id"),
-                        "app_project_id": pending.get("app_project_id"),
-                        "idempotency_key": pending.get("idempotency_key"),
-                        "correlation_id": pending.get("correlation_id"),
-                    },
-                    idempotency_key=event_idempotency,
-                    correlation_id=uuid.uuid4(),
+                content = (
+                    f"已批准任务: {row.task_type}"
+                    if approved
+                    else f"已拒绝任务: {row.task_type}"
                 )
-            )
-            session.add(outbox_event)
-
-        await session.commit()
+                session.add(
+                    ConversationMessageModel(
+                        id=uuid.uuid4(),
+                        conversation_id=conversation.id,
+                        ordinal=(last or 0) + 1,
+                        role="ASSISTANT",
+                        message_type="APPROVE_RESULT" if approved else "REJECT_RESULT",
+                        content=content,
+                        metadata_json={
+                            "task_id": str(task_id),
+                            "task_type": row.task_type,
+                            "approved": approved,
+                            "source": "human-tasks-api",
+                        },
+                        created_by=payload.assigned_to,
+                    )
+                )
+                await session.commit()
 
         return HumanTaskResponse(
             id=row.id,

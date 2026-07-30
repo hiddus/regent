@@ -2211,6 +2211,10 @@ class ExecutionOrchestrator:
                 }
                 goal.metadata_json = metadata
 
+        release_prompt = (
+            f"Approve preview release candidate for build {build_id}. "
+            "Respond with decision=APPROVE or decision=REJECT."
+        )
         await self._halt_goal_stage(
             goal_id,
             project_id,
@@ -2223,8 +2227,11 @@ class ExecutionOrchestrator:
             actor=actor,
             event_type="HUMAN_TASK_REQUIRED",
             extra={
-                "release_candidate_id": str(candidate.id),
+                "id": str(task_id),
                 "human_task_id": str(task_id),
+                "task_type": "RELEASE_APPROVAL",
+                "prompt": release_prompt,
+                "release_candidate_id": str(candidate.id),
             },
         )
 

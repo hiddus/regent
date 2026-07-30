@@ -5,9 +5,18 @@ from typing import Any, cast
 from sqlalchemy import func, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
+from regent.application.execution_events import (
+    QUALITY_APPROVAL_COMPLETED,
+    RELEASE_APPROVAL_COMPLETED,
+    EventEnvelope,
+    make_idempotency_key,
+    make_outbox_event,
+)
+from regent.application.live_action import merge_live_action_into_metadata
 from regent.domain.errors import DomainError, ErrorCode
-from regent.infrastructure.models import HumanTaskModel
+from regent.infrastructure.models import GoalModel, HumanTaskModel, ReleaseCandidateModel
 
 
 class HumanTaskService:
@@ -51,6 +60,11 @@ class HumanTaskService:
         assigned_to: str,
         response: dict[str, Any],
     ) -> None:
+        """Mark task COMPLETED and emit gate-completion outbox events when needed.
+
+        Chat guidance and HTTP `/human-tasks/{id}/complete` both call this path so
+        RELEASE_APPROVAL / QUALITY_APPROVAL always resume the orchestrator.
+        """
         async with self._sessions() as session, session.begin():
             result = cast(
                 CursorResult[Any],
@@ -71,6 +85,147 @@ class HumanTaskService:
             )
             if result.rowcount != 1:
                 raise DomainError(ErrorCode.INVALID_STATE, "human task is unavailable or expired")
+
+            row = await session.get(HumanTaskModel, task_id)
+            if row is None:
+                return
+            await self._emit_gate_completion_events(
+                session, row, assigned_to=assigned_to, response=response
+            )
+
+    @staticmethod
+    def _response_approved(response: dict[str, Any]) -> bool:
+        decision = str(response.get("decision", "")).upper()
+        if decision == "APPROVE":
+            return True
+        if decision == "REJECT":
+            return False
+        return bool(response.get("approved", False))
+
+    async def _emit_gate_completion_events(
+        self,
+        session: AsyncSession,
+        row: HumanTaskModel,
+        *,
+        assigned_to: str,
+        response: dict[str, Any],
+    ) -> None:
+        goal_id = row.goal_id
+        task_id = row.id
+        approved = self._response_approved(response)
+
+        if row.task_type == "QUALITY_APPROVAL":
+            feedback = str(response.get("feedback", ""))
+            event_idempotency = make_idempotency_key(
+                "quality_approval_completed", goal_id, str(task_id)
+            )
+            session.add(
+                make_outbox_event(
+                    EventEnvelope(
+                        event_type=QUALITY_APPROVAL_COMPLETED,
+                        aggregate_type="goal",
+                        aggregate_id=goal_id,
+                        aggregate_version=0,
+                        payload={
+                            "goal_id": str(goal_id),
+                            "task_id": str(task_id),
+                            "approved": approved,
+                            "feedback": feedback,
+                            "actor": assigned_to,
+                        },
+                        idempotency_key=event_idempotency,
+                        correlation_id=uuid.uuid4(),
+                    )
+                )
+            )
+
+        if row.task_type == "RELEASE_APPROVAL":
+            pending: dict[str, Any] = {}
+            goal = await session.get(GoalModel, goal_id)
+            if goal is not None:
+                meta = dict(goal.metadata_json or {})
+                pending = dict(meta.get("pending_release") or {})
+                meta["awaiting_human_intervention"] = False
+                summary = (
+                    "已确认，正在继续部署预览"
+                    if approved
+                    else "已拒绝预览发布，等待后续处理"
+                )
+                goal.metadata_json = merge_live_action_into_metadata(
+                    meta,
+                    summary,
+                    stage="RELEASE_APPROVED" if approved else "RELEASE_REJECTED",
+                    event_type="RELEASE_APPROVAL_COMPLETED",
+                )
+                flag_modified(goal, "metadata_json")
+            event_idempotency = make_idempotency_key(
+                "release_approval_completed", goal_id, str(task_id)
+            )
+            session.add(
+                make_outbox_event(
+                    EventEnvelope(
+                        event_type=RELEASE_APPROVAL_COMPLETED,
+                        aggregate_type="goal",
+                        aggregate_id=goal_id,
+                        aggregate_version=0,
+                        payload={
+                            "goal_id": str(goal_id),
+                            "task_id": str(task_id),
+                            "approved": approved,
+                            "actor": assigned_to,
+                            "release_candidate_id": pending.get("release_candidate_id"),
+                            "app_project_id": pending.get("app_project_id"),
+                            "idempotency_key": pending.get("idempotency_key"),
+                            "correlation_id": pending.get("correlation_id"),
+                        },
+                        idempotency_key=event_idempotency,
+                        correlation_id=uuid.uuid4(),
+                    )
+                )
+            )
+
+    async def reemit_stuck_release_approval(
+        self,
+        goal_id: uuid.UUID,
+        *,
+        assigned_to: str,
+    ) -> dict[str, str] | None:
+        """Re-emit ReleaseApprovalCompleted when task is COMPLETED but deploy never resumed.
+
+        Covers the pre-fix chat APPROVE path that marked the task done without outbox.
+        """
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                return None
+            meta = dict(goal.metadata_json or {})
+            pending = dict(meta.get("pending_release") or {})
+            task_id_raw = pending.get("human_task_id")
+            if not task_id_raw:
+                return None
+            task_id = uuid.UUID(str(task_id_raw))
+            row = await session.get(HumanTaskModel, task_id)
+            if row is None or row.task_type != "RELEASE_APPROVAL" or row.status != "COMPLETED":
+                return None
+            candidate_raw = pending.get("release_candidate_id")
+            if candidate_raw:
+                candidate = await session.get(
+                    ReleaseCandidateModel, uuid.UUID(str(candidate_raw))
+                )
+                if candidate is not None and candidate.status in {"APPROVED", "REJECTED"}:
+                    return None
+            response = dict(row.response or {})
+            if "decision" not in response and response.get("approved"):
+                response["decision"] = "APPROVE"
+                row.response = response
+                flag_modified(row, "response")
+            await self._emit_gate_completion_events(
+                session,
+                row,
+                assigned_to=assigned_to,
+                response=response,
+            )
+            return {"task_id": str(task_id), "task_type": row.task_type}
 
     async def timeout_due(self) -> int:
         async with self._sessions() as session, session.begin():

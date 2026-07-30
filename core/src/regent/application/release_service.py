@@ -141,12 +141,12 @@ class ReleaseService:
                 )
             if candidate.human_task_id is not None:
                 task = await session.get(HumanTaskModel, candidate.human_task_id)
-                if (
-                    task is None
-                    or task.status != "COMPLETED"
-                    or not task.response
-                    or task.response.get("decision") != "APPROVE"
-                ):
+                response = task.response if task is not None else None
+                decision = str((response or {}).get("decision", "")).upper()
+                approved = decision == "APPROVE" or bool((response or {}).get("approved", False))
+                if decision == "REJECT":
+                    approved = False
+                if task is None or task.status != "COMPLETED" or not response or not approved:
                     raise DomainError(
                         ErrorCode.POLICY_DENIED, "release approval task is incomplete"
                     )

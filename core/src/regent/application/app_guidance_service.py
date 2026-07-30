@@ -1146,6 +1146,26 @@ class AppGuidanceService:
         pending = context.get("pending_human_tasks", [])
 
         if not pending:
+            # Recovery: RELEASE_APPROVAL was COMPLETED (e.g. chat path before fix)
+            # but ReleaseApprovalCompleted never resumed the pipeline.
+            resumed = await HumanTaskService(self._sessions).reemit_stuck_release_approval(
+                goal_id, assigned_to=actor
+            )
+            if resumed is not None:
+                response = (
+                    f"已重新触发批准后续: {resumed['task_type']}\n"
+                    f"任务 {resumed['task_id']} 将继续部署。"
+                )
+                return await self._persist_simple(
+                    project_id, message, actor, interpretation, model, response,
+                    assistant_type="APPROVE_RESULT",
+                    assistant_metadata={
+                        "task_id": resumed["task_id"],
+                        "task_type": resumed["task_type"],
+                        "approved": True,
+                        "recovered": True,
+                    },
+                )
             # If goal is WAITING_HUMAN but no HumanTask records, try transitioning
             goal_status = str(context["goal"]["status"])
             if goal_status == "WAITING_HUMAN":
@@ -1174,7 +1194,7 @@ class AppGuidanceService:
         await HumanTaskService(self._sessions).complete(
             task_id,
             assigned_to=actor,
-            response={"approved": True, "message": message},
+            response={"approved": True, "decision": "APPROVE", "message": message},
         )
 
         # If goal is WAITING_HUMAN, transition to ACTIVE
@@ -1203,7 +1223,12 @@ class AppGuidanceService:
             user_msg = await self._persist_message_pair(
                 session, conversation.id, ordinal, message, actor,
                 response, "APPROVE_RESULT",
-                {"command_id": str(command_id), "task_id": str(task_id)},
+                {
+                    "command_id": str(command_id),
+                    "task_id": str(task_id),
+                    "task_type": pending[0].get("task_type"),
+                    "approved": True,
+                },
             )
             cid = await self._persist_command(
                 session, conversation.id, project_id, user_msg.id,
@@ -1226,12 +1251,18 @@ class AppGuidanceService:
         pending = context.get("pending_human_tasks", [])
         reason = interpretation.rejection_reason or message
 
+        task_id: uuid.UUID | None = None
         if pending:
             task_id = uuid.UUID(pending[0]["id"])
             await HumanTaskService(self._sessions).complete(
                 task_id,
                 assigned_to=actor,
-                response={"approved": False, "rejection_reason": reason, "message": message},
+                response={
+                    "approved": False,
+                    "decision": "REJECT",
+                    "rejection_reason": reason,
+                    "message": message,
+                },
             )
 
         goal_status = str(context["goal"]["status"])
@@ -1259,7 +1290,13 @@ class AppGuidanceService:
             user_msg = await self._persist_message_pair(
                 session, conversation.id, ordinal, message, actor,
                 response, "REJECT_RESULT",
-                {"command_id": str(command_id), "goal_id": str(goal_id), "reason": reason},
+                {
+                    "command_id": str(command_id),
+                    "goal_id": str(goal_id),
+                    "reason": reason,
+                    "task_id": str(task_id) if task_id else None,
+                    "approved": False,
+                },
             )
             cid = await self._persist_command(
                 session, conversation.id, project_id, user_msg.id,
@@ -1467,6 +1504,9 @@ class AppGuidanceService:
         interpretation: GuidanceInterpretation,
         model: str,
         response: str,
+        *,
+        assistant_type: str | None = None,
+        assistant_metadata: dict[str, Any] | None = None,
     ) -> GuidanceReceipt:
         command_id = uuid.uuid4()
         async with self._sessions() as session, session.begin():
@@ -1485,6 +1525,7 @@ class AppGuidanceService:
             session.add(user_message)
             await session.flush()
             payload = interpretation.model_dump(mode="json")
+            msg_type = assistant_type or f"{interpretation.command_type}_RESULT"
             session.add_all(
                 (
                     ConversationCommandModel(
@@ -1505,9 +1546,9 @@ class AppGuidanceService:
                         conversation_id=conversation.id,
                         ordinal=ordinal + 1,
                         role="ASSISTANT",
-                        message_type=f"{interpretation.command_type}_RESULT",
+                        message_type=msg_type,
                         content=response,
-                        metadata_json={"command_id": str(command_id)},
+                        metadata_json=assistant_metadata or {"command_id": str(command_id)},
                         created_by="regent-core",
                     ),
                 )

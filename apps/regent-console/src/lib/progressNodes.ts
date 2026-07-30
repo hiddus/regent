@@ -145,6 +145,8 @@ const STAGES: StageDef[] = [
     title: '需要你确认',
     events: {
       HUMAN_TASK_REQUIRED: { status: 'waiting', conclusion: '有一个步骤需要你确认' },
+      APPROVE_RESULT: { status: 'done', conclusion: '你已确认，正在继续' },
+      REJECT_RESULT: { status: 'failed', conclusion: '你已拒绝该步骤' },
       DELIVERY_GAP_EXHAUSTED: { status: 'waiting', conclusion: '自动修复已用尽，需要你介入' },
       RESEARCH_MORE_ADAPT_EXHAUSTED: { status: 'waiting', conclusion: '调研取证已用尽，需要你介入' },
     },
@@ -183,6 +185,8 @@ export function isProgressEvent(m: Message): boolean {
   return TYPE_INDEX.has(m.message_type) && m.message_type !== 'APP_CONFIRMATION_REQUIRED'
     && m.message_type !== 'HUMAN_TASK_REQUIRED'
     && m.message_type !== 'CORRECTION_APPLIED'
+    && m.message_type !== 'APPROVE_RESULT'
+    && m.message_type !== 'REJECT_RESULT'
 }
 
 /** Interactive / chat messages that remain as bubbles */
@@ -307,6 +311,18 @@ export function buildProgressNodes(messages: Message[]): ProgressNode[] {
       if (!node.conclusion || node.conclusion.includes('正在')) {
         node.conclusion = `${node.title.replace(/你的|想法/g, '').trim() || node.title}已完成`
       }
+    }
+  }
+  // Human gate resolved by later pipeline progress (preview/verify/outcome).
+  const human = byKey.get('human')
+  if (human && human.status === 'waiting') {
+    const laterKeys: NodeKey[] = ['preview', 'verify', 'milestone', 'outcome']
+    if (laterKeys.some(k => {
+      const n = byKey.get(k)
+      return n && (n.status === 'done' || n.status === 'running')
+    })) {
+      human.status = 'done'
+      human.conclusion = '你已确认，流程已继续'
     }
   }
   // If understand never got GOAL_CONFIRMED but execution queued, mark done.

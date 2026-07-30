@@ -26,6 +26,14 @@ function goalAlreadyMoving(items: Message[], goalId?: string) {
   })
 }
 
+function taskAlreadyResolved(items: Message[], taskId?: string) {
+  if (!taskId) return false
+  return items.some(m => {
+    if (m.message_type !== 'APPROVE_RESULT' && m.message_type !== 'REJECT_RESULT') return false
+    return String(m.metadata?.task_id || '') === taskId
+  })
+}
+
 function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   m: Message
   messages: Message[]
@@ -45,6 +53,9 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   if (m.message_type === 'PREVIEW_READY' || m.message_type === 'PREVIEW_DEPLOYMENT_SUCCEEDED') {
     return null
   }
+
+  const taskMeta = m.metadata || {}
+  const taskId = String(taskMeta.id || taskMeta.human_task_id || '')
 
   return (
     <article className={`message ${roleClass}`}>
@@ -78,7 +89,11 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
         )}
 
         {m.message_type === 'HUMAN_TASK_REQUIRED' && (
-          <TaskCard task={m.metadata} onAction={onTaskAction} />
+          <TaskCard
+            task={taskMeta}
+            resolved={taskAlreadyResolved(messages, taskId)}
+            onAction={onTaskAction}
+          />
         )}
       </div>
     </article>

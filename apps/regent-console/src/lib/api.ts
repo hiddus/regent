@@ -81,8 +81,8 @@ export const api = {
     request<Record<string, unknown>>(`/v1/human-tasks/${taskId}/complete`, {
       assigned_to: ACTOR,
       response: approved
-        ? { approved: true }
-        : { approved: false, rejection_reason: reason || '未提供原因' },
+        ? { approved: true, decision: 'APPROVE' }
+        : { approved: false, decision: 'REJECT', rejection_reason: reason || '未提供原因' },
     }),
 
   uploadFile: async (file: File, projectId?: string) => {

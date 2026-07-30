@@ -36,7 +36,7 @@ REGENT-DEFINITION-1.0
 
 - `BUILD_ALLOWED`：授权 Foundation M1–M6（含 M5 Contract 与 M6 内存路径清除）按 Gate 实施。
 - `ROLLOUT_NOT_ALLOWED`：强单 Agent 仍是默认 Champion；自适应多 Agent / 自由拓扑未授权。
-- **认证固定蜂巢（opt-in）**：设置 `REGENT_AAR1_CERTIFIED_HIVE=true` 后，在能力 C/V/R 满足时优先选用已认证模板 `pm-dev-independent-qa-v1`（Durable AgentTask PM→Dev→独立 QA）。这不是自适应自由拓扑，也不改变默认 Champion。
+- **认证固定蜂巢（opt-in）**：设置 `REGENT_AAR1_CERTIFIED_HIVE=true` 后，在能力 C/V/R 满足时优先选用已认证模板 `pm-dev-independent-qa-v1`（Durable AgentTask PM→Dev→独立 QA）。生产服务器已启用该 opt-in；本地示例默认仍关。这不是自适应自由拓扑，也不改变默认 Champion。
 - `ROLLOUT_ALLOWED`：未来仅由满足两份测量合同的 P2-4 Eval DecisionRecord 激活。
 - M6 说明：Coding Plan 仅列到 M5；用户授权的 M6 映射为 Technical Spec Contract 中的「移除旧内存 Task store / 旧状态适配」。
 
