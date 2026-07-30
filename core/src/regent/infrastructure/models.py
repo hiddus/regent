@@ -586,6 +586,7 @@ class ObservationModel(Base):
     is_bot: Mapped[bool] = mapped_column(nullable=False, default=False)
     is_internal: Mapped[bool] = mapped_column(nullable=False, default=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    anonymized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -1801,6 +1802,35 @@ class AgentTranscriptModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PrivacyConsentModel(Timestamped, Base):
+    """PRD §7.1 — notice/consent record per Goal Owner subject."""
+
+    __tablename__ = "privacy_consents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('GRANTED','WITHDRAWN')",
+            name="ck_privacy_consents_status",
+        ),
+        UniqueConstraint("goal_id", "subject", name="uq_privacy_consents_goal_subject"),
+        Index("ix_privacy_consents_goal_id", "goal_id"),
+        Index("ix_privacy_consents_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False
+    )
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    notice_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    notice_text: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class BudgetEntryModel(Base):

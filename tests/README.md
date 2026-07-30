@@ -11,10 +11,10 @@ Regent 的三层测试体系，全部由根 `pyproject.toml` 的 `[tool.pytest.i
 - `tests/integration/` — **端到端集成测试**
   - `test_scheduler_checkpoint.py` / `test_scheduler_e2e.py`：调度与检查点
   - `test_health_api.py`：健康端点
-  - `test_experiment_platform.py`：实验平台
-  - `test_adaptive_organization.py`：自适应组织
-  - `test_eval_harness_e2e.py`：Eval 工具链
-  - `test_csv_summary_baseline.py` / `test_evt_parser_gap.py`：评测基线 / 事件解析缺口
+  - `test_csv_summary_baseline.py` / `test_evt_parser_gap.py`：评测基线 / 事件解析缺口（P0 验收项）
+  - `test_experiment_platform.py`：实验平台（**P2-6 候选特性**，非已验收项）
+  - `test_adaptive_organization.py`：自适应组织（**P2-5 条件承诺**，默认 `ROLLOUT_NOT_ALLOWED`）
+  - `test_eval_harness_e2e.py`：Eval 工具链（**P2-4 承诺项**）
 - `tests/unit/` — **单元测试**，按分层组织：`agent/`、`api/`、`application/`、`domain/`、`infrastructure/`、`model/`、`ops/`、`runtime/`，以及 `test_config.py` / `test_console.py` / `test_worker.py`。
 
 ## 运行

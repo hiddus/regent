@@ -14,11 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.application.provider_capability import (
     PROVIDER_CAPABILITY_MATRIX,
+    ProviderCapability,
     ProviderCapabilityProfile,
     require_auto_irreversible,
 )
 from regent.domain.errors import DomainError, ErrorCode
-from regent.infrastructure.models import ExecutionPermitModel, ExternalOperationModel
+from regent.infrastructure.models import (
+    DeploymentModel,
+    ExecutionPermitModel,
+    ExternalOperationModel,
+)
 
 _RECONCILE_TIMEOUT_MINUTES = 15
 
@@ -243,6 +248,91 @@ class ExternalOperationService:
     def query_provider(self, provider: str) -> ProviderCapabilityProfile | None:
         """Return the capability profile for *provider*, or None if unregistered."""
         return PROVIDER_CAPABILITY_MATRIX.get(provider)
+
+    async def resolve_reconciling_via_query(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 50,
+    ) -> list[uuid.UUID]:
+        """G0: for RECONCILING EOs, probe durable provider state and resolve.
+
+        Uses capability matrix QUERY_* flags. Static preview probes Deployment rows
+        (durable surrogate for in-process provider memory). Past deadline without
+        a conclusive probe → MANUAL_REVIEW.
+        """
+        clock = now or datetime.now(UTC)
+        resolved: list[uuid.UUID] = []
+        async with self._sessions() as session:
+            rows = list(
+                await session.scalars(
+                    select(ExternalOperationModel)
+                    .where(ExternalOperationModel.status == "RECONCILING")
+                    .order_by(ExternalOperationModel.updated_at.asc())
+                    .limit(limit)
+                )
+            )
+        for eo in rows:
+            profile = self.query_provider(eo.provider)
+            can_query = profile is not None and (
+                ProviderCapability.QUERY_BY_OPERATION_KEY in profile.capabilities
+                or ProviderCapability.QUERY_BY_EXTERNAL_ID in profile.capabilities
+            )
+            outcome = await self._probe_durable_outcome(eo) if can_query else None
+            if outcome in {"SUCCEEDED", "FAILED_TERMINAL"}:
+                await self.resolve_reconcile(
+                    eo.id,
+                    status=outcome,
+                    external_id=eo.external_id,
+                    summary={"resolve_path": "provider_query", "probed_at": clock.isoformat()},
+                )
+                resolved.append(eo.id)
+                continue
+            deadline = eo.reconcile_deadline
+            if deadline is not None and clock >= deadline:
+                await self.resolve_reconcile(
+                    eo.id,
+                    status="MANUAL_REVIEW",
+                    summary={
+                        "resolve_path": "deadline_exceeded",
+                        "can_query": bool(can_query),
+                        "probed_at": clock.isoformat(),
+                    },
+                )
+                resolved.append(eo.id)
+        return resolved
+
+    async def _probe_durable_outcome(self, eo: ExternalOperationModel) -> str | None:
+        """Return SUCCEEDED / FAILED_TERMINAL / None from durable local state."""
+        async with self._sessions() as session:
+            deployment: DeploymentModel | None = None
+            if eo.external_id:
+                deployment = await session.scalar(
+                    select(DeploymentModel).where(
+                        DeploymentModel.external_deployment_id == eo.external_id
+                    )
+                )
+            if deployment is None and eo.operation_key.startswith("preview-deploy:"):
+                idem = eo.operation_key.removeprefix("preview-deploy:")
+                deployment = await session.scalar(
+                    select(DeploymentModel).where(DeploymentModel.idempotency_key == idem)
+                )
+            if deployment is None and eo.operation_key.startswith("preview-rollback:"):
+                # rollback keys: preview-rollback:{idempotency}:{permit}
+                parts = eo.operation_key.split(":", 2)
+                if len(parts) >= 2:
+                    deployment = await session.scalar(
+                        select(DeploymentModel).where(
+                            DeploymentModel.idempotency_key == parts[1]
+                        )
+                    )
+            if deployment is None:
+                return None
+            if deployment.status == "SUCCEEDED":
+                return "SUCCEEDED"
+            if deployment.status in {"FAILED", "ROLLED_BACK"}:
+                return "FAILED_TERMINAL"
+            return None
 
     async def _terminal(
         self,

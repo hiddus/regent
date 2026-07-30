@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     require_release_human_approval: bool = True
     # Worker reconciliation sweep interval (seconds) for stale ExternalOperations.
     reconciliation_interval_seconds: float = Field(default=300.0, ge=30.0)
+    # PRD §7.1–7.3 privacy: consent gate + retention anonymization.
+    # When True, Observation/Evidence/conversation collection requires GRANTED consent.
+    privacy_consent_enforced: bool = True
+    # Default retention for Observations / operational payloads (days); overdue → anonymize.
+    privacy_retention_days: int = Field(default=90, ge=1, le=3650)
+    # Worker retention sweep interval (seconds).
+    privacy_retention_interval_seconds: float = Field(default=3600.0, ge=60.0)
 
 
 @lru_cache

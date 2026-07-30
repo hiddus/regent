@@ -80,6 +80,20 @@ class ConversationService:
     async def append(self, command: AppendConversationMessage) -> ConversationMessageModel:
         if command.role not in {"USER", "ASSISTANT", "SYSTEM", "EVENT"}:
             raise DomainError(ErrorCode.INVALID_STATE, "unsupported conversation role")
+        async with self._sessions() as session:
+            conversation = await session.get(ConversationModel, command.conversation_id)
+            if conversation is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+            goal_id = getattr(conversation, "goal_id", None)
+
+        content = command.content
+        if goal_id is not None:
+            from regent.application.privacy_service import PrivacyService
+
+            privacy = PrivacyService(self._sessions)
+            await privacy.require_consent_for_scope(goal_id, scope="conversation")
+            content = privacy.reject_restricted_payload(content, context="conversation.content")
+
         async with self._sessions() as session, session.begin():
             conversation = await session.get(ConversationModel, command.conversation_id)
             if conversation is None:
@@ -97,7 +111,7 @@ class ConversationService:
                 ordinal=(last or 0) + 1,
                 role=command.role,
                 message_type=command.message_type,
-                content=command.content,
+                content=content,
                 metadata_json=command.metadata,
                 created_by=command.actor,
             )

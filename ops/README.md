@@ -1,17 +1,19 @@
-# Ops archive
+# Ops（运维脚本归档）
 
-One-off debugging / hotfix scripts previously littered the repository root and
-release trees. They diluted delivery quality by normalizing "fix via temp script"
-instead of migrations + tests.
+> **一致性说明（2026-07-30 修复后）**：`diag_*` / `fix_*` / `_server_*` 历史一次性脚本已迁入 `ops/archive/oneoff/`；`ops/` 根目录仅保留可复用的运维入口（如 `deploy_console.py`、`sync_local_to_server.py`、`check_repo_hygiene.py` 等）。
 
-## Layout
+## 布局
 
-- `archive/oneoff/` — historical `check_*` / `fix_*` / `q*` / `verify_*` scripts
-- Keep new operational tools documented here; do **not** put them back in repo root
+- `archive/oneoff/` — 历史 `diag_*` / `fix_*` / `_server_*` / `check_*` / `verify_*` 等一次性脚本归档
+- `ops/` 根目录 — 可复用运维入口与门禁脚本
 
-## Rules
+## 规则
 
-1. Product/runtime code lives under `core/`, `apps/`, `capabilities/`
-2. Schema changes go through Alembic under `core/migrations/versions/`
-3. Temporary diagnosis scripts belong in `ops/archive/oneoff/` (or a dated subfolder)
-4. CI enforces root whitelist via `ops/check_repo_hygiene.py`
+1. 产品/运行时代码只应位于 `core/`、`apps/`、`capabilities/`（运行时代码副本不得留在 `ops/` 根）
+2. Schema 变更走 `core/migrations/versions/` 下的 Alembic
+3. 临时诊断脚本归入 `ops/archive/oneoff/`（或带日期子目录）
+4. `ops/check_repo_hygiene.py` 作为根白名单门禁，阻止新脚本落回**仓库根目录**
+
+## 已完成
+
+- [x] 将 `ops/` 根目录 `diag_*` / `fix_*` / `_server_*` 迁移至 `archive/oneoff/`（2026-07-30 对齐审计修复轮）

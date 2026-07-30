@@ -19,7 +19,7 @@
 | 6 | ReleaseCandidate 自动批准 | ✅ **已修** | 强制 `RELEASE_APPROVAL` HumanTask；`require_release_human_approval=true`；经 `ReleaseApprovalCompleted` 继续部署 |
 | 7 | P2-3 Impact Graph | ✅ **已修** | `ImpactGraphService` + `memory_impact_edges` 迁移 0037：环检测/级联撤销/批量撤销/衰减/Gate 阻断 |
 | 8 | P2-5 AgentEnvelope HMAC | ✅ **已修** | 活跃路径接线 `envelope_v1` HMAC；配置密钥时 fail-closed |
-| 9 | G0 ExternalOperation 完整闭环 | ⚠️ **半落地** | Worker 已挂 `ReconciliationWorker.tick`；完整生产 provider query→resolve 全路径仍需后续（见附录） |
+| 9 | G0 ExternalOperation 完整闭环 | ⚠️ **半落地（已推进）** | Worker `tick` + `resolve_reconciling_via_query`（durable probe）；跨 provider 网络 query 仍后续 |
 | 10 | 文档口径张力 | ✅ **已修** | Spec §25 / `registered-unimplemented` / 本复检表统一为「产物可复核 + 已知半落地项」 |
 | 11 | USER.md 残留 | ℹ️ 非本仓范围 | 跨项目身份文件 |
 

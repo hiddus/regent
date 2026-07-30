@@ -201,6 +201,23 @@ class TestReconciliationWorker:
                 fake_id, resolved_status="SUCCEEDED"
             )
 
+    @pytest.mark.asyncio
+    async def test_tick_also_resolves_via_query_path(self) -> None:
+        """G0: tick marks stale then calls resolve_reconciling_via_query."""
+        factory, session = _mock_sessions()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        session.scalars = AsyncMock(return_value=mock_result)
+        worker = ReconciliationWorker(factory)
+        resolved_id = uuid.uuid4()
+        worker._service.resolve_reconciling_via_query = AsyncMock(  # type: ignore[method-assign]
+            return_value=[resolved_id]
+        )
+        custom_now = datetime(2026, 7, 25, 12, 0, 0, tzinfo=UTC)
+        touched = await worker.tick(now=custom_now)
+        assert resolved_id in touched
+        worker._service.resolve_reconciling_via_query.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # Test: Provider Capability Matrix

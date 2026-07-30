@@ -208,3 +208,11 @@ async def north_star_report(request: Request) -> dict[str, object]:
 
     report = await NorthStarMetricsService(request.app.state.sessions).report()
     return report.as_dict()
+
+
+@router.post("/privacy/anonymize-expired")
+async def anonymize_expired_privacy(request: Request) -> dict[str, object]:
+    """PRD §7.3 — operator trigger for retention anonymization sweep."""
+    from regent.application.privacy_service import PrivacyService
+
+    return await PrivacyService(request.app.state.sessions).anonymize_expired()

@@ -41,6 +41,21 @@ class ObservationService:
         expected = self.sign(item)
         if not hmac.compare_digest(expected, signature):
             raise DomainError(ErrorCode.POLICY_DENIED, "observation signature is invalid")
+        if item.goal_id is not None:
+            from regent.application.privacy_service import (
+                PrivacyService,
+                classify_and_minimize,
+            )
+
+            privacy = PrivacyService(self._sessions)
+            await privacy.require_consent_for_scope(item.goal_id, scope="observation")
+            # §7.2: fail closed — do not collect RESTRICTED PII (signature covers raw payload).
+            for key, value in item.metric_value.items():
+                if isinstance(value, str) and classify_and_minimize(value).contains_restricted:
+                    raise DomainError(
+                        ErrorCode.POLICY_DENIED,
+                        f"RESTRICTED PII in metric_value.{key}; not collected by default (PRD §7.2)",
+                    )
         async with self._sessions() as session, session.begin():
             existing = await session.scalar(
                 select(ObservationModel).where(ObservationModel.event_id == item.event_id)

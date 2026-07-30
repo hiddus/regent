@@ -58,6 +58,12 @@ class GoalService:
         )
         async with self._sessions() as session, session.begin():
             session.add_all((goal, spec))
+        # PRD §7.1: record notice + GRANTED consent as collection prerequisite.
+        from regent.application.privacy_service import PrivacyService
+
+        await PrivacyService(self._sessions).ensure_owner_consent_on_create(
+            goal_id, subject=command.created_by
+        )
         return goal
 
     async def get(self, goal_id: uuid.UUID) -> GoalModel:

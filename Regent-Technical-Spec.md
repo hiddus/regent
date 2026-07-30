@@ -580,8 +580,9 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 
 1. ~~ReleaseCandidate 在 P1 执行链上自动批准~~ **已修复（2026-07-30）**：预览链创建 `RELEASE_APPROVAL` HumanTask；`require_release_human_approval` 默认 true；人工完成任务后经 `ReleaseApprovalCompleted` 继续部署。
 2. 完整浏览器级 R7 gate：无 Playwright 时 `browser_journey` 为 dry-run（步骤标记 passed，非真浏览器验收）；有 Playwright 时执行真实旅程。
-3. ExternalOperation 完整闭环：Worker 已挂载 `ReconciliationWorker` 周期扫描；调度 `dispatch_with_eo` 创建真实 EO。完整 provider query→resolve 生产对账仍为后续切片。
+3. ExternalOperation 完整闭环：Worker 已挂载 `ReconciliationWorker` 周期扫描（stale→RECONCILING）并调用 `resolve_reconciling_via_query`（Deployment durable probe / 超期 MANUAL_REVIEW）；调度 `dispatch_with_eo` 创建真实 EO。跨 provider 真实网络 query→resolve 生产对账仍为后续切片。
 4. Eval Harness 已改为交付信号/Goal 证据评分（无 `hash%2` 桩）。P0#5 签署产物已纳入 `docs/experiments/p0-v1-artifacts/`，可按 SHA 与 DecisionRecord 字段仓内复核。
+5. ~~PRD §7.1–7.3 隐私缺口~~ **已修复（2026-07-30）**：consent 记录与采集闸门、PII 分级最小化、可配置保留期与超期匿名化已落地（见 `privacy_service.py` / 迁移 0038）。
 
 > 更正（2026-07-30）：此前误报「Evidence Connector 仍为空实现」「Deployment Provider 为内存实现」。现状为 `AllowlistedHttpEvidenceConnector` / `GoalIntentEvidenceConnector` 已接线；生产预览为 `StaticPreviewDeploymentProvider`（`InMemoryDeploymentProvider` 仅测试用）。
 

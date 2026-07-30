@@ -1,10 +1,8 @@
 """Periodic reconciliation worker for stale ExternalOperations.
 
 Scans DISPATCHING/UNKNOWN EOs that exceeded the timeout threshold
-(default 15 min) and transitions them to RECONCILING.
-
-This worker is designed to be called periodically (e.g. every 5 min)
-by the Worker loop or a durable timer.
+(default 15 min) and transitions them to RECONCILING, then attempts
+provider query → resolve (G0 durable path).
 """
 
 from __future__ import annotations
@@ -50,9 +48,12 @@ class ReconciliationWorker:
     ) -> list[uuid.UUID]:
         """Run one reconciliation sweep.
 
-        Returns the list of EO ids that were transitioned to RECONCILING.
+        1) Stale DISPATCHING/UNKNOWN → RECONCILING
+        2) RECONCILING → provider query resolve or MANUAL_REVIEW on deadline
+        Returns EO ids touched in either step.
         """
         clock = now or datetime.now(UTC)
+        touched: list[uuid.UUID] = []
         try:
             reconciled = await self._service.reconcile_stale_unknowns(
                 now=clock,
@@ -63,10 +64,18 @@ class ReconciliationWorker:
                     "Reconciliation sweep: %d stale EO(s) → RECONCILING",
                     len(reconciled),
                 )
-            return reconciled
+                touched.extend(reconciled)
+            resolved = await self._service.resolve_reconciling_via_query(now=clock)
+            if resolved:
+                logger.info(
+                    "Reconciliation resolve: %d EO(s) via provider query/deadline",
+                    len(resolved),
+                )
+                touched.extend(resolved)
+            return touched
         except Exception:
             logger.exception("Reconciliation sweep failed")
-            return []
+            return touched
 
     async def reconcile_specific(
         self,

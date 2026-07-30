@@ -179,6 +179,61 @@ class PrivacyActorBody(BaseModel):
     actor: str = Field(min_length=1, max_length=255)
 
 
+class PrivacyConsentBody(BaseModel):
+    actor: str = Field(min_length=1, max_length=255)
+    scopes: list[str] | None = None
+
+
+@router.get("/{goal_id}/privacy/notice")
+async def privacy_notice(goal_id: uuid.UUID) -> dict[str, Any]:
+    """PRD §7.1 — purpose notice shown before Observation/Evidence/conversation collection."""
+    from regent.application.privacy_service import privacy_notice as notice
+
+    payload = notice()
+    payload["goal_id"] = str(goal_id)
+    return payload
+
+
+@router.get("/{goal_id}/privacy/consent")
+async def get_privacy_consent(
+    goal_id: uuid.UUID, actor: str, request: Request
+) -> dict[str, Any]:
+    from regent.application.privacy_service import PrivacyService
+
+    record = await PrivacyService(request.app.state.sessions).get_consent(
+        goal_id, subject=actor
+    )
+    if record is None:
+        return {"goal_id": str(goal_id), "subject": actor, "status": "NONE"}
+    return record.as_dict()
+
+
+@router.post("/{goal_id}/privacy/consent")
+async def grant_privacy_consent(
+    goal_id: uuid.UUID, payload: PrivacyConsentBody, request: Request
+) -> dict[str, Any]:
+    """PRD §7.1 — grant (or re-grant) consent after notice."""
+    from regent.application.privacy_service import PrivacyService
+
+    record = await PrivacyService(request.app.state.sessions).grant_consent(
+        goal_id, subject=payload.actor, scopes=payload.scopes
+    )
+    return record.as_dict()
+
+
+@router.post("/{goal_id}/privacy/consent/withdraw")
+async def withdraw_privacy_consent(
+    goal_id: uuid.UUID, payload: PrivacyActorBody, request: Request
+) -> dict[str, Any]:
+    """PRD §7.1 — withdraw consent; further collection is denied while withdrawn."""
+    from regent.application.privacy_service import PrivacyService
+
+    record = await PrivacyService(request.app.state.sessions).withdraw_consent(
+        goal_id, subject=payload.actor
+    )
+    return record.as_dict()
+
+
 @router.get("/{goal_id}/export")
 async def export_goal(
     goal_id: uuid.UUID, actor: str, request: Request

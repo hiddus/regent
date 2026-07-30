@@ -11,6 +11,9 @@
 
 ## 相关
 
-- `compose.yaml`：编排 `regent-api` / `regent-worker` / `regent-egress`（Squid）/ `regent-postgres`。
+> **注意（一致性修正）**：`squid/squid.conf` 是一份**参考/待接入**的出口代理配置样例。默认 `compose.yaml` 当前仅编排 `regent-api` / `regent-worker` / `regent-postgres` 三项服务，**未包含 `regent-egress`（Squid）服务**，出口代理尚未接入默认部署路径。fail-closed 出口策略（Worker 与能力对外 HTTP 经 Squid 白名单）目前属于**规划态，默认部署不生效**，需显式接入编排后方可启用。
+
+- `compose.yaml`：当前编排 `regent-api` / `regent-worker` / `regent-postgres`（无 `regent-egress`）。
+- `squid/squid.conf`：出口代理参考配置，**默认未接入** `compose.yaml`。
 - `core/Dockerfile`、`core/Dockerfile.incremental`：Core 镜像构建。
 - `apps/regent-console/Dockerfile` + `nginx.conf`：控制台生产镜像。

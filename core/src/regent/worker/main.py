@@ -82,12 +82,18 @@ class Worker:
         self._reconciliation = None
         self._reconciliation_interval = 300.0
         self._next_reconciliation = 0.0
+        self._privacy_retention = None
+        self._privacy_retention_interval = 3600.0
+        self._next_privacy_retention = 0.0
         if sessions is not None:
             from regent.application.reconciliation_worker import ReconciliationWorker
             from regent.config import get_settings
 
             self._reconciliation = ReconciliationWorker(sessions)
-            self._reconciliation_interval = get_settings().reconciliation_interval_seconds
+            settings = get_settings()
+            self._reconciliation_interval = settings.reconciliation_interval_seconds
+            self._privacy_retention = sessions
+            self._privacy_retention_interval = settings.privacy_retention_interval_seconds
 
     async def serve(self) -> None:
         lease = await self.leases.acquire(
@@ -130,6 +136,24 @@ class Worker:
                     except Exception:
                         logger.exception("reconciliation worker tick failed")
                     self._next_reconciliation = monotonic() + self._reconciliation_interval
+                if (
+                    self._privacy_retention is not None
+                    and monotonic() >= self._next_privacy_retention
+                ):
+                    try:
+                        from regent.application.privacy_service import PrivacyService
+
+                        result = await PrivacyService(self._privacy_retention).anonymize_expired()
+                        if result.get("observations_anonymized"):
+                            logger.info(
+                                "privacy retention anonymize",
+                                extra=result,
+                            )
+                    except Exception:
+                        logger.exception("privacy retention anonymize failed")
+                    self._next_privacy_retention = (
+                        monotonic() + self._privacy_retention_interval
+                    )
                 await self.dispatcher.dispatch_once(self.worker_id)
                 if monotonic() >= next_heartbeat:
                     lease = await self.leases.heartbeat(lease)
