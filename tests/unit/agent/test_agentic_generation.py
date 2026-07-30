@@ -208,7 +208,9 @@ async def test_agentic_generator_materializes_artifacts(tmp_path: Path) -> None:
 
     original_run = AgentRunner.run
 
-    async def run_no_verify(self, plan, *, prior_gaps=None, verify=True, run_smoke=True):  # noqa: ANN001
+    async def run_no_verify(
+            self, plan, *, prior_gaps=None, verify=True, run_smoke=True, on_turn=None
+        ):  # noqa: ANN001
         return await original_run(
             self, plan, prior_gaps=prior_gaps, verify=False, run_smoke=False
         )

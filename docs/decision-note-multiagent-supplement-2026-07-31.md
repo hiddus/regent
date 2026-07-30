@@ -29,3 +29,13 @@ champion** as default. Do **not** enable adaptive free-form topology (P2-5).
 ## Status
 
 `org_adaptive_status = ROLLOUT_NOT_ALLOWED`
+
+## Corrective verification addendum
+
+The post-implementation review found and corrected unsafe fallback behavior and
+status overstatement. Certified Hive opt-in now requires an embedded,
+recomputable whole-template digest (migration `20260731_0040`) and cannot
+resurrect a candidate removed by TaskFeatures pruning. Durable plan/context
+services are wired into the agentic generation path; fixed-Hive dispatches now
+produce immutable dispatch audit rows. Artifact reads are Goal-scoped and plan
+terminal states are immutable under ordinary upsert.

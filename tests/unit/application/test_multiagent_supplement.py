@@ -29,6 +29,7 @@ from regent.application.member_contract import (
     enrich_topology_with_member_contracts,
     run_template_regression_suite,
     validate_certification_inheritance,
+    verify_template_certification,
 )
 from regent.application.multiagent_metrics import (
     FaultInjectionTrace,
@@ -203,6 +204,13 @@ def test_member_contract_certification_invalidation() -> None:
     )
     assert len(suite) == 5
     assert all(r.passed for r in suite)
+    embedded = dict(topo)
+    embedded["template_certification"] = cert1.as_dict()
+    assert verify_template_certification(
+        template_id=CERTIFIED_HIVE_TEMPLATE_ID,
+        semantic_version="1.0.0",
+        topology=embedded,
+    ).accepted is True
 
 
 def test_task_features_prune_strong_sequential() -> None:
@@ -245,6 +253,9 @@ def test_task_features_prune_strong_sequential() -> None:
     high_baseline = features.model_copy(update={"sequential_dependency_score": 0.1, "single_agent_baseline_success_rate": 0.6})
     pruned2 = prune_organization_space(candidates, high_baseline)
     assert any(h.rule_id == "R1_HIGH_SINGLE_AGENT_BASELINE" for h in pruned2.hits)
+    unsafe = prune_organization_space([candidates[1]], features)
+    assert unsafe.admitted == []
+    assert any(h.rule_id == "R_NO_SAFE_SINGLE_AGENT_FALLBACK" for h in unsafe.hits)
 
 
 @pytest.mark.asyncio
@@ -287,6 +298,10 @@ async def test_execution_plan_checkpoint_and_no_reopen(db_sessions) -> None:
     with pytest.raises(Exception):
         await svc.upsert_items(
             [UpsertPlanItem(goal_id=goal_id, item_key="a", content="reopen", status="pending")]
+        )
+    with pytest.raises(Exception):
+        await svc.upsert_items(
+            [UpsertPlanItem(goal_id=goal_id, item_key="a", content="rewrite", status="failed")]
         )
 
 
@@ -363,8 +378,11 @@ async def test_context_artifact_offload_and_rehydrate(db_sessions, tmp_path: Pat
         goal_id=goal_id, text=big, producer_ref="tester"
     )
     assert ref is not None
-    loaded = await svc.read_by_hash(ref.content_hash)
+    loaded = await svc.read_by_hash(goal_id=goal_id, content_hash=ref.content_hash)
     assert loaded == big
+    assert await svc.read_by_hash(
+        goal_id=uuid.uuid4(), content_hash=ref.content_hash
+    ) is None
 
     summary = build_structured_compact_summary(
         goal_intent="build app",
@@ -462,5 +480,8 @@ def test_a2a_projection_boundary() -> None:
     assert proj["state"] == "submitted"
     assert proj["auth"] == "auth_required"
     assert proj["internal_envelope_retained"] is True
+    assert_not_replacing_kernel("CrewAI", replaces_kernel=False)
     with pytest.raises(ValueError):
-        assert_not_replacing_kernel("CrewAI")
+        assert_not_replacing_kernel("CrewAI", replaces_kernel=True)
+    with pytest.raises(ValueError):
+        project_run_state("FUTURE_UNKNOWN")

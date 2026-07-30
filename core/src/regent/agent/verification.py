@@ -54,6 +54,21 @@ class VerificationAgent:
                 )
 
         smoke: dict[str, Any] = {"attempted": False}
+        test_result: dict[str, Any] = {"attempted": False, "degraded": False}
+        if not gaps:
+            test_result = await self._run_project_tests(files, success_criteria or {})
+            if test_result.get("failed"):
+                gaps.append(
+                    VerificationGap(
+                        code="project-tests",
+                        detail=str(test_result.get("error") or "project tests failed"),
+                        artifact_snippet=str(test_result.get("log") or "")[:2_000],
+                    )
+                )
+            elif test_result.get("degraded"):
+                # Explicit degradation path — do not silent-skip; do not hard-fail.
+                pass
+
         if run_smoke and not gaps:
             smoke = await self._smoke_http(files, success_criteria or {})
             if not smoke.get("passed"):
@@ -69,13 +84,13 @@ class VerificationAgent:
             return VerificationVerdict(
                 verdict="FAIL",
                 gaps=gaps,
-                smoke=smoke,
+                smoke={**smoke, "project_tests": test_result},
                 summary=f"FAIL with {len(gaps)} gaps",
             )
         return VerificationVerdict(
             verdict="PASS",
             gaps=[],
-            smoke=smoke,
+            smoke={**smoke, "project_tests": test_result},
             summary=review.summary or "PASS",
         )
 
@@ -86,6 +101,35 @@ class VerificationAgent:
             except (OSError, ValueError, FileNotFoundError):
                 continue
         return ""
+
+    async def _run_project_tests(
+        self,
+        files: dict[str, str],
+        success_criteria: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve and run pytest / project test command (GQ-2 / §13.6).
+
+        Missing commands degrade explicitly — never silent skip.
+        """
+        command = _resolve_test_command(files, success_criteria)
+        if command is None:
+            return {
+                "attempted": False,
+                "failed": False,
+                "degraded": True,
+                "error": "TEST_COMMAND_MISSING: no pytest/tests/ or configured test command",
+                "log": "",
+            }
+        log = await self._toolkit.run_command(command, timeout_seconds=120)
+        passed = log.startswith("exit=0")
+        return {
+            "attempted": True,
+            "failed": not passed,
+            "degraded": False,
+            "command": command,
+            "error": None if passed else "project tests failed",
+            "log": log[:4_000],
+        }
 
     async def _smoke_http(
         self,
@@ -222,6 +266,23 @@ def _routes_from_criteria(success_criteria: dict[str, Any]) -> list[str]:
         if extra not in routes:
             routes.append(extra)
     return routes[:4]
+
+
+def _resolve_test_command(
+    files: dict[str, str], success_criteria: dict[str, Any]
+) -> str | None:
+    """Prefer explicit criteria, then pyproject/pytest markers, then tests/ tree."""
+    for key in ("test_command", "pytest_command", "verification_test_command"):
+        raw = success_criteria.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    if "pytest.ini" in files or "pyproject.toml" in files:
+        # Prefer pytest when project declares it; still require a tests path or default.
+        if any(p.startswith("tests/") or p.startswith("test_") for p in files):
+            return f"{sys.executable} -m pytest -q --tb=line"
+    if any(p.startswith("tests/") for p in files):
+        return f"{sys.executable} -m pytest -q --tb=line"
+    return None
 
 
 def _pick_free_port() -> int:

@@ -253,13 +253,86 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 |---|---|---|
 | MA-0 合同冻结 | ✅ 已完成 | `multiagent_metrics` / `mast_failure` / `member_contract` Schema + 合同测试 |
 | MA-1 可观测与归因 | ✅ 已完成（OTel GenAI 后续对齐） | Token 分类、三指标复算、MAST 分类器（低置信保留原码）；OTel GenAI conventions 已写入验收，供应商栈未接 |
-| MA-2 固定模板加固 | ✅ 已完成 | 成员三要素、整体认证摘要失效规则、五场景回归套件 |
-| MA-3 长任务耐久化 | ✅ 已完成 | `execution_plan_items` 表、工具结果/Transcript Artifact 卸载、结构化 rehydration |
-| MA-4 路由与过程评估 | ✅ 已完成 | TaskFeatures 裁剪接入 OrganizationEngine；`dispatch_decisions` 可回放与熵报告 |
+| MA-2 固定模板加固 | ✅ 已完成并强制接线 | 成员三要素、五类摘要、迁移 `0040` 回填认证；候选加载时摘要不一致即 fail closed |
+| MA-3 长任务耐久化 | ✅ 已完成并接入生成主链 | `execution_plan_items`、大工具结果卸载、压缩前 Transcript Artifact、结构化 rehydration；Artifact 读取按 Goal 隔离 |
+| MA-4 路由与过程评估 | ✅ 固定 Hive 主链完成 | TaskFeatures 保守裁剪接入 OrganizationEngine；opt-in 不得绕过裁剪；PM→Dev→QA 派工写入 `dispatch_decisions` |
 | MA-5 P2-4 冻结实验 | ✅ 半落地（骨架） | `p24_frozen_experiment` A/B/C 报告与 DecisionRecord 载荷；完整生产盲评窗口待独立实验运行 |
 | MA-6 条件激活 | ✅ Gate 钩子（未激活） | `p25_adaptive_gate` + A2A 投影；无正净收益证据时保持 `ROLLOUT_NOT_ALLOWED` / `activation_allowed=false` |
 
 工作包验收对照：`WP-METRICS`/`WP-FAILURE`/`WP-TEMPLATE`/`WP-CONTEXT`/`WP-PLAN`/`WP-DISPATCH` 已有单元测试；`WP-EVAL` 提供可复算实验骨架，完整 95% CI 生产对照仍属实验窗口交付物。
+### 12.7 过度修复复核与纠正（2026-07-31）
+
+- fixed Hive opt-in 只能对裁剪后仍获准的候选提高优先级，不能恢复被高基线/强顺序规则排除的模板；
+- 缺少安全单 Agent champion 时组织选择 fail closed，不以首个多 Agent 候选兜底；
+- `CERTIFIED` 名称或旧状态不足以启用模板，必须通过嵌入式五类摘要复算；
+- 持久计划终态不可由普通 upsert 改写；上下文 Artifact 查询必须携带 Goal 范围；
+- A2A 未知状态拒绝投影；第三方框架仅在试图替换 Kernel 时拒绝，能力池内单 Agent 封装仍允许。
+
+## 13. 单 Agent 生成质量基线计划（2026-07-31）
+
+本计划对应诊断报告 `docs/diagnosis-output-quality-2026-07-31.md`（v2）。结论：当前主要质量瓶颈是主 Worker 未将已有 Agentic 生成循环接入默认交付路径；组织层补强（MA-0..MA-6）不能替代单 Agent 生成闭环的修复。固定 Hive 的净收益未经真实任务实验确认，不应假定必然改善或必然放大；其评估必须以强单 Agent 基线为前提（与 §10.5、Tech-Spec §13.4–§13.7 对齐）。
+
+### 13.1 原则
+
+- 优先修复单 Agent 生成闭环，而非继续增加组织层复杂度；
+- `generation_strategy` 是运行时契约，Worker 必须真正遵循；
+- 真实构建 / 测试 / smoke 失败必须回灌至生成会话；
+- agentic 默认切换由成功率 / 成本 / 延迟门槛门控，不得凭直觉；
+- 固定 Hive 与自适应组织评估一律推迟到强单 Agent 基线建立之后（与 MA-5/MA-6 衔接）。
+
+### 13.2 交付批次
+
+| 批次 | 依赖 | 交付物 | 完成门禁 |
+|---|---|---|---|
+| GQ-0 合同冻结 | 无 | 生成器元数据协议、FailureEnvelope/RepairAttempt、独立生成策略实验合同、冻结任务集、预注册门槛/样本量/停止规则、canary 隔离与回滚合同、现状基线报告 | PRD/Tech/Plan 一致；门槛在实验前登记；合同测试先失败 |
+| GQ-1 生成器选择一致性 | GQ-0 | Worker 按 `generation_strategy` 分派生成器；`generator_ref` 与实际类型一致性检查 | 标注 agentic 但实际 artifact-backed 的 Run 被 fail closed；单测覆盖两种策略 |
+| GQ-2 会话内验证反馈闭环 + Verification 扩展 | GQ-1 | 真实构建/测试/smoke 失败回灌生成循环；`VerificationAgent` 支持 pytest/项目测试命令 | 真实报错（非仅 gap reasons）进入下一轮；测试缺失有明确降级而非静默跳过 |
+| GQ-3 影子 / Canary 对照 | GQ-2 | artifact-backed vs agentic 按独立生成策略实验合同对照；影子隔离副作用，canary 稳定分桶 | 报告含 95% CI、用户结果与护栏；不得占用 P2-4 组织实验维度 |
+| GQ-4 默认切换决策 | GQ-3 | 按 GQ-0 预注册门槛生成唯一 DecisionRecord；达标后 `agentic` 设为默认 | kill switch、在途 Run 语义及回滚验证通过 |
+| GQ-5 / MA-5 固定 Hive 重评估 | GQ-4 + MA-5 实验骨架 | 基于强单 Agent 基线运行真实组织实验并重评固定 Hive 净收益 | 形成 DecisionRecord；未证明正净收益不扩大 Hive 启用 |
+
+### 13.3 建议实施顺序
+
+1. **GQ-0（1 短迭代）**：冻结选择器契约、一致性不变式、回灌合同与 canary 合同；产出现状基线报告。
+2. **GQ-1（1–2 迭代）**：修复 `worker/main.py` 生成器选择；加 `generator_ref` 一致性检查与 fail-closed。
+3. **GQ-2（2 迭代）**：打通真实失败回灌；`VerificationAgent` 接入 pytest/项目测试。
+4. **GQ-3（1 实验窗口）**：影子/canary 对照，产出可复算报告。
+5. **GQ-4（1 迭代）**：按 GQ-0 预注册门槛形成切换 DecisionRecord；达标才默认 agentic。
+6. **GQ-5 / MA-5（决策轮）**：运行真实组织实验，基于强单 Agent 基线重评固定 Hive（见 §12）。
+
+### 13.4 与 MA-0..MA-6 的关系
+
+- 本计划建立的「强单 Agent 基线」是 MA-5 真实实验与 MA-6 条件激活的前提；现有 MA-5 仅指实验骨架，真实组织实验与 GQ-5 合并在 GQ-4 后执行。
+- `aar1_certified_hive` 代码默认值为 False；生产当前已在既有范围 opt-in。GQ-5 前保持该范围且不得扩容，并继续受认证摘要和 TaskFeatures 裁剪约束；P2-5 保持 `ROLLOUT_NOT_ALLOWED`。
+- 不引入框架替换 Kernel（沿用 §12.5）；`generation_strategy=agentic` 使用自研 `AgenticCodeGenerator`，非第三方编排内核。
+
+### 13.5 工作包验收
+
+- `WP-GEN-SELECT`：两种策略下生成器分派正确；`generator_ref` 标签、对象类型与策略三者不一致时 fail closed，并写入 Evidence；
+- `WP-GEN-FEEDBACK`：构建/测试/smoke 真实失败进入下一轮修正的结构化输入；`ArtifactBackedCodeGenerator` 再生成携带真实报错；
+- `WP-VERIFY-TEST`：VerificationAgent 能解析并执行 pytest/项目测试命令；测试缺失有明确降级而非静默跳过；
+- `WP-CANARY`：对照在冻结模型/工具/预算下可复算，产出成功率/成本/延迟与 95% CI；
+- `WP-DEFAULT-GATE`：默认切换由版本化门槛门控，且具备回滚路径。
+
+### 13.6 明确不做
+
+- 不把「开蜂巢」当作提升单 Agent 输出质量的首要手段；
+- 不在强单 Agent 基线建立前默认 agentic 或扩大 Hive；
+- 不假定固定 Hive 必然改善或必然放大质量问题（结论留给 GQ-5）；
+- 不以 LLM 裁判替代真实构建/测试/smoke 验证。
+
+### 13.7 实现状态（2026-07-31）
+
+| 批次 | 状态 | 说明 |
+|---|---|---|
+| GQ-0 合同冻结 | ✅ 已完成 | 元数据协议、FailureEnvelope/RepairAttempt（迁移 `0041`）、独立生成策略实验合同、预注册门槛、影子/kill-switch 合同、`docs/gq0-baseline-report-2026-07-31.md` |
+| GQ-1 生成器选择一致性 | ✅ 已完成 | Worker/`app_delivery` 经 `generator_factory` 分派；`assert_generator_consistency` fail-closed + Evidence |
+| GQ-2 会话内反馈 + Verification | ✅ 半落地 | FailureEnvelope 注入再生成；VerificationAgent pytest/项目测试；AgentRunner 一次受控修正；完整生产成功率窗待观测 |
+| GQ-3 影子 / Canary | ✅ 钩子（未开流量） | 稳定分桶 + `canary_rollout_allowed`（要求 GQ-2 后再 canary）；canary% 默认 0 |
+| GQ-4 默认切换决策 | ✅ 钩子 | `gq4_default_switch_gate` + kill switch；默认仍 `artifact-backed`，未晋级 |
+| GQ-5 / MA-5 固定 Hive 重评 | ⏳ 未开 | 依赖 GQ-4；生产既有 CERTIFIED_HIVE opt-in **保持不扩容** |
+
+工作包：`WP-GEN-SELECT`/`WP-GEN-FEEDBACK`/`WP-VERIFY-TEST` 有单测（`test_generation_quality.py`）；`WP-CANARY`/`WP-DEFAULT-GATE` 为可复算钩子，完整实验窗口仍属后续交付。
 
 ## P1 编码基线
 

@@ -308,6 +308,27 @@ def validate_certification_inheritance(
     )
 
 
+def verify_template_certification(
+    *,
+    template_id: str,
+    semantic_version: str,
+    topology: Mapping[str, Any],
+) -> CertificationCheck:
+    """Fail closed unless an embedded approved digest matches current bindings."""
+    embedded = topology.get("template_certification")
+    if not isinstance(embedded, Mapping):
+        return CertificationCheck(accepted=False, reason="certification_digest_missing")
+    try:
+        approved = TemplateCertificationDigest.model_validate(embedded)
+    except Exception:
+        return CertificationCheck(accepted=False, reason="certification_digest_invalid")
+    current = compute_template_certification(
+        template_id=template_id,
+        semantic_version=semantic_version,
+        topology={k: v for k, v in topology.items() if k != "template_certification"},
+    )
+    return validate_certification_inheritance(previous=approved, current=current)
+
 TEMPLATE_REGRESSION_SCENARIOS: tuple[str, ...] = (
     "happy_path",
     "clarification_required",

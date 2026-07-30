@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.application.p1_contracts import FileChangeSet, GenerationPlanContract, canonical_hash
 from regent.application.p1_ports import FileChangeSetGenerator
+from regent.application.generator_metadata import assert_generator_consistency
+from regent.application.generation_strategy_policy import resolve_effective_generation_strategy
+from regent.config import get_settings
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
     CapabilityResolutionPlanModel,
@@ -197,6 +200,21 @@ class GenerationService:
     ) -> WorkspaceSnapshotModel:
         plan_payload = await self._claim(run_id)
         try:
+            # GQ-1: fail closed when injected generator disagrees with strategy / plan labels.
+            settings = get_settings()
+            goal_id = None
+            acceptance = plan_payload.get("acceptance_contract") or {}
+            if isinstance(acceptance, dict):
+                goal_id = acceptance.get("goal_id")
+            strategy = resolve_effective_generation_strategy(settings, goal_id=str(goal_id) if goal_id else None)
+            assert_generator_consistency(
+                strategy=strategy,
+                generator=self._generator,
+                plan_id=str(plan_payload.get("plan_id") or plan_payload.get("id") or ""),
+                run_id=str(run_id),
+                contract_generator_ref=str(plan_payload.get("generator_ref") or "") or None,
+                contract_prompt_version=str(plan_payload.get("prompt_version") or "") or None,
+            )
             generate = self._generator.generate
             try:
                 generated = await generate(plan_payload, on_progress=on_progress)

@@ -25,11 +25,10 @@ from regent.application.release_service import (
     ReleaseService,
     RequestDeployment,
 )
-from regent.agent.generator import AgenticCodeGenerator
-from regent.agent.types import AgentBudget
+from regent.application.generator_factory import build_code_generator
 from regent.config import get_settings
 from regent.infrastructure.artifact_store import FileArtifactStore
-from regent.infrastructure.code_generator import ArtifactBackedCodeGenerator, ArtifactUriResolver
+from regent.infrastructure.code_generator import ArtifactUriResolver
 from regent.infrastructure.deployment import StaticPreviewDeploymentProvider
 from regent.infrastructure.sandbox import (
     DockerDependencyMaterializer,
@@ -44,19 +43,13 @@ router = APIRouter(tags=["app-delivery"])
 
 def _build_generator(settings, artifacts: FileArtifactStore, sessions=None):
     provider = build_model_provider(settings)
-    if settings.generation_strategy == "agentic":
-        return AgenticCodeGenerator(
-            provider,
-            artifacts,
-            workspace_root=Path(settings.workspace_root),
-            budget=AgentBudget(
-                max_turns=settings.agent_max_turns,
-                max_tokens=settings.agent_max_tokens,
-                max_wall_seconds=settings.agent_max_wall_seconds,
-            ),
-            sessions=sessions,
-        )
-    return ArtifactBackedCodeGenerator(provider, artifacts)
+    return build_code_generator(
+        settings,
+        provider,
+        artifacts,
+        sessions=sessions,
+        enforce_consistency=True,
+    )
 
 
 class CreateGenerationPlanBody(BaseModel):

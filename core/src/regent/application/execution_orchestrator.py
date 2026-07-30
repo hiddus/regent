@@ -1361,6 +1361,21 @@ class ExecutionOrchestrator:
         failure_lessons = list(goal_meta.get("failure_lessons") or [])
         if failure_lessons:
             acceptance_contract["failure_lessons"] = failure_lessons[-8:]
+        # GQ-2: inject durable FailureEnvelope summaries (real build/test/smoke errors).
+        try:
+            from regent.application.failure_envelope import FailureEnvelopeService
+
+            envelopes = await FailureEnvelopeService(self._sessions).structured_feedback_for_goal(
+                goal_id, limit=5
+            )
+            if envelopes:
+                acceptance_contract["failure_envelopes"] = envelopes
+        except Exception:
+            logger.warning(
+                "failure envelope feedback load skipped",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
         learned_constraints = list(goal_meta.get("learned_constraints") or [])
         if learned_constraints:
             acceptance_contract["learned_constraints"] = learned_constraints[:16]
@@ -1387,14 +1402,38 @@ class ExecutionOrchestrator:
         acceptance_contract.setdefault("org_key", "default")
 
         from regent.config import get_settings
+        from regent.application.generator_factory import plan_metadata_for_settings
+        from regent.application.generator_metadata import assert_generator_consistency
+        from regent.application.generation_strategy_policy import (
+            resolve_effective_generation_strategy,
+        )
 
         settings = get_settings()
-        if settings.generation_strategy == "agentic":
-            generator_ref = "agentic-generation-v1"
-            prompt_version = "agentic-generation-v1"
-        else:
-            generator_ref = "artifact-backed-code-generator-v1"
-            prompt_version = "code-generation-v1"
+        strategy = resolve_effective_generation_strategy(settings, goal_id=str(goal_id))
+        meta = plan_metadata_for_settings(settings, goal_id=str(goal_id))
+        generator_ref = meta["generator_ref"]
+        prompt_version = meta["prompt_version"]
+
+        # Fail closed before freezing plan if injected generator disagrees.
+        if self._generator is not None:
+            try:
+                assert_generator_consistency(
+                    strategy=strategy,
+                    generator=self._generator,
+                    plan_id=None,
+                    run_id=None,
+                    contract_generator_ref=generator_ref,
+                    contract_prompt_version=prompt_version,
+                )
+            except DomainError as exc:
+                if exc.code == ErrorCode.GENERATOR_METADATA_MISMATCH:
+                    await self._record_generator_mismatch_evidence(
+                        goal_id=goal_id,
+                        message=exc.message,
+                        strategy=strategy,
+                        generator_ref=generator_ref,
+                    )
+                raise
 
         contract = GenerationPlanContract(
             goal_spec_hash=spec_hash,
@@ -2016,6 +2055,32 @@ class ExecutionOrchestrator:
                 extra={"build_id": str(result_build.id), "status": result_build.status},
             )
             failure_reason = await self._summarize_build_failure(result_build.id)
+            try:
+                from regent.application.failure_envelope import (
+                    FailureEnvelopeService,
+                    RecordFailureCommand,
+                )
+
+                await FailureEnvelopeService(self._sessions).record_failure(
+                    RecordFailureCommand(
+                        goal_id=goal_id,
+                        stage="build",
+                        error_code=str(result_build.failure_code or "BUILD_FAILED"),
+                        error_summary=failure_reason,
+                        generation_run_id=None,
+                        workspace_snapshot_id=snapshot_id,
+                        evidence_payload={
+                            "build_id": str(result_build.id),
+                            "status": result_build.status,
+                        },
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "failure envelope record skipped for build",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
             await self._halt_goal_stage(
                 goal_id,
                 project_id,
@@ -2563,6 +2628,31 @@ class ExecutionOrchestrator:
                     "errors": smoke_result.errors,
                 },
             )
+            try:
+                from regent.application.failure_envelope import (
+                    FailureEnvelopeService,
+                    RecordFailureCommand,
+                )
+
+                await FailureEnvelopeService(self._sessions).record_failure(
+                    RecordFailureCommand(
+                        goal_id=goal_id,
+                        stage="smoke",
+                        error_code="SMOKE_FAILED",
+                        error_summary="; ".join(str(e) for e in (smoke_result.errors or [])[:8])
+                        or "smoke failed",
+                        evidence_payload={
+                            "deployment_id": str(deployment_id),
+                            "errors": list(smoke_result.errors or [])[:12],
+                        },
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "failure envelope record skipped for smoke",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
 
         loop_service = IterationLoopService(self._sessions)
         feedback = FeedbackService(self._sessions)
@@ -3477,6 +3567,39 @@ class ExecutionOrchestrator:
             event_type="HUMAN_TASK_REQUIRED",
             extra={"gac": "GAC-A4", **(extra or {})},
         )
+
+    async def _record_generator_mismatch_evidence(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        message: str,
+        strategy: str,
+        generator_ref: str,
+    ) -> None:
+        """Persist Evidence for fail-closed generator metadata mismatch (GQ-1)."""
+        from regent.application.p1_contracts import canonical_hash as _ch
+
+        payload = {
+            "kind": "generator-metadata-mismatch",
+            "strategy": strategy,
+            "expected_generator_ref": generator_ref,
+            "message": message,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        digest = _ch(payload)
+        async with self._sessions() as session, session.begin():
+            session.add(
+                EvidenceModel(
+                    id=uuid.uuid4(),
+                    goal_id=goal_id,
+                    evidence_type="generator-metadata-mismatch",
+                    uri=None,
+                    content_hash=digest,
+                    producer_ref="gq1-generator-consistency",
+                    quality_tier="OBSERVED",
+                    payload=payload,
+                )
+            )
 
     async def _halt_goal_stage(
         self,

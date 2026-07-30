@@ -386,6 +386,44 @@ GenerationPlan 冻结 GoalSpec、Decision、Requirement、Resolution、Runtime P
 
 RequirementRevision 提供机器可执行 Journey；存在按钮或事件属性不构成成功。
 
+### 13.4 生成策略选择与一致性
+
+`generation_strategy`（`artifact-backed` / `agentic`）是运行时契约，不是装饰字段。Worker 构造生成器时必须按该值分派：`artifact-backed` → `ArtifactBackedCodeGenerator`，`agentic` → `AgenticCodeGenerator`（含多轮工具循环与真实验证）。`worker/main.py` 不得无条件固定某一生成器。
+
+GQ-0 必须先扩展 `FileChangeSetGenerator` 协议，冻结只读 `generator_type`、`generator_ref` 与 `prompt_version` 元数据；协议与实现均已具备上述只读字段（见 `p1_ports.FileChangeSetGenerator` 与两类生成器）。编排器写入运行元数据前，须校验标签、实际对象类型与 `generation_strategy` 三者一致。不一致时唯一语义为拒绝启动该 Run，并写入包含期望值、实际值、策略、Run/Plan 标识和时间戳的 Evidence；不得静默回退或换用另一生成器。
+
+### 13.5 会话内验证反馈闭环
+
+artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依赖解析/构建）与部署后 smoke test，但反馈发生在较晚阶段、纠错成本高。为缩短反馈回路：
+
+- 生成循环须能消费真实的构建失败、测试失败与端点 smoke 失败，作为下一轮（或同一会话的修正轮）的结构化输入，而非仅依赖文字化问题摘要或纯 LLM 裁判；
+- `ArtifactBackedCodeGenerator` 的再生成应优先携带真实报错（traceback / 非 2xx 响应 / pytest 失败摘要），而非仅 gap reasons；
+- agentic 路径的 AgentRunner 具备执行工具，但当前最终 VerificationAgent 失败不会自动返回工具循环，不得宣称强制闭环已经完成。GQ-2 必须至少触发一次受控修正。
+
+跨阶段回灌统一使用持久化 FailureEnvelope 与 RepairAttempt：前者至少关联 goal/run/plan/workspace snapshot、失败阶段、裁剪后的错误摘要与证据 Artifact；后者记录幂等键、策略、尝试序号、输入/输出 snapshot、状态和终止原因。每类失败须冻结最大修正次数、超时、不可重试错误和人工接管条件，Worker 重启后仍可恢复且不得重复执行副作用。
+
+### 13.6 VerificationAgent 测试能力扩展
+
+`VerificationAgent` 现有 `_smoke_http` 仅执行 `compileall`、启动应用并探测最多四个 HTTP 路由，不运行 pytest。为满足「真实测试反馈」，须补充：
+
+- 依 Runtime Profile / 项目约定解析并执行 pytest 或等价测试命令；
+- 测试结果与构建、smoke 失败一并纳入 §13.5 的回灌闭环；
+- 测试命令缺失或不可用时，明确降级路径（不静默跳过验证）。
+
+### 13.7 影子 / Canary 对照
+
+在将 `agentic` 设为默认前，必须运行对照实验：以影子流量或小比例 canary，在真实代表性任务样本上比较 `artifact-backed` 与 `agentic` 的：
+
+- 端到端任务成功率（机器验证优先于 LLM-as-a-Judge）；
+- 单任务 mean cost 与 cost per verified success；
+- 墙钟延迟与完成时间分布；
+
+生成策略实验不得直接占用 P2-4 的 A_single_agent/B_certified_hive/C_control 组织维度。GQ-0 应建立独立的 generation-strategy experiment contract，仅复用 P2-4 的冻结任务集、统计与 DecisionRecord 基础设施；结果作为 §13.4 默认切换依据，之后再由 P2-4 评估组织效应。
+
+任务集必须预注册用户场景、难度与框架分层，隔离调参与最终测试样本，并指定独立盲评 owner。实验运行前须冻结最小成功率提升或非劣界、最大成本和 P95 延迟退化、最低样本量、停止规则、失败/超时计分及严重质量与安全护栏。
+
+影子任务必须运行在独立 sandbox 与 Artifact namespace，禁止发布和外部副作用；canary 使用稳定分桶。配置须提供 kill switch，回滚时新 Run 使用旧策略，在途 Run 按已冻结 GenerationPlan 完成或显式取消，禁止中途无证据换生成器。
+
 ---
 
 ## 14. Runtime Profile 认证（P2-2）
@@ -661,7 +699,8 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
 - **确认后自主执行闭环**：Confirm/Start 分离、Outbox 指数退避与死信（0022）。
 - **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。该 flag 现受 §18.5 / MA-2 整体认证摘要约束（成员契约 + 五类 hash + 回归；摘要变更即旧认证失效）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
-- **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同（`coordination_token_share` / `error_amplification_factor` / `dispatch_entropy`）、MAST 失败词表、成员三要素契约与模板整体认证、`ExecutionPlanItem` / `DispatchDecision` 持久化（迁移 `20260731_0039`）、TaskFeatures 裁剪、P2-4 A/B/C 冻结实验骨架、P2-5 Gate 钩子与 A2A 边界投影。**P2-5 自适应拓扑仍禁止启用**（无正净收益 DecisionRecord 时保持 `ROLLOUT_NOT_ALLOWED`）。见 Plan §12。
+- **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同、MAST 词表、成员契约、`ExecutionPlanItem` / `DispatchDecision`（迁移 `0039`）与模板认证回填（迁移 `0040`）。固定 Hive 候选必须通过五类摘要复算，opt-in 不得绕过 TaskFeatures 裁剪；Agent 生成主链已接入 todo 持久化、大结果卸载与压缩前 Transcript Artifact，固定 Hive 派工已接入过程审计。P2-4 仍是实验骨架，**P2-5 自适应拓扑仍禁止启用**。见 Plan §12。
+- **单 Agent 生成质量基线（GQ-0～GQ-4，2026-07-31）**：生成器元数据协议与 fail-closed 一致性（`GENERATOR_METADATA_MISMATCH`）；Worker 按 `generation_strategy` 分派；`FailureEnvelope`/`RepairAttempt`（迁移 `0041`）；独立生成策略实验合同（不占用 P2-4 组织维）；用户质量指标骨架；VerificationAgent pytest/项目测试与一次受控修正；canary/kill-switch 钩子（默认 canary%=0，默认策略仍 artifact-backed）。GQ-3 流量窗与 GQ-4 默认切换 DecisionRecord、GQ-5 Hive 重评尚未开。生产 CERTIFIED_HIVE 既有 opt-in **不扩容**。见 Plan §13、`docs/gq0-baseline-report-2026-07-31.md`。
 - **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局；右侧以 `status.agents` + SSE/`live_action` 驱动参与 Agent 名册与对话进度卡详略，产物与预览为可折叠次要区（见 `apps/regent-console/README.md`）。
 - **桌面端（探索性）**：Tauri 桌面应用骨架存在于仓库；PRD 主交付范围为 Core + Web Console，桌面端未纳入 P0/P1 验收。
 

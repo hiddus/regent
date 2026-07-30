@@ -340,6 +340,21 @@ class TestOrganizationEngineF3:
                 },
             },
         ]
+        from regent.application.member_contract import (
+            compute_template_certification,
+            enrich_topology_with_member_contracts,
+        )
+
+        certified_topology = enrich_topology_with_member_contracts(
+            templates[1]["topology_json"]
+        )
+        certified_topology["template_certification"] = compute_template_certification(
+            template_id="pm-dev-independent-qa-v1",
+            semantic_version="1.0.0",
+            topology=certified_topology,
+        ).as_dict()
+        templates[1]["semantic_version"] = "1.0.0"
+        templates[1]["topology_json"] = certified_topology
         caps = {"delivery-review-v1", "product-surface-v1"}
         # Default champion remains single-agent when both feasible.
         default = engine.evaluate_candidates(templates, available_capabilities=caps)

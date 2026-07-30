@@ -27,7 +27,10 @@ def project_context_id(*, goal_id: str, correlation_id: str | None = None) -> st
 
 
 def project_run_state(status: str) -> str:
-    return _RUN_STATUS_MAP.get(status.upper(), "working")
+    normalized = status.upper()
+    if normalized not in _RUN_STATUS_MAP:
+        raise ValueError(f"unsupported Regent run state for A2A projection: {status}")
+    return _RUN_STATUS_MAP[normalized]
 
 
 def project_auth_required(*, permit_pending: bool) -> str | None:
@@ -79,10 +82,11 @@ def project_envelope_to_a2a(envelope: Mapping[str, Any]) -> dict[str, Any]:
     return projection
 
 
-def assert_not_replacing_kernel(framework_name: str | None) -> None:
-    """Third-party agent frameworks may wrap a single capability Agent only."""
-    blocked = {"crewai", "langgraph", "autogen", "openai-swarm", "swarm"}
-    if framework_name and framework_name.strip().lower() in blocked:
+def assert_not_replacing_kernel(
+    framework_name: str | None, *, replaces_kernel: bool = False
+) -> None:
+    """Reject framework use only when it replaces Regent kernel responsibilities."""
+    if framework_name and replaces_kernel:
         raise ValueError(
             f"{framework_name} must not replace Regent Kernel "
             "(Outbox/Lease/state machines/evidence chain)"

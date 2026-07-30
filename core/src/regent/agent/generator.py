@@ -31,6 +31,10 @@ PROMPT_VERSION = "agentic-generation-v1"
 class AgenticCodeGenerator:
     """Multi-turn agent generator implementing FileChangeSetGenerator."""
 
+    generator_type = "agentic"
+    generator_ref = GENERATOR_REF
+    prompt_version = PROMPT_VERSION
+
     def __init__(
         self,
         provider: ModelProvider,
@@ -87,11 +91,28 @@ class AgenticCodeGenerator:
         prior_gaps = _gaps_from_plan(plan)
         acceptance = dict(plan.get("acceptance_contract") or {})
         run_smoke = bool(acceptance.get("batch_run_smoke", True))
+        context_artifacts = None
+        execution_plans = None
+        goal_uuid = _maybe_uuid(plan.get("goal_id"))
+        runtime_run_uuid = _maybe_uuid(plan.get("run_id"))
+        if self._sessions is not None and goal_uuid is not None:
+            from regent.application.context_artifact import ContextArtifactService
+            from regent.application.execution_plan import ExecutionPlanService
+
+            context_artifacts = ContextArtifactService(
+                self._sessions, artifact_root=self._artifacts.root
+            )
+            execution_plans = ExecutionPlanService(self._sessions)
         runner = AgentRunner(
             self._provider,
             toolkit,
             budget=self._budget,
             regent_md=regent_md,
+            context_artifacts=context_artifacts,
+            execution_plans=execution_plans,
+            goal_id=goal_uuid,
+            run_id=runtime_run_uuid,
+            producer_ref=GENERATOR_REF,
         )
 
         async def _on_turn(turn: int, summary: str) -> None:

@@ -267,10 +267,15 @@ class ContextArtifactService:
             text, uri=uri, mime_type="application/json", artifact_id=artifact_id
         )
 
-    async def read_by_hash(self, content_hash: str) -> str | None:
+    async def read_by_hash(
+        self, *, goal_id: uuid.UUID, content_hash: str
+    ) -> str | None:
         async with self._sessions() as session:
             model = await session.scalar(
-                select(ArtifactModel).where(ArtifactModel.content_hash == content_hash).limit(1)
+                select(ArtifactModel).where(
+                    ArtifactModel.goal_id == goal_id,
+                    ArtifactModel.content_hash == content_hash,
+                ).limit(1)
             )
         if model is None:
             return None

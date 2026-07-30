@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     model_api_key: SecretStr | None = None
     # Generation strategy used by the installed worker image (optional locally).
     generation_strategy: Literal["artifact-backed", "agentic"] = "artifact-backed"
+    # GQ-3/GQ-4 hooks: kill switch forces fallback for NEW runs; in-flight keep frozen plan.
+    generation_strategy_kill_switch: bool = False
+    generation_strategy_fallback: Literal["artifact-backed", "agentic"] = "artifact-backed"
+    # Canary percent 0..100; diagnosis order requires GQ-2 closed before enabling (>0).
+    generation_strategy_canary_percent: int = Field(default=0, ge=0, le=100)
+    generation_strategy_canary_variant: Literal["artifact-backed", "agentic"] = "agentic"
+    # Shadow tasks: forbid publish / external side effects (contract flag for runners).
+    generation_strategy_shadow_mode: bool = False
     delivery_batch_enabled: bool = False
     agent_max_turns: int = Field(default=40, ge=1, le=200)
     agent_max_tokens: int = Field(default=200_000, ge=1_000)

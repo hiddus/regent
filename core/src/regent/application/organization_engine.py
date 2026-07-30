@@ -331,26 +331,6 @@ class OrganizationEngine:
             pruned = prune_organization_space(working, features)
             working = pruned.admitted
             prune_meta = pruned.as_dict()
-            # Preferred certified hive may still be evaluated if opt-in and pruned out,
-            # but only when explicitly preferred (opt-in path overrides prior prune).
-            if preferred_template_id:
-                admitted_ids = {
-                    str(
-                        (t.get("topology_json") or t).get("template_id")
-                        if isinstance(t.get("topology_json") or t, dict)
-                        else t.get("name")
-                        or ""
-                    )
-                    or str(t.get("name") or "")
-                    for t in working
-                }
-                if preferred_template_id not in admitted_ids:
-                    for tmpl in templates:
-                        topo = dict(tmpl.get("topology_json") or tmpl)
-                        tid = str(topo.get("template_id") or tmpl.get("name") or "")
-                        if tid == preferred_template_id:
-                            working.append(dict(tmpl))
-                            break
 
         scored: list[tuple[str, PredictedUtility, FeasibilityReport, dict[str, Any]]] = []
         candidate_reports: list[dict[str, Any]] = []
@@ -362,6 +342,31 @@ class OrganizationEngine:
             template_name = str(
                 topology.get("template_id") or tmpl.get("name") or uuid.uuid4()
             )
+            if template_name == "pm-dev-independent-qa-v1":
+                from regent.application.member_contract import verify_template_certification
+
+                certification = verify_template_certification(
+                    template_id=template_name,
+                    semantic_version=str(tmpl.get("semantic_version") or "1.0.0"),
+                    topology=topology,
+                )
+                if not certification.accepted:
+                    candidate_reports.append(
+                        {
+                            "template_id": template_name,
+                            "c": "FAIL",
+                            "v": "FAIL",
+                            "r": "UNKNOWN",
+                            "feasible": False,
+                            "predicted_utility": None,
+                            "reason_codes": [
+                                "TEMPLATE_CERTIFICATION_INVALID",
+                                certification.reason,
+                            ],
+                            "policy_outcome": "DENY",
+                        }
+                    )
+                    continue
             policy_result = self._policy.evaluate(
                 PolicyEvaluationRequest(
                     decision_point="ORG_CANDIDATE_ADMISSION",
@@ -484,11 +489,13 @@ class OrganizationEngine:
         activate: bool = True,
         version_id: uuid.UUID | None = None,
         preferred_template_id: str | None = None,
+        task_features: Any | None = None,
     ) -> OrganizationDecisionBundle:
         templates = await self.list_certified_templates(session)
         tmpl_payloads = [
             {
                 "name": t.name,
+                "semantic_version": t.semantic_version,
                 "topology_json": {
                     **dict(t.topology_json),
                     "template_id": t.topology_json.get("template_id") or t.name,
@@ -514,6 +521,7 @@ class OrganizationEngine:
             tmpl_payloads,
             available_capabilities=available_capabilities,
             preferred_template_id=preferred_template_id,
+            task_features=task_features,
         )
         # Fix feasible_count accurately
         feas = sum(1 for c in bundle.decision_json["candidates"] if c["feasible"])

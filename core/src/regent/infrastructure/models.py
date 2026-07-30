@@ -1941,3 +1941,86 @@ class DispatchDecisionModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class FailureEnvelopeModel(Base):
+    """Cross-stage failure capture for generation repair feedback (GQ-0 / §13.5)."""
+
+    __tablename__ = "failure_envelopes"
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('build','test','smoke','verification','generation')",
+            name="ck_failure_envelopes_stage",
+        ),
+        CheckConstraint(
+            "status IN ('OPEN','REPAIRING','CLOSED','HANDED_OFF')",
+            name="ck_failure_envelopes_status",
+        ),
+        Index("ix_failure_envelopes_goal_created", "goal_id", "created_at"),
+        Index("ix_failure_envelopes_generation_run", "generation_run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL")
+    )
+    generation_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("generation_plans.id", ondelete="SET NULL")
+    )
+    generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("generation_runs.id", ondelete="SET NULL")
+    )
+    workspace_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workspace_snapshots.id", ondelete="SET NULL")
+    )
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    error_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_artifact_uri: Mapped[str | None] = mapped_column(Text)
+    evidence_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    policy_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="OPEN")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class RepairAttemptModel(Base):
+    """Idempotent repair ledger bound to a FailureEnvelope (GQ-0 / §13.5)."""
+
+    __tablename__ = "repair_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('REQUESTED','RUNNING','SUCCEEDED','FAILED','EXHAUSTED','HANDED_OFF')",
+            name="ck_repair_attempts_status",
+        ),
+        CheckConstraint("attempt_no > 0", name="ck_repair_attempts_attempt_no"),
+        UniqueConstraint("idempotency_key", name="uq_repair_attempts_idempotency"),
+        UniqueConstraint(
+            "failure_envelope_id", "attempt_no", name="uq_repair_attempts_envelope_no"
+        ),
+        Index("ix_repair_attempts_envelope", "failure_envelope_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    failure_envelope_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("failure_envelopes.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="REQUESTED")
+    input_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    output_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    termination_reason: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="regent-core")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

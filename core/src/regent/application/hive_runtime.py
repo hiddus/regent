@@ -460,6 +460,44 @@ async def maybe_offer_generation_hive_chain(
             causation_id=str(dev_view.id),
             session=session,
         )
+        from regent.application.dispatch_decision import (
+            DispatchDecisionInput,
+            build_dispatch_record,
+        )
+        from regent.infrastructure.models import DispatchDecisionModel
+
+        base_dispatch_payload = dict(payload)
+        all_candidates = [str(binding.deployment_id) for binding in bindings.values()]
+        audit_steps = []
+        if pm is not None and pm_view is not None:
+            audit_steps.append(("pm", source_pm, pm.deployment_id, pm.capabilities))
+        audit_steps.extend(
+            [
+                ("dev", source_pm, dev.deployment_id, dev.capabilities),
+                ("qa", dev.deployment_id, qa.deployment_id, qa.capabilities),
+            ]
+        )
+        for role, source_id, selected_id, capabilities in audit_steps:
+            decision_payload = build_dispatch_record(
+                DispatchDecisionInput(
+                    goal_id=goal_id,
+                    run_id=None,
+                    step_id=f"hive:gen:{generation_run_id}:{attempt}:{role}",
+                    organization_version_id=org_version_id,
+                    source_agent_id=str(source_id),
+                    selected_agent_id=str(selected_id),
+                    candidate_agent_ids=all_candidates,
+                    candidate_weights={
+                        candidate: (1.0 if candidate == str(selected_id) else 0.0)
+                        for candidate in all_candidates
+                    },
+                    reason_code=f"CERTIFIED_HIVE_{role.upper()}",
+                    capability_scope=list(capabilities),
+                    input_payload=base_dispatch_payload,
+                    output_summary={"task_role": role, "selected": str(selected_id)},
+                )
+            )
+            session.add(DispatchDecisionModel(**decision_payload))
         return HiveTaskChain(
             pm_task=pm_view,
             dev_task=dev_view,

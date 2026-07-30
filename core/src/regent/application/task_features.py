@@ -191,13 +191,12 @@ def prune_organization_space(
             )
         )
 
-    # Safety: if everything multi was pruned and no single-agent left, keep first.
+    # Fail closed when the caller omitted the mandatory single-agent champion.
     if not admitted and candidates:
-        admitted = [dict(candidates[0])]
         hits.append(
             PruneHit(
-                rule_id="R_SAFE_FALLBACK",
-                reason="no admitted candidates; fallback to first",
+                rule_id="R_NO_SAFE_SINGLE_AGENT_FALLBACK",
+                reason="no admitted single-agent candidate; refuse unsafe fallback",
                 excluded_template_ids=[],
             )
         )

@@ -138,6 +138,10 @@ Activation instrumentation (additional, not a substitute for the product):
 
 
 class ArtifactBackedCodeGenerator:
+    generator_type = "artifact-backed"
+    generator_ref = "artifact-backed-code-generator-v1"
+    prompt_version = "code-generation-v1"
+
     def __init__(self, provider: ModelProvider, artifacts: FileArtifactStore) -> None:
         self._provider = provider
         self._artifacts = artifacts
@@ -252,8 +256,8 @@ class ArtifactBackedCodeGenerator:
                 )
         change_set = FileChangeSet(
             changes=changes,
-            generator_ref="artifact-backed-code-generator-v1",
-            prompt_version="code-generation-v1",
+            generator_ref=self.generator_ref,
+            prompt_version=self.prompt_version,
         )
         return GeneratedFileChangeSet(
             output=change_set,
@@ -264,19 +268,32 @@ class ArtifactBackedCodeGenerator:
 
     @staticmethod
     def _build_retry_context(acceptance: dict[str, Any]) -> str:
-        """Build retry context from delivery gap reasons and learned constraints."""
+        """Build retry context from delivery gaps, FailureEnvelope, and constraints."""
         gap_reasons = acceptance.get("delivery_gap_reasons") or []
         attempt = acceptance.get("delivery_gap_recovery_attempt") or 1
         constraints = list(acceptance.get("learned_constraints") or [])
         lessons = list(acceptance.get("failure_lessons") or [])
+        envelopes = list(acceptance.get("failure_envelopes") or [])
         replan_nonce = str(acceptance.get("replan_nonce") or "").strip()
-        if not gap_reasons and not constraints and not lessons:
+        if not gap_reasons and not constraints and not lessons and not envelopes:
             return ""
         lines: list[str] = []
         if int(attempt) > 1 or gap_reasons:
             lines.append(f"Previous attempt #{attempt} failed delivery review:")
             for reason in gap_reasons[:5]:
                 lines.append(f"  - {reason}")
+        if envelopes:
+            lines.append("Real build/test/smoke failures (prefer these over gap reasons):")
+            for env in envelopes[:5]:
+                if not isinstance(env, dict):
+                    continue
+                stage = env.get("stage") or "unknown"
+                summary = env.get("error_summary") or env.get("summary") or ""
+                code = env.get("error_code") or ""
+                prefix = f"[{stage}]"
+                if code:
+                    prefix = f"[{stage}/{code}]"
+                lines.append(f"  - {prefix} {str(summary)[:800]}")
         if replan_nonce:
             lines.append(f"Replan nonce: {replan_nonce}")
         if constraints:

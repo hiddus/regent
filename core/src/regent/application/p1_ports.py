@@ -138,6 +138,22 @@ class GeneratedFileChangeSet(BaseModel):
 
 
 class FileChangeSetGenerator(Protocol):
+    """GQ-0: frozen read-only metadata must accompany generate().
+
+    Implementations expose ``generator_type``, ``generator_ref``, and
+    ``prompt_version``. Orchestrators must fail closed on mismatch with
+    ``generation_strategy`` (Tech-Spec §13.4) — never silently fall back.
+    """
+
+    @property
+    def generator_type(self) -> str: ...
+
+    @property
+    def generator_ref(self) -> str: ...
+
+    @property
+    def prompt_version(self) -> str: ...
+
     async def generate(self, plan: dict[str, Any]) -> GeneratedFileChangeSet: ...
 
 

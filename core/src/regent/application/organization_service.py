@@ -717,6 +717,30 @@ class OrganizationService:
             await session.flush()
 
             engine = OrganizationEngine(self._sessions, enforce_cvr=True)
+            from regent.application.task_features import TaskFeatures
+
+            goal_obj_for_features = await session.get(GoalModel, goal_id)
+            goal_meta = dict((goal_obj_for_features.metadata_json if goal_obj_for_features else {}) or {})
+            measured_baseline = goal_meta.get("single_agent_baseline_success_rate")
+            work_count = len(works)
+            task_features = TaskFeatures(
+                tool_call_density=(
+                    sum(len(w.metadata_json.get("required_capabilities", [])) for w in works)
+                    / max(1, work_count)
+                ),
+                decomposability_score=min(1.0, work_count / 3.0),
+                sequential_dependency_score=(
+                    0.8
+                    if any(w.metadata_json.get("depends_on") for w in works)
+                    else 0.2
+                ),
+                # Unknown baseline fails closed to the single-agent champion.
+                single_agent_baseline_success_rate=(
+                    float(measured_baseline) if measured_baseline is not None else 1.0
+                ),
+                independent_verification_required=True,
+                estimated_parallelism_ceiling=(min(1.0, work_count / 3.0) if work_count > 1 else 0.0),
+            )
             bundle = await engine.decide_and_persist(
                 session,
                 goal_id=goal_id,
@@ -724,6 +748,7 @@ class OrganizationService:
                 trigger="INITIAL",
                 available_capabilities=available,
                 preferred_template_id=preferred,
+                task_features=task_features,
                 activate=True,
                 version_id=version_id,
             )

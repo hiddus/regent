@@ -113,12 +113,16 @@ class ExecutionPlanService:
             await session.flush()
             return _to_view(model)
 
-        # Do not rewind terminal items silently (idempotent resume safety).
-        if existing.status in _TERMINAL and item.status not in _TERMINAL:
-            raise DomainError(
-                ErrorCode.INVALID_STATE,
-                f"cannot reopen terminal plan item {item.item_key} from {existing.status}",
-            )
+        # Terminal plan evidence is immutable under ordinary upsert. Corrections require
+        # a new item/versioned administrative workflow rather than rewriting history.
+        if existing.status in _TERMINAL:
+            if item.status != existing.status:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    f"cannot rewrite terminal plan item {item.item_key} from "
+                    f"{existing.status} to {item.status}",
+                )
+            return _to_view(existing)
         existing.content = item.content
         existing.status = item.status
         existing.owner_agent_id = item.owner_agent_id

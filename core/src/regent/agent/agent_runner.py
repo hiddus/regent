@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
 from regent.agent.compact import ContextCompactor, HeuristicSummarizer, micro_compact
@@ -54,11 +55,21 @@ class AgentRunner:
         budget: AgentBudget | None = None,
         regent_md: str = "",
         context_window_tokens: int = 128_000,
+        context_artifacts: Any | None = None,
+        execution_plans: Any | None = None,
+        goal_id: uuid.UUID | None = None,
+        run_id: uuid.UUID | None = None,
+        producer_ref: str = "regent-agent",
     ) -> None:
         self._provider = provider
         self._toolkit = toolkit
         self._budget = budget or AgentBudget()
         self._regent_md = regent_md
+        self._context_artifacts = context_artifacts
+        self._execution_plans = execution_plans
+        self._goal_id = goal_id
+        self._run_id = run_id
+        self._producer_ref = producer_ref
         self._compactor = ContextCompactor(
             toolkit=toolkit,
             summarizer=HeuristicSummarizer(),
@@ -73,6 +84,7 @@ class AgentRunner:
         verify: bool = True,
         run_smoke: bool = True,
         on_turn: Callable[[int, str], Awaitable[None]] | None = None,
+        _allow_nested_repair: bool = True,
     ) -> AgentRunResult:
         assembler = ContextAssembler(
             plan=plan,
@@ -109,6 +121,18 @@ class AgentRunner:
                     f"正在生成应用（第 {turn + 1}/{max_turns} 轮）…",
                 )
 
+            # Persist the complete transcript before any lossy compact operation.
+            if (
+                self._context_artifacts is not None
+                and self._goal_id is not None
+                and self._compactor.needs_auto_compact(conversation)
+            ):
+                await self._context_artifacts.save_transcript_before_compact(
+                    goal_id=self._goal_id,
+                    transcript=[asdict(m) for m in conversation],
+                    producer_ref=self._producer_ref,
+                    run_id=self._run_id,
+                )
             # P1-1 autoCompact near window.
             auto = await self._compactor.maybe_auto_compact(
                 conversation,
@@ -163,9 +187,39 @@ class AgentRunner:
 
             for call in assistant.tool_calls:
                 result_text = await self._toolkit.execute(call)
+                message_result = result_text
+                if self._context_artifacts is not None and self._goal_id is not None:
+                    ref = await self._context_artifacts.offload_tool_result(
+                        goal_id=self._goal_id,
+                        run_id=self._run_id,
+                        text=result_text,
+                        producer_ref=self._producer_ref,
+                    )
+                    if ref is not None:
+                        message_result = json.dumps(ref.as_dict(), ensure_ascii=False)
+                if (
+                    call.name == "todo_write"
+                    and self._execution_plans is not None
+                    and self._goal_id is not None
+                ):
+                    from regent.application.execution_plan import UpsertPlanItem
+
+                    await self._execution_plans.upsert_items(
+                        [
+                            UpsertPlanItem(
+                                goal_id=self._goal_id,
+                                run_id=self._run_id,
+                                item_key=str(item.get("id") or ""),
+                                content=str(item.get("content") or ""),
+                                status=str(item.get("status") or "pending"),
+                            )
+                            for item in self._toolkit.todos
+                            if item.get("id")
+                        ]
+                    )
                 tool_msg = ChatMessage(
                     role="tool",
-                    content=result_text,
+                    content=message_result,
                     tool_call_id=call.id,
                     name=call.name,
                 )
@@ -197,6 +251,36 @@ class AgentRunner:
                 success_criteria=acceptance.get("success_criteria"),
                 run_smoke=run_smoke,
             )
+            # GQ-2: exactly one controlled repair when verification fails.
+            if (
+                _allow_nested_repair
+                and verification is not None
+                and not verification.passed
+                and verification.gaps
+            ):
+                if on_turn is not None:
+                    await on_turn(-1, "验证失败，启动受控修正轮…")
+                repaired = await self.run(
+                    plan,
+                    prior_gaps=list(verification.gaps),
+                    verify=True,
+                    run_smoke=run_smoke,
+                    on_turn=on_turn,
+                    _allow_nested_repair=False,
+                )
+                if repaired.verification is not None:
+                    smoke = dict(repaired.verification.smoke or {})
+                    smoke["controlled_repair_attempted"] = True
+                    smoke["pre_repair_gaps"] = [
+                        {"code": g.code, "detail": g.detail} for g in verification.gaps[:8]
+                    ]
+                    repaired.verification = VerificationVerdict(
+                        verdict=repaired.verification.verdict,
+                        gaps=list(repaired.verification.gaps),
+                        smoke=smoke,
+                        summary=repaired.verification.summary,
+                    )
+                return repaired
 
         return AgentRunResult(
             files=files,
