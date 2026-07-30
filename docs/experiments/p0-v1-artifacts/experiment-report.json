@@ -1,0 +1,105 @@
+{
+  "manifest": {
+    "id": "0f64f746-9ec3-4409-acd4-93f4aff9eae4",
+    "digest": "c7cf0d500123e92aaac8abbd6f1a36a61d037402562166a6b1bfe1ba101c3a1d"
+  },
+  "run_count": 270,
+  "metrics": {
+    "A": {
+      "failures": {
+        "ACCEPTANCE_MISMATCH": 45
+      },
+      "run_count": 90,
+      "input_tokens": 16596,
+      "success_ci95": [
+        0.39883544540986604,
+        0.601164554590134
+      ],
+      "success_rate": 0.5,
+      "human_minutes": 0.0,
+      "output_tokens": 265317,
+      "recovery_rate": 1.0,
+      "quality_median": 0.5,
+      "quality_pstdev": 0.5,
+      "safety_incidents": 0,
+      "duration_median_ms": 6491.5,
+      "duration_pstdev_ms": 90410.84196493264,
+      "coordination_tokens": 0
+    },
+    "B": {
+      "failures": {
+        "ModelOutputError": 19,
+        "ACCEPTANCE_MISMATCH": 38
+      },
+      "run_count": 90,
+      "input_tokens": 44727,
+      "success_ci95": [
+        0.2744710138371421,
+        0.4697788710753059
+      ],
+      "success_rate": 0.36666666666666664,
+      "human_minutes": 0.0,
+      "output_tokens": 327249,
+      "recovery_rate": 1.0,
+      "quality_median": 0.0,
+      "quality_pstdev": 0.4818944098266987,
+      "safety_incidents": 0,
+      "duration_median_ms": 22797.5,
+      "duration_pstdev_ms": 132483.49220792344,
+      "coordination_tokens": 69443
+    },
+    "C": {
+      "failures": {
+        "ModelOutputError": 16,
+        "ACCEPTANCE_MISMATCH": 33
+      },
+      "run_count": 90,
+      "input_tokens": 37395,
+      "success_ci95": [
+        0.3565944565658975,
+        0.5581555050715851
+      ],
+      "success_rate": 0.45555555555555555,
+      "human_minutes": 0.0,
+      "output_tokens": 88229,
+      "recovery_rate": 1.0,
+      "quality_median": 0.0,
+      "quality_pstdev": 0.4980207740225549,
+      "safety_incidents": 0,
+      "duration_median_ms": 15878.5,
+      "duration_pstdev_ms": 7414.598167021262,
+      "coordination_tokens": 77391
+    }
+  },
+  "gap_confusion": {
+    "A": {
+      "tp": 0,
+      "fp": 0,
+      "tn": 30,
+      "fn": 60
+    },
+    "B": {
+      "tp": 59,
+      "fp": 0,
+      "tn": 30,
+      "fn": 1
+    },
+    "C": {
+      "tp": 59,
+      "fp": 0,
+      "tn": 30,
+      "fn": 1
+    }
+  },
+  "safety_incidents": 0,
+  "human_task_count": 0,
+  "rollback_or_recovery_failures": 0,
+  "decision": {
+    "id": "ec17a72f-54cb-4771-89b0-70a7bd9490ef",
+    "value": "STOP_GENERALIZATION",
+    "rationale": "Dynamic organization did not pass the frozen net-benefit gates in this round.",
+    "evidence_digest": "23e68a223b72bb2d2449aa4dbe9251ec10f64b06e9fecdf3dc69cc6e2801ddb7",
+    "signature": "509a476a435fe5a0b28d910c4872303711ec96d7f9c1352a06a778e447d66245"
+  },
+  "next_round_change_limit": "At most one primary hypothesis or mechanism may change."
+}

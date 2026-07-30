@@ -19,6 +19,7 @@ from regent.application.execution_events import (
     PREVIEW_DEPLOYMENT_SUCCEEDED,
     QUALITY_APPROVAL_COMPLETED,
     QUALITY_APPROVAL_REQUESTED,
+    RELEASE_APPROVAL_COMPLETED,
     REQUIREMENT_REQUESTED,
     REQUIREMENT_VALIDATED,
     WORKSPACE_SNAPSHOT_READY,
@@ -33,9 +34,9 @@ from regent.application.execution_orchestrator import (
 from regent.infrastructure.models import OutboxEventModel
 
 
-def test_p1_main_chain_events_has_16_events() -> None:
-    """P1 main chain event catalog contains 16 event types (incl. quality approval)."""
-    assert len(P1_MAIN_CHAIN_EVENTS) == 16
+def test_p1_main_chain_events_has_17_events() -> None:
+    """P1 main chain event catalog contains 17 event types (incl. release approval)."""
+    assert len(P1_MAIN_CHAIN_EVENTS) == 17
 
 
 def test_p1_main_chain_events_contains_all_expected_events() -> None:
@@ -57,6 +58,7 @@ def test_p1_main_chain_events_contains_all_expected_events() -> None:
         PREVIEW_DEPLOYMENT_SUCCEEDED,
         QUALITY_APPROVAL_REQUESTED,
         QUALITY_APPROVAL_COMPLETED,
+        RELEASE_APPROVAL_COMPLETED,
     }
     assert set(P1_MAIN_CHAIN_EVENTS) == expected
 
@@ -156,6 +158,7 @@ def test_orchestrator_has_all_r2_to_r6_handlers() -> None:
     assert hasattr(orchestrator, "handle_app_build_passed")
     assert hasattr(orchestrator, "handle_preview_deployment_requested")
     assert hasattr(orchestrator, "handle_preview_deployment_succeeded")
+    assert hasattr(orchestrator, "handle_release_approval_completed")
 
 
 def test_get_p1_event_handlers_maps_all_events() -> None:

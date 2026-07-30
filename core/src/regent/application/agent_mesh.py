@@ -270,21 +270,34 @@ class AgentMesh:
         envelope: Any,
         *,
         description: str = "",
+        hmac_secret: bytes | None = None,
     ) -> A2ATask:
         """Route a message via AgentEnvelope with capability scope propagation.
 
         The envelope's capability_scope is propagated to the delegated task.
         Child agent permissions are a subset of the parent's authorization.
+        When ``REGENT_AAR1_ENVELOPE_HMAC_KEY`` is set (or ``hmac_secret`` passed),
+        HMAC verification is required (fail-closed).
         """
-        from regent.application.agent_envelope import AgentEnvelope
+        from regent.application.agent_envelope import AgentEnvelope, _resolve_hmac_secret
 
         if not isinstance(envelope, AgentEnvelope):
             raise TypeError(f"expected AgentEnvelope, got {type(envelope)}")
 
         self._reject_memory_if_closed()
 
-        # Verify content trust
-        if not envelope.verify_trust():
+        secret = _resolve_hmac_secret(hmac_secret)
+        if secret is not None and not envelope.hmac_signature:
+            return A2ATask(
+                task_id=str(uuid.uuid4()),
+                from_agent=envelope.source_agent,
+                to_agent=envelope.dest_agent,
+                task_description="REJECTED: HMAC signature required",
+                status=A2ATaskStatus.FAILED,
+            )
+
+        # Verify content trust (digest and/or HMAC)
+        if not envelope.verify_trust(hmac_secret=secret):
             return A2ATask(
                 task_id=str(uuid.uuid4()),
                 from_agent=envelope.source_agent,
@@ -305,5 +318,8 @@ class AgentMesh:
             "permit_refs": list(envelope.permit_refs),
             "envelope_id": str(envelope.envelope_id),
             "content_digest": envelope.content_digest,
+            "correlation_id": envelope.correlation_id,
+            "hmac_signature": envelope.hmac_signature,
+            "signing_key_id": envelope.signing_key_id,
         })
         return task

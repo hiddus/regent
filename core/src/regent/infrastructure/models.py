@@ -1703,6 +1703,41 @@ class MemoryRecordModel(Timestamped, Base):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
+class MemoryImpactEdgeModel(Base):
+    """P2-3 Impact Graph edge: to_memory depends on / derives from from_memory."""
+
+    __tablename__ = "memory_impact_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "from_memory_id",
+            "to_memory_id",
+            "edge_kind",
+            name="uq_memory_impact_edges_pair_kind",
+        ),
+        CheckConstraint(
+            "edge_kind IN ('DERIVED_FROM','CITES','SUPPORTS')",
+            name="ck_memory_impact_edges_kind",
+        ),
+        CheckConstraint("from_memory_id <> to_memory_id", name="ck_memory_impact_edges_no_self"),
+        Index("ix_memory_impact_edges_from", "from_memory_id"),
+        Index("ix_memory_impact_edges_to", "to_memory_id"),
+        Index("ix_memory_impact_edges_org", "org_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    from_memory_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("memory_records.id", ondelete="CASCADE"), nullable=False
+    )
+    to_memory_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("memory_records.id", ondelete="CASCADE"), nullable=False
+    )
+    edge_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="DERIVED_FROM")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PreemptionRecordModel(Base):
     __tablename__ = "preemption_records"
 

@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.impact_graph_service import ImpactGraphService
 from regent.application.p1_contracts import canonical_hash
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import MemoryRecordModel
@@ -82,6 +83,7 @@ class AdmitMemory:
 class MemoryService:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
+        self._impact = ImpactGraphService(sessions)
 
     async def admit(self, command: AdmitMemory) -> MemoryRecordModel:
         digest = canonical_hash(command.content)
@@ -113,7 +115,20 @@ class MemoryService:
                 }
             session.add(model)
             await session.flush()
-            return model
+            memory_id = model.id
+            source_refs = list(command.source_refs or [])
+            org_key = command.org_key
+        # Impact Graph edges outside the admit transaction (cycle checks need committed parent).
+        if source_refs:
+            await self._impact.link_from_source_refs(
+                org_key=org_key,
+                memory_id=memory_id,
+                source_refs=source_refs,
+            )
+        async with self._sessions() as session:
+            refreshed = await session.get(MemoryRecordModel, memory_id)
+            assert refreshed is not None
+            return refreshed
 
     async def verify(self, memory_id: uuid.UUID, *, actor: str) -> MemoryRecordModel:
         async with self._sessions() as session, session.begin():
@@ -131,18 +146,11 @@ class MemoryService:
             return model
 
     async def revoke(self, memory_id: uuid.UUID, *, actor: str, reason: str) -> MemoryRecordModel:
-        async with self._sessions() as session, session.begin():
+        await self._impact.revoke_cascade(memory_id, actor=actor, reason=reason)
+        async with self._sessions() as session:
             model = await session.get(MemoryRecordModel, memory_id)
             if model is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "memory not found")
-            model.status = "REVOKED"
-            model.content_json = {
-                **dict(model.content_json or {}),
-                "_revoked_by": actor,
-                "_revoke_reason": reason,
-                "_revalidation_required": True,
-            }
-            await session.flush()
             return model
 
     async def list_org(self, org_key: str) -> list[MemoryRecordModel]:

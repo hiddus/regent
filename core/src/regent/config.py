@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # Opt-in certified fixed hive template (pm-dev-independent-qa-v1) when feasible.
     # Default False keeps single-agent champion. Does NOT enable adaptive free topology.
     aar1_certified_hive: bool = False
+    # When True, ReleaseCandidate approve requires a completed human APPROVE task.
+    require_release_human_approval: bool = True
+    # Worker reconciliation sweep interval (seconds) for stale ExternalOperations.
+    reconciliation_interval_seconds: float = Field(default=300.0, ge=30.0)
 
 
 @lru_cache

@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from regent.application.execution_events import (
     QUALITY_APPROVAL_COMPLETED,
+    RELEASE_APPROVAL_COMPLETED,
     EventEnvelope,
     make_idempotency_key,
     make_outbox_event,
@@ -157,6 +158,43 @@ async def complete_human_task(
                 )
             )
             session.add(outbox_event)
+
+        if row.task_type == "RELEASE_APPROVAL":
+            decision = str(payload.response.get("decision", "")).upper()
+            approved = decision == "APPROVE" or bool(payload.response.get("approved", False))
+            goal_id = row.goal_id
+            pending: dict[str, Any] = {}
+            from regent.infrastructure.models import GoalModel
+
+            goal = await session.get(GoalModel, goal_id)
+            if goal is not None:
+                pending = dict((goal.metadata_json or {}).get("pending_release") or {})
+            event_idempotency = make_idempotency_key(
+                "release_approval_completed", goal_id, str(task_id)
+            )
+            outbox_event = make_outbox_event(
+                EventEnvelope(
+                    event_type=RELEASE_APPROVAL_COMPLETED,
+                    aggregate_type="goal",
+                    aggregate_id=goal_id,
+                    aggregate_version=0,
+                    payload={
+                        "goal_id": str(goal_id),
+                        "task_id": str(task_id),
+                        "approved": approved,
+                        "actor": payload.assigned_to,
+                        "release_candidate_id": pending.get("release_candidate_id"),
+                        "app_project_id": pending.get("app_project_id"),
+                        "idempotency_key": pending.get("idempotency_key"),
+                        "correlation_id": pending.get("correlation_id"),
+                    },
+                    idempotency_key=event_idempotency,
+                    correlation_id=uuid.uuid4(),
+                )
+            )
+            session.add(outbox_event)
+
+        await session.commit()
 
         return HumanTaskResponse(
             id=row.id,

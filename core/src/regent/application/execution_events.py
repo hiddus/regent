@@ -37,6 +37,7 @@ PREVIEW_DEPLOYMENT_REQUESTED = "PreviewDeploymentRequested"
 PREVIEW_DEPLOYMENT_SUCCEEDED = "PreviewDeploymentSucceeded"
 QUALITY_APPROVAL_REQUESTED = "QualityApprovalRequested"
 QUALITY_APPROVAL_COMPLETED = "QualityApprovalCompleted"
+RELEASE_APPROVAL_COMPLETED = "ReleaseApprovalCompleted"
 
 # All P1 main chain event types (in execution order)
 P1_MAIN_CHAIN_EVENTS: tuple[str, ...] = (
@@ -56,6 +57,7 @@ P1_MAIN_CHAIN_EVENTS: tuple[str, ...] = (
     PREVIEW_DEPLOYMENT_SUCCEEDED,
     QUALITY_APPROVAL_REQUESTED,
     QUALITY_APPROVAL_COMPLETED,
+    RELEASE_APPROVAL_COMPLETED,
 )
 
 # ---------------------------------------------------------------------------

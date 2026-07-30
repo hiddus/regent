@@ -79,6 +79,15 @@ class Worker:
         self.heartbeat_seconds = heartbeat_seconds
         self.event_engine = event_engine
         self._stopping = asyncio.Event()
+        self._reconciliation = None
+        self._reconciliation_interval = 300.0
+        self._next_reconciliation = 0.0
+        if sessions is not None:
+            from regent.application.reconciliation_worker import ReconciliationWorker
+            from regent.config import get_settings
+
+            self._reconciliation = ReconciliationWorker(sessions)
+            self._reconciliation_interval = get_settings().reconciliation_interval_seconds
 
     async def serve(self) -> None:
         lease = await self.leases.acquire(
@@ -110,6 +119,17 @@ class Worker:
                         logger.exception("CREATED run reclaim failed")
                 if self.scheduler is not None:
                     await self._scheduler_tick()
+                if self._reconciliation is not None and monotonic() >= self._next_reconciliation:
+                    try:
+                        reconciled = await self._reconciliation.tick()
+                        if reconciled:
+                            logger.info(
+                                "reconciliation worker tick",
+                                extra={"count": len(reconciled)},
+                            )
+                    except Exception:
+                        logger.exception("reconciliation worker tick failed")
+                    self._next_reconciliation = monotonic() + self._reconciliation_interval
                 await self.dispatcher.dispatch_once(self.worker_id)
                 if monotonic() >= next_heartbeat:
                     lease = await self.leases.heartbeat(lease)

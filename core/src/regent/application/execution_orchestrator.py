@@ -56,6 +56,7 @@ from regent.application.execution_events import (
     PREVIEW_DEPLOYMENT_SUCCEEDED,
     QUALITY_APPROVAL_COMPLETED,
     QUALITY_APPROVAL_REQUESTED,
+    RELEASE_APPROVAL_COMPLETED,
     REQUIREMENT_REQUESTED,
     REQUIREMENT_VALIDATED,
     WORKSPACE_SNAPSHOT_READY,
@@ -74,6 +75,7 @@ from regent.application.goal_interpreter import (
     GoalInterpreter,
     SubGoal,
 )
+from regent.application.human_task_service import HumanTaskService
 from regent.application.iteration_loop_service import IterationLoopService
 from regent.application.milestone_service import (
     GOAL_SCALE_LARGE,
@@ -2137,7 +2139,7 @@ class ExecutionOrchestrator:
     # ---------------------------------------------------------------------------
 
     async def handle_preview_deployment_requested(self, payload: dict[str, Any]) -> None:
-        """Create release candidate, approve, deploy, emit PreviewDeploymentSucceeded."""
+        """Create release candidate + human approval task; await RELEASE_APPROVAL."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
         project_id = uuid.UUID(str(payload["app_project_id"]))
         build_id = uuid.UUID(str(payload["app_build_id"]))
@@ -2154,23 +2156,154 @@ class ExecutionOrchestrator:
             goal = await session.get(GoalModel, goal_id)
             correlation_id = str(goal.correlation_id) if goal else ""
 
+        work_id, run_id = await self._ensure_work_and_run_for_goal(
+            goal_id, purpose="preview-deployment", actor=actor
+        )
+        human_tasks = HumanTaskService(self._sessions)
+        task_id = await human_tasks.create(
+            goal_id=goal_id,
+            work_id=work_id,
+            run_id=run_id,
+            task_type="RELEASE_APPROVAL",
+            prompt=(
+                f"Approve preview release candidate for build {build_id}. "
+                "Respond with decision=APPROVE or decision=REJECT."
+            ),
+            requested_by=actor,
+            due_at=datetime.now(UTC) + timedelta(hours=24),
+        )
         try:
             candidate = await release_service.create_candidate(
                 CreateReleaseCandidate(
                     app_build_id=build_id,
                     actor=actor,
                     correlation_id=correlation_id,
+                    human_task_id=task_id,
                 )
             )
+        except Exception as exc:
+            logger.exception(
+                "release candidate creation failed", extra={"goal_id": str(goal_id)}
+            )
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="RELEASE_CANDIDATE_FAILED",
+                message=f"Release candidate creation failed: {exc}",
+                terminal=GoalCommand.WAIT_FOR_HUMAN,
+                actor=actor,
+                event_type="HUMAN_TASK_REQUIRED",
+                extra={"error": str(exc)[:400]},
+            )
+            return
+
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id)
+            if goal is not None:
+                metadata = dict(goal.metadata_json or {})
+                metadata["pending_release"] = {
+                    "release_candidate_id": str(candidate.id),
+                    "human_task_id": str(task_id),
+                    "app_build_id": str(build_id),
+                    "app_project_id": str(project_id),
+                    "idempotency_key": idempotency_key,
+                    "correlation_id": correlation_id,
+                }
+                goal.metadata_json = metadata
+
+        await self._halt_goal_stage(
+            goal_id,
+            project_id,
+            stage="RELEASE_APPROVAL_REQUIRED",
+            message=(
+                f"预览发布候选 {candidate.id} 等待人工批准（任务 {task_id}）。"
+                "完成 RELEASE_APPROVAL 任务后将继续部署。"
+            ),
+            terminal=GoalCommand.WAIT_FOR_HUMAN,
+            actor=actor,
+            event_type="HUMAN_TASK_REQUIRED",
+            extra={
+                "release_candidate_id": str(candidate.id),
+                "human_task_id": str(task_id),
+            },
+        )
+
+    async def handle_release_approval_completed(self, payload: dict[str, Any]) -> None:
+        """After human RELEASE_APPROVAL, approve candidate and execute preview deploy."""
+        goal_id = uuid.UUID(str(payload["goal_id"]))
+        actor = str(payload.get("actor", "regent-core"))
+        approved = bool(payload.get("approved", False))
+        project_id = uuid.UUID(str(payload.get("app_project_id") or uuid.UUID(int=0)))
+        candidate_id_raw = payload.get("release_candidate_id")
+        idempotency_key = str(payload.get("idempotency_key", ""))
+        correlation_id = str(payload.get("correlation_id", ""))
+
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, goal_id)
+            meta = dict((goal.metadata_json if goal else None) or {})
+            pending = dict(meta.get("pending_release") or {})
+            if not candidate_id_raw:
+                candidate_id_raw = pending.get("release_candidate_id")
+            if not idempotency_key:
+                idempotency_key = str(pending.get("idempotency_key") or f"release-{goal_id}")
+            if not correlation_id:
+                correlation_id = str(pending.get("correlation_id") or "")
+            if project_id.int == 0 and pending.get("app_project_id"):
+                project_id = uuid.UUID(str(pending["app_project_id"]))
+
+        if not approved:
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="RELEASE_REJECTED",
+                message="人工拒绝了预览发布候选。",
+                terminal=GoalCommand.WAIT_FOR_HUMAN,
+                actor=actor,
+                event_type="HUMAN_TASK_REQUIRED",
+                extra={"release_candidate_id": str(candidate_id_raw or "")},
+            )
+            return
+
+        if not candidate_id_raw:
+            logger.error("release approval missing candidate id", extra={"goal_id": str(goal_id)})
+            return
+
+        if self._deployment_provider is None:
+            logger.warning("deployment skipped: deployment provider not configured")
+            return
+
+        await self._execute_approved_preview_deployment(
+            {
+                "goal_id": str(goal_id),
+                "app_project_id": str(project_id),
+                "release_candidate_id": str(candidate_id_raw),
+                "actor": actor,
+                "idempotency_key": idempotency_key,
+                "correlation_id": correlation_id,
+            }
+        )
+
+    async def _execute_approved_preview_deployment(self, payload: dict[str, Any]) -> None:
+        """Approve (already human-gated) candidate and run preview deployment."""
+        goal_id = uuid.UUID(str(payload["goal_id"]))
+        project_id = uuid.UUID(str(payload["app_project_id"]))
+        candidate_id = uuid.UUID(str(payload["release_candidate_id"]))
+        actor = str(payload.get("actor", "regent-core"))
+        idempotency_key = str(payload.get("idempotency_key", ""))
+        correlation_id = str(payload.get("correlation_id", ""))
+
+        assert self._deployment_provider is not None
+        release_service = ReleaseService(self._sessions, self._deployment_provider)
+        try:
             await release_service.approve(
-                candidate.id, actor=actor, reason="auto-approved by P1 execution chain"
+                candidate_id,
+                actor=actor,
+                reason="approved by human RELEASE_APPROVAL task",
             )
 
-            # Ensure work+run exist for FK constraint on permits
             work_id, run_id = await self._ensure_work_and_run_for_goal(
                 goal_id, purpose="preview-deployment", actor=actor
             )
-            # Create permit for preview deployment
             permit_id = uuid.uuid4()
             if self._permits:
                 permit_id = await self._permits.request(
@@ -2180,7 +2313,7 @@ class ExecutionOrchestrator:
                         run_id=run_id,
                         actor_id="preview-deployment-provider",
                         action="preview-deploy",
-                        target=str(candidate.id),
+                        target=str(candidate_id),
                         parameters={},
                         data_scope={},
                         network_scope={},
@@ -2193,7 +2326,7 @@ class ExecutionOrchestrator:
 
             deployment = await release_service.request_deployment(
                 RequestDeployment(
-                    release_candidate_id=candidate.id,
+                    release_candidate_id=candidate_id,
                     permit_id=permit_id,
                     environment="preview",
                     idempotency_key=idempotency_key,
@@ -2272,10 +2405,7 @@ class ExecutionOrchestrator:
                             terminal=GoalCommand.WAIT_FOR_HUMAN,
                             actor=actor,
                             event_type="HUMAN_TASK_REQUIRED",
-                            extra={
-                                "gap_kind": recovery.gap_kind,
-                                "gac": "GAC-D5",
-                            },
+                            extra={"gap_kind": recovery.gap_kind, "gac": "GAC-D5"},
                         )
                         return
                 await self._halt_goal_stage(
@@ -2320,7 +2450,6 @@ class ExecutionOrchestrator:
             )
             return
 
-        # Stamp real deployment UUID into published preview HTML for browser events.
         evidence = dict(result.evidence or {})
         project_key = str(evidence.get("project_key") or "")
         release_key = str(evidence.get("release_key") or "")
@@ -2344,11 +2473,11 @@ class ExecutionOrchestrator:
                     extra={"deployment_id": str(result.id)},
                 )
 
-        # Write PreviewDeploymentSucceeded
         async with self._sessions() as session, session.begin():
             goal = await session.get(GoalModel, goal_id)
             if goal:
                 metadata = dict(goal.metadata_json or {})
+                metadata.pop("pending_release", None)
                 verification = evidence.get("delivery_verification") or {}
                 if verification:
                     metadata["delivery_verification"] = verification
@@ -3611,6 +3740,7 @@ def get_p1_event_handlers(
         PREVIEW_DEPLOYMENT_SUCCEEDED: orchestrator.handle_preview_deployment_succeeded,
         QUALITY_APPROVAL_REQUESTED: orchestrator.handle_quality_approval_requested,
         QUALITY_APPROVAL_COMPLETED: orchestrator.handle_quality_approval_completed,
+        RELEASE_APPROVAL_COMPLETED: orchestrator.handle_release_approval_completed,
         "TimerFired": orchestrator.handle_timer_fired,
         # P1-C: V3 domain event handlers
         "ReorganizationTriggered": orchestrator.handle_reorganization_triggered,

@@ -118,6 +118,8 @@ class ReleaseService:
     async def approve(
         self, candidate_id: uuid.UUID, *, actor: str, reason: str
     ) -> ReleaseCandidateModel:
+        from regent.config import get_settings
+
         async with self._sessions() as session, session.begin():
             candidate = await session.scalar(
                 select(ReleaseCandidateModel)
@@ -131,6 +133,12 @@ class ReleaseService:
                 return candidate
             if candidate.status != "READY":
                 raise DomainError(ErrorCode.INVALID_STATE, "release candidate is not ready")
+            require_human = get_settings().require_release_human_approval
+            if require_human and candidate.human_task_id is None:
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED,
+                    "release approval requires a human task",
+                )
             if candidate.human_task_id is not None:
                 task = await session.get(HumanTaskModel, candidate.human_task_id)
                 if (

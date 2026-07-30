@@ -129,3 +129,47 @@ class TestAgentMeshRouteWithEnvelope:
         )
         task = mesh.route_with_envelope(env)
         assert sorted(task.metadata["capability_scope"]) == ["code-review", "test"]
+
+    def test_hmac_signed_envelope_routes(self) -> None:
+        secret = b"test-hmac-secret-key"
+        mesh = AgentMesh(use_memory=True)
+        env = create_envelope(
+            "a", "b",
+            capabilities=["read"],
+            content={"task": "x"},
+            correlation_id="corr-1",
+            hmac_secret=secret,
+        )
+        assert env.hmac_signature
+        assert env.correlation_id == "corr-1"
+        assert env.v1_envelope is not None
+        task = mesh.route_with_envelope(env, hmac_secret=secret)
+        assert task.status == A2ATaskStatus.PENDING
+        assert task.metadata["hmac_signature"] == env.hmac_signature
+
+    def test_hmac_required_when_secret_configured(self) -> None:
+        secret = b"test-hmac-secret-key"
+        mesh = AgentMesh(use_memory=True)
+        # Digest-only envelope rejected when HMAC secret is provided to router
+        env = create_envelope("a", "b", content={"task": "x"}, hmac_secret=None)
+        # Force no auto-sign by passing explicit None and ensuring no settings key:
+        assert not env.hmac_signature
+        task = mesh.route_with_envelope(env, hmac_secret=secret)
+        assert task.status == A2ATaskStatus.FAILED
+        assert "HMAC" in task.task_description
+
+    def test_hmac_tamper_rejected(self) -> None:
+        secret = b"test-hmac-secret-key"
+        mesh = AgentMesh(use_memory=True)
+        env = create_envelope(
+            "a", "b",
+            content={"task": "x"},
+            hmac_secret=secret,
+        )
+        # Tamper v1 envelope signature
+        tampered = dict(env.v1_envelope or {})
+        tampered["signature"] = "0" * 64
+        object.__setattr__(env, "v1_envelope", tampered)
+        object.__setattr__(env, "hmac_signature", tampered["signature"])
+        task = mesh.route_with_envelope(env, hmac_secret=secret)
+        assert task.status == A2ATaskStatus.FAILED

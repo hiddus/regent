@@ -578,10 +578,10 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 
 ### 已知非阻塞限制
 
-1. ReleaseCandidate 在 P1 执行链上自动批准（跳过人工任务）；人工批准 API 可用，默认不强制（见 `docs/registered-unimplemented-2026-07-30.md`）。
+1. ~~ReleaseCandidate 在 P1 执行链上自动批准~~ **已修复（2026-07-30）**：预览链创建 `RELEASE_APPROVAL` HumanTask；`require_release_human_approval` 默认 true；人工完成任务后经 `ReleaseApprovalCompleted` 继续部署。
 2. 完整浏览器级 R7 gate：无 Playwright 时 `browser_journey` 为 dry-run（步骤标记 passed，非真浏览器验收）；有 Playwright 时执行真实旅程。
-3. ExternalOperation 完整闭环需在 G0 合入；调度路径 `dispatch_with_eo` 已创建真实 EO 行（`scheduler-dispatch-v1`），但不替代完整 provider 对账闭环。
-4. Eval Harness 已改为交付信号/Goal 证据评分（无 `hash%2` 桩），`decide` 写入签名 `product_decision_record`；北极星/护栏提供只读报告 API（`/v1/governance/north-star`）。P0 完成定义第 5 条仍要求冻结任务集上的真实 A/B/C 对照与唯一产品 DecisionRecord，不得仅凭模块存在或夹具信号宣称已满足。
+3. ExternalOperation 完整闭环：Worker 已挂载 `ReconciliationWorker` 周期扫描；调度 `dispatch_with_eo` 创建真实 EO。完整 provider query→resolve 生产对账仍为后续切片。
+4. Eval Harness 已改为交付信号/Goal 证据评分（无 `hash%2` 桩）。P0#5 签署产物已纳入 `docs/experiments/p0-v1-artifacts/`，可按 SHA 与 DecisionRecord 字段仓内复核。
 
 > 更正（2026-07-30）：此前误报「Evidence Connector 仍为空实现」「Deployment Provider 为内存实现」。现状为 `AllowlistedHttpEvidenceConnector` / `GoalIntentEvidenceConnector` 已接线；生产预览为 `StaticPreviewDeploymentProvider`（`InMemoryDeploymentProvider` 仅测试用）。
 
