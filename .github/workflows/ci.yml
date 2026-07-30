@@ -11,5 +11,8 @@ jobs:
       - run: ruff check .
       - run: mypy
       - run: pytest
+      # Marker smoke: unknown markers must fail collection; empty selection is OK.
+      - run: pytest -m governance --collect-only
+      - run: pytest -m "idempotency or permit or recovery or eval" --collect-only
       - run: python -c "from pathlib import Path; assert Path('docs/definitions/REGENT-DEFINITION-1.0.txt').is_file()"
       # definition freeze covered by tests/architecture/test_regent_definition_freeze.py

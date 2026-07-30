@@ -1,0 +1,71 @@
+{
+  "version": "single-agent-baseline-v1",
+  "frozen_at": "2026-07-30T00:00:00Z",
+  "baseline": "strong_single_agent",
+  "org_adaptive_status": "ROLLOUT_NOT_ALLOWED",
+  "tasks": [
+    {
+      "id": "goal-csv-summary",
+      "description": "CSV_SUMMARY_BASELINE deterministic summary",
+      "category": "data_processing",
+      "verification": {
+        "mode": "delivery_signals",
+        "build_ok": true,
+        "preview_reachable": true,
+        "delivery_review": "PASS",
+        "evidence_refs": ["fixture://csv_summary_baseline/expected.json"]
+      }
+    },
+    {
+      "id": "goal-evt-parser",
+      "description": "EVT_PARSER_GAP certified parser",
+      "category": "capability_gap",
+      "verification": {
+        "mode": "delivery_signals",
+        "build_ok": true,
+        "preview_reachable": true,
+        "delivery_review": "PASS",
+        "evidence_refs": ["fixture://evt_parser_gap/certification"]
+      }
+    },
+    {
+      "id": "goal-static-preview",
+      "description": "Static preview reachable with delivery-review PASS",
+      "category": "delivery",
+      "verification": {
+        "mode": "delivery_signals",
+        "build_ok": true,
+        "preview_reachable": true,
+        "delivery_review": "PASS",
+        "evidence_refs": ["capability://delivery-review-v1"]
+      }
+    },
+    {
+      "id": "goal-fail-closed-demo",
+      "description": "Non-deliverable surface must fail review",
+      "category": "delivery",
+      "verification": {
+        "mode": "delivery_signals",
+        "build_ok": true,
+        "preview_reachable": false,
+        "delivery_review": "FAIL",
+        "expect_pass": false,
+        "evidence_refs": ["capability://delivery-review-v1"]
+      }
+    },
+    {
+      "id": "goal-db-verified",
+      "description": "Optional Goal ACHIEVED + Evidence when goal_id provided",
+      "category": "governance",
+      "verification": {
+        "mode": "goal_evidence",
+        "evidence_refs": ["db://goal.evidence"]
+      }
+    }
+  ],
+  "metadata": {
+    "seed": "eval-single-agent-baseline-v1",
+    "min_pass_rate": 0.6,
+    "confidence_level": 0.95
+  }
+}

@@ -5,8 +5,8 @@
 ## 功能
 
 - 目标（Goal）/ 工作项（Work）看板与状态跟踪
-- Agent 活动面板（`AgentActivityPanel`）与对话式交互（`Composer` / `MessageList`，SSE 流式）
-- 进度节点展示（`ProgressNodeCard`）、预览链接（`PreviewLink`）、人工任务确认卡片（`ConfirmationCard`）
+- Artifact 面板（`ArtifactPanel`）与对话式交互（`Composer` / `MessageList`，SSE 流式）
+- 进度节点展示（`ProgressNodeCard`）、人工任务确认卡片（`ConfirmationCard`）
 - 侧边栏导航（`Sidebar`）、任务卡片（`TaskCard`）
 
 ## 目录结构

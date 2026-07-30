@@ -173,3 +173,45 @@ async def transition_goal(
         payload.command,
     )
     return _response(await goals.get(goal_id))
+
+
+class PrivacyActorBody(BaseModel):
+    actor: str = Field(min_length=1, max_length=255)
+
+
+@router.get("/{goal_id}/export")
+async def export_goal(
+    goal_id: uuid.UUID, actor: str, request: Request
+) -> dict[str, Any]:
+    """PRD §7.4 Goal Owner export (PII-minimized)."""
+    from regent.application.privacy_service import PrivacyService
+
+    package = await PrivacyService(request.app.state.sessions).export_goal(
+        goal_id, requester=actor
+    )
+    return package.as_dict()
+
+
+@router.post("/{goal_id}/export")
+async def export_goal_post(
+    goal_id: uuid.UUID, payload: PrivacyActorBody, request: Request
+) -> dict[str, Any]:
+    from regent.application.privacy_service import PrivacyService
+
+    package = await PrivacyService(request.app.state.sessions).export_goal(
+        goal_id, requester=payload.actor
+    )
+    return package.as_dict()
+
+
+@router.post("/{goal_id}/delete-request")
+async def delete_goal_request(
+    goal_id: uuid.UUID, payload: PrivacyActorBody, request: Request
+) -> dict[str, Any]:
+    """PRD §7.4 Goal Owner delete request; receipt is written to Audit."""
+    from regent.application.privacy_service import PrivacyService
+
+    receipt = await PrivacyService(request.app.state.sessions).request_delete(
+        goal_id, requester=payload.actor
+    )
+    return receipt.as_dict()

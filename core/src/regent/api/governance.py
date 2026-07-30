@@ -199,3 +199,12 @@ async def replay_dead_letter(
         "replayed_by": receipt.replayed_by,
         "replayed_at": receipt.replayed_at.isoformat(),
     }
+
+
+@router.get("/north-star")
+async def north_star_report(request: Request) -> dict[str, object]:
+    """PRD §8.1 / §8.2 read-only CostPerVerifiedSuccess + guardrail report."""
+    from regent.application.north_star_metrics import NorthStarMetricsService
+
+    report = await NorthStarMetricsService(request.app.state.sessions).report()
+    return report.as_dict()

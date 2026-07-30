@@ -34,7 +34,7 @@ class WorkerLeaseService:
         async with self._sessions() as session, session.begin():
             db_now = await self._database_now(session)
             current = await session.get(WorkerLeaseModel, worker_id, with_for_update=True)
-            if current is not None and current.expires_at > db_now:
+            if current is not None and self._as_utc(current.expires_at) > db_now:
                 raise DomainError(ErrorCode.LEASE_CONFLICT, f"worker {worker_id} is active")
 
             token = uuid.uuid4()
@@ -97,10 +97,14 @@ class WorkerLeaseService:
                 raise DomainError(ErrorCode.LEASE_LOST, f"worker {lease.worker_id} lost lease")
 
     @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    @staticmethod
     async def _database_now(session: AsyncSession) -> datetime:
         value = await session.scalar(select(func.now()))
         if value is None:
             raise RuntimeError("database did not return current time")
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value
+        return WorkerLeaseService._as_utc(value)

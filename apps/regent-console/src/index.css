@@ -454,6 +454,46 @@ body {
   line-height: 1.5;
 }
 
+.progress-node-conclusion.live-detail {
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.progress-node.is-live {
+  border-color: color-mix(in srgb, var(--info) 35%, var(--line));
+  background: color-mix(in srgb, var(--info) 8%, transparent);
+}
+
+.progress-node.is-settled.view-overview {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.progress-node.is-settled.view-compressed {
+  padding-top: 4px;
+  padding-bottom: 4px;
+  opacity: 0.72;
+}
+
+.progress-node.is-settled.view-compressed .progress-node-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.progress-node-compressed-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 0;
+  opacity: 0.8;
+}
+
+.progress-node-detail.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* Collapsible detail section */
 .progress-node-detail-wrap {
   max-height: 0;
@@ -798,7 +838,7 @@ body {
 .artifact-panel-header {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
@@ -980,6 +1020,211 @@ body {
   padding: 40px 20px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.artifact-empty.compact {
+  padding: 12px 8px;
+  text-align: left;
+}
+
+.agent-panel-count {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.agent-roster {
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+
+.agent-roster-item {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--hover);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.agent-roster-item.is-main {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--hover));
+}
+
+.agent-roster-item.activity-active {
+  border-color: color-mix(in srgb, var(--info) 45%, var(--line));
+}
+
+.agent-avatar {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #2a2d3a;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.agent-avatar.activity-active {
+  background: color-mix(in srgb, var(--info) 28%, #2a2d3a);
+}
+
+.agent-avatar.activity-done {
+  background: color-mix(in srgb, var(--accent) 28%, #2a2d3a);
+}
+
+.agent-avatar.activity-waiting {
+  background: color-mix(in srgb, var(--warn) 28%, #2a2d3a);
+}
+
+.agent-avatar.activity-failed {
+  background: color-mix(in srgb, var(--danger) 28%, #2a2d3a);
+}
+
+.agent-status-badge {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--panel);
+  background: var(--muted);
+}
+
+.agent-status-badge.activity-active {
+  background: var(--info);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--info) 35%, transparent);
+}
+
+.agent-status-badge.activity-done { background: var(--accent); }
+.agent-status-badge.activity-waiting { background: var(--warn); }
+.agent-status-badge.activity-failed { background: var(--danger); }
+.agent-status-badge.activity-ready { background: #6b7280; }
+.agent-status-badge.activity-idle { background: #4b5563; }
+
+.agent-roster-body {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agent-roster-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.agent-roster-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-activity-chip {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.agent-activity-chip.activity-active {
+  color: #93c5fd;
+  border-color: #1d4ed8;
+  background: #172554;
+}
+
+.agent-activity-chip.activity-done {
+  color: #6ee7b7;
+  border-color: #047857;
+  background: #064e3b;
+}
+
+.agent-activity-chip.activity-waiting {
+  color: #fcd34d;
+  border-color: #b45309;
+  background: #451a03;
+}
+
+.agent-activity-chip.activity-failed {
+  color: #fca5a5;
+  border-color: #b91c1c;
+  background: #450a0a;
+}
+
+.agent-roster-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.agent-roster-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.artifact-fold-section {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.artifact-fold-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 4px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.artifact-fold-toggle:hover { color: var(--text); }
+
+.artifact-fold-arrow {
+  display: inline-block;
+  transition: transform 0.15s;
+  font-size: 14px;
+}
+
+.artifact-fold-toggle.open .artifact-fold-arrow {
+  transform: rotate(90deg);
+}
+
+.artifact-fold-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 4px;
 }
 
 /* Mobile */

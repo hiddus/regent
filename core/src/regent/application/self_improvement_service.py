@@ -42,6 +42,9 @@ class SelfImprovementReceipt:
     policy_version: str
     approved_by: str | None
     decision_reason: str | None
+    # P2-8 candidate: no product DecisionRecord gate yet (PRD §9.3).
+    candidate_ungated: bool = True
+    decision_record_status: str = "ROLLOUT_NOT_ALLOWED"
 
 
 class SelfImprovementService:
@@ -183,18 +186,20 @@ class SelfImprovementService:
     @staticmethod
     def _receipt(model: SelfImprovementRunModel) -> SelfImprovementReceipt:
         return SelfImprovementReceipt(
-            model.id,
-            model.status,
-            model.primary_problem,
-            model.hypothesis,
-            model.target_file,
-            model.baseline_hash,
-            model.candidate_hash,
-            model.candidate_workspace,
-            model.expected_outcome,
-            model.verification_json,
-            model.risk_json,
-            model.policy_version,
-            model.approved_by,
-            model.decision_reason,
+            id=model.id,
+            status=model.status,
+            primary_problem=model.primary_problem,
+            hypothesis=model.hypothesis,
+            target_file=model.target_file,
+            baseline_hash=model.baseline_hash,
+            candidate_hash=model.candidate_hash,
+            candidate_workspace=model.candidate_workspace,
+            expected_outcome=model.expected_outcome,
+            verification=model.verification_json,
+            risks=model.risk_json,
+            policy_version=model.policy_version,
+            approved_by=model.approved_by,
+            decision_reason=model.decision_reason,
+            candidate_ungated=True,
+            decision_record_status="ROLLOUT_NOT_ALLOWED",
         )

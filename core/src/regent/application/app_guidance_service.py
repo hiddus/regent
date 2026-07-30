@@ -24,6 +24,7 @@ from regent.application.transition_service import TransitionContext, TransitionS
 from regent.domain.errors import DomainError, ErrorCode
 from regent.domain.transitions import GoalCommand
 from regent.infrastructure.models import (
+    AgentSpecModel,
     AppBuildModel,
     AppPreviewReleaseModel,
     AppProjectModel,
@@ -47,6 +48,22 @@ from regent.infrastructure.models import (
     WorkspaceSnapshotModel,
 )
 from regent.model import ModelProvider
+
+# Console-facing role labels (Simplified Chinese).
+_AGENT_ROLE_LABELS: dict[str, str] = {
+    "core": "主助手",
+    "executor": "执行",
+    "pm": "产品",
+    "dev": "开发",
+    "qa": "质检",
+    "coordinator": "协调",
+    "reviewer": "审查",
+}
+
+_ACTIVE_TASK_STATUSES = frozenset({"CREATED", "OFFERED", "ACCEPTED", "RUNNING", "RECONCILING"})
+_DONE_TASK_STATUSES = frozenset({"SUCCEEDED", "CANCELLED"})
+_FAILED_TASK_STATUSES = frozenset({"FAILED_RETRYABLE", "FAILED_TERMINAL", "TIMED_OUT", "UNKNOWN"})
+_ACTIVE_DEPLOY_STATUSES = frozenset({"OPERATING", "DEPLOYED", "UPGRADING"})
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +334,13 @@ class AppGuidanceService:
                         "source": "goal_metadata",
                     }
 
+            agents = await self._goal_agents_for_console(
+                session,
+                goal_id=goal.id,
+                goal_status=goal.status,
+                metadata=metadata if isinstance(metadata, dict) else {},
+            )
+
             return {
                 "project": {
                     "name": project.name,
@@ -344,6 +368,7 @@ class AppGuidanceService:
                 "preview": preview_payload,
                 "pending_human_tasks": pending_tasks,
                 "active_corrections": active_corrections,
+                "agents": agents,
             }
 
     async def _conversation_history(
@@ -372,6 +397,167 @@ class AppGuidanceService:
                 }
                 for msg in reversed(rows)
             ]
+
+    # ------------------------------------------------------------------
+    # Console agents (Hive deployments / AgentSpec / live_action fallback)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _goal_agents_for_console(
+        session: AsyncSession,
+        *,
+        goal_id: uuid.UUID,
+        goal_status: str,
+        metadata: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Read-only agent roster for the console right panel.
+
+        Prefers Hive AgentDeployment rows; falls back to scoped AgentSpec;
+        always includes a synthetic Core/主助手 entry driven by live_action.
+        """
+        live = metadata.get("live_action") if isinstance(metadata.get("live_action"), dict) else {}
+        live_summary = str(live.get("summary") or "").strip() or None
+        goal_active = goal_status in {
+            "ACTIVE",
+            "WAITING_HUMAN",
+            "PAUSED",
+            "READY",
+            "BLOCKED",
+            "EXHAUSTED",
+        }
+        terminal = goal_status in {"ACHIEVED", "CANCELLED", "FAILED"}
+
+        core_activity = "idle"
+        if terminal:
+            core_activity = "done" if goal_status == "ACHIEVED" else "failed"
+        elif goal_status == "WAITING_HUMAN":
+            core_activity = "waiting"
+        elif goal_active and live_summary:
+            core_activity = "active"
+        elif goal_active:
+            core_activity = "ready"
+
+        agents: list[dict[str, Any]] = [
+            {
+                "id": "core",
+                "name": "主助手",
+                "role": "core",
+                "role_label": _AGENT_ROLE_LABELS["core"],
+                "kind": "core",
+                "activity": core_activity,
+                "detail": live_summary,
+                "is_main": True,
+            }
+        ]
+
+        # Prefer durable hive deployments when present.
+        try:
+            from regent.infrastructure.aar1_models import AgentDeploymentModel, AgentTaskModel
+
+            deployments = list(
+                await session.scalars(
+                    select(AgentDeploymentModel)
+                    .where(AgentDeploymentModel.goal_id == goal_id)
+                    .order_by(AgentDeploymentModel.created_at.asc())
+                )
+            )
+            if deployments:
+                # Latest task per deployment for activity.
+                task_by_dep: dict[uuid.UUID, Any] = {}
+                tasks = list(
+                    await session.scalars(
+                        select(AgentTaskModel)
+                        .where(AgentTaskModel.goal_id == goal_id)
+                        .order_by(AgentTaskModel.updated_at.desc())
+                        .limit(80)
+                    )
+                )
+                for task in tasks:
+                    dep_id = task.target_deployment_id
+                    if dep_id not in task_by_dep:
+                        task_by_dep[dep_id] = task
+
+                for dep in deployments:
+                    role = str(dep.role or "executor")
+                    task = task_by_dep.get(dep.id)
+                    activity = "idle"
+                    detail: str | None = None
+                    if dep.status in {"FAILED", "RETIRED", "SUSPENDED"}:
+                        activity = "failed" if dep.status == "FAILED" else "idle"
+                    elif task is not None:
+                        detail = str(task.task_type or "") or None
+                        if task.status in _ACTIVE_TASK_STATUSES:
+                            activity = "active"
+                        elif task.status in _DONE_TASK_STATUSES:
+                            activity = "done"
+                        elif task.status in _FAILED_TASK_STATUSES:
+                            activity = "failed"
+                        elif task.status == "MANUAL_REVIEW":
+                            activity = "waiting"
+                        elif dep.status in _ACTIVE_DEPLOY_STATUSES:
+                            activity = "ready"
+                    elif dep.status in _ACTIVE_DEPLOY_STATUSES:
+                        activity = "ready" if goal_active else "idle"
+                    elif dep.status == "PENDING":
+                        activity = "ready" if goal_active else "idle"
+
+                    short_id = str(dep.id).replace("-", "")[:8]
+                    display = _AGENT_ROLE_LABELS.get(role) or role
+                    agents.append(
+                        {
+                            "id": str(dep.id),
+                            "name": f"{display} · {short_id}",
+                            "role": role,
+                            "role_label": display,
+                            "kind": "hive",
+                            "activity": activity,
+                            "detail": detail,
+                            "is_main": False,
+                            "deployment_status": dep.status,
+                        }
+                    )
+                return agents
+        except Exception:
+            # Tables may be absent in older envs; fall through to AgentSpec.
+            pass
+
+        # Legacy organization AgentSpec scoped to this goal.
+        try:
+            specs = list(
+                await session.scalars(
+                    select(AgentSpecModel)
+                    .where(
+                        AgentSpecModel.scope_goal_id == goal_id,
+                        AgentSpecModel.status != "REVOKED",
+                    )
+                    .order_by(AgentSpecModel.created_at.asc())
+                )
+            )
+            for spec in specs:
+                constraints = spec.constraints if isinstance(spec.constraints, dict) else {}
+                role = str(constraints.get("hive_role") or constraints.get("role") or "executor")
+                display = _AGENT_ROLE_LABELS.get(role) or role
+                short_id = str(spec.id).replace("-", "")[:8]
+                activity = "ready" if (goal_active and spec.status == "ACTIVE") else "idle"
+                if terminal and goal_status == "ACHIEVED":
+                    activity = "done"
+                agents.append(
+                    {
+                        "id": str(spec.id),
+                        "name": f"{display} · {short_id}",
+                        "role": role,
+                        "role_label": display,
+                        "kind": "spec",
+                        "activity": activity,
+                        "detail": None,
+                        "is_main": False,
+                        "spec_status": spec.status,
+                    }
+                )
+        except Exception:
+            pass
+
+        return agents
 
     # ------------------------------------------------------------------
     # Execution stage detection (unchanged)

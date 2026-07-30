@@ -15,6 +15,9 @@ from regent.model.factory import build_model_provider
 
 router = APIRouter(prefix="/v1/self-improvement-runs", tags=["self-improvement"])
 
+# P2-8 candidate (PRD §9.3): responses include candidate_ungated=true until a uniquely
+# signed product DecisionRecord exists. Do not treat APPROVE as product 验收.
+
 
 def service(request: Request) -> SelfImprovementService:
     settings = get_settings()

@@ -7,7 +7,9 @@
 
 ## 当前内容
 
+- `regent-v3-gap-repair-summary` — v3 缺口修复总结画布。
 - `v3-component-conflict-resolution` — v3 组件冲突消解画布。
+- `v3-freeze-summary` — v3 冻结总结画布。
 - `v3-implementation-report` — v3 实施报告画布。
 
 ## 说明

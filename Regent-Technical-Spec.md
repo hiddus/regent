@@ -562,25 +562,28 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 
 ### 已完成
 
+> 下列「已完成」指**结构/链路已落地**；可验证交付以治理管道行为 pytest + 非桩 Eval 为准，不以模块存在或结构级断言为准（见 DecisionNote `docs/decision-note-verifiable-delivery-2026-07-30.md`）。
+
 - **P0 全链路**：Goal/Work/Run 三套状态机、Outbox、Lease、Timer、Artifact、Evidence、Audit，通过 CSV_SUMMARY_BASELINE。
 - **P1 R1–R6**：Goal 解释与分解、Discovery 编排、证据连接器、假设决策、需求修订、能力解析、WorkspaceWriter、Generation Service、Docker 沙箱构建、Preview 发布、观测回流、Gate 评估与 Iteration Decision。
 - **P1 R7**：DeploymentSmokeTestService 实现简化可体验性 Gate。
 - **P1 R8**：IterationLoopService 实现 Observation→Decision→REVISE 端到端闭环。
 - **对话与 App 身份**：Conversation 持久化、AppProject、GoalSpec DRAFT/FROZEN/SUPERSEDED、确认闸门、对话驱动修订（0019）。
 - **真实 App 预览**：StaticAppPublisher、CSP 预览、观测钩子（0020）。
-- **受监管自我改进**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）。
+- **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
 - **确认后自主执行闭环**：Confirm/Start 分离、Outbox 指数退避与死信（0022）。
-- **蜂巢并行执行架构**：HiveRuntime + 预装 Skills + BudgetLedger/EventEngine/BrowserJourney 集成。
+- **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 可经 `REGENT_AAR1_CERTIFIED_HIVE` 启用；**默认仍为强单 Agent**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
 - **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局，产物面板。
-- **桌面端**：Tauri 桌面应用骨架。
+- **桌面端（探索性）**：Tauri 桌面应用骨架存在于仓库；PRD 主交付范围为 Core + Web Console，桌面端未纳入 P0/P1 验收。
 
 ### 已知非阻塞限制
 
-1. Evidence Connector 仍为空实现。
-2. Deployment Provider 为内存实现。
-3. ReleaseCandidate 自动批准。
-4. 完整浏览器级 R7 gate 待 Playwright/Selenium 支持。
-5. ExternalOperation 完整闭环需在 G0 合入。
+1. ReleaseCandidate 在 P1 执行链上自动批准（跳过人工任务）。
+2. 完整浏览器级 R7 gate：无 Playwright 时 `browser_journey` 为 dry-run（步骤标记 passed，非真浏览器验收）。
+3. ExternalOperation 完整闭环需在 G0 合入。
+4. Eval Harness 已改为交付信号/Goal 证据评分（无 `hash%2` 桩），`decide` 写入签名 `product_decision_record`；北极星/护栏提供只读报告 API（`/v1/governance/north-star`）。P0 完成定义第 5 条仍要求冻结任务集上的真实 A/B/C 对照与唯一产品 DecisionRecord，不得仅凭模块存在或夹具信号宣称已满足。
+
+> 更正（2026-07-30）：此前误报「Evidence Connector 仍为空实现」「Deployment Provider 为内存实现」。现状为 `AllowlistedHttpEvidenceConnector` / `GoalIntentEvidenceConnector` 已接线；生产预览为 `StaticPreviewDeploymentProvider`（`InMemoryDeploymentProvider` 仅测试用）。
 
 ---
 

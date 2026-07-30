@@ -1,172 +1,195 @@
-"""Phase 5.2: Evidence chain integrity tests.
-
-Verifies that the full evidence chain from Goal creation to Decision
-is queryable and properly linked:
-- GoalSpec → DiscoveryRound → Evidence → Hypothesis → Decision
-- Requirement → Resolution → Generation → Build → Deployment
-- Observation → GateEvaluation → IterationDecision
-"""
+"""Evidence chain integrity — behavioral persistence, not DDL string checks."""
 
 from __future__ import annotations
 
 import uuid
 
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.schema import CreateTable
+import pytest
+from sqlalchemy import select
 
 from regent.application.execution_events import P1_MAIN_CHAIN_EVENTS
+from regent.domain.states import GoalState
 from regent.infrastructure.models import (
-    AppBuildModel,
+    ArtifactModel,
+    AuditRecordModel,
     BudgetEntryModel,
-    DeploymentModel,
-    DiscoveryRoundModel,
     EvidenceModel,
     GoalModel,
     GoalSpecModel,
     HypothesisDecisionModel,
-    HypothesisEvidenceRefModel,
-    ObservationModel,
+    DiscoveryRoundModel,
     ProductHypothesisModel,
-    RequirementRevisionModel,
+    HypothesisEvidenceRefModel,
 )
 
 
-# ---------------------------------------------------------------------------
-# Goal → Discovery → Evidence → Hypothesis → Decision chain
-# ---------------------------------------------------------------------------
+@pytest.mark.governance
+@pytest.mark.asyncio
+async def test_evidence_chain_persists_goal_to_decision(db_sessions) -> None:
+    goal_id = uuid.uuid4()
+    corr = uuid.uuid4()
+    artifact_id = uuid.uuid4()
+    evidence_id = uuid.uuid4()
+    round_id = uuid.uuid4()
+    hyp_id = uuid.uuid4()
+    decision_id = uuid.uuid4()
 
-
-def test_goal_has_fk_to_specs_and_rounds() -> None:
-    """GoalModel is the root; specs and rounds reference it via FK."""
-    goal_ddl = str(CreateTable(GoalModel.__table__).compile(dialect=postgresql.dialect()))
-    spec_ddl = str(CreateTable(GoalSpecModel.__table__).compile(dialect=postgresql.dialect()))
-    round_ddl = str(CreateTable(DiscoveryRoundModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "goals" in goal_ddl
-    assert "goal_id" in spec_ddl.lower() or "goals" in spec_ddl
-    assert "goal_id" in round_ddl.lower() or "goals" in round_ddl
-
-
-def test_evidence_links_to_goal() -> None:
-    """EvidenceModel has FK to goals table."""
-    ddl = str(CreateTable(EvidenceModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "goal_id" in ddl.lower()
-    assert "goals" in ddl
-
-
-def test_hypothesis_links_to_round() -> None:
-    """ProductHypothesisModel has FK to discovery_rounds."""
-    ddl = str(CreateTable(ProductHypothesisModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "round_id" in ddl.lower()
-    assert "discovery_rounds" in ddl
-
-
-def test_hypothesis_evidence_ref_bridges_hypothesis_and_evidence() -> None:
-    """HypothesisEvidenceRefModel bridges hypotheses ↔ evidence."""
-    ddl = str(
-        CreateTable(HypothesisEvidenceRefModel.__table__).compile(
-            dialect=postgresql.dialect()
+    async with db_sessions() as session, session.begin():
+        session.add(
+            GoalModel(
+                id=goal_id,
+                original_input="evidence chain fixture",
+                created_by="tester",
+                correlation_id=corr,
+                status=GoalState.ACTIVE.value,
+                metadata_json={"budget_limit": 100.0},
+            )
         )
-    )
-    assert "hypothesis_id" in ddl.lower()
-    assert "evidence_id" in ddl.lower()
-    assert "product_hypotheses" in ddl
-    assert "evidence" in ddl
-
-
-def test_decision_links_to_round_and_hypothesis() -> None:
-    """HypothesisDecisionModel links to both round and selected hypothesis."""
-    ddl = str(
-        CreateTable(HypothesisDecisionModel.__table__).compile(dialect=postgresql.dialect())
-    )
-    assert "round_id" in ddl.lower()
-    assert "selected_hypothesis_id" in ddl.lower()
-
-
-# ---------------------------------------------------------------------------
-# Requirement → Resolution → Generation → Build → Deployment chain
-# ---------------------------------------------------------------------------
-
-
-def test_requirement_revision_model_exists() -> None:
-    """RequirementRevisionModel table is defined."""
-    ddl = str(
-        CreateTable(RequirementRevisionModel.__table__).compile(
-            dialect=postgresql.dialect()
+        await session.flush()
+        session.add_all(
+            (
+                GoalSpecModel(
+                    id=uuid.uuid4(),
+                    goal_id=goal_id,
+                    version=1,
+                    status="FROZEN",
+                    content_hash="a" * 64,
+                    confirmed_by="tester",
+                    explicit_constraints={},
+                    system_inferences={},
+                    unknowns=[],
+                    success_criteria={"ok": True},
+                    source_refs=[],
+                ),
+                DiscoveryRoundModel(
+                    id=round_id,
+                    goal_id=goal_id,
+                    round=1,
+                    status="DECIDED",
+                    version=1,
+                    input_snapshot_hash="d" * 64,
+                    budget={"rounds": 1},
+                    policy_version="discovery-v1",
+                    idempotency_key=f"round-{goal_id}",
+                    created_by="tester",
+                    correlation_id=str(corr),
+                ),
+                ArtifactModel(
+                    id=artifact_id,
+                    goal_id=goal_id,
+                    work_id=None,
+                    run_id=None,
+                    artifact_type="source_snapshot",
+                    schema_ref="regent://schemas/evidence/v1",
+                    uri="artifact://chain/1",
+                    content_hash="b" * 64,
+                    producer_ref="test",
+                    provenance={},
+                    version=1,
+                ),
+                EvidenceModel(
+                    id=evidence_id,
+                    goal_id=goal_id,
+                    work_id=None,
+                    run_id=None,
+                    artifact_id=artifact_id,
+                    evidence_type="sourced_observation",
+                    uri="artifact://chain/1",
+                    content_hash="b" * 64,
+                    producer_ref="test",
+                    quality_tier="OBSERVED",
+                    payload={"class": "sourced-observation"},
+                ),
+                ProductHypothesisModel(
+                    id=hyp_id,
+                    round_id=round_id,
+                    candidate_key="hyp-1",
+                    content_json={"statement": "users need X"},
+                    content_hash="e" * 64,
+                    eligibility="ELIGIBLE",
+                    invalid_reasons=[],
+                    generator_ref="test-generator",
+                ),
+                HypothesisEvidenceRefModel(
+                    id=uuid.uuid4(),
+                    hypothesis_id=hyp_id,
+                    evidence_id=evidence_id,
+                    claim_key="market-need",
+                    relation="supports",
+                ),
+                HypothesisDecisionModel(
+                    id=decision_id,
+                    round_id=round_id,
+                    decision="SELECT",
+                    selected_hypothesis_id=hyp_id,
+                    rationale="best supported",
+                    evidence_digest="c" * 64,
+                    policy_version="discovery-v1",
+                    created_by="tester",
+                ),
+                BudgetEntryModel(
+                    id=uuid.uuid4(),
+                    goal_id=goal_id,
+                    run_id=None,
+                    cost_type="model_input_tokens",
+                    amount=1.25,
+                    price_book_version="price-book-v1",
+                    description="chain fixture",
+                ),
+                AuditRecordModel(
+                    id=uuid.uuid4(),
+                    aggregate_type="goal",
+                    aggregate_id=goal_id,
+                    aggregate_version=1,
+                    action="ACTIVATE",
+                    actor="tester",
+                    payload={"from": "QUALIFIED"},
+                    correlation_id=corr,
+                ),
+            )
         )
-    )
-    assert "requirement_revisions" in ddl
+
+    async with db_sessions() as session:
+        evidence = await session.get(EvidenceModel, evidence_id)
+        hyp = await session.get(ProductHypothesisModel, hyp_id)
+        decision = await session.get(HypothesisDecisionModel, decision_id)
+        refs = list(
+            await session.scalars(
+                select(HypothesisEvidenceRefModel).where(
+                    HypothesisEvidenceRefModel.hypothesis_id == hyp_id
+                )
+            )
+        )
+        budget = await session.scalar(
+            select(BudgetEntryModel).where(BudgetEntryModel.goal_id == goal_id)
+        )
+        audits = list(
+            await session.scalars(
+                select(AuditRecordModel).where(AuditRecordModel.aggregate_id == goal_id)
+            )
+        )
+
+    assert evidence is not None
+    assert evidence.quality_tier == "OBSERVED"
+    assert evidence.content_hash == "b" * 64
+    assert hyp is not None and hyp.round_id == round_id
+    assert decision is not None and decision.selected_hypothesis_id == hyp_id
+    assert len(refs) == 1 and refs[0].evidence_id == evidence_id
+    assert budget is not None and budget.amount == 1.25
+    assert len(audits) == 1
 
 
-def test_app_build_model_exists() -> None:
-    """AppBuildModel table is defined."""
-    ddl = str(CreateTable(AppBuildModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "app_builds" in ddl
-
-
-def test_deployment_model_exists() -> None:
-    """DeploymentModel table is defined."""
-    ddl = str(CreateTable(DeploymentModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "deployments" in ddl
-
-
-# ---------------------------------------------------------------------------
-# Observation → Decision chain
-# ---------------------------------------------------------------------------
-
-
-def test_observation_model_exists() -> None:
-    """ObservationModel table is defined."""
-    ddl = str(CreateTable(ObservationModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "observations" in ddl
-
-
-# ---------------------------------------------------------------------------
-# Budget chain
-# ---------------------------------------------------------------------------
-
-
-def test_budget_entry_links_to_goal() -> None:
-    """BudgetEntryModel has FK to goals."""
-    ddl = str(CreateTable(BudgetEntryModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "goal_id" in ddl.lower()
-    assert "goals" in ddl
-    assert "budget_entries" in ddl
-
-
-# ---------------------------------------------------------------------------
-# Event catalog completeness
-# ---------------------------------------------------------------------------
-
-
-def test_p1_event_catalog_has_16_events() -> None:
-    """P1 main chain has 16 event types covering the full lifecycle."""
+@pytest.mark.governance
+def test_p1_event_catalog_covers_lifecycle() -> None:
     assert len(P1_MAIN_CHAIN_EVENTS) == 16
-
-
-def test_p1_events_cover_goal_to_deployment() -> None:
-    """P1 events span from goal execution to deployment."""
-    assert "GoalExecutionRequested" in P1_MAIN_CHAIN_EVENTS
-    assert "DiscoveryRoundRequested" in P1_MAIN_CHAIN_EVENTS
-    assert "DiscoveryCompleted" in P1_MAIN_CHAIN_EVENTS
-    assert "AppBuildRequested" in P1_MAIN_CHAIN_EVENTS
-    assert "PreviewDeploymentRequested" in P1_MAIN_CHAIN_EVENTS
-    assert "PreviewDeploymentSucceeded" in P1_MAIN_CHAIN_EVENTS
-    assert "QualityApprovalRequested" in P1_MAIN_CHAIN_EVENTS
-    assert "QualityApprovalCompleted" in P1_MAIN_CHAIN_EVENTS
-
-
-# ---------------------------------------------------------------------------
-# Trust classification in evidence chain
-# ---------------------------------------------------------------------------
-
-
-def test_evidence_model_has_quality_tier() -> None:
-    """EvidenceModel carries quality_tier for trust classification."""
-    ddl = str(CreateTable(EvidenceModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "quality_tier" in ddl.lower()
-
-
-def test_evidence_model_has_content_hash() -> None:
-    """EvidenceModel carries content_hash for integrity verification."""
-    ddl = str(CreateTable(EvidenceModel.__table__).compile(dialect=postgresql.dialect()))
-    assert "content_hash" in ddl.lower()
+    for name in (
+        "GoalExecutionRequested",
+        "DiscoveryRoundRequested",
+        "DiscoveryCompleted",
+        "AppBuildRequested",
+        "PreviewDeploymentRequested",
+        "PreviewDeploymentSucceeded",
+        "QualityApprovalRequested",
+        "QualityApprovalCompleted",
+    ):
+        assert name in P1_MAIN_CHAIN_EVENTS

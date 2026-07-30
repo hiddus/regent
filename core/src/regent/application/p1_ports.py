@@ -49,7 +49,13 @@ class EvidenceSourceSnapshot(BaseModel):
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     metadata: dict[str, Any] = Field(default_factory=dict)
     # --- G2: evidence trust classification ---
-    trust_label: str = Field(default="UNTRUSTED_DATA", pattern=r"^(DECLARED_INTENT|UNTRUSTED_DATA)$")
+    trust_label: str = Field(
+        default="UNTRUSTED_DATA",
+        pattern=(
+            r"^(DECLARED_INTENT|UNTRUSTED_DATA|declared-intent|sourced-observation|"
+            r"build-verification|product-observation|operational-observation)$"
+        ),
+    )
     source_type: str = Field(default="")
     parser_version: str = Field(default="evidence-v1")
     injection_site: str = Field(default="discovery")

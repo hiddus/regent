@@ -39,15 +39,21 @@ class DecideBody(BaseModel):
 
 
 def _serialize(model: Any) -> dict[str, Any]:
+    scores = model.scores_json or {}
+    metrics = model.metrics_json or {}
     return {
         "id": str(model.id),
         "name": model.name,
         "status": model.status,
         "task_set_hash": model.task_set_hash,
         "seed": model.seed,
-        "scores": model.scores_json,
+        "scores": scores,
+        "evidence_digest": scores.get("evidence_digest"),
+        "scoring_mode": scores.get("scoring_mode"),
         "decision": model.decision,
         "decision_rationale": model.decision_rationale,
+        "product_decision_record": metrics.get("product_decision_record"),
+        "org_adaptive_status": metrics.get("org_adaptive_status", "ROLLOUT_NOT_ALLOWED"),
         "policy_version": model.policy_version,
         "created_by": model.created_by,
     }

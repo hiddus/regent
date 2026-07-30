@@ -65,6 +65,8 @@ COST_MODEL_OUTPUT = "model_output_tokens"
 COST_TOOL_INVOCATION = "tool_invocation"
 COST_INFRASTRUCTURE = "infrastructure"
 COST_EXTERNAL_OPERATION = "external_operation"
+COST_HUMAN_MINUTES = "human_minutes"
+COST_FAILURE_RECOVERY = "failure_recovery"
 
 _ALL_COST_TYPES = frozenset({
     COST_MODEL_INPUT,
@@ -72,6 +74,8 @@ _ALL_COST_TYPES = frozenset({
     COST_TOOL_INVOCATION,
     COST_INFRASTRUCTURE,
     COST_EXTERNAL_OPERATION,
+    COST_HUMAN_MINUTES,
+    COST_FAILURE_RECOVERY,
 })
 
 
