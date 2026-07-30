@@ -1113,7 +1113,10 @@ class OrganizationService:
             "proposed_by": actor,
             "rollout_gate": "ROLLOUT_NOT_ALLOWED",
         }
-        return proposal
+        # MA-6: attach P2-5 gate skeleton; never activate without GO DecisionRecord.
+        from regent.application.p25_adaptive_gate import enrich_adaptive_proposal_skeleton
+
+        return enrich_adaptive_proposal_skeleton(proposal, decision_record=None)
 
 
 async def _goal_aar1_meta(session: AsyncSession, goal_id: uuid.UUID) -> dict[str, Any] | None:

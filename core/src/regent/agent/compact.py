@@ -27,6 +27,7 @@ class CompactState:
     auto_failures: int = 0
     auto_successes: int = 0
     last_summary: str = ""
+    last_structured_summary: dict[str, Any] = field(default_factory=dict)
     history: list[str] = field(default_factory=list)
 
 
@@ -175,7 +176,33 @@ class ContextCompactor:
         summary: str,
         goal_anchor: str,
         todos: list[dict[str, Any]],
+        hard_constraints: list[str] | None = None,
+        permit_state: dict[str, Any] | None = None,
+        open_human_tasks: list[str] | None = None,
+        produced_artifacts: list[str] | None = None,
+        open_risks: list[str] | None = None,
+        next_actions: list[str] | None = None,
+        plan_checkpoint_ref: str | None = None,
     ) -> list[ChatMessage]:
+        from regent.application.context_artifact import build_structured_compact_summary
+
+        structured = build_structured_compact_summary(
+            goal_intent=goal_anchor,
+            produced_artifacts=produced_artifacts,
+            open_risks=open_risks,
+            next_actions=next_actions
+            or [
+                str(t.get("content") or t.get("id") or "")
+                for t in todos
+                if str(t.get("status") or "") in {"pending", "in_progress"}
+            ],
+            hard_constraints=hard_constraints,
+            permit_state=permit_state,
+            open_human_tasks=open_human_tasks,
+            plan_checkpoint_ref=plan_checkpoint_ref,
+            heuristic_blob=summary,
+        )
+        self.state.last_structured_summary = structured.as_dict()
         files_blob: list[str] = []
         for rel in self._toolkit.recent_writes[-POST_COMPACT_MAX_FILES:]:
             try:
@@ -187,7 +214,15 @@ class ContextCompactor:
             [
                 "══════ POST-COMPACT REHYDRATION ══════",
                 goal_anchor,
+                "STRUCTURED_SUMMARY:\n"
+                + json.dumps(structured.as_dict(), ensure_ascii=False, indent=2),
                 "TODOS:\n" + json.dumps(todos, ensure_ascii=False, indent=2),
+                "HARD_CONSTRAINTS:\n"
+                + json.dumps(list(structured.hard_constraints), ensure_ascii=False),
+                "PERMIT_STATE:\n"
+                + json.dumps(dict(structured.permit_state), ensure_ascii=False),
+                "OPEN_HUMAN_TASKS:\n"
+                + json.dumps(list(structured.open_human_tasks), ensure_ascii=False),
                 "RECENT FILES:\n" + ("\n".join(files_blob) or "(none)"),
                 "PRIOR SUMMARY:\n" + summary,
                 "Continue from this state. Do not re-ask already settled questions.",
@@ -198,7 +233,8 @@ class ContextCompactor:
                 role="system",
                 content=(
                     "Context was compacted to stay within the token budget. "
-                    "Trust the rehydrated goal, todos, recent files, and summary."
+                    "Trust the rehydrated goal, structured summary, todos, "
+                    "hard constraints, permit state, recent files, and summary."
                 ),
             ),
             ChatMessage(role="user", content=user),

@@ -1,5 +1,7 @@
 # Regent Vibe Coding 项目计划书
 
+> 更新：2026-07-31（Multi-Agent 研究吸收与补足计划）
+
 > 状态：唯一有效编码基线  
 > 配套需求：[Regent-PRD.md](./Regent-PRD.md)  
 > 技术规范：[Regent-Technical-Spec.md](./Regent-Technical-Spec.md)  
@@ -190,6 +192,74 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 - S8 结束：发布签名的实验报告和唯一产品 DecisionRecord。
 
 禁止一次生成整个 Core、无测试的大规模重构，以及向 Core 加入具体 App 业务概念。
+## 12. Multi-Agent 能力补足计划（2026-07-31）
+
+### 12.1 现状与原则
+
+现有代码已具备固定 Hive、AgentTask、组织版本、协调 Token 计数、Eval 基础、MCP 注册、会话 todo 与自动压缩；本计划在其上补强，不重复引入新的编排内核。单 Agent champion 保持默认，自适应自由拓扑继续 `ROLLOUT_NOT_ALLOWED`，直到 P2-4 统计 Gate 证明正净收益。
+
+| 能力 | 当前基础 | 主要缺口 | 目标落点 |
+|---|---|---|---|
+| 组织选择 | `OrganizationSpace` / `UtilityFunction` | 缺任务特征先验和可解释裁剪 | 路由特征、冻结规则、排除理由 |
+| 协作评测 | 协调 Token、Eval/实验平台基础 | 缺份额、错误放大、调度熵 | P2-4 三项冻结指标 |
+| 失败归因 | 通用 `failure_code` | 缺稳定协作失败词表 | MAST 命名空间与轨迹证据 |
+| 固定 Hive | `pm-dev-independent-qa-v1`、durable AgentTask | 成员契约与整体再认证不足 | 三要素契约、模板整体回归 |
+| 长任务 | todo、micro/auto compact | todo 不耐久；完整原文与大结果未统一 Artifact 化 | ExecutionPlanItem、Transcript/ToolResult Artifact |
+| 调度审计 | `SchedulingDecision` | 组织内逐步派工理由不完整 | `DispatchDecision` 可回放记录 |
+| 协议兼容 | MCP 注册；AgentEnvelope 设计 | 边界映射未冻结 | MCP 工具适配、A2A 只做外部投影 |
+
+### 12.2 交付批次
+
+| 批次 | 依赖 | 交付物 | 完成门禁 |
+|---|---|---|---|
+| MA-0 合同冻结 | 无 | 指标公式、MAST 词表、成员三要素 Schema、现状基线报告 | PRD/Tech/Plan 一致；合同测试先失败 |
+| MA-1 可观测与归因 | MA-0 | 协调 Token 分类、三指标计算器、过程 span、MAST 归因 | 缺数据为 `INSUFFICIENT_EVIDENCE`；指标可由原始轨迹复算 |
+| MA-2 固定模板加固 | MA-0 | 成员契约、强制澄清、整体认证摘要与回归套件 | 改任一成员/模型/Prompt/工具后旧认证失效 |
+| MA-3 长任务耐久化 | MA-0 | `ExecutionPlanItem`、大结果卸载、Transcript Artifact、结构化 rehydration | Worker 重启与两次压缩后计划/约束/证据无丢失 |
+| MA-4 路由与过程评估 | MA-1、MA-2 | TaskFeatures、裁剪器、DispatchDecision、熵趋势告警 | 强顺序任务不扩编；每次派工可解释与重放 |
+| MA-5 P2-4 冻结实验 | MA-1…MA-4 | 强单 Agent vs 固定 Hive A/B/C 报告与 DecisionRecord | 同预算、盲评、置信区间、护栏全量报告 |
+| MA-6 条件激活 | MA-5 正净收益 | P2-5 自适应组织候选；A2A 边界适配探索 | 未获正净收益则不开发/不启用自适应拓扑 |
+
+### 12.3 建议实施顺序与工作包
+
+1. **近期（MA-0，1 个短迭代）**：冻结 Schema、公式和错误码；补齐 `pm-dev-independent-qa-v1` 每角色边界、allowlist、停止/澄清条件。
+2. **近期（MA-1/MA-2，2 个迭代）**：先让现有固定 Hive 可测、可归因、可整体再认证；不改默认 rollout。
+3. **并行可靠性线（MA-3，2 个迭代）**：将现有 todo/compact 从会话能力升级为耐久执行合同，优先服务 P1 长生成链。
+4. **P2-4 前置（MA-4，1–2 个迭代）**：记录每步 DispatchDecision，并用任务特征裁剪无收益拓扑。
+5. **决策轮（MA-5，1 个冻结实验窗口）**：运行预注册 A/B/C；只接受可复算证据包。
+6. **条件阶段（MA-6）**：仅在 DecisionRecord 为 GO 时开发 P2-5；否则保留固定模板并优化单 Agent champion。
+
+### 12.4 工作包验收
+
+- `WP-METRICS`：三指标均有版本化公式、原始分子/分母、边界值和故障注入测试；
+- `WP-FAILURE`：九类首批 MAST 失败均有正例、反例、低置信度保留原码测试；
+- `WP-TEMPLATE`：成员变化导致内容哈希变化、旧认证拒绝、整套回归重跑；
+- `WP-CONTEXT`：20k Token 以上结果卸载后可按哈希回查；压缩前完整轨迹可检索；
+- `WP-PLAN`：Worker 中断后从持久计划续跑，不重复已完成副作用；
+- `WP-DISPATCH`：每一步能查询候选、选择、理由、证据、权限范围和输出摘要；
+- `WP-EVAL`：单 Agent 与固定 Hive 在冻结模型/工具/预算下重复运行并产生 95% 置信区间。
+
+### 12.5 明确不做
+
+- 不引入 CrewAI/LangGraph 等框架替换自研 Kernel；
+- 不把 A2A 不透明协作语义用于内部 Agent；
+- 不用更多 Agent 数、消息量或更长上下文作为成功指标；
+- 不在 P2-4 DecisionRecord 前开放自适应自由拓扑；
+- 不以 Prompt 调整替代状态机、角色契约、独立验证和恢复机制。
+
+### 12.6 实现状态（2026-07-31）
+
+| 批次 | 状态 | 说明 |
+|---|---|---|
+| MA-0 合同冻结 | ✅ 已完成 | `multiagent_metrics` / `mast_failure` / `member_contract` Schema + 合同测试 |
+| MA-1 可观测与归因 | ✅ 已完成 | Token 分类、三指标复算、MAST 分类器（低置信保留原码） |
+| MA-2 固定模板加固 | ✅ 已完成 | 成员三要素、整体认证摘要失效规则、五场景回归套件 |
+| MA-3 长任务耐久化 | ✅ 已完成 | `execution_plan_items` 表、工具结果/Transcript Artifact 卸载、结构化 rehydration |
+| MA-4 路由与过程评估 | ✅ 已完成 | TaskFeatures 裁剪接入 OrganizationEngine；`dispatch_decisions` 可回放与熵报告 |
+| MA-5 P2-4 冻结实验 | ✅ 半落地（骨架） | `p24_frozen_experiment` A/B/C 报告与 DecisionRecord 载荷；完整生产盲评窗口待独立实验运行 |
+| MA-6 条件激活 | ✅ Gate 钩子（未激活） | `p25_adaptive_gate` + A2A 投影；无正净收益证据时保持 `ROLLOUT_NOT_ALLOWED` / `activation_allowed=false` |
+
+工作包验收对照：`WP-METRICS`/`WP-FAILURE`/`WP-TEMPLATE`/`WP-CONTEXT`/`WP-PLAN`/`WP-DISPATCH` 已有单元测试；`WP-EVAL` 提供可复算实验骨架，完整 95% CI 生产对照仍属实验窗口交付物。
 
 ## P1 编码基线
 

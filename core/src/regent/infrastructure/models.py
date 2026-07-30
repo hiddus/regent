@@ -1863,3 +1863,81 @@ class BudgetEntryModel(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class ExecutionPlanItemModel(Base):
+    """Durable plan item for long-running agent work (Spec §18.6 / MA-3)."""
+
+    __tablename__ = "execution_plan_items"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','in_progress','completed','cancelled','failed')",
+            name="ck_execution_plan_items_status",
+        ),
+        CheckConstraint("version > 0", name="ck_execution_plan_items_version"),
+        UniqueConstraint("goal_id", "item_key", name="uq_execution_plan_items_goal_key"),
+        Index("ix_execution_plan_items_goal_status", "goal_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    item_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    owner_agent_id: Mapped[str | None] = mapped_column(String(255))
+    dependencies: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    next_action: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class DispatchDecisionModel(Base):
+    """Immutable per-step dispatch audit (Spec §18.2 / MA-4)."""
+
+    __tablename__ = "dispatch_decisions"
+    __table_args__ = (
+        Index("ix_dispatch_decisions_goal_created", "goal_id", "created_at"),
+        Index("ix_dispatch_decisions_run", "run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL")
+    )
+    step_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    organization_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scheduling_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("scheduling_decisions.id", ondelete="SET NULL")
+    )
+    source_agent_id: Mapped[str | None] = mapped_column(String(255))
+    selected_agent_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    candidate_agent_ids: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    candidate_weights: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    reason_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_scope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    permit_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    entropy: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

@@ -306,18 +306,59 @@ class OrganizationEngine:
         budget_remaining: float | None = None,
         rules: list[PolicyRule] | None = None,
         preferred_template_id: str | None = None,
+        task_features: Any | None = None,
     ) -> OrganizationDecisionBundle:
         """Pure decision pipeline used by dual-write shadow and enforce paths.
 
         When ``preferred_template_id`` is feasible it wins over utility argmax
         (used for opt-in certified hive; does not invent free-form topologies).
+
+        When ``task_features`` is provided, OrganizationSpace is pruned first
+        (PRD §10.1); prune hits are recorded on the decision JSON.
         """
+        from regent.application.member_contract import enrich_topology_with_member_contracts
+        from regent.application.task_features import TaskFeatures, prune_organization_space
+
         rules = rules or default_system_rules()
+        prune_meta: dict[str, Any] | None = None
+        working = list(templates)
+        if task_features is not None:
+            features = (
+                task_features
+                if isinstance(task_features, TaskFeatures)
+                else TaskFeatures.model_validate(task_features)
+            )
+            pruned = prune_organization_space(working, features)
+            working = pruned.admitted
+            prune_meta = pruned.as_dict()
+            # Preferred certified hive may still be evaluated if opt-in and pruned out,
+            # but only when explicitly preferred (opt-in path overrides prior prune).
+            if preferred_template_id:
+                admitted_ids = {
+                    str(
+                        (t.get("topology_json") or t).get("template_id")
+                        if isinstance(t.get("topology_json") or t, dict)
+                        else t.get("name")
+                        or ""
+                    )
+                    or str(t.get("name") or "")
+                    for t in working
+                }
+                if preferred_template_id not in admitted_ids:
+                    for tmpl in templates:
+                        topo = dict(tmpl.get("topology_json") or tmpl)
+                        tid = str(topo.get("template_id") or tmpl.get("name") or "")
+                        if tid == preferred_template_id:
+                            working.append(dict(tmpl))
+                            break
+
         scored: list[tuple[str, PredictedUtility, FeasibilityReport, dict[str, Any]]] = []
         candidate_reports: list[dict[str, Any]] = []
 
-        for tmpl in templates:
-            topology = dict(tmpl.get("topology_json") or tmpl)
+        for tmpl in working:
+            topology = enrich_topology_with_member_contracts(
+                dict(tmpl.get("topology_json") or tmpl)
+            )
             template_name = str(
                 topology.get("template_id") or tmpl.get("name") or uuid.uuid4()
             )
@@ -376,6 +417,14 @@ class OrganizationEngine:
                     break
         decision_id = uuid.uuid4()
         if selected is None:
+            rejected_json: dict[str, Any] = {
+                "utility_policy_version": UTILITY_POLICY_VERSION,
+                "candidates": candidate_reports,
+                "selected": None,
+                "error": "NO_FEASIBLE_ORGANIZATION",
+            }
+            if prune_meta is not None:
+                rejected_json["organization_space_prune"] = prune_meta
             return OrganizationDecisionBundle(
                 decision_id=decision_id,
                 selected_candidate_id=None,
@@ -383,12 +432,7 @@ class OrganizationEngine:
                 infeasible_count=len(scored),
                 predicted_utility=None,
                 status="REJECTED",
-                decision_json={
-                    "utility_policy_version": UTILITY_POLICY_VERSION,
-                    "candidates": candidate_reports,
-                    "selected": None,
-                    "error": "NO_FEASIBLE_ORGANIZATION",
-                },
+                decision_json=rejected_json,
                 infeasibility_report={
                     "code": "NO_FEASIBLE_ORGANIZATION",
                     "candidates": candidate_reports,
@@ -397,6 +441,22 @@ class OrganizationEngine:
 
         sel_id, sel_util, sel_top = selected
         feasible_n = sum(1 for _, __, rep, ___ in scored if rep.feasible)
+        accepted_json: dict[str, Any] = {
+            "utility_policy_version": UTILITY_POLICY_VERSION,
+            "candidates": candidate_reports,
+            "selected": {
+                "template_id": sel_id,
+                "predicted_utility": sel_util.value,
+                "components": sel_util.components,
+                "interval": list(sel_util.interval),
+                "rationale": sel_util.rationale,
+                "topology": sel_top,
+            },
+            "tie_break": "lower_cost_then_fewer_agents_then_template_id",
+            "preferred_template_id": preferred_template_id,
+        }
+        if prune_meta is not None:
+            accepted_json["organization_space_prune"] = prune_meta
         return OrganizationDecisionBundle(
             decision_id=decision_id,
             # Must be decision-scoped: template-only uuid5 collides across goals.
@@ -407,20 +467,7 @@ class OrganizationEngine:
             infeasible_count=len(scored) - feasible_n,
             predicted_utility=sel_util.value,
             status="ACCEPTED",
-            decision_json={
-                "utility_policy_version": UTILITY_POLICY_VERSION,
-                "candidates": candidate_reports,
-                "selected": {
-                    "template_id": sel_id,
-                    "predicted_utility": sel_util.value,
-                    "components": sel_util.components,
-                    "interval": list(sel_util.interval),
-                    "rationale": sel_util.rationale,
-                    "topology": sel_top,
-                },
-                "tie_break": "lower_cost_then_fewer_agents_then_template_id",
-                "preferred_template_id": preferred_template_id,
-            },
+            decision_json=accepted_json,
         )
 
     async def decide_and_persist(

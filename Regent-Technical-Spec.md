@@ -1,7 +1,7 @@
 # Regent 技术架构与实施规范
 
 > 状态：CURRENT  
-> 日期：2026-07-30（合并自 Technical-Spec-v2 + Architecture-v3）  
+> 日期：2026-07-31（吸收 Multi-Agent landscape 调研结论）
 > 性质：权威执行基线（Owner 批准）  
 > 配套需求：[`Regent-PRD.md`](./Regent-PRD.md)  
 > 附录：  
@@ -429,6 +429,19 @@ Agent 间消息必须封装为 AgentEnvelope：
 - `correlation_id` / 签名或 HMAC。
 
 权限只减不增：子 Agent 权限 ⊆ 父授权 ∩ GoalSpec 硬约束。
+### 17.1 A2A 兼容投影（非内核协议替换）
+
+内部 Agent 继续使用全轨迹、可审计的 `AgentEnvelope`；A2A 只作为未来跨组织互操作的边界投影。映射合同：
+
+| Regent | A2A 投影 |
+|---|---|
+| `goal_id` / `correlation_id` | `contextId` |
+| Run `QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED` | `submitted/working/completed/failed/canceled` |
+| `WAITING_HUMAN` | `input_required` |
+| Permit 待授权 | `auth_required` |
+| Capability/AgentSpec 声明 | 签名 Agent Card 的受限视图 |
+
+Agent Card 只能声明身份和能力，不能授予当前 Goal 权限。进入内核前仍需身份 allowlist、签名验证、Permit/fencing、租户隔离与 `UNTRUSTED_DATA` 标记。不得采用 A2A 的不透明语义弱化内部证据链。
 
 ---
 
@@ -443,6 +456,81 @@ Agent 间消息必须封装为 AgentEnvelope：
 
 最小 Eval Harness 必须记录：任务集哈希、基线配置、预算账本、种子、重复次数、墙钟与计算预算、pass@k、安全违规、DecisionRecord。  
 **自适应组织（P2-5）不得在 Harness 统计 Gate 之前默认启用。**
+### 18.1 组织路由特征与裁剪
+
+`TopologyPlanner` 的输入必须包含：
+
+```text
+TaskFeatures
+- tool_call_density
+- decomposability_score
+- sequential_dependency_score
+- single_agent_baseline_success_rate
+- independent_verification_required
+- estimated_parallelism_ceiling
+```
+
+`OrganizationSpace` 先按 PRD §10.1 的冻结规则裁剪，再由 `UtilityFunction` 计算效用。裁剪结果、命中规则、输入特征版本和被排除拓扑必须写入 `SchedulingDecision`，不得只保存最终模板。
+
+### 18.2 过程级调度记录
+
+每次派工新增不可变 `DispatchDecision`（可先作为 `SchedulingDecision` 的版本化子记录实现）：
+
+```text
+DispatchDecision
+- goal_id / run_id / step_id / organization_version_id
+- source_agent_id / selected_agent_id / candidate_agent_ids
+- evidence_refs / reason_code / policy_version
+- capability_scope / permit_refs
+- input_digest / output_digest
+- created_at
+```
+
+重放必须能解释“派给谁、为什么、依据什么”，并能按时间序列计算 `dispatch_entropy`。调度器不得从 Agent 自述推断权限或认证状态。
+
+### 18.3 指标计算合同
+
+- `coordination_token_share = coordination_message_tokens / total_tokens`；分母含全部 Agent、编排器和评价调用，缓存 Token 单列；
+- `error_amplification_factor` 只在版本化故障注入任务上计算，保存注入点、预期影响边界、实际受影响节点和独立评价证据；
+- `dispatch_entropy` 对每个可派工步骤保存候选概率/权重分布及熵，报告均值、斜率、峰值和终止前窗口；
+- 缺字段时结果为 `INSUFFICIENT_EVIDENCE`，不得用 0 填充；
+- 指标定义、阈值和计算器版本进入任务集哈希与 DecisionRecord。
+
+### 18.4 MAST failure_code 命名空间
+
+新增稳定前缀 `MAST_`，首批至少包含：
+
+```text
+MAST_STEP_REPETITION
+MAST_PREMATURE_TERMINATION
+MAST_ROLE_BOUNDARY_VIOLATION
+MAST_REASONING_ACTION_MISMATCH
+MAST_CLARIFICATION_NOT_REQUESTED
+MAST_IGNORED_PEER_OUTPUT
+MAST_IMPLICIT_DECISION_CONFLICT
+MAST_VERIFICATION_MISSING
+MAST_VERIFIER_FAILURE
+```
+
+分类器输出必须带轨迹引用和置信度；低置信度保留原始错误码并进入人工/离线复核，不得覆盖事实错误。
+
+### 18.5 模板整体认证
+
+`OrganizationTemplate` 的认证摘要必须覆盖 `member_manifest_hash`、`topology_hash`、`model_endpoint_hash`、`prompt_skill_tool_hash` 和 `verification_contract_hash`。任一摘要改变即创建新版本，旧认证不得继承。认证测试以整套模板运行，至少包含正常、澄清、同伴输出冲突、验证者拒绝和错误注入场景。
+
+### 18.6 长任务上下文与持久计划
+
+当前 `todo_write`、`micro_compact`、`autoCompact` 为实现基础，但需要以下耐久化补强：
+
+1. `ExecutionPlanItem` 持久化 `status/owner/dependencies/evidence_refs/next_action/version`，通过 Goal/Run checkpoint 恢复；
+2. 工具结果超过配置阈值（初始建议 20k Token）时写入不可变 Artifact，消息保存 URI、SHA-256、MIME、长度和截断预览；
+3. 每次 autoCompact 前保存完整 Transcript Artifact；压缩摘要使用 `goal_intent/produced_artifacts/open_risks/next_actions` 结构；
+4. rehydration 必须校验 Artifact 哈希，并重新注入硬约束、Permit 状态和未决 HumanTask；
+5. 相关指标记录压缩次数、压缩前后 Token、Artifact 读取命中和恢复失败，不把压缩本身视为成功。
+
+### 18.7 MCP 工具面边界
+
+能力池的工具接入优先提供 MCP 兼容适配器，但 MCP 只负责工具发现与调用语义。`CapabilityRegistry`、认证、细粒度授权、Permit、fencing、审计和撤销仍由 Regent 管理。第三方 Agent 框架只能作为能力池内单个 Agent 的封装，不得进入 Kernel 替换 Outbox、Lease、状态机或证据链。
 
 ---
 
@@ -508,7 +596,7 @@ GET  /audit/{goal_id}           # 导出审计链
 ## 22. 可观测性
 
 统一记录 correlation、causation、Goal、Work、Run、Event、ExternalOperation、Actor。  
-必须观测：Outbox/Dead Letter、Lease、阶段耗时、UNKNOWN、对账、Permit/fencing、预算、Agent 协调 Token、Observation 排除原因、Decision 证据链。
+必须观测：Outbox/Dead Letter、Lease、阶段耗时、UNKNOWN、对账、Permit/fencing、预算、Agent 协调 Token、`coordination_token_share`、`error_amplification_factor`、`dispatch_entropy`、MAST failure_code、压缩与恢复、Observation 排除原因、Decision 证据链。Agent 步骤优先对齐 OpenTelemetry GenAI 语义约定；语义版本必须记录，未稳定字段不得成为唯一事实源。
 
 Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂等键。
 
@@ -558,7 +646,7 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 
 ## 25. 当前实现状态
 
-> 截至 2026-07-30，代码统计：core 166 个 Python 模块，81 个测试文件，35 个迁移版本。
+> 截至 2026-07-31，代码统计：core 含多 Agent 补足模块（metrics/MAST/member_contract/TaskFeatures/DispatchDecision/ExecutionPlanItem 等），迁移 head `20260731_0039`。
 
 ### 已完成
 
@@ -573,6 +661,7 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
 - **确认后自主执行闭环**：Confirm/Start 分离、Outbox 指数退避与死信（0022）。
 - **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
+- **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同（`coordination_token_share` / `error_amplification_factor` / `dispatch_entropy`）、MAST 失败词表、成员三要素契约与模板整体认证、`ExecutionPlanItem` / `DispatchDecision` 持久化（迁移 `20260731_0039`）、TaskFeatures 裁剪、P2-4 A/B/C 冻结实验骨架、P2-5 Gate 钩子与 A2A 边界投影。**P2-5 自适应拓扑仍禁止启用**（无正净收益 DecisionRecord 时保持 `ROLLOUT_NOT_ALLOWED`）。见 Plan §12。
 - **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局；右侧以 `status.agents` + SSE/`live_action` 驱动参与 Agent 名册与对话进度卡详略，产物与预览为可折叠次要区（见 `apps/regent-console/README.md`）。
 - **桌面端（探索性）**：Tauri 桌面应用骨架存在于仓库；PRD 主交付范围为 Core + Web Console，桌面端未纳入 P0/P1 验收。
 
