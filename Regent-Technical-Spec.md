@@ -660,7 +660,7 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **真实 App 预览**：StaticAppPublisher、CSP 预览、观测钩子（0020）。
 - **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
 - **确认后自主执行闭环**：Confirm/Start 分离、Outbox 指数退避与死信（0022）。
-- **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
+- **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。该 flag 现受 §18.5 / MA-2 整体认证摘要约束（成员契约 + 五类 hash + 回归；摘要变更即旧认证失效）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
 - **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同（`coordination_token_share` / `error_amplification_factor` / `dispatch_entropy`）、MAST 失败词表、成员三要素契约与模板整体认证、`ExecutionPlanItem` / `DispatchDecision` 持久化（迁移 `20260731_0039`）、TaskFeatures 裁剪、P2-4 A/B/C 冻结实验骨架、P2-5 Gate 钩子与 A2A 边界投影。**P2-5 自适应拓扑仍禁止启用**（无正净收益 DecisionRecord 时保持 `ROLLOUT_NOT_ALLOWED`）。见 Plan §12。
 - **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局；右侧以 `status.agents` + SSE/`live_action` 驱动参与 Agent 名册与对话进度卡详略，产物与预览为可折叠次要区（见 `apps/regent-console/README.md`）。
 - **桌面端（探索性）**：Tauri 桌面应用骨架存在于仓库；PRD 主交付范围为 Core + Web Console，桌面端未纳入 P0/P1 验收。

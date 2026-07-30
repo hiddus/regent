@@ -382,6 +382,8 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 
 模板认证绑定完整成员清单、模型版本、Prompt/技能/工具哈希、拓扑和验证合同。替换任一成员或上述任一绑定项都产生新模板版本并触发**整体验证与整体回归**；禁止沿用旧模板认证。QA 必须与生成者身份和权限分离。
 
+生产 `REGENT_AAR1_CERTIFIED_HIVE` opt-in 曾早于本小节整体认证合同存在；MA-2（2026-07-31）已落地成员三要素、五类 hash 摘要与回归套件后，该 flag 仅在 digests 与认证合同一致时保持有效，摘要变更须重新核验后方可继续 opt-in（见 Plan §12.6）。
+
 ### 10.4 长任务上下文产品要求
 
 现有会话内 todo 与自动压缩能力升级为可恢复合同：
@@ -418,7 +420,7 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 - 未经认证的开放 Agent/Tool 市场。
 - 支付系统和完整商业化后台（除非作为独立 App Goal）。
 - **Tauri 桌面端**：仓库中若保留骨架，视为探索性非目标；产品交付面仍为 Core + Web Console，桌面端不计入 P0/P1/P2 验收。
-- **自适应自由拓扑 Hive**：始终 `ROLLOUT_NOT_ALLOWED`，不得作为默认多 Agent。认证固定模板 `pm-dev-independent-qa-v1` 可通过 `REGENT_AAR1_CERTIFIED_HIVE=true` opt-in（生产服务器已启用）；这不等于自适应自由拓扑，也不改变「单 Agent champion」的产品默认叙事。
+- **自适应自由拓扑 Hive**：始终 `ROLLOUT_NOT_ALLOWED`，不得作为默认多 Agent。认证固定模板 `pm-dev-independent-qa-v1` 可通过 `REGENT_AAR1_CERTIFIED_HIVE=true` opt-in（生产服务器已启用；现受 §10.3 / MA-2 整体认证合同约束，见上）；这不等于自适应自由拓扑，也不改变「单 Agent champion」的产品默认叙事。
 - 下列能力**已登记但未实现**（不得宣称验收）：P2-3 Impact Graph（衰减/批量撤销/循环检测）、P2-5 AgentEnvelope HMAC、G0 ExternalOperation 完整 EO 闭环。
 
 ---
