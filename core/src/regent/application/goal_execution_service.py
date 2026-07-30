@@ -1,9 +1,11 @@
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.live_action import build_live_action
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
     AppProjectModel,
@@ -48,6 +50,64 @@ class GoalExecutionService:
             )
             if project is None or spec is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "app goal context not found")
+            auto_prepared = False
+            if goal.status == "DRAFT":
+                if spec.status != "DRAFT" or project.status not in {"DRAFT", "ACTIVE"}:
+                    raise DomainError(
+                        ErrorCode.INVALID_STATE,
+                        "draft goal context is inconsistent",
+                    )
+                # This freezes an execution snapshot, not the user's intent forever.
+                # Unknowns remain discovery inputs and later guidance can create a
+                # newer GoalSpec version.
+                now = datetime.now(UTC)
+                spec.status = "FROZEN"
+                spec.confirmed_by = "regent-core:auto-snapshot"
+                spec.confirmed_at = now
+                project.status = "ACTIVE"
+                goal.status = "READY"
+                goal.version += 1
+                goal.metadata_json = {
+                    **goal.metadata_json,
+                    "goal_clarity_state": (
+                        "EXPLORING" if spec.unknowns else "PROVISIONAL"
+                    ),
+                    "confirmation_required": False,
+                    "execution_spec_version": spec.version,
+                }
+                snapshot_payload = {
+                    "app_project_id": str(project.id),
+                    "goal_spec_id": str(spec.id),
+                    "goal_spec_version": spec.version,
+                    "content_hash": spec.content_hash,
+                    "snapshot_by": actor,
+                    "confirmation_required": False,
+                    "unknown_count": len(spec.unknowns),
+                }
+                session.add_all(
+                    (
+                        AuditRecordModel(
+                            id=uuid.uuid4(),
+                            aggregate_type="goal",
+                            aggregate_id=goal.id,
+                            aggregate_version=goal.version,
+                            action="SNAPSHOT_GOAL_SPEC_FOR_EXECUTION",
+                            actor=actor,
+                            payload=snapshot_payload,
+                            correlation_id=goal.correlation_id,
+                        ),
+                        OutboxEventModel(
+                            id=uuid.uuid4(),
+                            event_type="GoalSpecFrozen",
+                            aggregate_type="goal",
+                            aggregate_id=goal.id,
+                            aggregate_version=goal.version,
+                            payload=snapshot_payload,
+                            correlation_id=goal.correlation_id,
+                        ),
+                    )
+                )
+                auto_prepared = True
             metadata = dict(goal.metadata_json)
             current_key = metadata.get("execution_idempotency_key")
             current_stage = str(metadata.get("execution_stage", "NOT_STARTED"))
@@ -75,6 +135,8 @@ class GoalExecutionService:
                 "app_project_id": str(project.id),
                 "actor": actor,
                 "idempotency_key": idempotency_key,
+                "auto_prepared": auto_prepared,
+                "goal_spec_version": spec.version,
             }
             session.add_all(
                 (
@@ -103,7 +165,7 @@ class GoalExecutionService:
                 session,
                 project.id,
                 "GOAL_EXECUTION_QUEUED",
-                "目标已固化。Core 已开始执行。你无需继续操作。",
+                "Core 已基于当前理解开始执行; 目标仍可继续补充和修正。",
                 {"goal_id": str(goal.id), "event_id": str(event_id)},
             )
             await session.flush()
@@ -121,7 +183,15 @@ class GoalExecutionService:
             goal = await session.get(GoalModel, goal_id, with_for_update=True)
             if goal is None or goal.app_project_id is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "app goal not found")
-            goal.metadata_json = {**goal.metadata_json, "execution_stage": stage}
+            goal.metadata_json = {
+                **goal.metadata_json,
+                "execution_stage": stage,
+                "live_action": build_live_action(
+                    message,
+                    stage=stage,
+                    event_type=f"GOAL_EXECUTION_{stage}",
+                ),
+            }
             await self._append_event(
                 session,
                 goal.app_project_id,

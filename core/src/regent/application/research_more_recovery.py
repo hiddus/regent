@@ -209,17 +209,20 @@ class ResearchMoreRecoveryService:
             if str(u).strip()
         ]
         if metadata.get("research_more_adapted") and existing_urls:
-            # Already adapted AND have URLs but still no evidence — truly exhausted.
-            metadata["execution_stage"] = "BLOCKED"
-            metadata["awaiting_authorized_sources"] = False
+            # Already adapted AND have URLs but still no evidence — need human, not calm EXHAUST.
+            metadata["execution_stage"] = "WAITING_HUMAN"
+            metadata["awaiting_authorized_sources"] = True
+            metadata["awaiting_human_intervention"] = True
             metadata["termination"] = {
-                "reason": "research_more_adapted_exhausted",
+                "reason": "research_more_needs_human",
                 "definition": "REGENT-DEFINITION-1.0 ATTRIBUTE_7",
+                "handoff": "WAITING_HUMAN",
             }
             goal.metadata_json = metadata
             message = (
                 "自适应发现仍无法获得足够外部证据以继续交付。"
-                "已按定义进入有证据的终态(非等待审批)。"
+                "已尝试能力 REUSE 与默认源；需要你补充授权来源或方向后继续，"
+                "不会标记为已完成。"
             )
             await self._append(
                 session,
@@ -227,7 +230,11 @@ class ResearchMoreRecoveryService:
                 role="ASSISTANT",
                 message_type="RESEARCH_MORE_ADAPT_EXHAUSTED",
                 content=message,
-                metadata={"goal_id": str(goal.id), "attempts": attempts},
+                metadata={
+                    "goal_id": str(goal.id),
+                    "attempts": attempts,
+                    "handoff": "WAITING_HUMAN",
+                },
             )
             return ResearchMoreRecoveryResult(
                 False, "STOP", capability_id, (), message

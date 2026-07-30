@@ -666,32 +666,30 @@ class OrganizationService:
 
         Legacy mutable strategy/rationale are projections of the active Version only.
         Dual-write / fail-open legacy selection is not used.
-        """
-        from regent.application.organization_engine import OrganizationEngine
 
-        caps = sorted(
-            {
-                str(capability)
-                for work in works
-                for capability in work.metadata_json.get("required_capabilities", [])
-            }
+        When ``REGENT_AAR1_CERTIFIED_HIVE=true`` and capabilities admit
+        ``pm-dev-independent-qa-v1``, that certified fixed template is preferred.
+        Adaptive free-form topology remains ROLLOUT_NOT_ALLOWED.
+        """
+        from regent.application.aar1_contract import (
+            CERTIFIED_HIVE_TEMPLATE_ID,
+            certified_hive_preferred,
+            is_certified_hive_topology,
         )
-        organization_id, agent_spec_id = uuid.uuid4(), uuid.uuid4()
+        from regent.application.hive_runtime import materialize_hive_topology
+        from regent.application.organization_engine import OrganizationEngine
+        from regent.config import get_settings
+
+        settings = get_settings()
+        preferred = certified_hive_preferred(enabled=settings.aar1_certified_hive)
+
+        organization_id = uuid.uuid4()
         version_id = uuid.uuid4()
         async with self._sessions() as session, session.begin():
-            session.add(
-                AgentSpecModel(
-                    id=agent_spec_id,
-                    name="goal-single-agent",
-                    version=1,
-                    status="CANDIDATE" if gaps else "ACTIVE",
-                    scope_goal_id=goal_id,
-                    capability_names=caps,
-                    model_ref="configured-model",
-                    tool_refs=[],
-                    constraints={"goal_scope_only": True, "max_delegation_depth": 0},
-                )
-            )
+            available = await self._resolve_available_capabilities(session)
+            # Goal work gaps are not platform-available; keep them out of C/V/R set.
+            available -= set(gaps)
+
             for gap in gaps:
                 session.add(
                     CapabilityModel(
@@ -724,7 +722,8 @@ class OrganizationService:
                 goal_id=goal_id,
                 organization_id=organization_id,
                 trigger="INITIAL",
-                available_capabilities=set() if gaps else {"*"},
+                available_capabilities=available,
+                preferred_template_id=preferred,
                 activate=True,
                 version_id=version_id,
             )
@@ -748,19 +747,51 @@ class OrganizationService:
             )
             org.max_agents = max(len(topology.get("roles") or []), 4)
 
-            for work in works:
+            if is_certified_hive_topology(topology) or template_id == CERTIFIED_HIVE_TEMPLATE_ID:
+                await materialize_hive_topology(
+                    session,
+                    goal_id=goal_id,
+                    organization_id=organization_id,
+                    organization_version_id=org.current_version_id,
+                    topology=topology,
+                    works=works,
+                    gaps=gaps,
+                )
+            else:
+                agent_spec_id = uuid.uuid4()
+                caps = sorted(
+                    {
+                        str(capability)
+                        for work in works
+                        for capability in work.metadata_json.get("required_capabilities", [])
+                    }
+                )
                 session.add(
-                    AssignmentModel(
-                        id=uuid.uuid4(),
-                        organization_id=organization_id,
-                        work_id=work.id,
-                        agent_spec_id=agent_spec_id,
-                        role="executor",
-                        delegated_capabilities=list(
-                            work.metadata_json.get("required_capabilities", [])
-                        ),
+                    AgentSpecModel(
+                        id=agent_spec_id,
+                        name="goal-single-agent",
+                        version=1,
+                        status="CANDIDATE" if gaps else "ACTIVE",
+                        scope_goal_id=goal_id,
+                        capability_names=caps,
+                        model_ref="configured-model",
+                        tool_refs=[],
+                        constraints={"goal_scope_only": True, "max_delegation_depth": 0},
                     )
                 )
+                for work in works:
+                    session.add(
+                        AssignmentModel(
+                            id=uuid.uuid4(),
+                            organization_id=organization_id,
+                            work_id=work.id,
+                            agent_spec_id=agent_spec_id,
+                            role="executor",
+                            delegated_capabilities=list(
+                                work.metadata_json.get("required_capabilities", [])
+                            ),
+                        )
+                    )
 
             goal_obj = await session.get(GoalModel, goal_id)
             if goal_obj is not None:
@@ -779,10 +810,23 @@ class OrganizationService:
                     "phase": "contract",
                     "engine_selected": template_id,
                     "legacy_dual_write": False,
+                    "certified_hive_opt_in": bool(preferred),
+                    "available_capabilities": sorted(available),
                 }
                 goal_obj.metadata_json = meta
 
         return await self._receipt(organization_id, replayed=False)
+
+    @staticmethod
+    async def _resolve_available_capabilities(session: AsyncSession) -> set[str]:
+        """Concrete VERIFIED capability names for C/V/R (never wildcard '*')."""
+        rows = await session.scalars(
+            select(CapabilityModel.name).where(
+                CapabilityModel.status == "VERIFIED",
+                CapabilityModel.scope_goal_id.is_(None),
+            )
+        )
+        return {str(name) for name in rows}
 
     @staticmethod
     async def _write_contract_projection_version(
@@ -916,13 +960,11 @@ class OrganizationService:
                         },
                     }
                 ]
+            available = await self._resolve_available_capabilities(session)
+            available -= set(gaps)
             bundle = engine.evaluate_candidates(
-                payloads, available_capabilities=set() if gaps else {"*"}
+                payloads, available_capabilities=available
             )
-            if gaps:
-                bundle = engine.evaluate_candidates(
-                    payloads, available_capabilities=set()
-                )
 
             compare = shadow_compare(strategy, bundle)
             topology = {

@@ -197,6 +197,8 @@ class BuildService:
             model.build_artifact_hash = result.build_artifact_hash
             model.log_uri = result.evidence_artifact_uri
             model.reconciliation_required = result.status == "UNKNOWN"
+            if result.status == "FAILED":
+                model.failure_code = model.failure_code or "VERIFICATION_FAILED"
             if result.status in {"PASSED", "FAILED"}:
                 session.add(
                     VerificationReportModel(

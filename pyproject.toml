@@ -15,6 +15,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "pydantic-settings>=2.7,<3",
   "psycopg[binary]>=3.2,<4",
+  "python-multipart>=0.0.9",
   "sqlalchemy[asyncio]>=2.0.36,<3",
   "structlog>=24.4,<26",
   "uvicorn[standard]>=0.34,<1",
@@ -34,7 +35,7 @@ packages = ["core/src/regent"]
 "core/src/regent/capabilities_bootstrap/allowlisted_http_source_v1.json" = "regent/capabilities_bootstrap/allowlisted_http_source_v1.json"
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --basetemp=.pytest_tmp"
 pythonpath = ["core/src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -45,6 +46,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"core/src/regent/api/*.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"

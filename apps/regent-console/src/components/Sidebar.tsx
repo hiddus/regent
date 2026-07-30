@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react'
 import type { Project } from '../lib/types'
 import type { NodeKey, NodeStatus } from '../lib/progressNodes'
+import { deriveLiveLabel, type LiveActivity } from '../lib/liveActivity'
 
 const STAGE_LABELS: Record<string, string> = {
   NOT_STARTED: '准备开始',
@@ -10,13 +12,28 @@ const STAGE_LABELS: Record<string, string> = {
   GENERATING: '正在生成应用...',
   SNAPSHOT_READY: '快照已就绪',
   BUILD_PASSED: '构建已通过',
+  BUILD_FAILED: '构建未通过，正在修复',
+  BUILD_DELIVERY_GAP_EXHAUSTED: '构建修复已用尽，需要你介入',
   DEPLOYED: '预览已部署',
+  DEPLOY_FAILED: '部署未成功，正在重试',
+  DEPLOY_NOT_SUCCEEDED: '部署未成功，正在重试',
+  DEPLOY_FAILED_NEEDS_HUMAN: '部署失败，需要你介入',
+  DEPLOY_NOT_SUCCEEDED_NEEDS_HUMAN: '部署失败，需要你介入',
+  DEPLOY_DELIVERY_REJECTED: '交付审查未通过，需要你介入',
+  DELIVERY_GAP_EXHAUSTED: '自动修复已用尽，需要你介入',
+  DISCOVERY_NO_SELECT: '调研未选定方案，正在重试',
+  DISCOVERY_NO_SELECT_NEEDS_HUMAN: '调研未选定方案，需要你介入',
   RESEARCH_MORE: '正在深入调研...',
+  RESEARCH_MORE_NEEDS_HUMAN: '调研取证不足，需要你介入',
   PREVIEW_SUCCEEDED: '预览已就绪',
   GATE_INSUFFICIENT_EVIDENCE: '需要更多数据',
   GATE_PASSED: '验证已通过',
-  GATE_FAILED: '验证未通过',
-  FAILED: '遇到问题',
+  GATE_FAILED: '验证未通过，正在重试',
+  WAITING_HUMAN: '需要你确认',
+  WAITING_HUMAN_VERIFICATION: '需要你确认交付',
+  BLOCKED: '已受阻，需要介入',
+  REORGANIZING: '正在重组能力...',
+  FAILED: '遇到问题，正在处理',
 }
 
 /** Product-friendly status labels (shown in badge) */
@@ -26,8 +43,9 @@ const GOAL_STATUS_LABELS: Record<string, string> = {
   ACTIVE: '进行中',
   PAUSED: '已暂停',
   WAITING_HUMAN: '需要你确认',
+  BLOCKED: '已受阻',
   ACHIEVED: '已完成',
-  EXHAUSTED: '已暂停',
+  EXHAUSTED: '需要介入',
   FAILED: '遇到问题',
   CANCELLED: '已取消',
 }
@@ -49,7 +67,7 @@ const STAGE_TITLES: Record<NodeKey, string> = {
   verify: '验证',
   milestone: '里程碑',
   human: '确认',
-  outcome: '完成',
+  outcome: '结果',
 }
 
 interface SidebarProps {
@@ -63,7 +81,9 @@ interface SidebarProps {
 function statusDot(status: string) {
   if (status === 'ACTIVE') return 'dot-active'
   if (status === 'PAUSED') return 'dot-paused'
-  if (status === 'WAITING_HUMAN') return 'dot-waiting'
+  if (status === 'WAITING_HUMAN' || status === 'EXHAUSTED' || status === 'BLOCKED') {
+    return 'dot-waiting'
+  }
   return 'dot-terminal'
 }
 
@@ -97,10 +117,17 @@ interface StageBarProps {
     goal: { status: string; metadata: Record<string, unknown>; execution_stage?: { stage: string } } | null
   } | null
   progressNodes?: { key: NodeKey; status: NodeStatus }[]
+  liveActivity?: LiveActivity
   onQuickAction: (text: string) => void
 }
 
-export function StageBar({ status, progressNodes, onQuickAction }: StageBarProps) {
+export function StageBar({ status, progressNodes, liveActivity, onQuickAction }: StageBarProps) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
   if (!status?.goal) {
     return (
       <div className="stage-bar">
@@ -114,24 +141,42 @@ export function StageBar({ status, progressNodes, onQuickAction }: StageBarProps
   const stage = (meta.execution_stage as string) || goal.execution_stage?.stage || goal.status
   const label = STAGE_LABELS[stage] || GOAL_STATUS_LABELS[goal.status] || stage
   const goalStatusLabel = GOAL_STATUS_LABELS[goal.status] || goal.status
+  const live = deriveLiveLabel(
+    liveActivity ?? { connection: 'idle', lastProgressAt: null, lastHeartbeatAt: null, liveAction: null },
+    goal.status,
+    now,
+  )
 
   const corrections = (meta.active_corrections as unknown[]) || []
+  const liveSummary = liveActivity?.liveAction?.summary
+  const actionAt = liveActivity?.liveAction?.updated_at
+    ? Date.parse(liveActivity.liveAction.updated_at)
+    : NaN
+  const actionElapsed = !Number.isNaN(actionAt)
+    ? Math.max(0, Math.floor((now - actionAt) / 1000))
+    : null
 
   // Compute progress from nodes
   const completedCount = progressNodes
     ? progressNodes.filter(n => n.status === 'done').length
     : 0
   const totalStages = PROGRESS_STAGES.length
+  const isActive = goal.status === 'ACTIVE' || goal.status === 'WAITING_HUMAN' || goal.status === 'PAUSED'
 
   return (
+    <div className="stage-bar-wrap">
     <div className="stage-bar">
       <div className="stage-bar-left">
-        <span className={`stage-badge ${goal.status.toLowerCase()}`}>
+        <span className={`stage-badge ${goal.status.toLowerCase()} ${live.tone === 'live' ? 'is-live' : ''}`}>
+          {(live.tone === 'live' || isActive) && <span className="live-pulse-dot" aria-hidden />}
           {label}
         </span>
         {goal.status !== 'DRAFT' && (
           <span className="stage-goal-status">{goalStatusLabel}</span>
         )}
+        <span className={`stage-live tone-${live.tone}`} title="根据实时连接与最新进展判断系统是否仍在运行">
+          {live.text}
+        </span>
         {corrections.length > 0 && (
           <span className="stage-corrections">有 {corrections.length} 条修正</span>
         )}
@@ -170,7 +215,28 @@ export function StageBar({ status, progressNodes, onQuickAction }: StageBarProps
             <button className="qa-btn danger" onClick={() => onQuickAction('拒绝，需要修改')}>拒绝</button>
           </>
         )}
+        {(goal.status === 'EXHAUSTED' || goal.status === 'BLOCKED') && (
+          <button className="qa-btn" onClick={() => onQuickAction('继续尝试，请根据上次失败重新规划')}>
+            继续尝试
+          </button>
+        )}
       </div>
+    </div>
+    {isActive && (
+      <div className={`core-live-strip tone-${live.tone}`}>
+        <span className="live-pulse-dot" aria-hidden />
+        <span className="core-live-text">
+          {liveSummary
+            ? `Core 正在：${liveSummary}`
+            : live.text.startsWith('Core：')
+              ? live.text
+              : `Core 正在执行 · ${label}`}
+        </span>
+        {actionElapsed != null && (
+          <span className="core-live-elapsed">{actionElapsed}s</span>
+        )}
+      </div>
+    )}
     </div>
   )
 }

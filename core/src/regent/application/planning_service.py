@@ -64,10 +64,10 @@ class PlanningService:
             )
             if goal is None:
                 raise DomainError(ErrorCode.NOT_FOUND, f"goal {goal_id} not found")
-            if goal.status not in {"READY", "ACTIVE"}:
+            if goal.status not in {"DRAFT", "READY", "ACTIVE"}:
                 raise DomainError(
                     ErrorCode.INVALID_STATE,
-                    "goal must be confirmed before planning",
+                    "goal is not open for planning",
                 )
             if goal.works:
                 return PlanReceipt(
@@ -89,7 +89,9 @@ class PlanningService:
 
         response = await self._provider.generate_structured(
             system_prompt=(
-                "Create the smallest executable work graph. Do not add permissions. "
+                "Create the smallest executable work graph. The goal may still be ambiguous: "
+                "turn non-blocking unknowns into bounded discovery work instead of inventing "
+                "facts. Do not add permissions. "
                 "Dependencies must reference work keys in this plan. Include bounded budgets "
                 "and explicit required capabilities. Return only the required structure."
             ),

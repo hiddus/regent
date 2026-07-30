@@ -115,6 +115,18 @@ def review_html_for_delivery(
     style_lower = style_text.lower()
     has_external_css = bool(_STYLESHEET_LINK_RE.search(html))
 
+    # Static/preview surfaces must not ship unrendered Jinja/Mustache markers.
+    has_template_markers = "{{" in html or "{%" in html or "{#" in html
+    checks.append(
+        DeliveryReviewCheck(
+            "forbid-unrendered-templates",
+            not has_template_markers,
+            "unrendered template markers ({{, {%, or {#) in HTML"
+            if has_template_markers
+            else "ok",
+        )
+    )
+
     if rules.get("require_semantic_main", True):
         ok = "<main" in lower
         checks.append(
@@ -439,6 +451,8 @@ def review_files_for_delivery(
         return result
     # Extend with project-level checks
     all_checks = list(result.checks)
+    contract = dict(acceptance_contract or {})
+    allow_demo = str(contract.get("delivery_policy") or "").lower() == "demo"
 
     # Project structure: forbid trivial server patterns in Python files
     trivial_patterns = (
@@ -447,9 +461,11 @@ def review_files_for_delivery(
         "http.server",
     )
     py_content = ""
+    py_files: list[str] = []
     for name, content in files.items():
         if name.endswith(".py") and content:
             py_content += content + "\n"
+            py_files.append(name)
     is_trivial = any(pat in py_content for pat in trivial_patterns)
     all_checks.append(
         DeliveryReviewCheck(
@@ -458,6 +474,35 @@ def review_files_for_delivery(
             "trivial http.server template detected" if is_trivial else "ok",
         )
     )
+
+    # Forbid pure static hosting disguised as an app (send_from_directory / StaticFiles only).
+    static_only = _is_pure_static_backend(py_content, py_files)
+    all_checks.append(
+        DeliveryReviewCheck(
+            "forbid-pure-static-backend",
+            not static_only,
+            (
+                "backend is pure static file serving without business logic"
+                if static_only
+                else "ok"
+            ),
+        )
+    )
+
+    # Placeholder / fake demo content is FAIL unless Goal explicitly asks for demo.
+    if not allow_demo:
+        placeholder_hit = _has_forbidden_placeholder(files)
+        all_checks.append(
+            DeliveryReviewCheck(
+                "forbid-placeholder-content",
+                not placeholder_hit,
+                (
+                    f"placeholder/fake content detected: {placeholder_hit}"
+                    if placeholder_hit
+                    else "ok"
+                ),
+            )
+        )
 
     # Project structure: require dependencies declaration
     has_requirements = any(
@@ -497,3 +542,50 @@ def review_files_for_delivery(
         checks=all_checks,
         summary=summary,
     )
+
+
+_STATIC_SERVE_RE = re.compile(
+    r"(send_from_directory|StaticFiles|send_file\s*\()",
+    re.I,
+)
+_DOMAIN_HINT_RE = re.compile(
+    r"(sqlalchemy|sqlite3|create_engine|Session\(|\.query\(|"
+    r"class\s+\w+\(.*Model|db\.Model|INSERT\s+INTO|SELECT\s+.+\s+FROM|"
+    r"jsonify\(|return\s+\{)",
+    re.I,
+)
+_PLACEHOLDER_RE = re.compile(
+    r"(lorem ipsum|fake user|john doe|jane doe|sample user|"
+    r"demo card|placeholder user|mock profile|hard-?coded demo|"
+    r"example@example\.com|user\d+@example)",
+    re.I,
+)
+
+
+def _is_pure_static_backend(py_content: str, py_files: list[str]) -> bool:
+    """True when Python app only hosts static files with no domain logic."""
+    if not py_content.strip():
+        # No backend at all — treat as non-product unless HTML-only frozen set
+        # (already skipped earlier).
+        return True
+    has_static = bool(_STATIC_SERVE_RE.search(py_content))
+    has_domain = bool(_DOMAIN_HINT_RE.search(py_content))
+    lines = [ln for ln in py_content.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    tiny = len(lines) <= 20
+    if has_static and tiny and not has_domain:
+        return True
+    if has_static and not has_domain and not any(
+        hint in py_content for hint in ("jsonify", "request.", "Form(", "BaseModel")
+    ):
+        return True
+    return False
+
+
+def _has_forbidden_placeholder(files: dict[str, str]) -> str:
+    for name, content in files.items():
+        if not content:
+            continue
+        match = _PLACEHOLDER_RE.search(content)
+        if match:
+            return f"{name}:{match.group(0)}"
+    return ""

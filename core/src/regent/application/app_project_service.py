@@ -62,8 +62,9 @@ class AppProjectService:
     async def create_draft(self, *, idea: str, actor: str) -> AppProjectDraftReceipt:
         response = await self._provider.generate_structured(
             system_prompt=(
-                "Turn the product idea into a concise confirmation card. Do not execute, plan, "
-                "browse, or invent user constraints. Success criteria must be externally "
+                "Turn the product idea into a concise provisional understanding. Do not "
+                "invent user constraints. Preserve ambiguity as explicit unknowns. Success "
+                "criteria must be externally "
                 "observable. Keep the first deliverable small enough for a preview validation."
             ),
             user_prompt=idea,
@@ -144,8 +145,11 @@ class AppProjectService:
                 conversation_id=conversation_id,
                 ordinal=2,
                 role="ASSISTANT",
-                message_type="APP_CONFIRMATION_REQUIRED",
-                content="我已经形成产品理解草案。确认前不会规划、生成、构建或发布。",
+                message_type="GOAL_UNDERSTANDING_READY",
+                content=(
+                    "我已形成第一版产品理解, 并将基于当前信息开始探索。"
+                    "你可以随时补充或修正目标。"
+                ),
                 metadata_json={
                     "app_project_id": str(project_id),
                     "goal_id": str(goal_id),

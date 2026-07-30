@@ -84,3 +84,34 @@ patch-test.tmp
 
 # Cleanup script
 /_cleanup_git.py
+
+# ops/ diagnostic / one-off scripts (never commit)
+ops/diag_*.py
+ops/check_*.py
+ops/fix_*.py
+ops/poll_*.py
+ops/enqueue_*.py
+ops/deploy_aar1_*.py
+ops/deploy_org_*.py
+ops/finish_*.py
+ops/pull_*.py
+ops/reclaim_*.py
+ops/remote_*.py
+ops/run_remote_*.py
+ops/safe_*.py
+ops/sync_*.py
+ops/unstick_*.py
+ops/upgrade_*.py
+ops/verify_*.py
+ops/compare_*.py
+ops/_*.py
+ops/archive/
+
+# archive directory at root (tarballs, reports, artifacts)
+/archive/
+
+# Canvas status files (auto-generated)
+*.canvas.status.json
+
+# pytest temp preview
+.pytest-tmp-preview-val/

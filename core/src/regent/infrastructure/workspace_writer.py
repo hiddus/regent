@@ -107,9 +107,13 @@ class WorkspaceWriter:
             if target.exists():
                 existing = target / ".regent-manifest.json"
                 if existing.is_file():
-                    # Immutable snapshot: first commit wins. Re-execution after a DB
-                    # commit race must reuse the existing workspace (not rewrite it).
                     existing_hash = hashlib.sha256(existing.read_bytes()).hexdigest()
+                    # Immutable snapshot: first commit wins for identical content.
+                    # Different content targeting the same key is a conflict.
+                    if manifest_hash != existing_hash:
+                        raise WorkspaceConflictError(
+                            f"immutable snapshot already exists with different content: {snapshot_key}"
+                        )
                     return self._existing_commit(target, existing_hash)
                 raise WorkspaceConflictError(f"immutable snapshot already exists: {snapshot_key}")
             self._atomic_directory_commit(stage, target)

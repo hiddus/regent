@@ -146,6 +146,7 @@ export default function App() {
         <StageBar
           status={ws.status}
           progressNodes={progressNodes}
+          liveActivity={ws.liveActivity}
           onQuickAction={handleQuickAction}
         />
         <MessageList

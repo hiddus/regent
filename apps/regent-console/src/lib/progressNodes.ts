@@ -51,6 +51,7 @@ const STAGES: StageDef[] = [
       APP_CONFIRMATION_REQUIRED: { status: 'waiting', conclusion: '已初步理解你的产品想法' },
       GOAL_UNDERSTANDING_READY: { status: 'running', conclusion: '正在探索你的产品方向' },
       GOAL_CONFIRMED: { status: 'done', conclusion: '产品方向已确认' },
+      GOAL_EXECUTION_QUEUED: { status: 'done', conclusion: '产品方向已确认并开始执行' },
       CORRECTION_APPLIED: { status: 'running', conclusion: '已记录你的补充，继续完善方案' },
     },
   },
@@ -58,9 +59,10 @@ const STAGES: StageDef[] = [
     key: 'discover',
     title: '市场调研',
     events: {
-      GOAL_EXECUTION_QUEUED: { status: 'running', conclusion: '已开始为你工作' },
       DISCOVERY_ROUND_CREATED: { status: 'running', conclusion: '正在进行市场调研' },
+      DISCOVERY_ROUND_REQUESTED: { status: 'running', conclusion: '正在继续市场调研' },
       DISCOVERY_COMPLETED: { status: 'done', conclusion: '市场调研已完成' },
+      RESEARCH_MORE_ADAPT_CONTINUE: { status: 'running', conclusion: '正在深入取证调研' },
     },
   },
   {
@@ -95,6 +97,8 @@ const STAGES: StageDef[] = [
       DELIVERY_GLOBAL_VERIFY_FAILED: { status: 'failed', conclusion: '生成过程遇到问题，正在尝试修复' },
       DELIVERY_BATCHES_COMPLETED: { status: 'done', conclusion: '应用代码已全部生成完成' },
       WORKSPACE_SNAPSHOT_READY: { status: 'done', conclusion: '应用已打包完成' },
+      ATTAINMENT_RECOVERY_STARTED: { status: 'running', conclusion: '目标未达成，正在重新规划并继续生成' },
+      DELIVERY_GAP_CAPABILITY_ESCALATED: { status: 'running', conclusion: '正在升级能力并重新生成交付物' },
     },
   },
   {
@@ -124,7 +128,8 @@ const STAGES: StageDef[] = [
       GATE_INSUFFICIENT_REORGANIZED: { status: 'running', conclusion: '正在补充验证数据' },
       QUALITY_SELF_VERIFIED: { status: 'done', conclusion: '所有验证已通过' },
       VERIFICATION_REQUIRED: { status: 'waiting', conclusion: '需要你确认是否满意当前结果' },
-      ITERATION_REVISE_STARTED: { status: 'running', conclusion: '正在根据你的反馈优化' },
+      ITERATION_REVISE_STARTED: { status: 'running', conclusion: '正在根据反馈优化方案' },
+      GATE_CAPABILITY_REORGANIZED: { status: 'running', conclusion: '验证未通过，正在重组能力并重试' },
     },
   },
   {
@@ -140,6 +145,8 @@ const STAGES: StageDef[] = [
     title: '需要你确认',
     events: {
       HUMAN_TASK_REQUIRED: { status: 'waiting', conclusion: '有一个步骤需要你确认' },
+      DELIVERY_GAP_EXHAUSTED: { status: 'waiting', conclusion: '自动修复已用尽，需要你介入' },
+      RESEARCH_MORE_ADAPT_EXHAUSTED: { status: 'waiting', conclusion: '调研取证已用尽，需要你介入' },
     },
   },
   {
@@ -147,8 +154,11 @@ const STAGES: StageDef[] = [
     title: '完成',
     events: {
       GOAL_ACHIEVED: { status: 'done', conclusion: '你的 App 已准备就绪' },
-      GOAL_EXHAUSTED: { status: 'failed', conclusion: '执行已暂停，需要你补充信息' },
-      GOAL_EXECUTION_STAGE_HALTED: { status: 'failed', conclusion: '执行已停止，请查看详情' },
+      // Exhausted / halted are NOT “完成” — retitle to 需要处理 / 未达成 after build.
+      GOAL_EXHAUSTED: { status: 'waiting', conclusion: '自动路径已用尽，需要你介入后继续' },
+      GOAL_EXECUTION_STAGE_HALTED: { status: 'waiting', conclusion: '执行需处理，请查看详情后继续' },
+      GOAL_FAILED: { status: 'failed', conclusion: '执行遇到问题，未能达成目标' },
+      GOAL_BLOCKED: { status: 'waiting', conclusion: '执行受阻，需要你介入' },
     },
   },
 ]
@@ -219,6 +229,8 @@ function extractHighlights(m: Message): Record<string, string> {
 export function buildProgressNodes(messages: Message[]): ProgressNode[] {
   const byKey = new Map<NodeKey, ProgressNode>()
   const order: NodeKey[] = []
+  /** Stages that may legitimately reopen after done (retry / recovery). */
+  const reopenable = new Set<NodeKey>(['generate', 'build', 'preview', 'verify', 'human'])
 
   for (const m of messages) {
     const hit = TYPE_INDEX.get(m.message_type)
@@ -243,21 +255,78 @@ export function buildProgressNodes(messages: Message[]): ProgressNode[] {
 
     const nextRank = STATUS_RANK[status]
     const curRank = STATUS_RANK[node.status]
-    if (status === 'failed' || status === 'waiting' || nextRank >= curRank || status === 'running') {
-      if (!(node.status === 'failed' && status !== 'failed')) {
+    // Never let a later "running" event undo a finished early stage (e.g. understand/discover).
+    if (status === 'running' && node.status === 'done' && !reopenable.has(stage.key)) {
+      // keep done; still attach message for history
+    } else if (status === 'failed' || status === 'waiting' || nextRank >= curRank) {
+      if (!(node.status === 'failed' && status !== 'failed' && status !== 'waiting')) {
         node.status = status
       }
-    }
-    if (status === 'running' && (node.status === 'done' || node.status === 'waiting')) {
+    } else if (status === 'running' && reopenable.has(stage.key) && (node.status === 'done' || node.status === 'waiting')) {
+      node.status = 'running'
+    } else if (status === 'running' && curRank < STATUS_RANK.running) {
       node.status = 'running'
     }
 
     const defaultConclusion = hit.conclusion || stage.title
-    node.conclusion = summarizeContent(m.content) || defaultConclusion
-    node.detail = hit.conclusion && hit.conclusion !== node.conclusion ? hit.conclusion : undefined
+    // Prefer product conclusion labels for status chips; keep latest content as detail.
+    if (hit.conclusion) {
+      node.detail = summarizeContent(m.content) || undefined
+      if (status === 'running' || status === 'waiting' || nextRank >= curRank) {
+        node.conclusion = hit.conclusion
+      }
+    } else {
+      node.conclusion = summarizeContent(m.content) || defaultConclusion
+    }
+    // For long recovery messages, keep the stage conclusion stable and put body in detail.
+    if (m.message_type === 'ATTAINMENT_RECOVERY_STARTED' || m.message_type === 'DELIVERY_GAP_CAPABILITY_ESCALATED') {
+      node.conclusion = hit.conclusion || node.conclusion
+      node.detail = summarizeContent(m.content, 200)
+    }
     node.updatedAt = m.created_at
     node.messageIds.push(m.id)
     Object.assign(node.highlights || {}, extractHighlights(m))
+  }
+
+  // Auto-complete earlier stages once a later stage has started — avoids
+  // "理解你的想法 / 市场调研" stuck on 进行中 after the pipeline moved on
+  // (common when GOAL_CONFIRMED is never emitted).
+  const stageOrder: NodeKey[] = [
+    'understand', 'discover', 'require', 'capability', 'generate',
+    'build', 'preview', 'verify', 'milestone', 'human', 'outcome',
+  ]
+  const maxIdx = Math.max(
+    -1,
+    ...[...byKey.keys()].map(k => stageOrder.indexOf(k)).filter(i => i >= 0),
+  )
+  for (let i = 0; i < maxIdx; i += 1) {
+    const key = stageOrder[i]
+    const node = byKey.get(key)
+    if (node && (node.status === 'running' || node.status === 'pending')) {
+      node.status = 'done'
+      if (!node.conclusion || node.conclusion.includes('正在')) {
+        node.conclusion = `${node.title.replace(/你的|想法/g, '').trim() || node.title}已完成`
+      }
+    }
+  }
+  // If understand never got GOAL_CONFIRMED but execution queued, mark done.
+  const understand = byKey.get('understand')
+  if (understand && understand.status === 'running' && byKey.has('discover')) {
+    understand.status = 'done'
+    understand.conclusion = '产品方向已确认并开始执行'
+  }
+
+  // “完成” is only for real attainment; failed/waiting outcomes are “未达成”.
+  for (const node of byKey.values()) {
+    if (node.key === 'outcome') {
+      if (node.status === 'done') {
+        node.title = '完成'
+      } else if (node.status === 'waiting') {
+        node.title = '需要处理'
+      } else if (node.status === 'failed') {
+        node.title = '未达成'
+      }
+    }
   }
 
   return order.map(k => byKey.get(k)!).filter(Boolean)

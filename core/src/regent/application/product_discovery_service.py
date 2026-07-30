@@ -14,6 +14,7 @@ from regent.application.p1_contracts import (
     ProductHypothesisProposal,
     canonical_hash,
     inherit_constraints,
+    sanitize_evidence_references,
     validate_evidence_references,
 )
 from regent.application.p1_ports import (
@@ -89,6 +90,8 @@ class ProductDiscoveryService:
                 "evidence_id": str(evidence_ids_by_hash.get(item.content_hash, "unregistered")),
                 "source_uri": item.source_uri,
                 "content_hash": item.content_hash,
+                "trust_label": item.trust_label,
+                "source_type": item.source_type,
                 "metadata": {
                     "kind": item.metadata.get("kind"),
                     "connector": item.metadata.get("connector"),
@@ -109,7 +112,7 @@ class ProductDiscoveryService:
             ),
             response_model=ProductHypothesisBatch,
         )
-        hypotheses = generated.output.hypotheses
+        hypotheses = sanitize_evidence_references(generated.output.hypotheses, available_ids)
         self._validate_candidate_set(hypotheses)
         validate_evidence_references(hypotheses, available_ids)
         decision_response = await self._provider.generate_structured(

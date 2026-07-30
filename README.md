@@ -26,3 +26,22 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 - [本地开发](./core/README.md)
 
 编码冲突时：产品语义以 PRD 为准，实现契约以 P1 最终技术规范为准，阶段顺序以 Plan 为准；任何冲突必须通过 ADR 或 DecisionRecord 解决。
+
+## 仓库结构
+
+| 路径 | 说明 | 详情 |
+|---|---|---|
+| `core/` | Regent 后端核心（FastAPI + Worker），源码包 `core/src/regent` | [core/README.md](./core/README.md) |
+| `capabilities/` | 认证能力池（引导声明 + 解析器/沙箱） | [capabilities/README.md](./capabilities/README.md) |
+| `apps/regent-console/` | Web 控制台（React 19 + Vite + TS） | [apps/regent-console/README.md](./apps/regent-console/README.md) |
+| `apps/regent-desktop/` | 桌面端封装（Tauri） | [apps/regent-desktop/README.md](./apps/regent-desktop/README.md) |
+| `tests/` | 三层测试：architecture / integration / unit | [tests/README.md](./tests/README.md) |
+| `fixtures/` | 测试与评测固定数据（eval_task_set_v1.json） | [fixtures/README.md](./fixtures/README.md) |
+| `scripts/` | 仓库级辅助脚本（凭据扫描、发布打标） | [scripts/README.md](./scripts/README.md) |
+| `ops/` | 运维工具与一次性脚本归档 | [ops/README.md](./ops/README.md) |
+| `deploy/` | 部署配置（Squid 出口代理等） | [deploy/README.md](./deploy/README.md) |
+| `docs/` | 规范文档、契约、ADR、附录与归档 | [docs/README.md](./docs/README.md) |
+| `canvases/` | 可视化画布生成物 | [canvases/README.md](./canvases/README.md) |
+| `archive/` | 归档：根目录清理出的临时/实验产物 | — |
+
+> 仓库根只允许白名单内的正式文件；一次性诊断/热修脚本必须放入 `ops/archive/oneoff/`，由 `ops/check_repo_hygiene.py` 在 CI 中强制。详见 [ops/README.md](./ops/README.md)。

@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from regent.application.auto_fix_service import AutoFixService
-from regent.application.delivery_review_service import review_html_for_delivery
+from regent.application.delivery_review_service import review_files_for_delivery
 from regent.application.p1_ports import (
     DeploymentRequest,
     DeploymentResult,
@@ -40,6 +40,64 @@ _ACTIVATION_JS = """
 """
 
 _ACTIVATION_SCRIPT_TAG = '<script src="./regent-preview.js"></script>\n'
+
+# Unrendered server/template engines must never be published as static-html.
+_UNRENDERED_TEMPLATE_MARKERS = ("{{", "{%", "{#")
+
+
+def html_has_unrendered_template_markers(html: str) -> bool:
+    """True when HTML still contains Jinja/Mustache-style template markers."""
+    return any(marker in html for marker in _UNRENDERED_TEMPLATE_MARKERS)
+
+
+_TEXT_SUFFIXES = {
+    ".py",
+    ".html",
+    ".htm",
+    ".css",
+    ".js",
+    ".json",
+    ".md",
+    ".txt",
+    ".toml",
+    ".yml",
+    ".yaml",
+    ".ini",
+    ".cfg",
+}
+
+
+def _collect_text_files(root: Path, *, max_files: int = 80, max_bytes: int = 200_000) -> dict[str, str]:
+    """Collect relative text files from a preview/workspace tree for delivery review."""
+    files: dict[str, str] = {}
+    root = root.resolve()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix.lower() not in _TEXT_SUFFIXES and path.name.lower() != "requirements.txt":
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative.startswith(".") or "/." in relative:
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if len(raw) > max_bytes:
+            continue
+        try:
+            files[relative] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if len(files) >= max_files:
+            break
+    # Normalize common entrypoints to basename keys expected by review_files.
+    if "index.html" not in files:
+        for key, content in list(files.items()):
+            if key.endswith("/index.html") or key.endswith("\\index.html"):
+                files["index.html"] = content
+                break
+    return files
 
 
 def stamp_preview_deployment_id(
@@ -116,39 +174,55 @@ class StaticPreviewDeploymentProvider:
                 shutil.copy2(index, target_dir / "index.html")
             index_path = target_dir / "index.html"
             html = index_path.read_text(encoding="utf-8")
+            # Fail closed: static-html must be fully rendered (no Jinja/Mustache left).
+            if html_has_unrendered_template_markers(html):
+                raise ValueError(
+                    "static-html preview rejected: index.html contains unrendered "
+                    "template markers ({{, {%, or {#); refuse to publish blank/raw UI"
+                )
             # R7 / P2-0: never synthesize interaction hooks; generated app must provide them.
             if "data-regent-event" not in html:
                 raise ValueError(
                     "preview requires data-regent-event in index.html; "
                     "refusing to inject synthetic task controls"
                 )
-            # delivery-review-v1: fail-closed against demo-only pages.
-            review = review_html_for_delivery(
-                html,
+            # P0-4: review full project tree (not HTML-only) so pure-static backends fail.
+            project_files = _collect_text_files(target_dir)
+            review = review_files_for_delivery(
+                project_files,
                 acceptance_contract=request.acceptance_contract,
                 success_criteria=request.success_criteria,
             )
             fix_result = None
             if not review.passed:
-                # GAC-D6: Core auto-fix - attempt to repair delivery issues before failing.
+                # GAC-D6: Core auto-fix only mutates HTML; skip for structural gaps.
                 failed_checks = [c for c in review.checks if not c.passed]
-                auto_fix = AutoFixService()
-                fix_result = auto_fix.fix(
-                    html,
-                    acceptance_contract=request.acceptance_contract,
-                    success_criteria=request.success_criteria,
-                    failed_checks=failed_checks,
-                )
-                if fix_result.fixed:
-                    html = fix_result.html
-                    # Re-review the fixed HTML
-                    review = review_html_for_delivery(
+                structural = {
+                    "forbid-pure-static-backend",
+                    "forbid-trivial-server",
+                    "forbid-placeholder-content",
+                    "forbid-unrendered-templates",
+                    "require-dependencies-declared",
+                    "min-file-count",
+                }
+                html_only_gaps = all(c.name not in structural for c in failed_checks)
+                if html_only_gaps:
+                    auto_fix = AutoFixService()
+                    fix_result = auto_fix.fix(
                         html,
                         acceptance_contract=request.acceptance_contract,
                         success_criteria=request.success_criteria,
+                        failed_checks=failed_checks,
                     )
+                    if fix_result.fixed:
+                        html = fix_result.html
+                        project_files["index.html"] = html
+                        review = review_files_for_delivery(
+                            project_files,
+                            acceptance_contract=request.acceptance_contract,
+                            success_criteria=request.success_criteria,
+                        )
                 if not review.passed:
-                    # Still failed after auto-fix - raise for orchestrator recovery
                     review.raise_if_failed()
             (target_dir / "regent-preview.js").write_text(_ACTIVATION_JS, encoding="utf-8")
             if "regent-preview.js" not in html:
@@ -175,6 +249,11 @@ class StaticPreviewDeploymentProvider:
                     "release_key": str(release_key),
                     "artifact_hash": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
                     "runtime": "static-html",
+                    "delivery_verification": {
+                        "verdict": "PASS",
+                        "capability": review.capability,
+                        "summary": review.summary,
+                    },
                     "delivery_review": {
                         "capability": review.capability,
                         "passed": True,
@@ -195,12 +274,16 @@ class StaticPreviewDeploymentProvider:
             # Re-raise delivery-review-v1 failures so the orchestrator can trigger recovery.
             if "delivery-review-v1" in str(exc):
                 raise
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
             result = DeploymentResult(
                 external_request_id=request.idempotency_key,
                 status="FAILED",
                 evidence={"provider": "static-preview", "error": str(exc)},
             )
         except Exception as exc:
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
             result = DeploymentResult(
                 external_request_id=request.idempotency_key,
                 status="FAILED",

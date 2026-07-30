@@ -166,6 +166,42 @@ body {
   min-height: 44px;
 }
 
+.stage-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line);
+  background: var(--side);
+}
+.stage-bar-wrap .stage-bar {
+  border-bottom: none;
+}
+
+.core-live-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 20px 8px;
+  font-size: 12px;
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 8%, transparent);
+}
+.core-live-strip.tone-live { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.core-live-strip.tone-stale { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.core-live-strip.tone-offline { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.core-live-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.core-live-elapsed {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+
 .stage-bar-left {
   display: flex;
   align-items: center;
@@ -196,9 +232,46 @@ body {
   color: var(--muted);
 }
 
+.stage-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 360px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stage-live.tone-live { color: var(--accent); }
+.stage-live.tone-quiet { color: var(--info); }
+.stage-live.tone-stale { color: var(--warn); }
+.stage-live.tone-offline { color: var(--danger); }
+
+.stage-badge.is-live {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.live-pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
 .stage-corrections {
   font-size: 11px;
   color: var(--warn);
+}
+
+.artifact-summary-freshness {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
 }
 
 /* Progress steps visualization */
@@ -945,6 +1018,7 @@ body {
   }
   .mobile-menu { display: block; }
   .stage-bar { overflow-x: auto; flex-wrap: wrap; }
+  .stage-live { max-width: 100%; white-space: normal; }
   .stage-progress { display: none; }
   .facts { grid-template-columns: 80px 1fr; }
   .artifact-panel {

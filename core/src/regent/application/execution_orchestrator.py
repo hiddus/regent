@@ -1354,6 +1354,32 @@ class ExecutionOrchestrator:
                     "Do not claim the full Goal until the final milestone."
                 )
 
+        # Failure-driven learning: always inject prior lessons when present so
+        # plan digest changes and the generator sees concrete constraints.
+        failure_lessons = list(goal_meta.get("failure_lessons") or [])
+        if failure_lessons:
+            acceptance_contract["failure_lessons"] = failure_lessons[-8:]
+        learned_constraints = list(goal_meta.get("learned_constraints") or [])
+        if learned_constraints:
+            acceptance_contract["learned_constraints"] = learned_constraints[:16]
+        replan_nonce = str(
+            payload.get("replan_nonce") or goal_meta.get("replan_nonce") or ""
+        ).strip()
+        if replan_nonce:
+            acceptance_contract["replan_nonce"] = replan_nonce
+        lesson_digest = str(
+            payload.get("failure_lesson_digest")
+            or (goal_meta.get("capability_resolution") or {}).get("failure_lesson_digest")
+            or ""
+        ).strip()
+        if lesson_digest:
+            acceptance_contract["failure_lesson_digest"] = lesson_digest
+        if learned_constraints and "Constraint:" not in architecture_summary:
+            architecture_summary = (
+                f"{architecture_summary}\n\nLearned constraints from prior failures:\n"
+                + "\n".join(f"- {item}" for item in learned_constraints[:8])
+            )
+
         acceptance_contract["app_project_id"] = str(project_id)
         acceptance_contract["goal_id"] = str(goal_id)
         acceptance_contract.setdefault("org_key", "default")
@@ -1445,7 +1471,28 @@ class ExecutionOrchestrator:
                         "completed generation run missing workspace snapshot",
                     )
             else:
-                snapshot = await gen_service.execute(run.id)
+                from regent.application.live_action import set_goal_live_action
+
+                async def _on_generation_progress(summary: str) -> None:
+                    await set_goal_live_action(
+                        self._sessions,
+                        goal_id,
+                        summary,
+                        stage="GENERATING",
+                        event_type="GENERATION_RUN_REQUESTED",
+                    )
+
+                await set_goal_live_action(
+                    self._sessions,
+                    goal_id,
+                    "正在生成应用代码…",
+                    stage="GENERATING",
+                    event_type="GENERATION_RUN_REQUESTED",
+                )
+                snapshot = await gen_service.execute(
+                    run.id,
+                    on_progress=_on_generation_progress,
+                )
             # Phase 2.3: Record generation token costs in BudgetLedger
             await self._record_generation_costs(goal_id, run.id)
         except DomainError as exc:
@@ -1467,6 +1514,11 @@ class ExecutionOrchestrator:
                     capability_resolution_plan_id=resolution_plan_id,
                     actor=actor,
                     gap_reasons=reasons,
+                    halt_context={
+                        "stage": "DELIVERY_REVIEW_REJECTED",
+                        "last_error": str(exc)[:400],
+                        "message": str(exc.message)[:400],
+                    },
                 )
                 if recovery.recovered:
                     logger.info(
@@ -1495,6 +1547,55 @@ class ExecutionOrchestrator:
                     extra={"goal_id": str(goal_id), "message": recovery.message},
                 )
                 return
+            if exc.code == ErrorCode.INVALID_STATE:
+                # Business INVALID_STATE: learn + replan into a new event.
+                # Do not blind-retry the same GenerationRunRequested payload.
+                recovery = await DeliveryGapRecoveryService(self._sessions).recover(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    requirement_revision_id=requirement_id,
+                    capability_resolution_plan_id=resolution_plan_id,
+                    actor=actor,
+                    gap_reasons=[f"invalid-state: {exc.message[:200]}"],
+                    halt_context={
+                        "stage": "GENERATION_INVALID_STATE",
+                        "last_error": str(exc)[:400],
+                        "message": exc.message[:400],
+                        "error_code": exc.code.value,
+                    },
+                )
+                if recovery.recovered:
+                    logger.info(
+                        "invalid-state recovery replanned",
+                        extra={
+                            "goal_id": str(goal_id),
+                            "attempts": recovery.attempts,
+                            "error": exc.message[:200],
+                        },
+                    )
+                    return
+                if recovery.terminal_exhaust:
+                    await self._halt_goal_stage(
+                        goal_id,
+                        project_id,
+                        stage="GENERATION_INVALID_STATE_NEEDS_HUMAN",
+                        message=recovery.message,
+                        terminal=GoalCommand.WAIT_FOR_HUMAN,
+                        actor=actor,
+                        event_type="HUMAN_TASK_REQUIRED",
+                        extra={
+                            "gap_kind": recovery.gap_kind,
+                            "attempts": recovery.attempts,
+                            "last_error": str(exc)[:400],
+                            "gac": "GAC-D5",
+                        },
+                    )
+                    return
+                logger.warning(
+                    "invalid-state could not replan; refusing blind outbox retry",
+                    extra={"goal_id": str(goal_id), "error": exc.message[:200]},
+                )
+                raise
             logger.exception("generation failed", extra={"goal_id": str(goal_id)})
             raise
         except ValueError as exc:
@@ -1514,6 +1615,11 @@ class ExecutionOrchestrator:
                 capability_resolution_plan_id=resolution_plan_id,
                 actor=actor,
                 gap_reasons=reasons,
+                halt_context={
+                    "stage": "DELIVERY_REVIEW_REJECTED",
+                    "last_error": str(exc)[:400],
+                    "message": str(exc)[:400],
+                },
             )
             if recovery.recovered:
                 logger.info(
@@ -1933,6 +2039,13 @@ class ExecutionOrchestrator:
                     capability_resolution_plan_id=plan_uuid,
                     actor=actor,
                     gap_reasons=[f"build-verification: {failure_reason}"],
+                    halt_context={
+                        "stage": "BUILD_FAILED",
+                        "message": f"应用构建未通过验证：{failure_reason}",
+                        "last_error": failure_reason[:400],
+                        "build_id": str(result_build.id),
+                        "status": result_build.status,
+                    },
                 )
                 if recovery.recovered:
                     logger.info(
@@ -2142,6 +2255,11 @@ class ExecutionOrchestrator:
                         capability_resolution_plan_id=plan_uuid,
                         actor=actor,
                         gap_reasons=reasons,
+                        halt_context={
+                            "stage": "DEPLOY_DELIVERY_REJECTED",
+                            "last_error": str(exc)[:400],
+                            "message": str(exc)[:400],
+                        },
                     )
                     if recovery.recovered:
                         return
@@ -2763,6 +2881,11 @@ class ExecutionOrchestrator:
                     capability_resolution_plan_id=plan_uuid,
                     actor=actor,
                     gap_reasons=["gate-insufficient-evidence-timeout"],
+                    halt_context={
+                        "stage": "GATE_INSUFFICIENT_EVIDENCE",
+                        "message": "gate insufficient evidence timeout",
+                        "last_error": "gate-insufficient-evidence-timeout",
+                    },
                 )
                 if recovery.recovered:
                     return
@@ -3172,6 +3295,12 @@ class ExecutionOrchestrator:
                 capability_resolution_plan_id=plan_uuid,
                 actor=actor,
                 gap_reasons=gap_reasons,
+                halt_context={
+                    "stage": stage,
+                    "message": message,
+                    "last_error": str((extra or {}).get("error") or message)[:400],
+                    **{k: v for k, v in dict(extra or {}).items() if k != "error"},
+                },
             )
             if recovery.recovered:
                 logger.info(
@@ -3423,7 +3552,7 @@ class ExecutionOrchestrator:
         content: str,
         metadata: dict[str, object],
     ) -> None:
-        """Append event message to conversation timeline."""
+        """Append event message to conversation timeline and refresh live_action."""
         await ExecutionOrchestrator._append_conversation_message(
             session,
             project_id,
@@ -3431,6 +3560,28 @@ class ExecutionOrchestrator:
             message_type=message_type,
             content=content,
             metadata=dict(metadata),
+        )
+        goal_raw = metadata.get("goal_id")
+        if not goal_raw:
+            return
+        try:
+            goal_id = uuid.UUID(str(goal_raw))
+        except ValueError:
+            return
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return
+        from regent.application.live_action import apply_live_action_on_goal, summary_for_event
+
+        stage = None
+        if isinstance(goal.metadata_json, dict):
+            stage = goal.metadata_json.get("execution_stage")
+        apply_live_action_on_goal(
+            goal,
+            summary_for_event(message_type, content),
+            stage=str(stage) if stage else None,
+            detail=content[:240] if content else None,
+            event_type=message_type,
         )
 
 

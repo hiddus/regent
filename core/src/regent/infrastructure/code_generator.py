@@ -107,9 +107,10 @@ Product fidelity is mandatory:
 - When the plan includes observed_evidence_entries or similar evidence payloads, render
   those headlines/links/summaries in the UI. Do not invent substitute news when observed
   entries exist.
-- If live external data is unavailable and no observed entries are supplied, embed
-  realistic placeholder content that still matches the product shape; do not collapse
-  the UI to a single heading.
+- Placeholder / fake user profiles / hard-coded demo cards are FORBIDDEN unless the Goal
+  explicitly requests a demo mockup (acceptance_contract.delivery_policy == "demo").
+  If live data is unavailable, implement real persistence + API endpoints that return
+  empty collections with honest empty states — never invent fake records.
 - Target is delivery of the Goal, not a demo: pass means GoalSpec success criteria /
   first_deliverable are met for a real user. Capability delivery-review-v1 will reject
   Goal-not-attained surfaces and unstyled browser-default dumps before preview publish.
@@ -124,9 +125,10 @@ Product fidelity is mandatory:
 
 Forbidden patterns (will be rejected by delivery review):
 - http.server.SimpleHTTPRequestHandler or socketserver.TCPServer as the application
-- Pure static file serving without business logic
+- Pure static file serving without business logic (Flask/FastAPI send_from_directory /
+  StaticFiles-only apps with no domain routes/models are rejected)
 - Single-file projects without requirements.txt
-- Placeholder-only content (lorem ipsum, "demo", "sample")
+- Placeholder-only content (lorem ipsum, fake users, hard-coded demo cards, "sample")
 
 Activation instrumentation (additional, not a substitute for the product):
 - If an HTML page is generated, also include a user-visible control with data-regent-event
@@ -140,10 +142,17 @@ class ArtifactBackedCodeGenerator:
         self._provider = provider
         self._artifacts = artifacts
 
-    async def generate(self, plan: dict[str, Any]) -> GeneratedFileChangeSet:
+    async def generate(
+        self,
+        plan: dict[str, Any],
+        *,
+        on_progress: Any = None,
+    ) -> GeneratedFileChangeSet:
         planned_paths = set(plan.get("planned_paths", []))
         if not planned_paths:
             raise ValueError("generation plan must freeze planned paths")
+        if on_progress is not None:
+            await on_progress("正在请求模型生成应用代码…")
         # GAC-GA: GoalAnchor — inject original goal text into user prompt
         # so the LLM cannot ignore what the user actually asked for.
         acceptance = plan.get("acceptance_contract") or {}
@@ -255,14 +264,30 @@ class ArtifactBackedCodeGenerator:
 
     @staticmethod
     def _build_retry_context(acceptance: dict[str, Any]) -> str:
-        """Build retry context from delivery gap reasons."""
+        """Build retry context from delivery gap reasons and learned constraints."""
         gap_reasons = acceptance.get("delivery_gap_reasons") or []
         attempt = acceptance.get("delivery_gap_recovery_attempt") or 1
-        if not gap_reasons or int(attempt) <= 1:
+        constraints = list(acceptance.get("learned_constraints") or [])
+        lessons = list(acceptance.get("failure_lessons") or [])
+        replan_nonce = str(acceptance.get("replan_nonce") or "").strip()
+        if not gap_reasons and not constraints and not lessons:
             return ""
-        lines = [f"Previous attempt #{attempt} failed delivery review:"]
-        for reason in gap_reasons[:5]:
-            lines.append(f"  - {reason}")
+        lines: list[str] = []
+        if int(attempt) > 1 or gap_reasons:
+            lines.append(f"Previous attempt #{attempt} failed delivery review:")
+            for reason in gap_reasons[:5]:
+                lines.append(f"  - {reason}")
+        if replan_nonce:
+            lines.append(f"Replan nonce: {replan_nonce}")
+        if constraints:
+            lines.append("Learned constraints (must satisfy):")
+            for item in constraints[:8]:
+                lines.append(f"  - {item}")
+        if lessons:
+            latest = lessons[-1] if isinstance(lessons[-1], dict) else {}
+            digest = latest.get("lesson_digest") if isinstance(latest, dict) else None
+            if digest:
+                lines.append(f"Absorb failure lesson {digest} before regenerating.")
         lines.append(
             "You MUST fix these issues and ensure the output matches the goal."
         )

@@ -1,8 +1,11 @@
+import io
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from regent.application.build_service import (
@@ -22,6 +25,8 @@ from regent.application.release_service import (
     ReleaseService,
     RequestDeployment,
 )
+from regent.agent.generator import AgenticCodeGenerator
+from regent.agent.types import AgentBudget
 from regent.config import get_settings
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.code_generator import ArtifactBackedCodeGenerator, ArtifactUriResolver
@@ -35,6 +40,23 @@ from regent.infrastructure.workspace_writer import WorkspaceWriter
 from regent.model.factory import build_model_provider
 
 router = APIRouter(tags=["app-delivery"])
+
+
+def _build_generator(settings, artifacts: FileArtifactStore, sessions=None):
+    provider = build_model_provider(settings)
+    if settings.generation_strategy == "agentic":
+        return AgenticCodeGenerator(
+            provider,
+            artifacts,
+            workspace_root=Path(settings.workspace_root),
+            budget=AgentBudget(
+                max_turns=settings.agent_max_turns,
+                max_tokens=settings.agent_max_tokens,
+                max_wall_seconds=settings.agent_max_wall_seconds,
+            ),
+            sessions=sessions,
+        )
+    return ArtifactBackedCodeGenerator(provider, artifacts)
 
 
 class CreateGenerationPlanBody(BaseModel):
@@ -74,7 +96,7 @@ def service(request: Request) -> GenerationService:
     artifacts = FileArtifactStore(Path(settings.artifact_root))
     return GenerationService(
         request.app.state.sessions,
-        ArtifactBackedCodeGenerator(build_model_provider(settings), artifacts),
+        _build_generator(settings, artifacts, sessions=request.app.state.sessions),
         WorkspaceWriter(Path(settings.workspace_root), ArtifactUriResolver(artifacts.root)),
     )
 
@@ -562,3 +584,67 @@ def deployment_response(model: Any) -> DeploymentResponse:
         reconciliation_required=model.reconciliation_required,
         failure_code=model.failure_code,
     )
+
+
+@router.get("/app-delivery/{project_id}/download")
+async def download_artifact(project_id: uuid.UUID, request: Request) -> StreamingResponse:
+    """Download generated artifact as a ZIP file."""
+    import re
+
+    from sqlalchemy import select
+
+    from regent.infrastructure.models import GoalModel
+
+    settings = get_settings()
+    preview_root = Path(settings.workspace_root) / "previews"
+    candidate_dirs: list[Path] = []
+
+    # P1 previews live at previews/{deploy_project_key}/{release_key}/ which may
+    # differ from the console app_project id. Prefer goal metadata endpoint.
+    try:
+        async with request.app.state.sessions() as session:
+            goal = await session.scalar(
+                select(GoalModel)
+                .where(GoalModel.app_project_id == project_id)
+                .order_by(GoalModel.created_at.desc())
+            )
+            endpoint = None
+            if goal is not None and isinstance(goal.metadata_json, dict):
+                endpoint = goal.metadata_json.get("last_preview_endpoint")
+            if isinstance(endpoint, str):
+                match = re.search(
+                    r"/preview/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})",
+                    endpoint,
+                )
+                if match:
+                    candidate_dirs.append(preview_root / match.group(1) / match.group(2))
+                    candidate_dirs.append(preview_root / match.group(1))
+    except Exception:
+        pass
+
+    candidate_dirs.extend(
+        [
+            preview_root / str(project_id),
+            Path(settings.workspace_root) / str(project_id),
+        ]
+    )
+
+    for project_dir in candidate_dirs:
+        if not (project_dir.exists() and project_dir.is_dir()):
+            continue
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file_path in project_dir.rglob("*"):
+                if file_path.is_file():
+                    arcname = str(file_path.relative_to(project_dir))
+                    zf.write(file_path, arcname)
+        if buf.tell() == 0:
+            continue
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="regent-{project_id}.zip"'},
+        )
+
+    raise HTTPException(status_code=404, detail="No artifact found for this project")

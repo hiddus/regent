@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     ] = "contract"
     aar1_envelope_hmac_key: SecretStr | None = None
     aar1_shadow_log_divergences: bool = True
+    # Opt-in certified fixed hive template (pm-dev-independent-qa-v1) when feasible.
+    # Default False keeps single-agent champion. Does NOT enable adaptive free topology.
+    aar1_certified_hive: bool = False
 
 
 @lru_cache

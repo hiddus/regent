@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -52,7 +52,12 @@ class AgenticCodeGenerator:
             projects_root=self._workspace_root / "project_memory",
         )
 
-    async def generate(self, plan: dict[str, Any]) -> GeneratedFileChangeSet:
+    async def generate(
+        self,
+        plan: dict[str, Any],
+        *,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> GeneratedFileChangeSet:
         run_id = str(plan.get("generation_run_id") or uuid.uuid4())
         sandbox = self._workspace_root / "agentic" / run_id
         base_workspace = _resolve_base(plan)
@@ -88,9 +93,20 @@ class AgenticCodeGenerator:
             budget=self._budget,
             regent_md=regent_md,
         )
+
+        async def _on_turn(turn: int, summary: str) -> None:
+            if on_progress is not None:
+                await on_progress(summary)
+
         try:
+            if on_progress is not None:
+                await on_progress("正在启动多轮生成…")
             result = await runner.run(
-                plan, prior_gaps=prior_gaps, verify=True, run_smoke=run_smoke
+                plan,
+                prior_gaps=prior_gaps,
+                verify=True,
+                run_smoke=run_smoke,
+                on_turn=_on_turn if on_progress else None,
             )
         except BudgetExhaustedError as exc:
             raise ValueError(

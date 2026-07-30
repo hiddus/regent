@@ -159,7 +159,7 @@ def create_app() -> FastAPI:
                 stages = {row.stage: row.cnt for row in stage_rows}
                 dead_letter_types = await session.execute(
                     text(
-                        "SELECT event_type, COUNT(*) FROM outbox_events "
+                        "SELECT event_type, COUNT(*) as cnt FROM outbox_events "
                         "WHERE status='DEAD_LETTER' GROUP BY event_type"
                     )
                 )

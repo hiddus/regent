@@ -13,6 +13,43 @@ from regent.infrastructure.models import OutboxEventModel
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
+# Transient / concurrency errors: keep exponential outbox retry.
+_RETRYABLE_DOMAIN_CODES = frozenset(
+    {
+        ErrorCode.LEASE_CONFLICT,
+        ErrorCode.LEASE_LOST,
+        ErrorCode.VERSION_CONFLICT,
+        ErrorCode.ACTIVE_RUN_EXISTS,
+        ErrorCode.STALE_LEASE,
+        ErrorCode.EXTERNAL_EFFECT_UNKNOWN,
+    }
+)
+
+# Business / permanent invalid state: do not burn attempts on the same bad payload.
+# GenerationRunRequested handlers should prefer learn→replan→new event; this is the
+# safety net when INVALID_STATE still bubbles to the dispatcher.
+_NON_RETRYABLE_DOMAIN_CODES = frozenset(
+    {
+        ErrorCode.INVALID_STATE,
+        ErrorCode.NOT_FOUND,
+        ErrorCode.POLICY_DENIED,
+        ErrorCode.GOAL_TERMINAL,
+        ErrorCode.PERMIT_REQUIRED,
+        ErrorCode.PERMIT_INVALID,
+        ErrorCode.RECONCILIATION_REQUIRED,
+        ErrorCode.NO_ACTIVE_CONSTITUTION,
+        ErrorCode.POLICY_EVALUATION_FAILED,
+        ErrorCode.NO_FEASIBLE_ORGANIZATION,
+        ErrorCode.STALE_ORGANIZATION_VERSION,
+        ErrorCode.INVALID_AGENT_LIFECYCLE_TRANSITION,
+        ErrorCode.CAPABILITY_SCOPE_ESCALATION,
+        ErrorCode.ENVELOPE_TAMPERED,
+        ErrorCode.ENVELOPE_EXPIRED,
+        ErrorCode.ENVELOPE_REPLAYED,
+        ErrorCode.MCP_SERVER_NOT_CERTIFIED,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ClaimedEvent:
@@ -21,6 +58,17 @@ class ClaimedEvent:
     payload: dict[str, Any]
     attempt: int
     correlation_id: uuid.UUID
+
+
+def is_retryable_handler_error(exc: BaseException) -> bool:
+    """Infrastructure/transient → retry; business INVALID_STATE → dead-letter."""
+    if isinstance(exc, DomainError):
+        if exc.code in _RETRYABLE_DOMAIN_CODES:
+            return True
+        if exc.code in _NON_RETRYABLE_DOMAIN_CODES:
+            return False
+        return False
+    return True
 
 
 def claim_statement(limit: int) -> Select[tuple[OutboxEventModel]]:
@@ -103,7 +151,12 @@ class OutboxDispatcher:
             try:
                 await handler(event.payload)
             except Exception as exc:
-                await self.fail(event.id, worker_id, f"{type(exc).__name__}: {exc}")
+                await self.fail(
+                    event.id,
+                    worker_id,
+                    f"{type(exc).__name__}: {exc}",
+                    retryable=is_retryable_handler_error(exc),
+                )
             else:
                 await self.ack(event.id, worker_id)
         return len(claimed)
@@ -151,17 +204,27 @@ class OutboxDispatcher:
                 # Already DISPATCHED/FAILED by reclaim — treat as success.
                 return
 
-    async def fail(self, event_id: uuid.UUID, worker_id: str, error: str) -> None:
+    async def fail(
+        self,
+        event_id: uuid.UUID,
+        worker_id: str,
+        error: str,
+        *,
+        retryable: bool = True,
+    ) -> None:
         async with self._sessions() as session, session.begin():
             db_now = await self._database_now(session)
             event = await session.get(OutboxEventModel, event_id)
             if event is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "outbox event not found")
-            dead_letter = event.attempt >= self._max_attempts
+            # Non-retryable business errors (e.g. INVALID_STATE on the same bad
+            # GenerationRunRequested payload) skip attempt burn-down to dead letter.
+            dead_letter = (not retryable) or event.attempt >= self._max_attempts
             delay = min(
                 self._retry_seconds * 2 ** max(event.attempt - 1, 0),
                 300,
             )
+            tagged_error = error if retryable else f"[non-retryable] {error}"
             result = cast(
                 CursorResult[Any],
                 await session.execute(
@@ -176,7 +239,7 @@ class OutboxDispatcher:
                         available_at=db_now + timedelta(seconds=delay),
                         lease_owner=None,
                         lease_expires_at=None,
-                        last_error=error[:4000],
+                        last_error=tagged_error[:4000],
                     )
                 ),
             )

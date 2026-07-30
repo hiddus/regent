@@ -7,6 +7,9 @@ Per REGENT-DEFINITION-1.0:
 - ATTRIBUTE_7: explicit termination when Goal cannot be attained
 
 GAC-D: escalate the ladder across attempts, reorganize the goal org, BUILD real packages.
+
+Product principle: every retry must absorb prior failure experience and replan —
+never blind same-input retries that re-hit the same wall.
 """
 
 from __future__ import annotations
@@ -14,6 +17,9 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,6 +30,7 @@ from regent.application.capability_acquire_service import (
 )
 from regent.application.capability_build_service import build_attainment_capability
 from regent.application.capability_ladder import (
+    ATTAINMENT_LADDER_CYCLES,
     MAX_ATTAINMENT_ESCALATION_ATTEMPTS,
     EscalationStep,
     built_capability_name,
@@ -42,7 +49,9 @@ from regent.application.execution_events import (
     make_idempotency_key,
     make_outbox_event,
 )
+from regent.application.memory_service import AdmitMemory, MemoryKind, MemoryService
 from regent.application.organization_service import OrganizationService
+from regent.application.p1_contracts import canonical_hash
 from regent.infrastructure.delivery_review_capability import (
     CAPABILITY_NAME as DELIVERY_REVIEW_NAME,
 )
@@ -73,6 +82,8 @@ from regent.infrastructure.product_surface_capability import (
 logger = logging.getLogger(__name__)
 
 _DELIVERY_POLICY = "goal_attainment_escalation"
+_MAX_FAILURE_LESSONS = 8
+_MAX_LEARNED_CONSTRAINTS = 16
 
 _PRESENTATION_MARKERS = (
     "stylesheet-present",
@@ -158,6 +169,79 @@ def guidance_for_gap_kind(gap_kind: str) -> tuple[str, ...]:
     return tuple(merged[:8])
 
 
+def build_learned_constraints(gap_kind: str, gap_reasons: list[str]) -> list[str]:
+    """Turn failure codes into concrete do-not / must-fix constraints for replanning."""
+    constraints: list[str] = [
+        f"Do not repeat the prior rejected surface for gap_kind={gap_kind}.",
+        "Absorb prior failure lessons before emitting another deliverable.",
+    ]
+    joined = " ".join(r.lower() for r in gap_reasons)
+    if "stylesheet" in joined or "styled-surface" in joined or gap_kind == "presentation":
+        constraints.append(
+            "Must ship substantial CSS (layout + typography); no browser-default dumps."
+        )
+    if "outbound" in joined or "observed" in joined or gap_kind == "evidence":
+        constraints.append(
+            "Must render observed evidence with real https outbound links and source labels."
+        )
+    if "first-deliverable" in joined or "required-phrases" in joined or gap_kind == "goal_intent":
+        constraints.append(
+            "Must satisfy GoalSpec first_deliverable / success_criteria keywords on the page."
+        )
+    if "deployment" in joined or "deploy" in joined:
+        constraints.append(
+            "Prior preview deploy failed (GAC-A4); regenerate a deployable, review-passing surface."
+        )
+    if "invalid-state" in joined or "frozen generation plan" in joined:
+        constraints.append(
+            "Prior generation hit INVALID_STATE; replan with changed inputs — do not reuse the dead plan digest blindly."
+        )
+    if "placeholder" in joined or "demo-shell" in joined or "forbid-demo" in joined:
+        constraints.append("Forbid placeholder/demo-shell content; ship goal-aligned product UI.")
+    for reason in gap_reasons[:6]:
+        item = f"Fix: {reason}"
+        if item not in constraints:
+            constraints.append(item)
+    return constraints[:_MAX_LEARNED_CONSTRAINTS]
+
+
+def build_failure_lesson(
+    *,
+    gap_reasons: list[str],
+    gap_kind: str,
+    method: str,
+    attempt: int,
+    halt_context: dict[str, Any] | None = None,
+    goal_text: str = "",
+) -> dict[str, Any]:
+    """Structured lesson persisted for the next generation round."""
+    halt = dict(halt_context or {})
+    lesson = {
+        "at": datetime.now(UTC).isoformat(),
+        "attempt": attempt,
+        "gap_kind": gap_kind,
+        "escalation_method": method,
+        "gap_reasons": list(gap_reasons)[:12],
+        "learned_constraints": build_learned_constraints(gap_kind, gap_reasons),
+        "halt_stage": str(halt.get("stage") or halt.get("execution_stage") or ""),
+        "halt_message": str(halt.get("message") or "")[:400],
+        "last_error": str(halt.get("last_error") or halt.get("error") or "")[:400],
+        "goal_text": goal_text[:240],
+        "replan_required": True,
+    }
+    lesson["lesson_digest"] = canonical_hash(
+        {
+            "attempt": attempt,
+            "gap_kind": gap_kind,
+            "method": method,
+            "reasons": lesson["gap_reasons"],
+            "constraints": lesson["learned_constraints"],
+            "last_error": lesson["last_error"],
+        }
+    )[:24]
+    return lesson
+
+
 class DeliveryGapRecoveryService:
     """Escalate capabilities + reorganize agents when delivery does not attain Goal."""
 
@@ -165,6 +249,7 @@ class DeliveryGapRecoveryService:
         self._sessions = sessions
         self._resolver = CapabilityResolutionService()
         self._orgs = OrganizationService(sessions)
+        self._memories = MemoryService(sessions)
 
     async def recover(
         self,
@@ -175,6 +260,8 @@ class DeliveryGapRecoveryService:
         capability_resolution_plan_id: uuid.UUID,
         actor: str,
         gap_reasons: list[str],
+        halt_context: dict[str, Any] | None = None,
+        org_key: str = "default",
     ) -> DeliveryGapRecoveryResult:
         surface_id = await ensure_product_surface_capability(self._sessions)
         review_id = await ensure_delivery_review_capability(self._sessions)
@@ -182,6 +269,9 @@ class DeliveryGapRecoveryService:
         reasons = [str(r) for r in gap_reasons if str(r).strip()][:12]
         gap_kind = classify_delivery_gap_kind(reasons)
         guidance = guidance_for_gap_kind(gap_kind)
+
+        lesson_for_memory: dict[str, Any] | None = None
+        result: DeliveryGapRecoveryResult | None = None
 
         async with self._sessions() as session, session.begin():
             goal = await session.get(GoalModel, goal_id, with_for_update=True)
@@ -196,25 +286,34 @@ class DeliveryGapRecoveryService:
                 .limit(1)
             )
             metadata = dict(goal.metadata_json or {})
+            # Merge halt already on the goal with caller-supplied context.
+            prior_halt = dict(metadata.get("halt") or {})
+            merged_halt = {**prior_halt, **dict(halt_context or {})}
             attempts = int(metadata.get("delivery_gap_recovery_attempts") or 0)
             plan = plan_escalation(attempts)
 
             if plan.exhausted or plan.step is EscalationStep.STOP:
-                metadata["execution_stage"] = "BLOCKED"
+                # Ladder spent: hand off to human — never calm EXHAUST / fake-complete.
+                metadata["execution_stage"] = "WAITING_HUMAN"
                 metadata["awaiting_authorized_sources"] = False
+                metadata["awaiting_human_intervention"] = True
                 metadata["delivery_gap_kind"] = gap_kind
                 metadata["termination"] = {
-                    "reason": "goal_attainment_not_reached",
+                    "reason": "goal_attainment_needs_human",
                     "definition": "REGENT-DEFINITION-1.0 ATTRIBUTE_7",
                     "gap_reasons": reasons,
                     "gap_kind": gap_kind,
                     "ladder_exhausted": True,
+                    "attempts_tried": attempts,
                     "gac": "GAC-D1",
+                    "handoff": "WAITING_HUMAN",
                 }
                 goal.metadata_json = metadata
                 message = (
-                    "交付未达成 Goal。已按 ATTRIBUTE_3 爬完 REUSE→COMPOSE→BUILD；"
-                    "拒绝发布不可靠表面，进入有证据终态（ATTRIBUTE_7）。"
+                    "交付仍未达成 Goal。已穷举 ATTRIBUTE_3 能力阶梯 "
+                    f"（REUSE→CONFIGURE→COMPOSE→BUILD→ACQUIRE ×{ATTAINMENT_LADDER_CYCLES} 轮，"
+                    f"共 {MAX_ATTAINMENT_ESCALATION_ATTEMPTS} 次）。"
+                    "拒绝发布不可靠表面；需要你补充方向或授权后继续，不会标记为已完成。"
                 )
                 await self._append(
                     session,
@@ -227,6 +326,7 @@ class DeliveryGapRecoveryService:
                         "attempts": attempts,
                         "gap_reasons": reasons,
                         "gap_kind": gap_kind,
+                        "handoff": "WAITING_HUMAN",
                     },
                 )
                 return DeliveryGapRecoveryResult(
@@ -273,6 +373,33 @@ class DeliveryGapRecoveryService:
                 actor=actor,
             )
 
+            lesson = build_failure_lesson(
+                gap_reasons=reasons,
+                gap_kind=gap_kind,
+                method=method,
+                attempt=plan.attempt,
+                halt_context=merged_halt,
+                goal_text=goal.original_input or "",
+            )
+            lesson_for_memory = lesson
+            prior_lessons = list(metadata.get("failure_lessons") or [])
+            prior_lessons.append(lesson)
+            learned = list(
+                dict.fromkeys(
+                    [
+                        *list(metadata.get("learned_constraints") or []),
+                        *lesson["learned_constraints"],
+                    ]
+                )
+            )[:_MAX_LEARNED_CONSTRAINTS]
+            # Include lesson digest in guidance so architecture + contract both see it.
+            lesson_guidance = [
+                f"Replan from failure lesson {lesson['lesson_digest']}: "
+                f"attempt={plan.attempt} method={method} gap_kind={gap_kind}.",
+                *[f"Constraint: {c}" for c in learned[:6]],
+            ]
+            all_guidance = list(dict.fromkeys([*lesson_guidance, *all_guidance]))
+
             metadata["delivery_gap_recovery_attempts"] = plan.attempt
             metadata["delivery_policy"] = _DELIVERY_POLICY
             metadata["delivery_gap_reasons"] = reasons
@@ -281,6 +408,12 @@ class DeliveryGapRecoveryService:
             metadata["awaiting_authorized_sources"] = False
             metadata["organization_id"] = str(reorg.receipt.organization_id)
             metadata["organization_strategy"] = reorg.receipt.strategy
+            # Failure-driven learning fields consumed by next GenerationRunRequested.
+            metadata["failure_lessons"] = prior_lessons[-_MAX_FAILURE_LESSONS:]
+            metadata["learned_constraints"] = learned
+            metadata["replan_nonce"] = (
+                f"{plan.attempt}:{gap_kind}:{method}:{lesson['lesson_digest']}"
+            )
             metadata["capability_resolution"] = {
                 **dict(metadata.get("capability_resolution") or {}),
                 "delivery_method": method,
@@ -294,13 +427,16 @@ class DeliveryGapRecoveryService:
                 "recovery_work_id": str(reorg.recovery_work_id),
                 "organization_id": str(reorg.receipt.organization_id),
                 "generation_guidance": all_guidance,
+                "replan_nonce": metadata["replan_nonce"],
+                "failure_lesson_digest": lesson["lesson_digest"],
             }
             goal.metadata_json = metadata
 
             resume_key = make_idempotency_key(
                 "generation-delivery-recovery",
                 goal.id,
-                f"{requirement_revision_id}:{plan.attempt}:{gap_kind}:{method}",
+                f"{requirement_revision_id}:{plan.attempt}:{gap_kind}:{method}:"
+                f"{lesson['lesson_digest']}",
             )
             session.add(
                 make_outbox_event(
@@ -323,6 +459,8 @@ class DeliveryGapRecoveryService:
                             "delivery_gap_kind": gap_kind,
                             "escalation_step": method,
                             "gap_reasons": reasons,
+                            "replan_nonce": metadata["replan_nonce"],
+                            "failure_lesson_digest": lesson["lesson_digest"],
                         },
                         idempotency_key=resume_key,
                         correlation_id=goal.correlation_id,
@@ -333,6 +471,7 @@ class DeliveryGapRecoveryService:
             message = (
                 f"交付未达成 Goal（{', '.join(reasons[:3]) or 'review failed'}；"
                 f"gap_kind={gap_kind}）。"
+                f"已吸收失败经验并重规划（lesson={lesson['lesson_digest']}）。"
                 f"ATTRIBUTE_3 {method} → {primary_name}；ATTRIBUTE_4 重组组织 "
                 f"{reorg.receipt.strategy}（attempt {plan.attempt}/"
                 f"{MAX_ATTAINMENT_ESCALATION_ATTEMPTS}）。"
@@ -354,19 +493,22 @@ class DeliveryGapRecoveryService:
                     "capability_name": primary_name,
                     "organization_id": str(reorg.receipt.organization_id),
                     "recovery_work_id": str(reorg.recovery_work_id),
+                    "replan_nonce": metadata["replan_nonce"],
+                    "failure_lesson_digest": lesson["lesson_digest"],
                 },
             )
             logger.info(
-                "delivery gap escalated",
+                "delivery gap escalated with replan lesson",
                 extra={
                     "goal_id": str(goal.id),
                     "attempt": plan.attempt,
                     "method": method,
                     "gap_kind": gap_kind,
                     "org": str(reorg.receipt.organization_id),
+                    "replan_nonce": metadata["replan_nonce"],
                 },
             )
-            return DeliveryGapRecoveryResult(
+            result = DeliveryGapRecoveryResult(
                 True,
                 method,
                 message,
@@ -374,6 +516,121 @@ class DeliveryGapRecoveryService:
                 gap_kind,
                 recovery_work_id=reorg.recovery_work_id,
                 organization_id=reorg.receipt.organization_id,
+            )
+
+        if result is not None and result.recovered and lesson_for_memory is not None:
+            await self._admit_failure_memories(
+                org_key=org_key,
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+                lesson=lesson_for_memory,
+            )
+        assert result is not None
+        return result
+
+    async def _admit_failure_memories(
+        self,
+        *,
+        org_key: str,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        actor: str,
+        lesson: dict[str, Any],
+    ) -> None:
+        """Persist episodic failure + reorganization memories; refresh REGENT.md gaps."""
+        try:
+            await self._memories.admit(
+                AdmitMemory(
+                    org_key=org_key or "default",
+                    kind=MemoryKind.EPISODIC_RUN_FAILURE.value,
+                    content={
+                        "source": "delivery_gap_recovery",
+                        "goal_text": lesson.get("goal_text") or "",
+                        "verification_passed": False,
+                        "verification_summary": (
+                            f"delivery gap recovery attempt={lesson.get('attempt')} "
+                            f"method={lesson.get('escalation_method')} "
+                            f"gap_kind={lesson.get('gap_kind')}"
+                        ),
+                        "gaps": list(lesson.get("gap_reasons") or [])[:12],
+                        "learned_constraints": list(
+                            lesson.get("learned_constraints") or []
+                        )[:16],
+                        "lesson_digest": lesson.get("lesson_digest"),
+                        "halt_stage": lesson.get("halt_stage") or "",
+                        "last_error": lesson.get("last_error") or "",
+                        "replan_required": True,
+                    },
+                    actor=actor,
+                    goal_id=goal_id,
+                    source_refs=[
+                        {"type": "app_project", "id": str(project_id)},
+                        {
+                            "type": "replan_nonce",
+                            "id": (
+                                f"{lesson.get('attempt')}:"
+                                f"{lesson.get('gap_kind')}:"
+                                f"{lesson.get('lesson_digest')}"
+                            ),
+                        },
+                    ],
+                )
+            )
+            await self._memories.admit(
+                AdmitMemory(
+                    org_key=org_key or "default",
+                    kind=MemoryKind.EPISODIC_REORGANIZATION.value,
+                    content={
+                        "source": "delivery_gap_recovery",
+                        "gap_kind": lesson.get("gap_kind"),
+                        "method": lesson.get("escalation_method"),
+                        "attempt": lesson.get("attempt"),
+                        "lesson_digest": lesson.get("lesson_digest"),
+                        "learned_constraints": list(
+                            lesson.get("learned_constraints") or []
+                        )[:8],
+                    },
+                    actor=actor,
+                    goal_id=goal_id,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "failed to admit delivery-gap failure memory",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+        try:
+            from regent.agent.project_memory import ProjectMemoryService
+            from regent.config import get_settings
+
+            settings = get_settings()
+            memory = ProjectMemoryService(
+                self._sessions,
+                projects_root=Path(settings.workspace_root) / "project_memory",
+            )
+            existing = memory.load_regent_md(project_id)
+            distilled = memory.distill_regent_md(
+                existing=existing,
+                goal_text=str(lesson.get("goal_text") or ""),
+                stack_hints=[],
+                structure=[],
+                gaps=[
+                    *list(lesson.get("gap_reasons") or [])[:8],
+                    *list(lesson.get("learned_constraints") or [])[:8],
+                ],
+                verification_summary=(
+                    f"recovery replan lesson={lesson.get('lesson_digest')} "
+                    f"method={lesson.get('escalation_method')}"
+                ),
+            )
+            memory.write_regent_md(project_id, distilled)
+        except Exception:
+            logger.warning(
+                "failed to distill REGENT.md after delivery-gap recovery",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
             )
 
     async def prepare_gate_reorganization(
@@ -399,24 +656,37 @@ class DeliveryGapRecoveryService:
                 )
             metadata = dict(goal.metadata_json or {})
             attempts = int(metadata.get("gate_reorg_attempts") or 0)
-            # Gate path allows up to COMPOSE then BUILD (2 rounds).
-            if attempts >= 2:
+            # Gate path: walk COMPOSE→BUILD→ACQUIRE→COMPOSE… until ladder budget.
+            _GATE_MAX = min(6, MAX_ATTAINMENT_ESCALATION_ATTEMPTS)
+            if attempts >= _GATE_MAX:
                 return DeliveryGapRecoveryResult(
                     False,
                     "STOP",
-                    "gate reorganization exhausted",
+                    (
+                        f"Gate 自动重组已用尽（{attempts}/{_GATE_MAX} 次）；"
+                        "需要你介入后继续，不会标记为已完成。"
+                    ),
                     attempts,
                     gap_kind,
                     terminal_exhaust=True,
                 )
-            plan = plan_escalation(attempts)
-            # Prefer COMPOSE on first gate reorg, BUILD on second.
-            step = EscalationStep.COMPOSE if attempts == 0 else EscalationStep.BUILD
-            if plan.exhausted:
-                step = EscalationStep.STOP
+            _GATE_STEPS = (
+                EscalationStep.COMPOSE,
+                EscalationStep.BUILD,
+                EscalationStep.ACQUIRE,
+                EscalationStep.COMPOSE,
+                EscalationStep.BUILD,
+                EscalationStep.ACQUIRE,
+            )
+            step = _GATE_STEPS[attempts] if attempts < len(_GATE_STEPS) else EscalationStep.STOP
             if step is EscalationStep.STOP:
                 return DeliveryGapRecoveryResult(
-                    False, "STOP", "ladder exhausted", attempts, gap_kind, True
+                    False,
+                    "STOP",
+                    "Gate 阶梯已穷举，需要你介入后继续。",
+                    attempts,
+                    gap_kind,
+                    True,
                 )
 
             candidates = await self._load_candidates(
@@ -510,7 +780,7 @@ class DeliveryGapRecoveryService:
         review_id: uuid.UUID,
     ) -> tuple[str, str, uuid.UUID, list[str]]:
         """Return (method, primary_name, primary_id, extra_guidance)."""
-        if step is EscalationStep.REUSE:
+        if step in {EscalationStep.REUSE, EscalationStep.CONFIGURE}:
             primary_name, requirement_key, primary_id = self._route_primary(
                 gap_kind, surface_id=surface_id, http_id=http_id
             )
@@ -527,6 +797,12 @@ class DeliveryGapRecoveryService:
                 [],
             )
             item = plan.items[0]
+            if step is EscalationStep.CONFIGURE:
+                extra = [
+                    f"CONFIGURE {primary_name}: tighten bindings and generation guidance "
+                    f"for gap_kind={gap_kind}; do not ship the prior rejected surface.",
+                ]
+                return "CONFIGURE", primary_name, primary_id or item.capability_id or surface_id, extra
             method = (
                 item.method.value
                 if item.method

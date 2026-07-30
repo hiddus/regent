@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from regent.agent.compact import ContextCompactor, HeuristicSummarizer, micro_compact
 from regent.agent.context_assembler import ContextAssembler
@@ -72,6 +72,7 @@ class AgentRunner:
         prior_gaps: list[VerificationGap] | None = None,
         verify: bool = True,
         run_smoke: bool = True,
+        on_turn: Callable[[int, str], Awaitable[None]] | None = None,
     ) -> AgentRunResult:
         assembler = ContextAssembler(
             plan=plan,
@@ -100,6 +101,12 @@ class AgentRunner:
                 raise BudgetExhaustedError(
                     f"token budget exceeded ({input_tokens + output_tokens} > "
                     f"{self._budget.max_tokens})"
+                )
+
+            if on_turn is not None:
+                await on_turn(
+                    turn,
+                    f"正在生成应用（第 {turn + 1}/{max_turns} 轮）…",
                 )
 
             # P1-1 autoCompact near window.

@@ -175,6 +175,35 @@ def canonical_hash(value: BaseModel | dict[str, Any] | list[Any]) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
+def sanitize_evidence_references(
+    hypotheses: list[ProductHypothesisProposal],
+    available_evidence_ids: set[uuid.UUID],
+) -> list[ProductHypothesisProposal]:
+    """Drop invented evidence UUIDs from the model; downgrade empty OBSERVED claims.
+
+    LLMs frequently cite evidence_ids that were never registered. Hard-failing the
+    whole discovery round leaves the Goal stuck with no outbox retry path.
+    """
+    cleaned: list[ProductHypothesisProposal] = []
+    for hypothesis in hypotheses:
+        new_claims: list[EvidenceClaim] = []
+        for claim in hypothesis.claims:
+            kept = [eid for eid in claim.evidence_ids if eid in available_evidence_ids]
+            classification = claim.classification
+            if (
+                classification is EvidenceClassification.OBSERVED
+                and not kept
+            ):
+                classification = EvidenceClassification.INFERRED
+            new_claims.append(
+                claim.model_copy(
+                    update={"evidence_ids": kept, "classification": classification}
+                )
+            )
+        cleaned.append(hypothesis.model_copy(update={"claims": new_claims}))
+    return cleaned
+
+
 def validate_evidence_references(
     hypotheses: list[ProductHypothesisProposal],
     available_evidence_ids: set[uuid.UUID],

@@ -140,6 +140,8 @@ class GoalIntentEvidenceConnector:
                     "byte_size": stored.size,
                     "budget": dict(request.budget),
                 },
+                trust_label="DECLARED_INTENT",
+                source_type="goal-intent",
             )
         ]
 
@@ -307,4 +309,6 @@ class AllowlistedHttpEvidenceConnector:
             content_artifact_uri=stored.uri,
             content_hash=stored.content_hash,
             metadata=metadata,
+            trust_label="UNTRUSTED_DATA",
+            source_type="http-snapshot",
         )

@@ -23,11 +23,20 @@ CAPABILITY_RESOLUTION_REQUESTED = "CapabilityResolutionRequested"
 CAPABILITY_RESOLUTION_SATISFIED = "CapabilityResolutionSatisfied"
 GENERATION_RUN_REQUESTED = "GenerationRunRequested"
 WORKSPACE_SNAPSHOT_READY = "WorkspaceSnapshotReady"
+DELIVERY_BATCH_PLANNED = "DeliveryBatchPlanned"
+DELIVERY_BATCH_STARTED = "DeliveryBatchStarted"
+DELIVERY_BATCH_VERIFIED = "DeliveryBatchVerified"
+DELIVERY_BATCH_MERGED = "DeliveryBatchMerged"
+DELIVERY_BATCH_REJECTED = "DeliveryBatchRejected"
+DELIVERY_BATCHES_COMPLETED = "DeliveryBatchesCompleted"
+DELIVERY_GLOBAL_VERIFY_FAILED = "DeliveryGlobalVerifyFailed"
 DEPENDENCY_RESOLUTION_REQUESTED = "DependencyResolutionRequested"
 APP_BUILD_REQUESTED = "AppBuildRequested"
 APP_BUILD_PASSED = "AppBuildPassed"
 PREVIEW_DEPLOYMENT_REQUESTED = "PreviewDeploymentRequested"
 PREVIEW_DEPLOYMENT_SUCCEEDED = "PreviewDeploymentSucceeded"
+QUALITY_APPROVAL_REQUESTED = "QualityApprovalRequested"
+QUALITY_APPROVAL_COMPLETED = "QualityApprovalCompleted"
 
 # All P1 main chain event types (in execution order)
 P1_MAIN_CHAIN_EVENTS: tuple[str, ...] = (
@@ -45,6 +54,8 @@ P1_MAIN_CHAIN_EVENTS: tuple[str, ...] = (
     APP_BUILD_PASSED,
     PREVIEW_DEPLOYMENT_REQUESTED,
     PREVIEW_DEPLOYMENT_SUCCEEDED,
+    QUALITY_APPROVAL_REQUESTED,
+    QUALITY_APPROVAL_COMPLETED,
 )
 
 # ---------------------------------------------------------------------------

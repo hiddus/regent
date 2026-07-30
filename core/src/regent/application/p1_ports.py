@@ -5,6 +5,34 @@ from pydantic import BaseModel, Field, model_validator
 from regent.application.p1_contracts import FileChangeSet
 
 
+# ---------------------------------------------------------------------------
+# Multi-format artifact generation (Phase 2)
+# ---------------------------------------------------------------------------
+
+class ReportArtifactRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    subtitle: str = Field(default="", max_length=500)
+    author: str = Field(default="Regent Core", max_length=200)
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    formats: list[str] = Field(default_factory=lambda: ["markdown", "html"])
+
+
+class SpreadsheetArtifactRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    columns: list[str] = Field(min_length=1)
+    rows: list[list[Any]] = Field(default_factory=list)
+    format: str = Field(default="csv", pattern=r"^(csv|html)$")
+
+
+class ReportGenerator(Protocol):
+    async def generate_report(self, request: ReportArtifactRequest) -> list[dict[str, Any]]: ...
+
+
+class SpreadsheetGeneratorPort(Protocol):
+    async def generate_spreadsheet(self, request: SpreadsheetArtifactRequest) -> dict[str, Any]: ...
+
+
 class EvidenceSourceRequest(BaseModel):
     query: str = Field(min_length=1)
     source_types: list[str] = Field(default_factory=list)
@@ -20,6 +48,11 @@ class EvidenceSourceSnapshot(BaseModel):
     content_artifact_uri: str = Field(min_length=1)
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # --- G2: evidence trust classification ---
+    trust_label: str = Field(default="UNTRUSTED_DATA", pattern=r"^(DECLARED_INTENT|UNTRUSTED_DATA)$")
+    source_type: str = Field(default="")
+    parser_version: str = Field(default="evidence-v1")
+    injection_site: str = Field(default="discovery")
 
 
 class SandboxBuildRequest(BaseModel):

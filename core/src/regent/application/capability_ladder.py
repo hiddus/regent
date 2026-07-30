@@ -3,6 +3,9 @@
 Order (definition): REUSE → CONFIGURE → COMPOSE → BUILD → ACQUIRE → request human last.
 GAC-D maps auto-recovery attempts onto this ladder before explicit termination.
 V3 addition: ACQUIRE step allows fetching external capability packages from the network.
+
+Product principle: unmet Goal must keep enumerating paths — the ladder runs multiple
+cycles before requesting human (WAITING_HUMAN), never calm EXHAUST on first miss.
 """
 
 from __future__ import annotations
@@ -20,15 +23,21 @@ class EscalationStep(StrEnum):
     STOP = "STOP"
 
 
-# Attempt 1..N maps to ladder; beyond → STOP (ATTRIBUTE_7).
-_LADDER: tuple[EscalationStep, ...] = (
+# One cycle of the ATTRIBUTE_3 auto ladder (human is outside the cycle).
+_CYCLE: tuple[EscalationStep, ...] = (
     EscalationStep.REUSE,
+    EscalationStep.CONFIGURE,
     EscalationStep.COMPOSE,
     EscalationStep.BUILD,
     EscalationStep.ACQUIRE,
 )
 
-# Max successful recovery rounds before terminal (matches len(_LADDER)).
+# Two full cycles before requesting human — enough to try alternate strategies.
+ATTAINMENT_LADDER_CYCLES = 2
+
+_LADDER: tuple[EscalationStep, ...] = _CYCLE * ATTAINMENT_LADDER_CYCLES
+
+# Max successful recovery rounds before terminal human handoff.
 MAX_ATTAINMENT_ESCALATION_ATTEMPTS = len(_LADDER)
 
 

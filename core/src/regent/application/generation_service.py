@@ -60,6 +60,13 @@ class GenerationService:
                 select(GenerationPlanModel).where(GenerationPlanModel.input_digest == digest)
             )
             if existing is not None:
+                # Digest hit on a terminal plan: reopen so DeliveryGapRecovery /
+                # GenerationRunRequested can request a new run instead of
+                # INVALID_STATE "frozen generation plan is required".
+                if existing.status in {"COMPLETED", "FAILED"}:
+                    existing.status = "FROZEN"
+                    existing.version += 1
+                    await session.flush()
                 return existing
             requirement = await session.get(
                 RequirementRevisionModel, command.requirement_revision_id
@@ -92,6 +99,24 @@ class GenerationService:
             await session.flush()
             return model
 
+    @staticmethod
+    def _reopen_plan_for_run(
+        plan: GenerationPlanModel, *, allow_executing: bool = False
+    ) -> None:
+        """Re-FROZEN terminal plans so a new / retried run can start.
+
+        ``allow_executing`` is only for same-idempotency crash reclaim of a
+        FAILED/stale GENERATING run whose plan was left EXECUTING.
+        """
+        reopenable = {"COMPLETED", "FAILED"}
+        if allow_executing:
+            reopenable = {*reopenable, "EXECUTING"}
+        if plan.status in reopenable:
+            plan.status = "FROZEN"
+            plan.version += 1
+        elif plan.status != "FROZEN":
+            raise DomainError(ErrorCode.INVALID_STATE, "frozen generation plan is required")
+
     async def request_run(self, command: RequestGenerationRun) -> GenerationRunModel:
         async with self._sessions() as session, session.begin():
             existing = await session.scalar(
@@ -121,20 +146,17 @@ class GenerationService:
                 plan = await session.get(GenerationPlanModel, existing.plan_id)
                 if plan is None:
                     raise DomainError(ErrorCode.INVALID_STATE, "generation plan missing")
-                if plan.status in {"FAILED", "EXECUTING"}:
-                    plan.status = "FROZEN"
-                    plan.version += 1
-                elif plan.status != "FROZEN":
-                    raise DomainError(
-                        ErrorCode.INVALID_STATE, "frozen generation plan is required"
-                    )
+                self._reopen_plan_for_run(plan, allow_executing=True)
                 existing.status = "REQUESTED"
                 existing.version += 1
                 await session.flush()
                 return existing
             plan = await session.get(GenerationPlanModel, command.plan_id)
-            if plan is None or plan.status != "FROZEN":
+            if plan is None:
                 raise DomainError(ErrorCode.INVALID_STATE, "frozen generation plan is required")
+            # New idempotency key (e.g. delivery-gap recovery): reopen COMPLETED
+            # plans that create_plan reused via input_digest hit.
+            self._reopen_plan_for_run(plan, allow_executing=False)
             attempt = (
                 int(
                     await session.scalar(
@@ -167,11 +189,20 @@ class GenerationService:
             return model
 
     async def execute(
-        self, run_id: uuid.UUID, *, base_workspace: Path | None = None
+        self,
+        run_id: uuid.UUID,
+        *,
+        base_workspace: Path | None = None,
+        on_progress: Any = None,
     ) -> WorkspaceSnapshotModel:
         plan_payload = await self._claim(run_id)
         try:
-            generated = await self._generator.generate(plan_payload)
+            generate = self._generator.generate
+            try:
+                generated = await generate(plan_payload, on_progress=on_progress)
+            except TypeError:
+                # Older generators without on_progress kwarg.
+                generated = await generate(plan_payload)
             changes = generated.output
             planned_paths = set(plan_payload.get("planned_paths", []))
             if planned_paths and any(

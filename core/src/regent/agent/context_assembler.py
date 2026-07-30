@@ -132,10 +132,32 @@ class ContextAssembler:
     def _failures_segment(self) -> str:
         acceptance = self._plan.get("acceptance_contract") or {}
         gap_reasons = list(acceptance.get("delivery_gap_reasons") or [])
+        lessons = list(acceptance.get("failure_lessons") or [])
+        constraints = list(acceptance.get("learned_constraints") or [])
         lines = ["══════ RECENT FAILURES ══════"]
+        replan_nonce = str(acceptance.get("replan_nonce") or "").strip()
+        if replan_nonce:
+            lines.append(f"Replan nonce (must change plan inputs): {replan_nonce}")
         if gap_reasons:
             lines.append("Prior delivery gap reasons:")
             lines.extend(f"  - {r}" for r in gap_reasons[:12])
+        if constraints:
+            lines.append("Learned constraints from prior failures:")
+            lines.extend(f"  - {c}" for c in constraints[:12])
+        if lessons:
+            lines.append("Prior failure lessons (absorb before regenerating):")
+            for lesson in lessons[-4:]:
+                if not isinstance(lesson, dict):
+                    continue
+                digest = lesson.get("lesson_digest") or "?"
+                kind = lesson.get("gap_kind") or "?"
+                method = lesson.get("escalation_method") or "?"
+                lines.append(
+                    f"  - lesson={digest} gap_kind={kind} method={method} "
+                    f"attempt={lesson.get('attempt')}"
+                )
+                for reason in list(lesson.get("gap_reasons") or [])[:4]:
+                    lines.append(f"      gap: {reason}")
         for gap in self._gaps[:8]:
             lines.append(f"[{gap.code}] {gap.detail}")
             if gap.artifact_snippet:

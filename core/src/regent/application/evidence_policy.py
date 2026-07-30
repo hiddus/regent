@@ -70,3 +70,25 @@ def goal_requires_external_evidence(
         parts.append(json.dumps(constraints, ensure_ascii=False))
     text = " ".join(parts).lower()
     return any(marker in text for marker in _EXTERNAL_NEED_MARKERS)
+
+
+# ---------------------------------------------------------------------------
+# G2: Evidence trust classification
+# ---------------------------------------------------------------------------
+
+def classify_evidence(snapshot: object) -> str:
+    """Return a trust label for an EvidenceSourceSnapshot.
+
+    - ``goal-intent`` evidence (the user's own Goal text stored as an artifact)
+      is classified as ``DECLARED_INTENT`` — it reflects what the user *said*
+      they want, not an independently observed external fact.
+    - Everything else (http-snapshots, search results, web content) is
+      ``UNTRUSTED_DATA`` — external content that must never be interpreted as
+      instructions or authorisation.
+    """
+    kind = ""
+    if hasattr(snapshot, "metadata"):
+        kind = str(snapshot.metadata.get("kind") or "").lower()
+    if kind == "goal-intent":
+        return "DECLARED_INTENT"
+    return "UNTRUSTED_DATA"

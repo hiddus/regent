@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1763,5 +1764,36 @@ class AgentTranscriptModel(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class BudgetEntryModel(Base):
+    """Tracks cost entries for goals and runs (model tokens, tool calls, infra)."""
+
+    __tablename__ = "budget_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "cost_type IN ('model_input_tokens','model_output_tokens',"
+            "'tool_invocation','infrastructure','external_operation')",
+            name="ck_budget_entries_cost_type",
+        ),
+        CheckConstraint("amount >= 0", name="ck_budget_entries_amount_non_negative"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    cost_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    price_book_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="price-book-v1"
+    )
+    description: Mapped[str | None] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

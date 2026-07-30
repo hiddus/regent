@@ -2,11 +2,13 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from regent.application.evidence_policy import extract_urls_from_text
 from regent.application.execution_events import (
@@ -16,8 +18,11 @@ from regent.application.execution_events import (
     make_outbox_event,
 )
 from regent.application.goal_execution_service import GoalExecutionService
+from regent.application.human_task_service import HumanTaskService
 from regent.application.p1_contracts import canonical_hash
+from regent.application.transition_service import TransitionContext, TransitionService
 from regent.domain.errors import DomainError, ErrorCode
+from regent.domain.transitions import GoalCommand
 from regent.infrastructure.models import (
     AppBuildModel,
     AppPreviewReleaseModel,
@@ -32,6 +37,7 @@ from regent.infrastructure.models import (
     GenerationRunModel,
     GoalModel,
     GoalSpecModel,
+    HumanTaskModel,
     HypothesisDecisionModel,
     OutboxEventModel,
     ProductHypothesisModel,
@@ -43,9 +49,56 @@ from regent.infrastructure.models import (
 from regent.model import ModelProvider
 
 
+# ---------------------------------------------------------------------------
+# Stage labels for human-friendly display
+# ---------------------------------------------------------------------------
+
+_STAGE_LABELS: dict[str, str] = {
+    "NOT_STARTED": "未开始",
+    "QUEUED": "排队中",
+    "DISCOVERING": "产品发现中",
+    "DECIDED": "方案已决策",
+    "RESOLVED": "能力已解析",
+    "GENERATING": "代码生成中",
+    "SNAPSHOT_READY": "快照就绪",
+    "BUILD_PASSED": "构建通过",
+    "DEPLOYED": "预览已部署",
+    "RESEARCH_MORE": "研究中",
+    "PREVIEW_SUCCEEDED": "预览成功",
+    "GATE_INSUFFICIENT_EVIDENCE": "证据不足",
+    "GATE_PASSED": "门禁通过",
+    "GATE_FAILED": "门禁未通过",
+    "FAILED": "失败",
+}
+
+
 class GuidanceInterpretation(BaseModel):
-    command_type: Literal["QUERY", "MODIFY", "CONTINUE"]
+    """LLM-interpreted user guidance command."""
+
+    command_type: Literal[
+        "QUERY",
+        "MODIFY",
+        "CONTINUE",
+        "PAUSE",
+        "RESUME",
+        "CORRECT",
+        "APPROVE",
+        "REJECT",
+    ] = Field(
+        description=(
+            "QUERY: read status/history. "
+            "MODIFY: change goal objectives/significantly redirect (creates new revision). "
+            "CONTINUE: proceed without changing the goal. "
+            "PAUSE: temporarily halt execution. "
+            "RESUME: resume after pause. "
+            "CORRECT: lightweight mid-execution correction (e.g. 'use REST not GraphQL', "
+            "'add dark mode', 'change the API response format'). Creates a newer GoalSpec snapshot without requiring confirmation. "
+            "APPROVE: approve a pending gate or human task. "
+            "REJECT: reject a pending gate result, trigger revision."
+        )
+    )
     summary: str = Field(min_length=1)
+    # MODIFY fields
     objective: str | None = None
     product_intent: str | None = None
     target_users: str | None = None
@@ -55,6 +108,17 @@ class GuidanceInterpretation(BaseModel):
     explicit_constraints: dict[str, str | int | float | bool] | None = None
     non_goals: list[str] | None = None
     unknowns: list[str] | None = None
+    # CORRECT fields
+    correction_target: str | None = Field(
+        default=None,
+        description="What aspect to correct: 'requirements', 'design', 'api', 'constraints', 'behavior', 'other'",
+    )
+    correction_detail: str | None = Field(
+        default=None,
+        description="Detailed description of the correction to apply",
+    )
+    # APPROVE/REJECT fields
+    rejection_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,34 +139,96 @@ class AppGuidanceService:
         self._sessions = sessions
         self._provider = provider
 
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
     async def guide(self, project_id: uuid.UUID, *, message: str, actor: str) -> GuidanceReceipt:
         context = await self._context(project_id)
+        history = await self._conversation_history(project_id, limit=10)
+
         generated = await self._provider.generate_structured(
-            system_prompt=(
-                "Classify a follow-up message for an existing App. QUERY only reads status or "
-                "history. MODIFY changes objective, users, problem, deliverable, success criteria, "
-                "constraints, or non-goals. CONTINUE asks to proceed without changing the frozen "
-                "goal. For MODIFY, return a complete revised proposal using supplied context and "
-                "the user's message. Never execute or grant permissions."
-            ),
-            user_prompt=str({"current": context, "message": message}),
+            system_prompt=self._system_prompt(context, history),
+            user_prompt=str({"current_state": context, "recent_messages": history, "user_message": message}),
             response_model=GuidanceInterpretation,
         )
         interpretation = generated.output
+
+        # Check for URL-based research resume first
         resumed = await self._maybe_resume_research_more(project_id, message, actor)
         if resumed is not None:
             return resumed
-        if interpretation.command_type == "QUERY":
-            return await self._record_query(
+
+        handler = {
+            "QUERY": self._handle_query,
+            "CONTINUE": self._handle_continue,
+            "MODIFY": self._handle_modify,
+            "PAUSE": self._handle_pause,
+            "RESUME": self._handle_resume,
+            "CORRECT": self._handle_correct,
+            "APPROVE": self._handle_approve,
+            "REJECT": self._handle_reject,
+        }.get(interpretation.command_type)
+        if handler is None:
+            return await self._handle_query(
                 project_id, message, actor, interpretation, generated.model
             )
-        if interpretation.command_type == "CONTINUE":
-            return await self._record_continue(
-                project_id, message, actor, interpretation, generated.model
-            )
-        return await self._create_revision(
-            project_id, message, actor, interpretation, generated.model
-        )
+        return await handler(project_id, message, actor, interpretation, generated.model)
+
+    # ------------------------------------------------------------------
+    # System prompt builder — gives LLM full context
+    # ------------------------------------------------------------------
+
+    def _system_prompt(self, context: dict[str, Any], history: list[dict[str, Any]]) -> str:
+        goal_status = context.get("goal", {}).get("status", "UNKNOWN")
+        stage_info = context.get("goal", {}).get("execution_stage", {})
+        stage = stage_info.get("stage", "UNKNOWN") if isinstance(stage_info, dict) else "UNKNOWN"
+        stage_label = _STAGE_LABELS.get(stage, stage)
+        pending_tasks = context.get("pending_human_tasks", [])
+        active_corrections = context.get("active_corrections", [])
+
+        parts = [
+            "You are Regent Core's conversation assistant. Classify the user's follow-up message.",
+            "",
+            f"Current goal status: {goal_status}",
+            f"Current execution stage: {stage} ({stage_label})",
+        ]
+        if pending_tasks:
+            parts.append(f"Pending human tasks: {len(pending_tasks)} (user can APPROVE or REJECT)")
+        if active_corrections:
+            parts.append(f"Active corrections applied: {len(active_corrections)}")
+        if stage == "RESEARCH_MORE":
+            parts.append("Hint: user may paste authorized source URLs to resume discovery.")
+        if goal_status == "PAUSED":
+            parts.append("Hint: goal is paused, user likely wants to RESUME or CORRECT.")
+        if goal_status == "WAITING_HUMAN":
+            parts.append("Hint: goal is waiting for human input, user should APPROVE or REJECT.")
+
+        parts.extend([
+            "",
+            "Command types:",
+            "- QUERY: user asks about status, progress, or details. Answer informatively.",
+            "- MODIFY: user wants to significantly change objectives/users/problem/deliverable. Creates and starts a new goal revision without a confirmation gate.",
+            "- CONTINUE: user says 'go ahead', 'continue', 'proceed'. Starts or retries execution.",
+            "- PAUSE: user says 'pause', 'stop', 'wait', 'hold'. Temporarily halts execution.",
+            "- RESUME: user says 'resume', 'continue after pause', 'go'. Resumes a paused goal.",
+            "- CORRECT: user gives a specific mid-execution correction (e.g. 'use REST not GraphQL', "
+            "'add dark mode', 'change API format to JSON', 'add error handling'). "
+            "This creates a newer GoalSpec snapshot so later stages use the correction. "
+            "Set correction_target and correction_detail fields.",
+            "- APPROVE: user says 'approve', 'looks good', 'accept', 'yes'. Approves pending gate/human task.",
+            "- REJECT: user says 'reject', 'no', 'wrong', 'this is not right'. Rejects pending gate, triggers revision.",
+            "",
+            "For CORRECT, always set correction_target (one of: requirements, design, api, constraints, behavior, other) "
+            "and correction_detail (the specific change requested).",
+            "For MODIFY, return a complete revised proposal using supplied context and the user's message.",
+            "Never execute or grant permissions.",
+        ])
+        return "\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Context gathering
+    # ------------------------------------------------------------------
 
     async def status(self, project_id: uuid.UUID) -> dict[str, Any]:
         return await self._context(project_id)
@@ -139,6 +265,58 @@ class AppGuidanceService:
             work_states: dict[str, int] = {
                 str(work_status): int(count) for work_status, count in work_rows
             }
+            stage = await self._project_execution_stage(session, goal.id)
+
+            # Fetch pending human tasks
+            human_tasks = (
+                await session.execute(
+                    select(HumanTaskModel)
+                    .where(
+                        HumanTaskModel.goal_id == goal.id,
+                        HumanTaskModel.status == "OPEN",
+                    )
+                    .order_by(HumanTaskModel.created_at.desc())
+                    .limit(5)
+                )
+            ).scalars().all()
+            pending_tasks = [
+                {
+                    "id": str(t.id),
+                    "task_type": t.task_type,
+                    "prompt": t.prompt,
+                    "due_at": t.due_at.isoformat() if t.due_at else None,
+                }
+                for t in human_tasks
+            ]
+
+            # Fetch active corrections from metadata
+            metadata = goal.metadata_json or {}
+            active_corrections = metadata.get("active_corrections", [])
+
+            preview_payload: dict[str, Any] | None = None
+            if preview is not None:
+                preview_payload = {
+                    "id": str(preview.id),
+                    "status": preview.status,
+                    "endpoint": preview.preview_endpoint,
+                    "failure_code": preview.failure_code,
+                    "failure_summary": preview.failure_summary,
+                }
+            else:
+                # P1 durable path stores the live preview on goal metadata, not
+                # app_preview_releases. Surface it so the console artifact panel
+                # can show the deliverable after ACHIEVE.
+                endpoint = metadata.get("last_preview_endpoint")
+                if isinstance(endpoint, str) and endpoint.strip():
+                    preview_payload = {
+                        "id": None,
+                        "status": "PREVIEW_READY",
+                        "endpoint": endpoint.strip(),
+                        "failure_code": None,
+                        "failure_summary": None,
+                        "source": "goal_metadata",
+                    }
+
             return {
                 "project": {
                     "name": project.name,
@@ -149,8 +327,9 @@ class AppGuidanceService:
                     "id": str(goal.id),
                     "objective": goal.original_input,
                     "status": goal.status,
+                    "version": goal.version,
                     "metadata": goal.metadata_json,
-                    "execution_stage": await self._project_execution_stage(session, goal.id),
+                    "execution_stage": stage,
                 },
                 "goal_spec": {
                     "explicit_constraints": spec.explicit_constraints if spec else {},
@@ -162,28 +341,47 @@ class AppGuidanceService:
                     "unknowns": spec.unknowns if spec else [],
                 },
                 "work_states": work_states,
-                "preview": (
-                    {
-                        "id": str(preview.id),
-                        "status": preview.status,
-                        "endpoint": preview.preview_endpoint,
-                        "failure_code": preview.failure_code,
-                        "failure_summary": preview.failure_summary,
-                    }
-                    if preview
-                    else None
-                ),
+                "preview": preview_payload,
+                "pending_human_tasks": pending_tasks,
+                "active_corrections": active_corrections,
             }
+
+    async def _conversation_history(
+        self, project_id: uuid.UUID, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Fetch recent conversation messages for LLM context."""
+        async with self._sessions() as session:
+            conversation = await session.scalar(
+                select(ConversationModel).where(ConversationModel.app_project_id == project_id)
+            )
+            if conversation is None:
+                return []
+            rows = (
+                await session.execute(
+                    select(ConversationMessageModel)
+                    .where(ConversationMessageModel.conversation_id == conversation.id)
+                    .order_by(ConversationMessageModel.ordinal.desc())
+                    .limit(limit)
+                )
+            ).scalars().all()
+            return [
+                {
+                    "role": msg.role,
+                    "type": msg.message_type,
+                    "content": msg.content[:500] if msg.content else "",
+                }
+                for msg in reversed(rows)
+            ]
+
+    # ------------------------------------------------------------------
+    # Execution stage detection (unchanged)
+    # ------------------------------------------------------------------
 
     @staticmethod
     async def _project_execution_stage(
         session: AsyncSession, goal_id: uuid.UUID
     ) -> dict[str, str]:
-        """Project execution stage from underlying objects.
-
-        Returns {"stage": "...", "object_id": "..."} dict.
-        """
-        # Deployment SUCCEEDED -> DEPLOYED
+        """Project execution stage from underlying objects."""
         deployment = await session.scalar(
             select(DeploymentModel)
             .join(
@@ -218,7 +416,6 @@ class AppGuidanceService:
         if deployment is not None:
             return {"stage": "DEPLOYED", "object_id": str(deployment.id)}
 
-        # AppBuild PASSED -> BUILD_PASSED
         build = await session.scalar(
             select(AppBuildModel)
             .join(
@@ -248,7 +445,6 @@ class AppGuidanceService:
         if build is not None:
             return {"stage": "BUILD_PASSED", "object_id": str(build.id)}
 
-        # WorkspaceSnapshot -> SNAPSHOT_READY
         snapshot = await session.scalar(
             select(WorkspaceSnapshotModel)
             .join(
@@ -271,7 +467,6 @@ class AppGuidanceService:
         if snapshot is not None:
             return {"stage": "SNAPSHOT_READY", "object_id": str(snapshot.id)}
 
-        # GenerationRun -> GENERATING
         gen_run = await session.scalar(
             select(GenerationRunModel)
             .join(
@@ -290,7 +485,6 @@ class AppGuidanceService:
         if gen_run is not None:
             return {"stage": "GENERATING", "object_id": str(gen_run.id)}
 
-        # CapabilityResolutionPlan SATISFIED -> RESOLVED
         resolution = await session.scalar(
             select(CapabilityResolutionPlanModel)
             .join(
@@ -308,7 +502,6 @@ class AppGuidanceService:
         if resolution is not None:
             return {"stage": "RESOLVED", "object_id": str(resolution.id)}
 
-        # HypothesisDecision SELECT -> DECIDED
         decision = await session.scalar(
             select(HypothesisDecisionModel)
             .join(
@@ -330,7 +523,6 @@ class AppGuidanceService:
         if decision is not None:
             return {"stage": "DECIDED", "object_id": str(decision.id)}
 
-        # DiscoveryRound -> DISCOVERING
         discovery = await session.scalar(
             select(DiscoveryRoundModel)
             .where(DiscoveryRoundModel.goal_id == goal_id)
@@ -340,7 +532,6 @@ class AppGuidanceService:
         if discovery is not None:
             return {"stage": "DISCOVERING", "object_id": str(discovery.id)}
 
-        # GoalExecutionRequested outbox event -> QUEUED
         execution_event = await session.scalar(
             select(OutboxEventModel).where(
                 OutboxEventModel.aggregate_type == "goal",
@@ -352,6 +543,10 @@ class AppGuidanceService:
             return {"stage": "QUEUED", "object_id": str(execution_event.id)}
 
         return {"stage": "NOT_STARTED", "object_id": ""}
+
+    # ------------------------------------------------------------------
+    # Conversation helpers
+    # ------------------------------------------------------------------
 
     async def _conversation(
         self, session: AsyncSession, project_id: uuid.UUID
@@ -371,7 +566,80 @@ class AppGuidanceService:
         )
         return (value or 0) + 1
 
-    async def _record_query(
+    async def _persist_message_pair(
+        self,
+        session: AsyncSession,
+        conversation_id: uuid.UUID,
+        ordinal: int,
+        user_message: str,
+        actor: str,
+        assistant_content: str,
+        assistant_type: str,
+        assistant_metadata: dict[str, Any] | None = None,
+    ) -> ConversationMessageModel:
+        """Persist a USER+ASSISTANT message pair, return the user message model."""
+        user_msg = ConversationMessageModel(
+            id=uuid.uuid4(),
+            conversation_id=conversation_id,
+            ordinal=ordinal,
+            role="USER",
+            message_type="GUIDANCE",
+            content=user_message,
+            metadata_json={},
+            created_by=actor,
+        )
+        session.add(user_msg)
+        await session.flush()
+        session.add(
+            ConversationMessageModel(
+                id=uuid.uuid4(),
+                conversation_id=conversation_id,
+                ordinal=ordinal + 1,
+                role="ASSISTANT",
+                message_type=assistant_type,
+                content=assistant_content,
+                metadata_json=assistant_metadata or {},
+                created_by="regent-core",
+            )
+        )
+        return user_msg
+
+    async def _persist_command(
+        self,
+        session: AsyncSession,
+        conversation_id: uuid.UUID,
+        project_id: uuid.UUID,
+        user_message_id: uuid.UUID,
+        command_type: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+        actor: str,
+        resulting_goal_id: uuid.UUID | None = None,
+    ) -> uuid.UUID:
+        command_id = uuid.uuid4()
+        payload = interpretation.model_dump(mode="json")
+        session.add(
+            ConversationCommandModel(
+                id=command_id,
+                app_project_id=project_id,
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+                command_type=command_type,
+                status="APPLIED",
+                interpretation_json=payload,
+                interpretation_hash=canonical_hash(payload),
+                resulting_goal_id=resulting_goal_id,
+                model_ref=model,
+                created_by=actor,
+            )
+        )
+        return command_id
+
+    # ------------------------------------------------------------------
+    # Command handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_query(
         self,
         project_id: uuid.UUID,
         message: str,
@@ -380,13 +648,443 @@ class AppGuidanceService:
         model: str,
     ) -> GuidanceReceipt:
         context = await self._context(project_id)
-        response = (
-            f"{interpretation.summary}\n\n当前 Goal: {context['goal']['status']}; "
-            f"工作状态: {context['work_states']}。"
-        )
+        goal = context["goal"]
+        stage_info = goal.get("execution_stage", {})
+        stage = stage_info.get("stage", goal["status"]) if isinstance(stage_info, dict) else goal["status"]
+        stage_label = _STAGE_LABELS.get(stage, stage)
+        work = context.get("work_states", {})
+        pending = context.get("pending_human_tasks", [])
+        corrections = context.get("active_corrections", [])
+
+        parts = [interpretation.summary]
+        parts.append(f"\n当前状态: {goal['status']} | 阶段: {stage_label}")
+        if work:
+            parts.append(f"工作项: {work}")
+        if pending:
+            parts.append(f"待处理任务: {len(pending)} 个")
+            for t in pending[:3]:
+                parts.append(f"  - [{t['task_type']}] {t['prompt'][:80]}")
+        if corrections:
+            parts.append(f"已应用修正: {len(corrections)} 条")
+            for c in corrections[-3:]:
+                parts.append(f"  - [{c.get('target', '?')}] {c.get('detail', '')[:80]}")
+        if context.get("preview"):
+            pv = context["preview"]
+            if pv.get("endpoint"):
+                parts.append(f"预览地址: {pv['endpoint']}")
+
+        response = "\n".join(parts)
         return await self._persist_simple(
             project_id, message, actor, interpretation, model, response
         )
+
+    async def _handle_continue(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        context = await self._context(project_id)
+        goal_status = str(context["goal"]["status"])
+        stage_info = context["goal"].get("execution_stage", {"stage": goal_status})
+        stage = (
+            stage_info.get("stage", goal_status)
+            if isinstance(stage_info, dict)
+            else goal_status
+        )
+        should_start = goal_status in {"DRAFT", "READY"} or (
+            goal_status == "ACTIVE" and stage == "FAILED"
+        )
+
+        if goal_status == "READY":
+            response = "Core 已接受继续请求并开始执行。"
+        elif goal_status == "ACTIVE":
+            response = (
+                "Core 正在安全重试。" if should_start else f"Core 正在执行。当前阶段: {_STAGE_LABELS.get(stage, stage)}。"
+            )
+        elif goal_status == "PAUSED":
+            response = "目标已暂停。发送“恢复”或“resume”以继续执行。"
+        else:
+            response = f"当前 Goal 状态为 {goal_status}, 当前不可直接继续。"
+        receipt = await self._persist_simple(
+            project_id, message, actor, interpretation, model, response
+        )
+        if should_start:
+            await GoalExecutionService(self._sessions).start(
+                uuid.UUID(str(context["goal"]["id"])),
+                actor=actor,
+                idempotency_key=f"guidance:{receipt.command_id}",
+            )
+        return receipt
+
+    async def _handle_pause(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        context = await self._context(project_id)
+        goal_id = uuid.UUID(str(context["goal"]["id"]))
+        goal_status = str(context["goal"]["status"])
+        goal_version = int(context["goal"].get("version", 0))
+
+        if goal_status != "ACTIVE":
+            response = f"目标当前状态为 {goal_status}，只有执行中(ACTIVE)的目标可以暂停。"
+            return await self._persist_simple(
+                project_id, message, actor, interpretation, model, response
+            )
+
+        try:
+            await TransitionService(self._sessions).transition_goal(
+                TransitionContext(
+                    aggregate_id=goal_id,
+                    expected_version=goal_version,
+                    actor=actor,
+                    correlation_id=uuid.uuid4(),
+                ),
+                GoalCommand.PAUSE,
+            )
+            response = "已暂停执行。你可以发送修正指令，或发送“恢复”继续。"
+        except DomainError as exc:
+            response = f"暂停失败: {exc.message}"
+
+        command_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            conversation = await self._conversation(session, project_id)
+            ordinal = await self._next_ordinal(session, conversation.id)
+            user_msg = await self._persist_message_pair(
+                session, conversation.id, ordinal, message, actor,
+                response, "PAUSE_RESULT",
+                {"command_id": str(command_id), "goal_id": str(goal_id)},
+            )
+            cid = await self._persist_command(
+                session, conversation.id, project_id, user_msg.id,
+                "PAUSE", interpretation, model, actor,
+            )
+            command_id = cid
+        return GuidanceReceipt(command_id, "PAUSE", None, False, response)
+
+    async def _handle_resume(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        context = await self._context(project_id)
+        goal_id = uuid.UUID(str(context["goal"]["id"]))
+        goal_status = str(context["goal"]["status"])
+        goal_version = int(context["goal"].get("version", 0))
+
+        if goal_status != "PAUSED":
+            response = f"目标当前状态为 {goal_status}，只有已暂停(PAUSED)的目标可以恢复。"
+            return await self._persist_simple(
+                project_id, message, actor, interpretation, model, response
+            )
+
+        try:
+            await TransitionService(self._sessions).transition_goal(
+                TransitionContext(
+                    aggregate_id=goal_id,
+                    expected_version=goal_version,
+                    actor=actor,
+                    correlation_id=uuid.uuid4(),
+                ),
+                GoalCommand.RESUME,
+            )
+            # Try to re-trigger execution; if it fails (e.g. already ACTIVE), that's OK
+            # — the goal is back to ACTIVE and pending events will be processed.
+            try:
+                await GoalExecutionService(self._sessions).start(
+                    goal_id,
+                    actor=actor,
+                    idempotency_key=f"guidance-resume:{uuid.uuid4()}",
+                )
+            except DomainError:
+                pass  # Goal is ACTIVE, worker will pick up pending events
+            response = "已恢复执行。Core 将继续从当前阶段推进。"
+        except DomainError as exc:
+            response = f"恢复失败: {exc.message}"
+
+        command_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            conversation = await self._conversation(session, project_id)
+            ordinal = await self._next_ordinal(session, conversation.id)
+            user_msg = await self._persist_message_pair(
+                session, conversation.id, ordinal, message, actor,
+                response, "RESUME_RESULT",
+                {"command_id": str(command_id), "goal_id": str(goal_id)},
+            )
+            cid = await self._persist_command(
+                session, conversation.id, project_id, user_msg.id,
+                "RESUME", interpretation, model, actor,
+            )
+            command_id = cid
+        return GuidanceReceipt(command_id, "RESUME", None, False, response)
+
+    async def _handle_correct(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        """Lightweight mid-execution correction — stores in goal metadata, no new revision."""
+        context = await self._context(project_id)
+        goal_id = uuid.UUID(str(context["goal"]["id"]))
+        goal_status = str(context["goal"]["status"])
+
+        if goal_status not in ("DRAFT", "ACTIVE", "PAUSED", "READY", "WAITING_HUMAN"):
+            response = f"目标当前状态为 {goal_status}，无法应用修正。"
+            return await self._persist_simple(
+                project_id, message, actor, interpretation, model, response
+            )
+
+        target = interpretation.correction_target or "other"
+        detail = interpretation.correction_detail or message
+
+        command_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "goal not found")
+            metadata = dict(goal.metadata_json or {})
+            corrections = list(metadata.get("active_corrections", []))
+            corrections.append({
+                "target": target,
+                "detail": detail,
+                "original_message": message,
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "actor": actor,
+                "summary": interpretation.summary,
+            })
+            metadata["active_corrections"] = corrections
+            latest_spec = await session.scalar(
+                select(GoalSpecModel)
+                .where(GoalSpecModel.goal_id == goal_id)
+                .order_by(GoalSpecModel.version.desc())
+                .with_for_update()
+            )
+            if latest_spec is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "goal spec not found")
+
+            constraints = dict(latest_spec.explicit_constraints or {})
+            if interpretation.explicit_constraints:
+                constraints.update(interpretation.explicit_constraints)
+            inferences = dict(latest_spec.system_inferences or {})
+            for key, value in {
+                "target_users": interpretation.target_users,
+                "problem": interpretation.problem,
+                "first_deliverable": interpretation.first_deliverable,
+            }.items():
+                if value:
+                    inferences[key] = value
+            progressive = list(inferences.get("progressive_corrections", []))
+            progressive.append({"target": target, "detail": detail, "actor": actor})
+            inferences["progressive_corrections"] = progressive
+            unknowns = (
+                [{"question": item, "blocking": False} for item in interpretation.unknowns]
+                if interpretation.unknowns is not None
+                else list(latest_spec.unknowns or [])
+            )
+            success_criteria = (
+                interpretation.success_criteria or dict(latest_spec.success_criteria or {})
+            )
+            spec_content = {
+                "explicit_constraints": constraints,
+                "system_inferences": inferences,
+                "unknowns": unknowns,
+                "success_criteria": success_criteria,
+                "source_refs": [
+                    *list(latest_spec.source_refs or []),
+                    {"type": "guidance_command", "id": str(command_id)},
+                ],
+            }
+            latest_spec.status = "SUPERSEDED"
+            next_spec = GoalSpecModel(
+                id=uuid.uuid4(),
+                goal_id=goal_id,
+                version=latest_spec.version + 1,
+                status="FROZEN" if goal.status != "DRAFT" else "DRAFT",
+                content_hash=canonical_hash(spec_content),
+                confirmed_by="regent-core:progressive-snapshot" if goal.status != "DRAFT" else None,
+                confirmed_at=datetime.now(UTC) if goal.status != "DRAFT" else None,
+                **spec_content,
+            )
+            session.add(next_spec)
+            metadata["goal_clarity_state"] = "EXPLORING" if unknowns else "CLARIFIED"
+            metadata["latest_goal_spec_version"] = next_spec.version
+            goal.metadata_json = metadata
+            flag_modified(goal, "metadata_json")
+
+            conversation = await self._conversation(session, project_id)
+            ordinal = await self._next_ordinal(session, conversation.id)
+            user_msg = await self._persist_message_pair(
+                session, conversation.id, ordinal, message, actor,
+                f"已记录修正: [{target}] {detail}\n修正将在下一个执行步骤中生效。",
+                "CORRECTION_APPLIED",
+                {
+                    "command_id": str(command_id),
+                    "goal_id": str(goal_id),
+                    "correction_target": target,
+                    "correction_detail": detail,
+                    "total_corrections": len(corrections),
+                },
+            )
+            cid = await self._persist_command(
+                session, conversation.id, project_id, user_msg.id,
+                "CORRECT", interpretation, model, actor,
+            )
+            command_id = cid
+
+        response = f"已记录修正: [{target}] {detail}"
+        return GuidanceReceipt(command_id, "CORRECT", None, False, response)
+
+    async def _handle_approve(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        """Approve pending human tasks for this goal."""
+        context = await self._context(project_id)
+        goal_id = uuid.UUID(str(context["goal"]["id"]))
+        pending = context.get("pending_human_tasks", [])
+
+        if not pending:
+            # If goal is WAITING_HUMAN but no HumanTask records, try transitioning
+            goal_status = str(context["goal"]["status"])
+            if goal_status == "WAITING_HUMAN":
+                goal_version = int(context["goal"].get("version", 0))
+                try:
+                    await TransitionService(self._sessions).transition_goal(
+                        TransitionContext(
+                            aggregate_id=goal_id,
+                            expected_version=goal_version,
+                            actor=actor,
+                            correlation_id=uuid.uuid4(),
+                        ),
+                        GoalCommand.HUMAN_RESOLVED,
+                    )
+                    response = "已批准。目标恢复执行。"
+                except DomainError as exc:
+                    response = f"批准失败: {exc.message}"
+            else:
+                response = "当前没有待批准的任务。"
+            return await self._persist_simple(
+                project_id, message, actor, interpretation, model, response
+            )
+
+        # Complete the first pending human task
+        task_id = uuid.UUID(pending[0]["id"])
+        await HumanTaskService(self._sessions).complete(
+            task_id,
+            assigned_to=actor,
+            response={"approved": True, "message": message},
+        )
+
+        # If goal is WAITING_HUMAN, transition to ACTIVE
+        goal_status = str(context["goal"]["status"])
+        if goal_status == "WAITING_HUMAN":
+            goal_version = int(context["goal"].get("version", 0))
+            try:
+                await TransitionService(self._sessions).transition_goal(
+                    TransitionContext(
+                        aggregate_id=goal_id,
+                        expected_version=goal_version,
+                        actor=actor,
+                        correlation_id=uuid.uuid4(),
+                    ),
+                    GoalCommand.HUMAN_RESOLVED,
+                )
+            except DomainError:
+                pass  # Task completed even if transition fails
+
+        response = f"已批准任务: {pending[0]['task_type']}\n{pending[0]['prompt'][:100]}"
+
+        command_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            conversation = await self._conversation(session, project_id)
+            ordinal = await self._next_ordinal(session, conversation.id)
+            user_msg = await self._persist_message_pair(
+                session, conversation.id, ordinal, message, actor,
+                response, "APPROVE_RESULT",
+                {"command_id": str(command_id), "task_id": str(task_id)},
+            )
+            cid = await self._persist_command(
+                session, conversation.id, project_id, user_msg.id,
+                "APPROVE", interpretation, model, actor,
+            )
+            command_id = cid
+        return GuidanceReceipt(command_id, "APPROVE", None, False, response)
+
+    async def _handle_reject(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        """Reject pending human tasks, trigger revision."""
+        context = await self._context(project_id)
+        goal_id = uuid.UUID(str(context["goal"]["id"]))
+        pending = context.get("pending_human_tasks", [])
+        reason = interpretation.rejection_reason or message
+
+        if pending:
+            task_id = uuid.UUID(pending[0]["id"])
+            await HumanTaskService(self._sessions).complete(
+                task_id,
+                assigned_to=actor,
+                response={"approved": False, "rejection_reason": reason, "message": message},
+            )
+
+        goal_status = str(context["goal"]["status"])
+        if goal_status == "WAITING_HUMAN":
+            goal_version = int(context["goal"].get("version", 0))
+            try:
+                await TransitionService(self._sessions).transition_goal(
+                    TransitionContext(
+                        aggregate_id=goal_id,
+                        expected_version=goal_version,
+                        actor=actor,
+                        correlation_id=uuid.uuid4(),
+                    ),
+                    GoalCommand.HUMAN_BLOCKED,
+                )
+            except DomainError:
+                pass
+
+        response = f"已拒绝。原因: {reason}\nCore 将根据反馈重新规划。"
+
+        command_id = uuid.uuid4()
+        async with self._sessions() as session, session.begin():
+            conversation = await self._conversation(session, project_id)
+            ordinal = await self._next_ordinal(session, conversation.id)
+            user_msg = await self._persist_message_pair(
+                session, conversation.id, ordinal, message, actor,
+                response, "REJECT_RESULT",
+                {"command_id": str(command_id), "goal_id": str(goal_id), "reason": reason},
+            )
+            cid = await self._persist_command(
+                session, conversation.id, project_id, user_msg.id,
+                "REJECT", interpretation, model, actor,
+            )
+            command_id = cid
+        return GuidanceReceipt(command_id, "REJECT", None, False, response)
+
+    # ------------------------------------------------------------------
+    # URL-based research resume (unchanged)
+    # ------------------------------------------------------------------
 
     async def _maybe_resume_research_more(
         self, project_id: uuid.UUID, message: str, actor: str
@@ -444,6 +1142,7 @@ class AppGuidanceService:
             metadata["awaiting_authorized_sources"] = False
             metadata["execution_stage"] = "DISCOVERING"
             goal.metadata_json = metadata
+            flag_modified(goal, "metadata_json")
 
             conversation = await self._conversation(session, project_id)
             ordinal = await self._next_ordinal(session, conversation.id)
@@ -570,44 +1269,9 @@ class AppGuidanceService:
             response=response,
         )
 
-    async def _record_continue(
-        self,
-        project_id: uuid.UUID,
-        message: str,
-        actor: str,
-        interpretation: GuidanceInterpretation,
-        model: str,
-    ) -> GuidanceReceipt:
-        context = await self._context(project_id)
-        goal_status = str(context["goal"]["status"])
-        stage_info = context["goal"].get("execution_stage", {"stage": goal_status})
-        stage = (
-            stage_info.get("stage", goal_status)
-            if isinstance(stage_info, dict)
-            else goal_status
-        )
-        should_start = goal_status == "READY" or (
-            goal_status == "ACTIVE" and stage == "FAILED"
-        )
-
-        if goal_status == "READY":
-            response = "Core 已接受继续请求并开始执行。"
-        elif goal_status == "ACTIVE":
-            response = (
-                "Core 正在安全重试。" if should_start else f"Core 正在执行。当前阶段: {stage}。"
-            )
-        else:
-            response = f"当前 Goal 状态为 {goal_status}, 需要先确认或创建新目标, 不能直接继续。"
-        receipt = await self._persist_simple(
-            project_id, message, actor, interpretation, model, response
-        )
-        if should_start:
-            await GoalExecutionService(self._sessions).start(
-                uuid.UUID(str(context["goal"]["id"])),
-                actor=actor,
-                idempotency_key=f"guidance:{receipt.command_id}",
-            )
-        return receipt
+    # ------------------------------------------------------------------
+    # Simple persist (for QUERY/CONTINUE/failed transitions)
+    # ------------------------------------------------------------------
 
     async def _persist_simple(
         self,
@@ -664,7 +1328,11 @@ class AppGuidanceService:
             )
         return GuidanceReceipt(command_id, interpretation.command_type, None, False, response)
 
-    async def _create_revision(
+    # ------------------------------------------------------------------
+    # MODIFY handler (creates new goal revision — unchanged logic)
+    # ------------------------------------------------------------------
+
+    async def _handle_modify(
         self,
         project_id: uuid.UUID,
         message: str,
@@ -788,8 +1456,8 @@ class AppGuidanceService:
                         conversation_id=conversation.id,
                         ordinal=ordinal + 1,
                         role="ASSISTANT",
-                        message_type="APP_CONFIRMATION_REQUIRED",
-                        content="我已根据你的指导形成新一轮目标草案。确认前不会重新规划或执行。",
+                        message_type="GOAL_UNDERSTANDING_READY",
+                        content="我已根据你的指导形成新的目标版本，并将按当前理解继续探索。",
                         metadata_json={
                             "app_project_id": str(project_id),
                             "goal_id": str(goal_id),
@@ -802,4 +1470,21 @@ class AppGuidanceService:
                     ),
                 )
             )
-        return GuidanceReceipt(command_id, "MODIFY", goal_id, True, interpretation.summary)
+        if previous_goal.status not in {
+            "ACHIEVED", "EXHAUSTED", "FAILED", "CANCELLED"
+        }:
+            await TransitionService(self._sessions).transition_goal(
+                TransitionContext(
+                    aggregate_id=previous_goal.id,
+                    expected_version=previous_goal.version,
+                    actor=actor,
+                    correlation_id=previous_goal.correlation_id,
+                ),
+                GoalCommand.CANCEL,
+            )
+        await GoalExecutionService(self._sessions).start(
+            goal_id,
+            actor=actor,
+            idempotency_key=f"guidance-modify:{command_id}",
+        )
+        return GuidanceReceipt(command_id, "MODIFY", goal_id, False, interpretation.summary)

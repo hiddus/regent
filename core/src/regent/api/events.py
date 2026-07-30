@@ -17,14 +17,20 @@ async def _poll_changes(
     sessions_factory: Any,
     project_id: uuid.UUID | None,
     last_message_ordinal: int,
-) -> list[dict[str, Any]]:
-    """Poll for new messages and status changes."""
+    last_status_fingerprint: str | None,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """Poll for new messages and real status changes.
+
+    Returns ``(events, status_fingerprint, live_action)``.
+    ``status_change`` is emitted only when the fingerprint changes.
+    ``live_action`` is always returned (when available) for heartbeat sync.
+    """
     events: list[dict[str, Any]] = []
+    status_fingerprint = last_status_fingerprint
+    live_action: dict[str, Any] | None = None
     try:
         async with sessions_factory() as session:
-            # Check for new messages in conversations bound to this project
             if project_id:
-                # Get conversation for this project
                 conv_row = await session.execute(
                     text(
                         "SELECT id FROM conversations "
@@ -44,6 +50,7 @@ async def _poll_changes(
                         {"cid": str(conv_id), "ord": last_message_ordinal},
                     )
                     for row in msg_rows:
+                        created_at = row[6]
                         events.append({
                             "type": "new_message",
                             "data": {
@@ -53,54 +60,88 @@ async def _poll_changes(
                                 "message_type": row[3],
                                 "content": row[4],
                                 "metadata": row[5] if isinstance(row[5], dict) else {},
+                                "created_at": (
+                                    created_at.isoformat()
+                                    if hasattr(created_at, "isoformat")
+                                    else str(created_at) if created_at is not None else None
+                                ),
                             },
                         })
 
-                # Check goal status change
+                # Goals are keyed by app_project_id (not app_projects.goal_id).
                 goal_row = await session.execute(
                     text(
-                        "SELECT g.id, g.status, g.metadata FROM goals g "
-                        "JOIN app_projects ap ON ap.goal_id = g.id "
-                        "WHERE ap.id = :pid"
+                        "SELECT g.id, g.status, g.metadata, g.updated_at FROM goals g "
+                        "WHERE g.app_project_id = :pid "
+                        "ORDER BY g.created_at DESC LIMIT 1"
                     ),
                     {"pid": str(project_id)},
                 )
                 g_row = goal_row.first()
                 if g_row:
-                    events.append({
-                        "type": "status_change",
-                        "data": {
-                            "goal_id": str(g_row[0]),
-                            "status": g_row[1],
-                            "metadata": g_row[2] if isinstance(g_row[2], dict) else {},
-                        },
-                    })
+                    metadata = g_row[2] if isinstance(g_row[2], dict) else {}
+                    if isinstance(metadata.get("live_action"), dict):
+                        live_action = dict(metadata["live_action"])
+                    updated_at = g_row[3]
+                    updated_iso = (
+                        updated_at.isoformat()
+                        if hasattr(updated_at, "isoformat")
+                        else str(updated_at) if updated_at is not None else ""
+                    )
+                    stage = str(metadata.get("execution_stage") or "") if isinstance(metadata, dict) else ""
+                    live_at = str((live_action or {}).get("updated_at") or "")
+                    fingerprint = f"{g_row[1]}|{stage}|{updated_iso}|{live_at}"
+                    if fingerprint != last_status_fingerprint:
+                        status_fingerprint = fingerprint
+                        events.append({
+                            "type": "status_change",
+                            "data": {
+                                "goal_id": str(g_row[0]),
+                                "status": g_row[1],
+                                "metadata": metadata,
+                                "updated_at": updated_iso or None,
+                                "live_action": live_action,
+                            },
+                        })
     except Exception:
         pass
-    return events
+    return events, status_fingerprint, live_action
 
 
 @router.get("/stream")
 async def event_stream(
     request: Request,
     project_id: str | None = Query(default=None),
-    poll_interval: float = Query(default=2.0, gt=0, le=30),
+    poll_interval: float = Query(default=1.0, gt=0, le=30),
 ):
     """SSE endpoint that pushes real-time updates to the console."""
 
     async def generate():
+        from datetime import datetime, timezone
+
         last_ordinal = 0
+        last_status_fingerprint: str | None = None
         pid = uuid.UUID(project_id) if project_id else None
 
-        # Send initial connection event
-        yield f"data: {json.dumps({'type': 'connected', 'data': {}})}\n\n"
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "connected",
+                    "data": {"server_time": datetime.now(timezone.utc).isoformat()},
+                }
+            )
+            + "\n\n"
+        )
 
         while True:
             if await request.is_disconnected():
                 break
 
             sessions = request.app.state.sessions
-            changes = await _poll_changes(sessions, pid, last_ordinal)
+            changes, last_status_fingerprint, live_action = await _poll_changes(
+                sessions, pid, last_ordinal, last_status_fingerprint
+            )
 
             for event in changes:
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -109,14 +150,30 @@ async def event_stream(
                     if ord_val > last_ordinal:
                         last_ordinal = ord_val
 
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "heartbeat",
+                        "data": {
+                            "server_time": datetime.now(timezone.utc).isoformat(),
+                            "has_changes": bool(changes),
+                            "live_action": live_action,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+
             try:
                 await asyncio.wait_for(
                     request.is_disconnected(),
                     timeout=poll_interval,
                 )
-                break  # Client disconnected
+                break
             except TimeoutError:
-                pass  # Continue polling
+                pass
 
     from fastapi.responses import StreamingResponse
 

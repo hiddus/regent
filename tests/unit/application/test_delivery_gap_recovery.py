@@ -126,6 +126,7 @@ async def test_recover_routes_evidence_to_http_capability() -> None:
             AsyncMock(return_value=http_id),
         ),
         patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
     ):
         svc = DeliveryGapRecoveryService(factory)
         svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
@@ -180,6 +181,7 @@ async def test_recover_escalates_to_configure_on_second_attempt() -> None:
             AsyncMock(return_value=composed_id),
         ),
         patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
     ):
         svc = DeliveryGapRecoveryService(factory)
         svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
@@ -232,6 +234,7 @@ async def test_recover_escalates_to_compose_on_third_attempt() -> None:
             AsyncMock(return_value=composed_id),
         ),
         patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
     ):
         svc = DeliveryGapRecoveryService(factory)
         svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
@@ -278,6 +281,7 @@ async def test_recover_stops_after_ladder_exhausted() -> None:
             AsyncMock(return_value=uuid.uuid4()),
         ),
         patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
     ):
         result = await DeliveryGapRecoveryService(factory).recover(
             goal_id=goal_id,
@@ -327,6 +331,7 @@ async def test_recover_routes_presentation_to_product_surface() -> None:
             AsyncMock(return_value=uuid.uuid4()),
         ),
         patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
     ):
         svc = DeliveryGapRecoveryService(factory)
         svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
@@ -344,3 +349,202 @@ async def test_recover_routes_presentation_to_product_surface() -> None:
         goal.metadata_json["capability_resolution"]["primary_capability"]
         == PRODUCT_SURFACE_NAME
     )
+
+
+def test_build_failure_lesson_and_constraints_absorb_deploy_gap() -> None:
+    from regent.application.delivery_gap_recovery import (
+        build_failure_lesson,
+        build_learned_constraints,
+    )
+
+    reasons = ["deployment-failed: RuntimeError", "stylesheet-present: missing"]
+    constraints = build_learned_constraints("presentation", reasons)
+    assert any("CSS" in c or "stylesheet" in c.lower() or "Substantial" in c for c in constraints)
+    assert any("deploy" in c.lower() for c in constraints)
+
+    lesson = build_failure_lesson(
+        gap_reasons=reasons,
+        gap_kind="presentation",
+        method="REUSE",
+        attempt=1,
+        halt_context={"stage": "DEPLOY_FAILED", "last_error": "boom"},
+        goal_text="build a news digest",
+    )
+    assert lesson["replan_required"] is True
+    assert lesson["lesson_digest"]
+    assert lesson["last_error"] == "boom"
+    assert "stylesheet-present: missing" in lesson["gap_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_recover_writes_failure_lessons_and_replan_nonce() -> None:
+    goal_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="news digest site",
+        status="ACTIVE",
+        version=1,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        metadata_json={
+            "halt": {"stage": "DEPLOY_FAILED", "message": "preview down", "error": "boom"}
+        },
+    )
+    factory = _goal_session(goal, None)
+    reorg = _fake_reorg(goal_id)
+    admit = AsyncMock()
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", admit),
+    ):
+        svc = DeliveryGapRecoveryService(factory)
+        svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
+        result = await svc.recover(
+            goal_id=goal_id,
+            project_id=uuid.uuid4(),
+            requirement_revision_id=uuid.uuid4(),
+            capability_resolution_plan_id=uuid.uuid4(),
+            actor="test",
+            gap_reasons=["deployment-failed: RuntimeError"],
+            halt_context={"stage": "DEPLOY_FAILED", "last_error": "RuntimeError"},
+        )
+
+    assert result.recovered is True
+    meta = goal.metadata_json
+    assert meta["failure_lessons"]
+    assert meta["learned_constraints"]
+    assert meta["replan_nonce"]
+    assert meta["capability_resolution"]["failure_lesson_digest"]
+    assert meta["replan_nonce"].startswith("1:")
+    assert "absorb" in " ".join(meta["learned_constraints"]).lower() or any(
+        "deploy" in c.lower() for c in meta["learned_constraints"]
+    )
+    # Outbox payload must carry replan markers so next GenerationRunRequested differs.
+    added = factory.return_value.__aenter__.return_value.add.call_args_list
+    assert added, "expected outbox event to be added"
+    outbox_event = added[0].args[0]
+    payload = outbox_event.payload
+    assert payload["replan_nonce"] == meta["replan_nonce"]
+    assert payload["failure_lesson_digest"] == meta["capability_resolution"][
+        "failure_lesson_digest"
+    ]
+    admit.assert_awaited_once()
+    assert "已吸收失败经验并重规划" in result.message
+
+
+@pytest.mark.asyncio
+async def test_recover_replan_nonce_changes_across_attempts() -> None:
+    goal_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=1,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        metadata_json={},
+    )
+    reorg = _fake_reorg(goal_id)
+    nonces: list[str] = []
+    digests: list[str] = []
+
+    async def _run_once(prior_attempts: int) -> None:
+        goal.metadata_json = {
+            **dict(goal.metadata_json or {}),
+            "delivery_gap_recovery_attempts": prior_attempts,
+        }
+        factory = _goal_session(goal, None)
+        with (
+            patch(
+                "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+                AsyncMock(return_value=uuid.uuid4()),
+            ),
+            patch(
+                "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+                AsyncMock(return_value=uuid.uuid4()),
+            ),
+            patch(
+                "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+                AsyncMock(return_value=uuid.uuid4()),
+            ),
+            patch(
+                "regent.application.delivery_gap_recovery.build_attainment_capability",
+                AsyncMock(return_value=uuid.uuid4()),
+            ),
+            patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+            patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
+        ):
+            svc = DeliveryGapRecoveryService(factory)
+            svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
+            result = await svc.recover(
+                goal_id=goal_id,
+                project_id=uuid.uuid4(),
+                requirement_revision_id=uuid.uuid4(),
+                capability_resolution_plan_id=uuid.uuid4(),
+                actor="test",
+                gap_reasons=["stylesheet-present: missing"],
+            )
+        assert result.recovered is True
+        nonces.append(goal.metadata_json["replan_nonce"])
+        digests.append(goal.metadata_json["capability_resolution"]["failure_lesson_digest"])
+
+    await _run_once(0)
+    await _run_once(1)
+
+    assert nonces[0] != nonces[1]
+    assert digests[0] != digests[1]
+    assert nonces[0].startswith("1:")
+    assert nonces[1].startswith("2:")
+    assert len(goal.metadata_json["failure_lessons"]) >= 1
+
+
+def test_acceptance_contract_replan_fields_change_plan_digest() -> None:
+    """Observable replan: failure lesson fields must change GenerationPlanContract digest."""
+    import uuid as uuid_mod
+
+    from regent.application.p1_contracts import GenerationPlanContract, canonical_hash
+
+    base = {
+        "goal_spec_hash": "a" * 64,
+        "hypothesis_decision_id": uuid_mod.uuid4(),
+        "requirement_revision_hash": "b" * 64,
+        "capability_resolution_hash": "c" * 64,
+        "runtime_profile_hash": "d" * 64,
+        "evidence_bundle_digest": "e" * 64,
+        "generator_ref": "agentic-generation-v1",
+        "model_ref": "p1-model",
+        "prompt_version": "agentic-generation-v1",
+        "planned_paths": ["src/index.html"],
+        "verification_commands": ["python -m compileall src"],
+        "acceptance_contract": {
+            "delivery_policy": "goal_attainment_escalation",
+            "delivery_gap_reasons": ["stylesheet-present: missing"],
+            "delivery_gap_recovery_attempt": 1,
+        },
+    }
+    first = GenerationPlanContract(**base)
+    second_contract = {
+        **base["acceptance_contract"],
+        "delivery_gap_recovery_attempt": 2,
+        "replan_nonce": "2:presentation:CONFIGURE:abc123",
+        "failure_lesson_digest": "abc123",
+        "learned_constraints": ["Must ship substantial CSS"],
+        "failure_lessons": [{"lesson_digest": "abc123", "attempt": 2}],
+    }
+    second = GenerationPlanContract(
+        **{**base, "acceptance_contract": second_contract}
+    )
+    assert canonical_hash(first) != canonical_hash(second)

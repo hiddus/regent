@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from enum import StrEnum
 
 
@@ -29,10 +28,27 @@ class ErrorCode(StrEnum):
     EXTERNAL_EFFECT_UNKNOWN = "EXTERNAL_EFFECT_UNKNOWN"
 
 
-@dataclass(frozen=True, slots=True)
 class DomainError(Exception):
+    """Domain-level error carrying a machine-readable ErrorCode."""
+
     code: ErrorCode
     message: str
 
+    def __init__(self, code: ErrorCode, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"
+
+    def __repr__(self) -> str:
+        return f"DomainError({self.code!r}, {self.message!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DomainError):
+            return NotImplemented
+        return (self.code, self.message) == (other.code, other.message)
+
+    def __hash__(self) -> int:
+        return hash((self.code, self.message))

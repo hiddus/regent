@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, Field
 
 from regent.application.app_project_service import AppProjectService
+from regent.application.goal_execution_service import GoalExecutionService
 from regent.config import get_settings
 from regent.model.factory import build_model_provider
 
@@ -66,8 +67,15 @@ class ConfirmAppResponse(BaseModel):
 
 
 @router.post("/drafts", response_model=AppDraftResponse, status_code=status.HTTP_201_CREATED)
-async def create_app_draft(payload: CreateAppDraftBody, projects: ServiceDep) -> AppDraftResponse:
+async def create_app_draft(
+    payload: CreateAppDraftBody, projects: ServiceDep, request: Request
+) -> AppDraftResponse:
     receipt = await projects.create_draft(idea=payload.idea, actor=payload.actor)
+    await GoalExecutionService(request.app.state.sessions).start(
+        receipt.goal.id,
+        actor=payload.actor,
+        idempotency_key=f"auto-start:{receipt.goal.id}",
+    )
     return AppDraftResponse(
         project=project_response(receipt.project),
         conversation_id=receipt.conversation.id,

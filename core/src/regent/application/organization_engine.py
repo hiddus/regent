@@ -192,11 +192,13 @@ def feasibility_cvr(
     available = available_capabilities or set()
 
     # C — capability / constitution / compliance hard constraints
+    # available_capabilities must be concrete names (never treat "*" as wildcard).
     required_caps: set[str] = set()
     for role in topology.get("roles") or []:
         for cap in role.get("capabilities") or role.get("capability_requirements") or []:
             required_caps.add(str(cap))
-    missing = sorted(required_caps - available)
+    concrete = {c for c in available if c and c != "*"}
+    missing = sorted(required_caps - concrete)
     if missing:
         c: CheckResult = "FAIL"
         reasons.append(f"CAPABILITY_GAP:{','.join(missing)}")
@@ -303,8 +305,13 @@ class OrganizationEngine:
         available_capabilities: set[str] | None = None,
         budget_remaining: float | None = None,
         rules: list[PolicyRule] | None = None,
+        preferred_template_id: str | None = None,
     ) -> OrganizationDecisionBundle:
-        """Pure decision pipeline used by dual-write shadow and enforce paths."""
+        """Pure decision pipeline used by dual-write shadow and enforce paths.
+
+        When ``preferred_template_id`` is feasible it wins over utility argmax
+        (used for opt-in certified hive; does not invent free-form topologies).
+        """
         rules = rules or default_system_rules()
         scored: list[tuple[str, PredictedUtility, FeasibilityReport, dict[str, Any]]] = []
         candidate_reports: list[dict[str, Any]] = []
@@ -362,6 +369,11 @@ class OrganizationEngine:
             )
 
         selected = select_feasible_argmax(scored)
+        if preferred_template_id:
+            for cid, util, report, top in scored:
+                if cid == preferred_template_id and report.feasible:
+                    selected = (cid, util, top)
+                    break
         decision_id = uuid.uuid4()
         if selected is None:
             return OrganizationDecisionBundle(
@@ -407,6 +419,7 @@ class OrganizationEngine:
                     "topology": sel_top,
                 },
                 "tie_break": "lower_cost_then_fewer_agents_then_template_id",
+                "preferred_template_id": preferred_template_id,
             },
         )
 
@@ -423,6 +436,7 @@ class OrganizationEngine:
         constitution_version_id: uuid.UUID | None = None,
         activate: bool = True,
         version_id: uuid.UUID | None = None,
+        preferred_template_id: str | None = None,
     ) -> OrganizationDecisionBundle:
         templates = await self.list_certified_templates(session)
         tmpl_payloads = [
@@ -447,9 +461,12 @@ class OrganizationEngine:
                     },
                 }
             ]
-        # Prefer single-agent as default champion when both feasible.
+        # Default champion is single-agent via utility; preferred_template_id
+        # (certified hive opt-in) overrides when that candidate is feasible.
         bundle = self.evaluate_candidates(
-            tmpl_payloads, available_capabilities=available_capabilities
+            tmpl_payloads,
+            available_capabilities=available_capabilities,
+            preferred_template_id=preferred_template_id,
         )
         # Fix feasible_count accurately
         feas = sum(1 for c in bundle.decision_json["candidates"] if c["feasible"])
