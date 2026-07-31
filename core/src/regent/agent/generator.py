@@ -172,15 +172,40 @@ class AgenticCodeGenerator:
         except Exception:  # noqa: BLE001 — memory must not block delivery path
             pass
 
+        planned = set(plan.get("planned_paths") or [])
+        scope = uuid.UUID(str(plan["hypothesis_decision_id"]))
+
         if result.verification is not None and not result.verification.passed:
+            # Keep a draft tree + artifact URIs so recovery/human review is not
+            # an empty terminal — files existed; verification rejected publish.
+            draft_note = _persist_verification_draft(
+                workspace_root=self._workspace_root,
+                sandbox=sandbox,
+                goal_id=plan.get("goal_id"),
+                run_id=run_id,
+                files=result.files,
+            )
+            draft_changes = 0
+            try:
+                draft_changes = len(
+                    _materialize_incremental_changes(
+                        base_files=base_files,
+                        files=result.files,
+                        planned=planned,
+                        artifacts=self._artifacts,
+                        scope=scope,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — draft artifacts best-effort
+                draft_changes = 0
             reasons = "; ".join(gaps[:8])
             raise ValueError(
                 f"delivery-review-v1 rejected non-deliverable surface: "
                 f"verification-agent: {reasons or result.verification.summary}"
+                f"; draft_files={len(result.files)} draft_artifacts={draft_changes}"
+                f"{('; draft_workspace=' + draft_note) if draft_note else ''}"
             )
 
-        planned = set(plan.get("planned_paths") or [])
-        scope = uuid.UUID(str(plan["hypothesis_decision_id"]))
         changes = _materialize_incremental_changes(
             base_files=base_files,
             files=result.files,
@@ -210,6 +235,58 @@ def _maybe_uuid(value: Any) -> uuid.UUID | None:
         return uuid.UUID(str(value))
     except ValueError:
         return None
+
+
+def _persist_verification_draft(
+    *,
+    workspace_root: Path,
+    sandbox: Path,
+    goal_id: Any,
+    run_id: str,
+    files: dict[str, str],
+) -> str:
+    """Copy rejected-but-present agent output to a durable draft workspace."""
+    import shutil
+
+    if not files:
+        return ""
+    key = str(goal_id or run_id or "unknown")
+    draft = workspace_root / "agentic_drafts" / key / run_id
+    try:
+        if draft.exists():
+            shutil.rmtree(draft, ignore_errors=True)
+        draft.mkdir(parents=True, exist_ok=True)
+        if sandbox.exists():
+            for path in sorted(sandbox.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(sandbox).as_posix()
+                if rel.startswith(".regent"):
+                    continue
+                dest = draft / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dest)
+        else:
+            for rel, content in files.items():
+                dest = draft / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+        marker = draft / ".regent-verification-draft.json"
+        marker.write_text(
+            json.dumps(
+                {
+                    "goal_id": str(goal_id or ""),
+                    "run_id": run_id,
+                    "file_count": len(files),
+                    "status": "verification_rejected",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return str(draft)
+    except Exception:  # noqa: BLE001 — never block the rejection path
+        return ""
 
 
 def _resolve_base(plan: dict[str, Any]) -> Path | None:

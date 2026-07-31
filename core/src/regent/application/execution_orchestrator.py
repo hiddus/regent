@@ -3310,6 +3310,11 @@ class ExecutionOrchestrator:
                 metadata = dict(goal.metadata_json or {})
                 metadata["execution_stage"] = "ACHIEVED"
                 metadata["quality_verified_by"] = actor
+                # Drop stale mid-loop halt so console does not show prior
+                # build/deploy failure next to an achieved goal.
+                metadata.pop("halt", None)
+                metadata.pop("awaiting_human_intervention", None)
+                metadata.pop("awaiting_verification", None)
                 goal.metadata_json = metadata
             await self._append_conversation_event(
                 session,

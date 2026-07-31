@@ -307,6 +307,53 @@ async def test_execution_plan_checkpoint_and_no_reopen(db_sessions) -> None:
 
 
 @pytest.mark.asyncio
+async def test_execution_plan_run_scoped_keys_allow_replan(db_sessions) -> None:
+    """Replan with run-scoped keys must not hit terminal rewrite INVALID_STATE."""
+    goal_id = uuid.uuid4()
+    run1 = uuid.uuid4()
+    run2 = uuid.uuid4()
+    async with db_sessions() as session, session.begin():
+        session.add(
+            GoalModel(
+                id=goal_id,
+                original_input="replan todos",
+                created_by="tester",
+                correlation_id=uuid.uuid4(),
+                status=GoalState.ACTIVE.value,
+                metadata_json={},
+            )
+        )
+    svc = ExecutionPlanService(db_sessions)
+    await svc.upsert_items(
+        [
+            UpsertPlanItem(
+                goal_id=goal_id,
+                run_id=run1,
+                item_key=f"{run1}:1",
+                content="build",
+                status="completed",
+            )
+        ]
+    )
+    # New run uses a different scoped key — should succeed.
+    views = await svc.upsert_items(
+        [
+            UpsertPlanItem(
+                goal_id=goal_id,
+                run_id=run2,
+                item_key=f"{run2}:1",
+                content="rebuild",
+                status="pending",
+            )
+        ]
+    )
+    assert views[0].status == "pending"
+    assert views[0].item_key == f"{run2}:1"
+    keys = {i.item_key for i in await svc.list_items(goal_id)}
+    assert f"{run1}:1" in keys and f"{run2}:1" in keys
+
+
+@pytest.mark.asyncio
 async def test_dispatch_decision_entropy_replay(db_sessions) -> None:
     goal_id = uuid.uuid4()
     async with db_sessions() as session, session.begin():

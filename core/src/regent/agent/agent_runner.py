@@ -203,20 +203,34 @@ class AgentRunner:
                     and self._goal_id is not None
                 ):
                     from regent.application.execution_plan import UpsertPlanItem
+                    from regent.domain.errors import DomainError, ErrorCode
 
-                    await self._execution_plans.upsert_items(
-                        [
-                            UpsertPlanItem(
-                                goal_id=self._goal_id,
-                                run_id=self._run_id,
-                                item_key=str(item.get("id") or ""),
-                                content=str(item.get("content") or ""),
-                                status=str(item.get("status") or "pending"),
-                            )
-                            for item in self._toolkit.todos
-                            if item.get("id")
-                        ]
-                    )
+                    # Scope keys by run so replan/regenerate does not try to reopen
+                    # completed items from a prior run (INVALID_STATE → empty delivery).
+                    run_scope = str(self._run_id) if self._run_id is not None else ""
+                    try:
+                        await self._execution_plans.upsert_items(
+                            [
+                                UpsertPlanItem(
+                                    goal_id=self._goal_id,
+                                    run_id=self._run_id,
+                                    item_key=(
+                                        f"{run_scope}:{item.get('id')}"
+                                        if run_scope
+                                        else str(item.get("id") or "")
+                                    ),
+                                    content=str(item.get("content") or ""),
+                                    status=str(item.get("status") or "pending"),
+                                )
+                                for item in self._toolkit.todos
+                                if item.get("id")
+                            ]
+                        )
+                    except DomainError as exc:
+                        if exc.code != ErrorCode.INVALID_STATE:
+                            raise
+                        # Absorb terminal-immutability conflicts: keep generating
+                        # instead of aborting the whole run into DeliveryGapExhaust.
                 tool_msg = ChatMessage(
                     role="tool",
                     content=message_result,
