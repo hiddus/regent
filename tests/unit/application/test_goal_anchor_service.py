@@ -191,11 +191,11 @@ class TestValidateGoalAlignment:
 
 
 class TestValidateGoalAlignmentSemantic:
-    """Tests for LLM-based semantic alignment validation."""
+    """Tests for optional LLM semantic alignment (opt-in; not quality verification)."""
 
     @pytest.mark.asyncio
     async def test_aligned_html_passes(self):
-        """LLM says aligned=True -> result.aligned=True."""
+        """LLM says aligned=True -> result.aligned=True (explicit call only)."""
         mock_response = MagicMock()
         mock_response.output = _SemanticAlignmentResponse(
             aligned=True, reasoning="Page shows a live timestamp", confidence=0.9,

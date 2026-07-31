@@ -426,9 +426,10 @@ artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依
 
 #### 13.7.1 GQ-3 Canary 控制流
 
-- 启动期构造 `GeneratorSelector`（`generator_factory.build_generator_selector`），同时持有 `ArtifactBackedCodeGenerator` 与 `AgenticCodeGenerator`；编排器与 API 注入选择器而非单例。
+- 启动期构造 `GeneratorSelector`（`generator_factory.build_generator_selector`）：**轻量** `ArtifactBackedCodeGenerator` 可立即持有；`AgenticCodeGenerator` **首次命中 agentic 策略时再懒构造**（避免启动期双实例死重）。编排器与 API 注入选择器而非单例。
 - 生成时按 `goal_id` 调用 `GeneratorSelector.select(goal_id)`，由 `resolve_effective_generation_strategy` 解析有效策略后返回对应生成器，再对该具体生成器做 `assert_generator_consistency`。由此 canary 选中的 `agentic` goal 真正使用 agentic 生成器，而非因单例不符而 fail-closed（历史 bug）。
 - canary 排序强制：解析中先查 kill switch，再经 `canary_rollout_allowed(kill_switch, gq2_closed)` 校验 `generation_strategy_canary_gate`（GQ-2 验证后由运维置 True）。`canary_gate=False`（默认）或 `canary_percent=0` 时，任何 goal 都回落默认策略。
+- **已剪死重（2026-07-31）**：artifact-backed 写文件后默认**不再**额外调用 `validate_goal_alignment_semantic`（该 LLM「语义对齐」**不是**质量验证 / **非** fail-closed 真实验证；真实验证仍为 build/deploy/smoke/pytest）。仅当显式 `REGENT_GOAL_SEMANTIC_ALIGNMENT_ENABLED=true` 时才启用。
 
 #### 13.7.2 GQ-4 默认切换控制流
 

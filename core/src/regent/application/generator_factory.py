@@ -52,7 +52,11 @@ def build_code_generator(
             sessions=sessions,
         )
     else:
-        generator = ArtifactBackedCodeGenerator(provider, artifacts)
+        generator = ArtifactBackedCodeGenerator(
+            provider,
+            artifacts,
+            semantic_alignment_enabled=settings.goal_semantic_alignment_enabled,
+        )
 
     if enforce_consistency:
         assert_generator_consistency(strategy=strategy, generator=generator)
@@ -67,29 +71,53 @@ def plan_metadata_for_settings(
 
 
 class GeneratorSelector:
-    """Holds both strategy generators; selects the one matching the resolved
-    effective strategy for a concrete goal.
+    """Per-goal generator selection with lazy agentic construction.
 
-    The single injected ``self._generator`` historically capped canary at the
-    startup default (artifact-backed), so a canary-resolved ``agentic`` goal
-    would fail-closed on a metadata mismatch. The selector lets the runtime
-    honour the per-goal decision instead of forcing one singleton.
+    Eagerly holds the lightweight artifact-backed generator; constructs
+    ``AgenticCodeGenerator`` only on the first ``select()`` that resolves to
+    ``agentic``. Fail-closed consistency checks remain on construct / select.
     """
 
     def __init__(
         self,
         *,
         artifact_backed: Any,
-        agentic: Any,
         settings: Settings,
+        provider: ModelProvider,
+        artifacts: FileArtifactStore,
+        sessions: async_sessionmaker[AsyncSession] | None = None,
+        enforce_consistency: bool = True,
     ) -> None:
         self._artifact_backed = artifact_backed
-        self._agentic = agentic
+        self._agentic: Any | None = None
         self._settings = settings
+        self._provider = provider
+        self._artifacts = artifacts
+        self._sessions = sessions
+        self._enforce_consistency = enforce_consistency
 
     def select(self, goal_id: str | None = None) -> Any:
         strategy = resolve_effective_generation_strategy(self._settings, goal_id=goal_id)
-        return self._agentic if strategy == "agentic" else self._artifact_backed
+        if strategy == "agentic":
+            return self._ensure_agentic()
+        return self._artifact_backed
+
+    def _ensure_agentic(self) -> Any:
+        if self._agentic is None:
+            self._agentic = AgenticCodeGenerator(
+                self._provider,
+                self._artifacts,
+                workspace_root=Path(self._settings.workspace_root),
+                budget=AgentBudget(
+                    max_turns=self._settings.agent_max_turns,
+                    max_tokens=self._settings.agent_max_tokens,
+                    max_wall_seconds=self._settings.agent_max_wall_seconds,
+                ),
+                sessions=self._sessions,
+            )
+            if self._enforce_consistency:
+                assert_generator_consistency(strategy="agentic", generator=self._agentic)
+        return self._agentic
 
 
 def build_generator_selector(
@@ -100,28 +128,25 @@ def build_generator_selector(
     sessions: async_sessionmaker[AsyncSession] | None = None,
     enforce_consistency: bool = True,
 ) -> Any:
-    """Build a per-goal ``GeneratorSelector`` holding both strategy generators.
+    """Build a per-goal ``GeneratorSelector`` (artifact-backed eager; agentic lazy).
 
     Returns ``None`` when no model provider is configured (matches the prior
     single-generator behaviour where generation is skipped).
     """
     if provider is None:
         return None
-    artifact_backed = ArtifactBackedCodeGenerator(provider, artifacts)
-    agentic = AgenticCodeGenerator(
+    artifact_backed = ArtifactBackedCodeGenerator(
         provider,
         artifacts,
-        workspace_root=Path(settings.workspace_root),
-        budget=AgentBudget(
-            max_turns=settings.agent_max_turns,
-            max_tokens=settings.agent_max_tokens,
-            max_wall_seconds=settings.agent_max_wall_seconds,
-        ),
-        sessions=sessions,
+        semantic_alignment_enabled=settings.goal_semantic_alignment_enabled,
     )
     if enforce_consistency:
         assert_generator_consistency(strategy="artifact-backed", generator=artifact_backed)
-        assert_generator_consistency(strategy="agentic", generator=agentic)
     return GeneratorSelector(
-        artifact_backed=artifact_backed, agentic=agentic, settings=settings
+        artifact_backed=artifact_backed,
+        settings=settings,
+        provider=provider,
+        artifacts=artifacts,
+        sessions=sessions,
+        enforce_consistency=enforce_consistency,
     )

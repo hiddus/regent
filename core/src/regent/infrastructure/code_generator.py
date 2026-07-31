@@ -16,7 +16,7 @@ from regent.application.p1_contracts import (
 )
 from regent.application.p1_ports import GeneratedFileChangeSet
 from regent.infrastructure.artifact_store import FileArtifactStore
-from regent.application.goal_anchor_service import build_goal_anchored_prompt, validate_goal_alignment_semantic
+from regent.application.goal_anchor_service import build_goal_anchored_prompt
 from regent.infrastructure.html_evidence import (
     ensure_semantic_main,
     inject_observed_entries,
@@ -142,9 +142,18 @@ class ArtifactBackedCodeGenerator:
     generator_ref = "artifact-backed-code-generator-v1"
     prompt_version = "code-generation-v1"
 
-    def __init__(self, provider: ModelProvider, artifacts: FileArtifactStore) -> None:
+    def __init__(
+        self,
+        provider: ModelProvider,
+        artifacts: FileArtifactStore,
+        *,
+        semantic_alignment_enabled: bool = False,
+    ) -> None:
         self._provider = provider
         self._artifacts = artifacts
+        # Opt-in only. Default False: not quality verification, not fail-closed.
+        # See validate_goal_alignment_semantic / REGENT_GOAL_SEMANTIC_ALIGNMENT_ENABLED.
+        self._semantic_alignment_enabled = semantic_alignment_enabled
 
     async def generate(
         self,
@@ -236,11 +245,15 @@ class ArtifactBackedCodeGenerator:
                     rationale=generated.rationale,
                 )
             )
-        # GAC-GA: LLM semantic alignment check — validate generated HTML
-        # against the original goal BEFORE committing to artifacts.
-        # If the output is semantically unrelated to the goal, raise
-        # ValueError to trigger the delivery gap recovery retry.
-        if goal_text and generated_htmls:
+        # Optional LLM semantic alignment is NOT quality verification and is
+        # NOT fail-closed real verification. Default off (hot path must not
+        # pay an extra LLM call after artifact-backed write). Opt-in via
+        # REGENT_GOAL_SEMANTIC_ALIGNMENT_ENABLED / semantic_alignment_enabled.
+        if self._semantic_alignment_enabled and goal_text and generated_htmls:
+            from regent.application.goal_anchor_service import (
+                validate_goal_alignment_semantic,
+            )
+
             combined_html = "\n".join(generated_htmls)
             semantic_result = await validate_goal_alignment_semantic(
                 combined_html,

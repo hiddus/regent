@@ -12,10 +12,11 @@
 ## 二、控制流实现
 
 ### GQ-3 Canary（Tech-Spec §13.7.1）
-- 新增 `GeneratorSelector`（`core/src/regent/application/generator_factory.py`）：同时持有 `ArtifactBackedCodeGenerator` 与 `AgenticCodeGenerator`。
+- 新增 `GeneratorSelector`（`core/src/regent/application/generator_factory.py`）：持有轻量 `ArtifactBackedCodeGenerator`；`AgenticCodeGenerator` **首次命中 agentic 时懒构造**（2026-07-31 剪启动期双实例死重）。
 - Worker / API 启动期改调 `build_generator_selector`，注入选择器而非单例。
 - 生成时按 `goal_id` 调 `GeneratorSelector.select(goal_id)` → `resolve_effective_generation_strategy` 解析有效策略 → 返回对应生成器 → 再对该**具体**生成器做一致性检查。canary 选中的 `agentic` goal 真正使用 agentic 生成器。
 - **顺序强制**（O5）：`resolve_effective_generation_strategy` 新增 `gq2_closed`（源自 `config.generation_strategy_canary_gate`，默认 `False`），canary 必经 `canary_rollout_allowed(kill_switch, gq2_closed)` 校验 GQ-2→GQ-3 顺序。
+- **已剪死重**：artifact-backed 热路径默认不再调用 `validate_goal_alignment_semantic`（非真实验证；opt-in `REGENT_GOAL_SEMANTIC_ALIGNMENT_ENABLED`）。
 
 ### GQ-4 默认切换（Tech-Spec §13.7.2）
 - 新增 `core/src/regent/application/generation_strategy_promotion.py`：

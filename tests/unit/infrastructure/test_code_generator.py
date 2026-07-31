@@ -17,8 +17,10 @@ from regent.model import ModelUsage, StructuredModelResponse
 class FakeProvider:
     def __init__(self, output: GeneratedSourceBundle) -> None:
         self.output = output
+        self.calls = 0
 
     async def generate_structured(self, **_: Any) -> Any:
+        self.calls += 1
         return StructuredModelResponse(
             output=self.output,
             usage=ModelUsage(input_tokens=10, output_tokens=20),
@@ -39,7 +41,8 @@ async def test_generator_materializes_content_as_immutable_artifact(tmp_path: Pa
         ]
     )
     store = FileArtifactStore(tmp_path / "artifacts")
-    generator = ArtifactBackedCodeGenerator(FakeProvider(bundle), store)  # type: ignore[arg-type]
+    provider = FakeProvider(bundle)
+    generator = ArtifactBackedCodeGenerator(provider, store)  # type: ignore[arg-type]
     result = await generator.generate(
         {
             "planned_paths": ["src/app.py"],
@@ -50,6 +53,43 @@ async def test_generator_materializes_content_as_immutable_artifact(tmp_path: Pa
     assert change.content_artifact_uri is not None
     assert ArtifactUriResolver(store.root)(change.content_artifact_uri) == b"print('hello')\n"
     assert result.model_ref == "fake-model"
+    # Default path: only the generation call — no extra semantic-alignment LLM.
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_generator_default_skips_semantic_alignment_llm(tmp_path: Path) -> None:
+    """Hot path must not call LLM again for semantic alignment (default off)."""
+    html = (
+        "<html><body><main><h1>Clock</h1>"
+        '<button data-regent-event="activation">Go</button></main></body></html>'
+    )
+    bundle = GeneratedSourceBundle(
+        files=[
+            GeneratedSourceFile(
+                relative_path="index.html",
+                operation=SourceFileOperation.CREATE,
+                content=html,
+                rationale="page",
+                media_type="text/html",
+            )
+        ]
+    )
+    provider = FakeProvider(bundle)
+    generator = ArtifactBackedCodeGenerator(
+        provider,
+        FileArtifactStore(tmp_path / "artifacts"),  # type: ignore[arg-type]
+    )
+    await generator.generate(
+        {
+            "planned_paths": ["index.html"],
+            "hypothesis_decision_id": str(uuid.uuid4()),
+            "goal_text": "Show current timestamp",
+            "first_deliverable": "A live clock page",
+        }
+    )
+    assert provider.calls == 1
+    assert generator._semantic_alignment_enabled is False
 
 
 @pytest.mark.asyncio

@@ -358,10 +358,16 @@ def test_generator_selector_picks_per_goal_strategy(tmp_path) -> None:
     )
     selector = build_generator_selector(settings, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
     assert isinstance(selector, GeneratorSelector)
+    # Agentic must remain lazy until first agentic hit.
+    assert selector._agentic is None
     # No goal_id → default artifact-backed (canary needs a goal).
     assert isinstance(selector.select(None), ArtifactBackedCodeGenerator)
-    # canary_percent=100 → every goal bucket selects agentic.
+    assert selector._agentic is None
+    # canary_percent=100 → every goal bucket selects agentic (constructed on first hit).
     assert isinstance(selector.select("goal-x"), AgenticCodeGenerator)
+    assert selector._agentic is not None
+    # Second agentic select reuses the same instance.
+    assert selector.select("goal-y") is selector._agentic
     # Gate off → canary inert → artifact-backed even for canary bucket.
     settings_off = Settings(
         generation_strategy="artifact-backed",
@@ -372,6 +378,24 @@ def test_generator_selector_picks_per_goal_strategy(tmp_path) -> None:
     )
     selector_off = build_generator_selector(settings_off, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
     assert isinstance(selector_off.select("goal-x"), ArtifactBackedCodeGenerator)
+    assert selector_off._agentic is None
+
+
+def test_generator_selector_lazy_skips_agentic_at_build(tmp_path) -> None:
+    """build_generator_selector must not construct AgenticCodeGenerator eagerly."""
+    from regent.infrastructure.artifact_store import FileArtifactStore
+
+    artifacts = FileArtifactStore(tmp_path / "arts")
+    settings = Settings(
+        generation_strategy="artifact-backed",
+        workspace_root=str(tmp_path / "ws"),
+    )
+    selector = build_generator_selector(settings, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
+    assert isinstance(selector, GeneratorSelector)
+    assert selector._agentic is None
+    assert isinstance(selector.select(None), ArtifactBackedCodeGenerator)
+    assert selector._agentic is None
+
 
 
 def test_gq4_promotion_gate_enforced() -> None:

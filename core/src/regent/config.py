@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     agent_max_turns: int = Field(default=40, ge=1, le=200)
     agent_max_tokens: int = Field(default=200_000, ge=1_000)
     agent_max_wall_seconds: int = Field(default=900, ge=30)
+    # Opt-in LLM semantic alignment after artifact-backed write.
+    # Default False: NOT quality verification / NOT fail-closed real verification.
+    # Real gates remain build / deploy / smoke / pytest.
+    goal_semantic_alignment_enabled: bool = False
     observation_signing_key: SecretStr | None = None
     experiment_signing_key: SecretStr | None = None
     public_base_url: str | None = None

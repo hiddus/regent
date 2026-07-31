@@ -275,11 +275,15 @@ async def validate_goal_alignment_semantic(
     provider: Any,
     first_deliverable: str = "",
 ) -> GoalAlignmentResult:
-    """Use an LLM to semantically validate HTML against the original goal.
+    """Optional LLM semantic alignment hint — NOT quality verification.
 
-    This is a slower but much more accurate check than keyword-based
-    ``validate_goal_alignment``.  Call it when keyword check is borderline
-    or as a final gate before delivery.
+    This is **not** fail-closed real verification (build/deploy/smoke/pytest
+    remain the real gates). It is slower than keyword
+    ``validate_goal_alignment`` and historically sat on the artifact-backed
+    hot path as dead weight (extra LLM round-trip after write).
+
+    Keep off by default. Call only when explicitly opted in via
+    ``REGENT_GOAL_SEMANTIC_ALIGNMENT_ENABLED`` / ``semantic_alignment_enabled``.
     """
     user_content = f"ORIGINAL GOAL:\n{goal_text}\n"
     if first_deliverable:
