@@ -34,6 +34,22 @@ function taskAlreadyResolved(items: Message[], taskId?: string) {
   })
 }
 
+function approveAlreadyDone(items: Message[], goalId?: string, taskId?: string) {
+  if (taskAlreadyResolved(items, taskId)) return true
+  if (!goalId && !taskId) {
+    return items.some(m => m.message_type === 'APPROVE_RESULT')
+  }
+  return items.some(m => {
+    if (m.message_type !== 'APPROVE_RESULT') return false
+    const mid = m.metadata?.goal_id as string | undefined
+    const tid = String(m.metadata?.task_id || '')
+    if (taskId && tid && tid === taskId) return true
+    if (goalId && mid && mid === goalId) return true
+    if (!goalId && !tid) return true
+    return Boolean(taskId) && tid === taskId
+  })
+}
+
 function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   m: Message
   messages: Message[]
@@ -54,8 +70,39 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
     return null
   }
 
-  const taskMeta = m.metadata || {}
+  const taskMeta = { ...(m.metadata || {}) } as Record<string, unknown>
   const taskId = String(taskMeta.id || taskMeta.human_task_id || '')
+  const isExhaustedHandoff =
+    m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
+    m.message_type === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
+    m.message_type === 'RESEARCH_MORE_ADAPT_EXHAUSTED' ||
+    (m.message_type === 'HUMAN_TASK_REQUIRED' &&
+      (Boolean(taskMeta.confirmation) ||
+        String(taskMeta.stage || '').includes('DELIVERY_GAP') ||
+        String(taskMeta.stage || '').includes('NEEDS_HUMAN')))
+  // Historical exhausted messages may lack confirmation/task id — still show operable card.
+  if (isExhaustedHandoff && !taskMeta.confirmation) {
+    taskMeta.confirmation = {
+      action: String(taskMeta.task_type || 'DELIVERY_GAP_INTERVENE'),
+      summary: '自动修复已用尽，需要你介入',
+      rules_applied: ['stage:DELIVERY_GAP_EXHAUSTED'],
+      risk_level: 'high',
+      rationale: '能力阶梯已穷尽；批准后将重新规划生成，拒绝则保持等待你的下一步指示。',
+      on_allow: '重置恢复计数并继续生成',
+      on_deny: '停止自动推进，等待你补充方向',
+      timeout_seconds: 300,
+      default_on_timeout: 'deny',
+      detail: m.content?.slice(0, 800) || null,
+    }
+  }
+  if (isExhaustedHandoff && !taskMeta.task_type) {
+    taskMeta.task_type = 'DELIVERY_GAP_INTERVENE'
+  }
+  if (isExhaustedHandoff && !taskMeta.prompt) {
+    taskMeta.prompt = m.content
+  }
+  const showTaskCard =
+    m.message_type === 'HUMAN_TASK_REQUIRED' || isExhaustedHandoff
 
   return (
     <article className={`message ${roleClass}`}>
@@ -88,11 +135,14 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
           </div>
         )}
 
-        {(m.message_type === 'HUMAN_TASK_REQUIRED' ||
-          (m.message_type === 'DELIVERY_GAP_EXHAUSTED' && Boolean(taskId))) && (
+        {showTaskCard && (
           <TaskCard
             task={taskMeta}
-            resolved={taskAlreadyResolved(messages, taskId)}
+            resolved={approveAlreadyDone(
+              messages,
+              (taskMeta.goal_id as string | undefined) || (m.metadata?.goal_id as string | undefined),
+              taskId || undefined,
+            )}
             onAction={onTaskAction}
           />
         )}

@@ -718,6 +718,11 @@ body {
   transition: opacity 0.15s;
 }
 .task-btn.approve { background: var(--accent); color: white; }
+.task-btn.approve-always {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
 .task-btn.reject { background: var(--danger); color: white; }
 .task-btn:hover { opacity: 0.85; }
 .task-btn:disabled { opacity: 0.4; cursor: not-allowed; }

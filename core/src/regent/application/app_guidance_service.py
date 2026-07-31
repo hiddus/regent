@@ -1178,6 +1178,8 @@ class AppGuidanceService:
             # If goal is WAITING_HUMAN but no HumanTask records, try transitioning
             goal_status = str(context["goal"]["status"])
             if goal_status == "WAITING_HUMAN":
+                # Check resume need BEFORE transition (flags still intact).
+                needs_gap_resume = await self._goal_needs_delivery_gap_resume(goal_id)
                 goal_version = int(context["goal"].get("version", 0))
                 try:
                     await TransitionService(self._sessions).transition_goal(
@@ -1195,7 +1197,7 @@ class AppGuidanceService:
                         project_id, message, actor, interpretation, model, response
                     )
                 # Delivery-gap exhaust: must replan + regenerate, not empty ACTIVE.
-                if await self._goal_needs_delivery_gap_resume(goal_id):
+                if needs_gap_resume:
                     recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
                         goal_id=goal_id,
                         project_id=project_id,
@@ -1227,11 +1229,23 @@ class AppGuidanceService:
                             "method": recovery.method,
                         },
                     )
+                # Empty resume: still clear stuck "等待你确认" live_action strip.
+                from regent.application.live_action import set_goal_live_action
+
+                await set_goal_live_action(
+                    self._sessions,
+                    goal_id,
+                    "已批准，正在继续执行",
+                    stage="ACTIVE",
+                    event_type="APPROVE_RESULT",
+                )
                 response = "已批准。目标恢复执行。"
             else:
                 response = "当前没有待批准的任务。"
             return await self._persist_simple(
-                project_id, message, actor, interpretation, model, response
+                project_id, message, actor, interpretation, model, response,
+                assistant_type="APPROVE_RESULT",
+                assistant_metadata={"approved": True, "empty_resume": True},
             )
 
         # Complete the first pending human task
@@ -1299,6 +1313,7 @@ class AppGuidanceService:
                 return False
             meta = dict(goal.metadata_json or {})
             termination = dict(meta.get("termination") or {})
+            halt = dict(meta.get("halt") or {})
             if meta.get("awaiting_human_intervention"):
                 return True
             if termination.get("ladder_exhausted"):
@@ -1306,7 +1321,12 @@ class AppGuidanceService:
             if meta.get("pending_delivery_gap_human"):
                 return True
             stage = str(meta.get("execution_stage") or "")
-            return "DELIVERY_GAP" in stage or stage.endswith("_NEEDS_HUMAN")
+            halt_stage = str(halt.get("stage") or "")
+            if "DELIVERY_GAP" in stage or stage.endswith("_NEEDS_HUMAN") or stage.endswith("_EXHAUSTED"):
+                return True
+            if "DELIVERY_GAP" in halt_stage or halt_stage.endswith("_EXHAUSTED"):
+                return True
+            return False
 
     async def _handle_reject(
         self,

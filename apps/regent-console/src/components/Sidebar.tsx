@@ -155,6 +155,15 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
   const actionElapsed = !Number.isNaN(actionAt)
     ? Math.max(0, Math.floor((now - actionAt) / 1000))
     : null
+  // Stale strip: goal already ACTIVE/approved but live_action still says waiting.
+  const waitingLive =
+    !!liveSummary &&
+    (liveSummary.includes('等待你确认') || liveSummary.includes('需要你介入'))
+  const stripSummary =
+    waitingLive && goal.status === 'ACTIVE'
+      ? '已批准，正在继续执行'
+      : liveSummary
+  const showElapsed = !(waitingLive && goal.status === 'ACTIVE')
 
   // Compute progress from nodes
   const completedCount = progressNodes
@@ -226,13 +235,13 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
       <div className={`core-live-strip tone-${live.tone}`}>
         <span className="live-pulse-dot" aria-hidden />
         <span className="core-live-text">
-          {liveSummary
-            ? `Core 正在：${liveSummary}`
+          {stripSummary
+            ? `Core 正在：${stripSummary}`
             : live.text.startsWith('Core：')
               ? live.text
               : `Core 正在执行 · ${label}`}
         </span>
-        {actionElapsed != null && (
+        {showElapsed && actionElapsed != null && (
           <span className="core-live-elapsed">{actionElapsed}s</span>
         )}
       </div>

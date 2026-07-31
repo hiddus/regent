@@ -109,6 +109,18 @@ export function TaskCard({ task, resolved = false, onAction }: TaskCardProps) {
           >
             允许
           </button>
+          {!confirmation.safety_invariant && (
+            <button
+              className="task-btn approve-always"
+              title="本次会话对该类动作总是允许（首版等同允许）"
+              onClick={() => {
+                setDone(true)
+                onAction(taskId, true)
+              }}
+            >
+              总是允许
+            </button>
+          )}
           <button
             className="task-btn reject"
             onClick={() => {
@@ -122,7 +134,9 @@ export function TaskCard({ task, resolved = false, onAction }: TaskCardProps) {
       )}
       {done && <p className="task-done">已处理</p>}
       {!done && !taskId && (
-        <p className="task-done">任务信息不完整，请在下方输入「批准」或「拒绝」</p>
+        <p className="task-done">
+          任务卡缺少 task id — 请用下方快捷「批准」/「拒绝」，或输入「批准」触发恢复
+        </p>
       )}
 
       {(confirmation.detail || prompt) && (

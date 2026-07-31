@@ -1572,6 +1572,9 @@ class ExecutionOrchestrator:
                     )
                     return
                 if recovery.terminal_exhaust:
+                    # recover() already wrote DELIVERY_GAP_EXHAUSTED + HumanTask + live_action.
+                    # Only converge Goal → WAITING_HUMAN; avoid a second HUMAN_TASK_REQUIRED
+                    # EVENT that lacks task id and keeps the console on a bubble-only path.
                     await self._halt_goal_stage(
                         goal_id,
                         project_id,
@@ -1585,6 +1588,7 @@ class ExecutionOrchestrator:
                             "attempts": recovery.attempts,
                             "gac": "GAC-D5",
                         },
+                        append_conversation=False,
                     )
                     return
                 logger.warning(
@@ -1686,6 +1690,7 @@ class ExecutionOrchestrator:
                         "attempts": recovery.attempts,
                         "gac": "GAC-D5",
                     },
+                    append_conversation=False,
                 )
                 return
             logger.warning(
@@ -3675,6 +3680,7 @@ class ExecutionOrchestrator:
         actor: str,
         extra: dict[str, object] | None = None,
         event_type: str = "GOAL_EXECUTION_STAGE_HALTED",
+        append_conversation: bool = True,
     ) -> None:
         """GAC-A4: mark observable mid-chain exit; optionally converge Goal."""
         expected_version = 0
@@ -3697,18 +3703,22 @@ class ExecutionOrchestrator:
             if terminal == GoalCommand.WAIT_FOR_HUMAN:
                 metadata["awaiting_human_intervention"] = True
             goal.metadata_json = metadata
-            from regent.application.confirmation_present import enrich_halt_extra
+            from sqlalchemy.orm.attributes import flag_modified
 
-            event_meta = enrich_halt_extra(
-                event_type, stage, message, {"goal_id": str(goal_id), "stage": stage, **(extra or {})}
-            )
-            await self._append_conversation_event(
-                session,
-                project_id,
-                event_type,
-                message,
-                event_meta,
-            )
+            flag_modified(goal, "metadata_json")
+            if append_conversation:
+                from regent.application.confirmation_present import enrich_halt_extra
+
+                event_meta = enrich_halt_extra(
+                    event_type, stage, message, {"goal_id": str(goal_id), "stage": stage, **(extra or {})}
+                )
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    event_type,
+                    message,
+                    event_meta,
+                )
         if terminal is not None and status == "ACTIVE":
             try:
                 await TransitionService(self._sessions).transition_goal(

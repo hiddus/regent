@@ -180,13 +180,21 @@ const STATUS_RANK: Record<NodeStatus, number> = {
   failed: 4,
 }
 
+const INTERACTIVE_TASK_TYPES = new Set([
+  'APP_CONFIRMATION_REQUIRED',
+  'HUMAN_TASK_REQUIRED',
+  'DELIVERY_GAP_EXHAUSTED',
+  'BUILD_DELIVERY_GAP_EXHAUSTED',
+  'RESEARCH_MORE_ADAPT_EXHAUSTED',
+  'CORRECTION_APPLIED',
+  'APPROVE_RESULT',
+  'REJECT_RESULT',
+])
+
 export function isProgressEvent(m: Message): boolean {
+  if (INTERACTIVE_TASK_TYPES.has(m.message_type)) return false
   if (m.role === 'EVENT') return true
-  return TYPE_INDEX.has(m.message_type) && m.message_type !== 'APP_CONFIRMATION_REQUIRED'
-    && m.message_type !== 'HUMAN_TASK_REQUIRED'
-    && m.message_type !== 'CORRECTION_APPLIED'
-    && m.message_type !== 'APPROVE_RESULT'
-    && m.message_type !== 'REJECT_RESULT'
+  return TYPE_INDEX.has(m.message_type)
 }
 
 /** Interactive / chat messages that remain as bubbles */
@@ -198,6 +206,9 @@ export function isChatSurfaceMessage(m: Message): boolean {
   return (
     t === 'APP_CONFIRMATION_REQUIRED' ||
     t === 'HUMAN_TASK_REQUIRED' ||
+    t === 'DELIVERY_GAP_EXHAUSTED' ||
+    t === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
+    t === 'RESEARCH_MORE_ADAPT_EXHAUSTED' ||
     t === 'CORRECTION_APPLIED' ||
     t === 'PREVIEW_READY' ||
     t === 'PREVIEW_DEPLOYMENT_SUCCEEDED'
@@ -381,12 +392,15 @@ export function buildTimeline(messages: Message[]): TimelineItem[] {
     if (node && !consumedNodeKeys.has(node.key)) {
       items.push({ kind: 'node', node })
       consumedNodeKeys.add(node.key)
-      // Keep interactive chat surface messages
+      // Keep interactive chat / confirmation surfaces (incl. exhausted handoffs)
       if (isChatSurfaceMessage(m) && m.role !== 'EVENT') {
         items.push({ kind: 'message', message: m })
       } else if (
         m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
         m.message_type === 'HUMAN_TASK_REQUIRED' ||
+        m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
+        m.message_type === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
+        m.message_type === 'RESEARCH_MORE_ADAPT_EXHAUSTED' ||
         m.message_type === 'CORRECTION_APPLIED'
       ) {
         items.push({ kind: 'message', message: m })
