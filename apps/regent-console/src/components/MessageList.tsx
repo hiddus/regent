@@ -88,7 +88,8 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
           </div>
         )}
 
-        {m.message_type === 'HUMAN_TASK_REQUIRED' && (
+        {(m.message_type === 'HUMAN_TASK_REQUIRED' ||
+          (m.message_type === 'DELIVERY_GAP_EXHAUSTED' && Boolean(taskId))) && (
           <TaskCard
             task={taskMeta}
             resolved={taskAlreadyResolved(messages, taskId)}

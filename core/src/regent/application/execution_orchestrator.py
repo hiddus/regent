@@ -44,6 +44,7 @@ from regent.application.execution_events import (
     CAPABILITY_RESOLUTION_REQUESTED,
     CAPABILITY_RESOLUTION_SATISFIED,
     DEPENDENCY_RESOLUTION_REQUESTED,
+    DELIVERY_GAP_HUMAN_APPROVED,
     DISCOVERY_COMPLETED,
     DISCOVERY_ROUND_REQUESTED,
     FAILURE_COMPLIANCE,
@@ -2358,6 +2359,60 @@ class ExecutionOrchestrator:
             }
         )
 
+    async def handle_delivery_gap_human_approved(self, payload: dict[str, Any]) -> None:
+        """After DELIVERY_GAP_INTERVENE approve: reset ladder and re-enter DeliveryGapRecovery."""
+        goal_id = uuid.UUID(str(payload["goal_id"]))
+        project_id = uuid.UUID(str(payload["app_project_id"]))
+        actor = str(payload.get("actor", "regent-core"))
+        human_message = str(payload.get("message") or "")
+
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                return
+            status = goal.status
+            version = goal.version
+            correlation_id = goal.correlation_id
+
+        if status == "WAITING_HUMAN":
+            try:
+                await TransitionService(self._sessions).transition_goal(
+                    TransitionContext(goal_id, version, actor, correlation_id),
+                    GoalCommand.HUMAN_RESOLVED,
+                )
+            except DomainError:
+                logger.warning(
+                    "delivery gap human approve transition skipped",
+                    extra={"goal_id": str(goal_id)},
+                )
+
+        recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+            goal_id=goal_id,
+            project_id=project_id,
+            actor=actor,
+            human_message=human_message or None,
+        )
+        if recovery.recovered:
+            logger.info(
+                "delivery gap resumed after human approve",
+                extra={
+                    "goal_id": str(goal_id),
+                    "attempts": recovery.attempts,
+                    "method": recovery.method,
+                },
+            )
+            return
+        await self._halt_goal_stage(
+            goal_id,
+            project_id,
+            stage="DELIVERY_GAP_RESUME_BLOCKED",
+            message=recovery.message or "人工批准后仍无法重开交付恢复。",
+            terminal=GoalCommand.WAIT_FOR_HUMAN,
+            actor=actor,
+            event_type="HUMAN_TASK_REQUIRED",
+            extra={"gap_kind": recovery.gap_kind, "gac": "GAC-D1"},
+        )
+
     async def _execute_approved_preview_deployment(self, payload: dict[str, Any]) -> None:
         """Approve (already human-gated) candidate and run preview deployment."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
@@ -3884,6 +3939,7 @@ def get_p1_event_handlers(
         QUALITY_APPROVAL_REQUESTED: orchestrator.handle_quality_approval_requested,
         QUALITY_APPROVAL_COMPLETED: orchestrator.handle_quality_approval_completed,
         RELEASE_APPROVAL_COMPLETED: orchestrator.handle_release_approval_completed,
+        DELIVERY_GAP_HUMAN_APPROVED: orchestrator.handle_delivery_gap_human_approved,
         "TimerFired": orchestrator.handle_timer_fired,
         # P1-C: V3 domain event handlers
         "ReorganizationTriggered": orchestrator.handle_reorganization_triggered,

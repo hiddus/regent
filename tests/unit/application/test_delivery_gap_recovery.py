@@ -299,6 +299,74 @@ async def test_recover_stops_after_ladder_exhausted() -> None:
     assert goal.metadata_json.get("execution_stage") == "WAITING_HUMAN"
     assert goal.metadata_json.get("awaiting_human_intervention") is True
     assert goal.metadata_json.get("termination", {}).get("handoff") == "WAITING_HUMAN"
+    assert goal.metadata_json.get("pending_delivery_gap_human", {}).get("human_task_id")
+
+
+@pytest.mark.asyncio
+async def test_resume_after_human_resets_attempts_and_recovers() -> None:
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=2,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        app_project_id=project_id,
+        metadata_json={
+            "delivery_gap_recovery_attempts": 10,
+            "awaiting_human_intervention": True,
+            "delivery_gap_kind": "presentation",
+            "requirement_revision_id": str(req_id),
+            "capability_resolution_plan_id": str(plan_id),
+            "termination": {
+                "ladder_exhausted": True,
+                "gap_reasons": ["stylesheet-present: missing"],
+                "handoff": "WAITING_HUMAN",
+            },
+        },
+    )
+    factory = _goal_session(goal, None)
+    reorg = _fake_reorg(goal_id)
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
+    ):
+        svc = DeliveryGapRecoveryService(factory)
+        svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
+        result = await svc.resume_after_human(
+            goal_id=goal_id,
+            project_id=project_id,
+            actor="user",
+            human_message="批准",
+        )
+
+    assert result.recovered is True
+    assert result.attempts == 1
+    assert goal.metadata_json.get("awaiting_human_intervention") is False
+    assert "termination" not in (goal.metadata_json or {})
+    assert goal.metadata_json.get("delivery_gap_recovery_attempts") == 1
+    assert "human-authorized-continue" in str(
+        goal.metadata_json.get("delivery_gap_reasons")
+        or goal.metadata_json.get("capability_resolution")
+        or ""
+    ) or result.method in {"REUSE", "CONFIGURE", "COMPOSE", "BUILD", "ACQUIRE"}
 
 
 @pytest.mark.asyncio

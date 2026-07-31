@@ -38,6 +38,7 @@ PREVIEW_DEPLOYMENT_SUCCEEDED = "PreviewDeploymentSucceeded"
 QUALITY_APPROVAL_REQUESTED = "QualityApprovalRequested"
 QUALITY_APPROVAL_COMPLETED = "QualityApprovalCompleted"
 RELEASE_APPROVAL_COMPLETED = "ReleaseApprovalCompleted"
+DELIVERY_GAP_HUMAN_APPROVED = "DeliveryGapHumanApproved"
 
 # All P1 main chain event types (in execution order)
 P1_MAIN_CHAIN_EVENTS: tuple[str, ...] = (

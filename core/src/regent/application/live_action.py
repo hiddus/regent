@@ -35,7 +35,9 @@ EVENT_LIVE_SUMMARY: dict[str, str] = {
     "DELIVERY_GAP_CAPABILITY_ESCALATED": "正在升级能力并重试交付",
     "MILESTONE_ATTAINED": "当前阶段已达成",
     "GOAL_ACHIEVED": "目标已完成",
-    "HUMAN_TASK_REQUIRED": "等待你确认后继续",
+    "HUMAN_TASK_REQUIRED": "等待你确认以继续",
+    "DELIVERY_GAP_EXHAUSTED": "等待你确认以继续",
+    "DELIVERY_GAP_HUMAN_APPROVED": "已批准，正在重新规划并继续生成",
 }
 
 

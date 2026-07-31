@@ -17,12 +17,13 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from regent.application.capability_acquire_service import (
     AcquireRequest,
@@ -43,12 +44,14 @@ from regent.application.capability_resolution_service import (
     CapabilityResolutionService,
     ResolutionMethod,
 )
+from regent.application.confirmation_present import confirmation_for_human_task
 from regent.application.execution_events import (
     GENERATION_RUN_REQUESTED,
     EventEnvelope,
     make_idempotency_key,
     make_outbox_event,
 )
+from regent.application.live_action import merge_live_action_into_metadata
 from regent.application.memory_service import AdmitMemory, MemoryKind, MemoryService
 from regent.application.organization_service import OrganizationService
 from regent.application.p1_contracts import canonical_hash
@@ -66,10 +69,16 @@ from regent.infrastructure.evidence_capability import (
 )
 from regent.infrastructure.models import (
     CapabilityModel,
+    CapabilityResolutionPlanModel,
     ConversationMessageModel,
     ConversationModel,
+    DiscoveryRoundModel,
+    GenerationPlanModel,
     GoalModel,
     GoalSpecModel,
+    HumanTaskModel,
+    ProductHypothesisModel,
+    RequirementRevisionModel,
 )
 from regent.infrastructure.product_surface_capability import (
     CAPABILITY_NAME as PRODUCT_SURFACE_NAME,
@@ -308,13 +317,53 @@ class DeliveryGapRecoveryService:
                     "gac": "GAC-D1",
                     "handoff": "WAITING_HUMAN",
                 }
-                goal.metadata_json = metadata
                 message = (
                     "交付仍未达成 Goal。已穷举 ATTRIBUTE_3 能力阶梯 "
                     f"（REUSE→CONFIGURE→COMPOSE→BUILD→ACQUIRE ×{ATTAINMENT_LADDER_CYCLES} 轮，"
                     f"共 {MAX_ATTAINMENT_ESCALATION_ATTEMPTS} 次）。"
                     "拒绝发布不可靠表面；需要你补充方向或授权后继续，不会标记为已完成。"
                 )
+                task_id = uuid.uuid4()
+                confirmation = confirmation_for_human_task(
+                    task_type="DELIVERY_GAP_INTERVENE",
+                    summary="自动修复已用尽，需要你介入",
+                    rationale=(
+                        "能力阶梯已穷尽且拒绝发布不可靠表面；"
+                        "批准后将重置恢复计数并重新规划生成，拒绝则保持等待你的下一步指示。"
+                    ),
+                    detail="; ".join(reasons) if reasons else message[:500],
+                    prompt=message,
+                    extra_rules=["stage:DELIVERY_GAP_EXHAUSTED", "gac:GAC-D1"],
+                )
+                timeout_sec = int(confirmation.get("timeout_seconds") or 300)
+                if confirmation.get("safety_invariant"):
+                    timeout_sec = max(timeout_sec, 24 * 3600)
+                session.add(
+                    HumanTaskModel(
+                        id=task_id,
+                        goal_id=goal_id,
+                        work_id=None,
+                        run_id=None,
+                        task_type="DELIVERY_GAP_INTERVENE",
+                        prompt=message,
+                        requested_by=actor,
+                        due_at=datetime.now(UTC) + timedelta(seconds=max(timeout_sec, 60)),
+                        status="OPEN",
+                    )
+                )
+                metadata["pending_delivery_gap_human"] = {
+                    "human_task_id": str(task_id),
+                    "gap_kind": gap_kind,
+                    "gap_reasons": reasons,
+                    "attempts_tried": attempts,
+                }
+                goal.metadata_json = merge_live_action_into_metadata(
+                    metadata,
+                    "等待你确认以继续",
+                    stage="WAITING_HUMAN",
+                    event_type="DELIVERY_GAP_EXHAUSTED",
+                )
+                flag_modified(goal, "metadata_json")
                 await self._append(
                     session,
                     project_id,
@@ -323,10 +372,15 @@ class DeliveryGapRecoveryService:
                     content=message,
                     metadata={
                         "goal_id": str(goal_id),
+                        "id": str(task_id),
+                        "human_task_id": str(task_id),
+                        "task_type": "DELIVERY_GAP_INTERVENE",
                         "attempts": attempts,
                         "gap_reasons": reasons,
                         "gap_kind": gap_kind,
                         "handoff": "WAITING_HUMAN",
+                        "prompt": message,
+                        "confirmation": confirmation,
                     },
                 )
                 return DeliveryGapRecoveryResult(
@@ -528,6 +582,137 @@ class DeliveryGapRecoveryService:
             )
         assert result is not None
         return result
+
+    async def resume_after_human(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        actor: str,
+        human_message: str | None = None,
+    ) -> DeliveryGapRecoveryResult:
+        """After human authorizes continue: reset ladder counter and re-enter recover/replan.
+
+        Chat「批准」must not only flip WAITING_HUMAN→ACTIVE (fake resume). Without this,
+        delivery_gap_recovery_attempts stays exhausted and nothing regenerates.
+        """
+        gap_reasons: list[str] = []
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                return DeliveryGapRecoveryResult(
+                    False, "BLOCK", "goal not found", 0, terminal_exhaust=False
+                )
+            metadata = dict(goal.metadata_json or {})
+            termination = dict(metadata.get("termination") or {})
+            pending = dict(metadata.get("pending_delivery_gap_human") or {})
+            raw_reasons = (
+                pending.get("gap_reasons")
+                or termination.get("gap_reasons")
+                or metadata.get("delivery_gap_reasons")
+                or []
+            )
+            if isinstance(raw_reasons, list):
+                gap_reasons = [str(r) for r in raw_reasons if str(r).strip()][:12]
+            if human_message and human_message.strip():
+                gap_reasons = [
+                    f"human-authorized-continue: {human_message.strip()[:200]}",
+                    *gap_reasons,
+                ][:12]
+            if not gap_reasons:
+                gap_reasons = [
+                    "human-authorized-continue: ladder was exhausted; replan required"
+                ]
+
+            metadata["delivery_gap_recovery_attempts"] = 0
+            metadata["awaiting_human_intervention"] = False
+            metadata.pop("termination", None)
+            metadata.pop("pending_delivery_gap_human", None)
+            metadata["execution_stage"] = "GENERATING"
+            metadata["human_resume_nonce"] = (
+                f"human:{datetime.now(UTC).isoformat()}:{uuid.uuid4().hex[:8]}"
+            )
+            goal.metadata_json = merge_live_action_into_metadata(
+                metadata,
+                "已批准，正在重新规划并继续生成",
+                stage="GENERATING",
+                event_type="ATTAINMENT_RECOVERY_STARTED",
+            )
+            flag_modified(goal, "metadata_json")
+
+            req_id, plan_id = await self._resolve_generation_ids(session, goal_id)
+            if req_id is None or plan_id is None:
+                await self._append(
+                    session,
+                    project_id,
+                    role="ASSISTANT",
+                    message_type="ATTAINMENT_RECOVERY_STARTED",
+                    content=(
+                        "已批准，但缺少生成谱系（requirement/plan），无法自动重开交付恢复；"
+                        "请补充方向或重新确认目标。"
+                    ),
+                    metadata={"goal_id": str(goal_id), "human_resume": True},
+                )
+                return DeliveryGapRecoveryResult(
+                    False,
+                    "BLOCK",
+                    "missing generation lineage after human approve",
+                    0,
+                    str(metadata.get("delivery_gap_kind") or "product_surface"),
+                )
+
+        return await self.recover(
+            goal_id=goal_id,
+            project_id=project_id,
+            requirement_revision_id=req_id,
+            capability_resolution_plan_id=plan_id,
+            actor=actor,
+            gap_reasons=gap_reasons,
+            halt_context={
+                "stage": "HUMAN_AUTHORIZED_RESUME",
+                "message": (human_message or "human approved continue")[:400],
+                "last_error": "human-authorized-replan",
+                "gac": "GAC-D1",
+            },
+        )
+
+    @staticmethod
+    async def _resolve_generation_ids(
+        session: AsyncSession, goal_id: uuid.UUID
+    ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+        goal = await session.get(GoalModel, goal_id)
+        meta = dict((goal.metadata_json if goal else None) or {})
+        raw_plan = meta.get("capability_resolution_plan_id")
+        raw_req = meta.get("requirement_revision_id")
+        if raw_plan and raw_req:
+            return uuid.UUID(str(raw_req)), uuid.UUID(str(raw_plan))
+        if raw_plan:
+            plan = await session.get(
+                CapabilityResolutionPlanModel, uuid.UUID(str(raw_plan))
+            )
+            if plan is not None:
+                return plan.requirement_revision_id, plan.id
+        gen = await session.scalar(
+            select(GenerationPlanModel)
+            .join(
+                RequirementRevisionModel,
+                RequirementRevisionModel.id == GenerationPlanModel.requirement_revision_id,
+            )
+            .join(
+                ProductHypothesisModel,
+                ProductHypothesisModel.id == RequirementRevisionModel.hypothesis_id,
+            )
+            .join(
+                DiscoveryRoundModel,
+                DiscoveryRoundModel.id == ProductHypothesisModel.round_id,
+            )
+            .where(DiscoveryRoundModel.goal_id == goal_id)
+            .order_by(GenerationPlanModel.created_at.desc())
+            .limit(1)
+        )
+        if gen is not None:
+            return gen.requirement_revision_id, gen.capability_resolution_plan_id
+        return None, None
 
     async def _admit_failure_memories(
         self,

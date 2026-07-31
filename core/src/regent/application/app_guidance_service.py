@@ -1148,6 +1148,8 @@ class AppGuidanceService:
         model: str,
     ) -> GuidanceReceipt:
         """Approve pending human tasks for this goal."""
+        from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
+
         context = await self._context(project_id)
         goal_id = uuid.UUID(str(context["goal"]["id"]))
         pending = context.get("pending_human_tasks", [])
@@ -1187,9 +1189,45 @@ class AppGuidanceService:
                         ),
                         GoalCommand.HUMAN_RESOLVED,
                     )
-                    response = "已批准。目标恢复执行。"
                 except DomainError as exc:
                     response = f"批准失败: {exc.message}"
+                    return await self._persist_simple(
+                        project_id, message, actor, interpretation, model, response
+                    )
+                # Delivery-gap exhaust: must replan + regenerate, not empty ACTIVE.
+                if await self._goal_needs_delivery_gap_resume(goal_id):
+                    recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+                        goal_id=goal_id,
+                        project_id=project_id,
+                        actor=actor,
+                        human_message=message,
+                    )
+                    if recovery.recovered:
+                        response = (
+                            "已批准。正在重新规划并继续生成交付物"
+                            f"（恢复阶梯第 {recovery.attempts} 次，方法 {recovery.method}）。"
+                        )
+                    else:
+                        response = (
+                            "已批准并尝试恢复执行，但未能自动重开交付恢复："
+                            f"{recovery.message}"
+                        )
+                    return await self._persist_simple(
+                        project_id,
+                        message,
+                        actor,
+                        interpretation,
+                        model,
+                        response,
+                        assistant_type="APPROVE_RESULT",
+                        assistant_metadata={
+                            "approved": True,
+                            "delivery_gap_resume": True,
+                            "recovered": recovery.recovered,
+                            "method": recovery.method,
+                        },
+                    )
+                response = "已批准。目标恢复执行。"
             else:
                 response = "当前没有待批准的任务。"
             return await self._persist_simple(
@@ -1198,6 +1236,7 @@ class AppGuidanceService:
 
         # Complete the first pending human task
         task_id = uuid.UUID(pending[0]["id"])
+        task_type = str(pending[0].get("task_type") or "")
         await HumanTaskService(self._sessions).complete(
             task_id,
             assigned_to=actor,
@@ -1221,7 +1260,15 @@ class AppGuidanceService:
             except DomainError:
                 pass  # Task completed even if transition fails
 
-        response = f"已批准任务: {pending[0]['task_type']}\n{pending[0]['prompt'][:100]}"
+        # DELIVERY_GAP_INTERVENE: HumanTaskService.complete emits DeliveryGapHumanApproved
+        # which resumes the ladder; keep chat copy honest about replan.
+        if task_type == "DELIVERY_GAP_INTERVENE":
+            response = (
+                "已批准。正在重新规划并继续生成交付物"
+                "（能力阶梯计数已重置，将再次尝试交付恢复）。"
+            )
+        else:
+            response = f"已批准任务: {pending[0]['task_type']}\n{pending[0]['prompt'][:100]}"
 
         command_id = uuid.uuid4()
         async with self._sessions() as session, session.begin():
@@ -1235,6 +1282,7 @@ class AppGuidanceService:
                     "task_id": str(task_id),
                     "task_type": pending[0].get("task_type"),
                     "approved": True,
+                    "delivery_gap_resume": task_type == "DELIVERY_GAP_INTERVENE",
                 },
             )
             cid = await self._persist_command(
@@ -1243,6 +1291,22 @@ class AppGuidanceService:
             )
             command_id = cid
         return GuidanceReceipt(command_id, "APPROVE", None, False, response)
+
+    async def _goal_needs_delivery_gap_resume(self, goal_id: uuid.UUID) -> bool:
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                return False
+            meta = dict(goal.metadata_json or {})
+            termination = dict(meta.get("termination") or {})
+            if meta.get("awaiting_human_intervention"):
+                return True
+            if termination.get("ladder_exhausted"):
+                return True
+            if meta.get("pending_delivery_gap_human"):
+                return True
+            stage = str(meta.get("execution_stage") or "")
+            return "DELIVERY_GAP" in stage or stage.endswith("_NEEDS_HUMAN")
 
     async def _handle_reject(
         self,

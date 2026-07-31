@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from regent.application.execution_events import (
+    DELIVERY_GAP_HUMAN_APPROVED,
     QUALITY_APPROVAL_COMPLETED,
     RELEASE_APPROVAL_COMPLETED,
     EventEnvelope,
@@ -183,6 +184,47 @@ class HumanTaskService:
                     )
                 )
             )
+
+        if row.task_type == "DELIVERY_GAP_INTERVENE" and approved:
+            goal = await session.get(GoalModel, goal_id)
+            project_id = None
+            if goal is not None:
+                meta = dict(goal.metadata_json or {})
+                meta["awaiting_human_intervention"] = False
+                project_id = goal.app_project_id
+                goal.metadata_json = merge_live_action_into_metadata(
+                    meta,
+                    "已批准，正在重新规划并继续生成",
+                    stage="GENERATING",
+                    event_type=DELIVERY_GAP_HUMAN_APPROVED,
+                )
+                flag_modified(goal, "metadata_json")
+            if project_id is not None:
+                event_idempotency = make_idempotency_key(
+                    "delivery_gap_human_approved", goal_id, str(task_id)
+                )
+                feedback = str(response.get("message") or response.get("feedback") or "")
+                session.add(
+                    make_outbox_event(
+                        EventEnvelope(
+                            event_type=DELIVERY_GAP_HUMAN_APPROVED,
+                            aggregate_type="goal",
+                            aggregate_id=goal_id,
+                            aggregate_version=0,
+                            payload={
+                                "goal_id": str(goal_id),
+                                "app_project_id": str(project_id),
+                                "task_id": str(task_id),
+                                "approved": True,
+                                "actor": assigned_to,
+                                "message": feedback[:400],
+                                "idempotency_key": event_idempotency,
+                            },
+                            idempotency_key=event_idempotency,
+                            correlation_id=uuid.uuid4(),
+                        )
+                    )
+                )
 
     async def reemit_stuck_release_approval(
         self,
