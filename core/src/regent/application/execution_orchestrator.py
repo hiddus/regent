@@ -1565,31 +1565,20 @@ class ExecutionOrchestrator:
                         "message": str(exc.message)[:400],
                     },
                 )
-                if recovery.recovered:
-                    logger.info(
-                        "delivery gap recovery scheduled",
-                        extra={"goal_id": str(goal_id), "attempts": recovery.attempts},
-                    )
-                    return
-                if recovery.terminal_exhaust:
-                    # recover() already wrote DELIVERY_GAP_EXHAUSTED + HumanTask + live_action.
-                    # Only converge Goal → WAITING_HUMAN; avoid a second HUMAN_TASK_REQUIRED
-                    # EVENT that lacks task id and keeps the console on a bubble-only path.
-                    await self._halt_goal_stage(
-                        goal_id,
-                        project_id,
-                        stage="DELIVERY_GAP_EXHAUSTED",
-                        message=recovery.message,
-                        terminal=GoalCommand.WAIT_FOR_HUMAN,
-                        actor=actor,
-                        event_type="HUMAN_TASK_REQUIRED",
-                        extra={
-                            "gap_kind": recovery.gap_kind,
-                            "attempts": recovery.attempts,
-                            "gac": "GAC-D5",
-                        },
-                        append_conversation=False,
-                    )
+                if await self._apply_delivery_verdict(
+                    recovery,
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    actor=actor,
+                    recovered_log="delivery gap recovery scheduled",
+                    stage_exhausted="DELIVERY_GAP_EXHAUSTED",
+                    extra_exhausted={
+                        "gap_kind": recovery.gap_kind,
+                        "attempts": recovery.attempts,
+                        "gac": "GAC-D5",
+                    },
+                    append_conversation=False,
+                ):
                     return
                 logger.warning(
                     "delivery gap exhausted; refusing unreliable publish",
@@ -1613,32 +1602,20 @@ class ExecutionOrchestrator:
                         "error_code": exc.code.value,
                     },
                 )
-                if recovery.recovered:
-                    logger.info(
-                        "invalid-state recovery replanned",
-                        extra={
-                            "goal_id": str(goal_id),
-                            "attempts": recovery.attempts,
-                            "error": exc.message[:200],
-                        },
-                    )
-                    return
-                if recovery.terminal_exhaust:
-                    await self._halt_goal_stage(
-                        goal_id,
-                        project_id,
-                        stage="GENERATION_INVALID_STATE_NEEDS_HUMAN",
-                        message=recovery.message,
-                        terminal=GoalCommand.WAIT_FOR_HUMAN,
-                        actor=actor,
-                        event_type="HUMAN_TASK_REQUIRED",
-                        extra={
-                            "gap_kind": recovery.gap_kind,
-                            "attempts": recovery.attempts,
-                            "last_error": str(exc)[:400],
-                            "gac": "GAC-D5",
-                        },
-                    )
+                if await self._apply_delivery_verdict(
+                    recovery,
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    actor=actor,
+                    recovered_log="invalid-state recovery replanned",
+                    stage_exhausted="GENERATION_INVALID_STATE_NEEDS_HUMAN",
+                    extra_exhausted={
+                        "gap_kind": recovery.gap_kind,
+                        "attempts": recovery.attempts,
+                        "last_error": str(exc)[:400],
+                        "gac": "GAC-D5",
+                    },
+                ):
                     return
                 logger.warning(
                     "invalid-state could not replan; refusing blind outbox retry",
@@ -1670,28 +1647,20 @@ class ExecutionOrchestrator:
                     "message": str(exc)[:400],
                 },
             )
-            if recovery.recovered:
-                logger.info(
-                    "delivery gap recovery scheduled",
-                    extra={"goal_id": str(goal_id), "attempts": recovery.attempts},
-                )
-                return
-            if recovery.terminal_exhaust:
-                await self._halt_goal_stage(
-                    goal_id,
-                    project_id,
-                    stage="DELIVERY_GAP_EXHAUSTED",
-                    message=recovery.message,
-                    terminal=GoalCommand.WAIT_FOR_HUMAN,
-                    actor=actor,
-                    event_type="HUMAN_TASK_REQUIRED",
-                    extra={
-                        "gap_kind": recovery.gap_kind,
-                        "attempts": recovery.attempts,
-                        "gac": "GAC-D5",
-                    },
-                    append_conversation=False,
-                )
+            if await self._apply_delivery_verdict(
+                recovery,
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+                recovered_log="delivery gap recovery scheduled",
+                stage_exhausted="DELIVERY_GAP_EXHAUSTED",
+                extra_exhausted={
+                    "gap_kind": recovery.gap_kind,
+                    "attempts": recovery.attempts,
+                    "gac": "GAC-D5",
+                },
+                append_conversation=False,
+            ):
                 return
             logger.warning(
                 "delivery gap exhausted; refusing unreliable publish",
@@ -2123,27 +2092,20 @@ class ExecutionOrchestrator:
                         "status": result_build.status,
                     },
                 )
-                if recovery.recovered:
-                    logger.info(
-                        "build failure recovery scheduled",
-                        extra={"goal_id": str(goal_id), "attempts": recovery.attempts},
-                    )
+                if await self._apply_delivery_verdict(
+                    recovery,
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    actor=actor,
+                    recovered_log="build failure recovery scheduled",
+                    stage_exhausted="BUILD_DELIVERY_GAP_EXHAUSTED",
+                    extra_exhausted={
+                        "gap_kind": recovery.gap_kind,
+                        "attempts": recovery.attempts,
+                        "build_id": str(result_build.id),
+                    },
+                ):
                     return
-                if recovery.terminal_exhaust:
-                    await self._halt_goal_stage(
-                        goal_id,
-                        project_id,
-                        stage="BUILD_DELIVERY_GAP_EXHAUSTED",
-                        message=recovery.message,
-                        terminal=GoalCommand.WAIT_FOR_HUMAN,
-                        actor=actor,
-                        event_type="HUMAN_TASK_REQUIRED",
-                        extra={
-                            "gap_kind": recovery.gap_kind,
-                            "attempts": recovery.attempts,
-                            "build_id": str(result_build.id),
-                        },
-                    )
             return
 
         # Write AppBuildPassed
@@ -2529,19 +2491,15 @@ class ExecutionOrchestrator:
                             "message": str(exc)[:400],
                         },
                     )
-                    if recovery.recovered:
-                        return
-                    if recovery.terminal_exhaust:
-                        await self._halt_goal_stage(
-                            goal_id,
-                            project_id,
-                            stage="DEPLOY_DELIVERY_REJECTED",
-                            message=recovery.message,
-                            terminal=GoalCommand.WAIT_FOR_HUMAN,
-                            actor=actor,
-                            event_type="HUMAN_TASK_REQUIRED",
-                            extra={"gap_kind": recovery.gap_kind, "gac": "GAC-D5"},
-                        )
+                    if await self._apply_delivery_verdict(
+                        recovery,
+                        goal_id=goal_id,
+                        project_id=project_id,
+                        actor=actor,
+                        recovered_log="delivery gap recovery scheduled",
+                        stage_exhausted="DEPLOY_DELIVERY_REJECTED",
+                        extra_exhausted={"gap_kind": recovery.gap_kind, "gac": "GAC-D5"},
+                    ):
                         return
                 await self._halt_goal_stage(
                     goal_id,
@@ -3596,32 +3554,20 @@ class ExecutionOrchestrator:
                     **{k: v for k, v in dict(extra or {}).items() if k != "error"},
                 },
             )
-            if recovery.recovered:
-                logger.info(
-                    "deploy failure recovery scheduled",
-                    extra={
-                        "goal_id": str(goal_id),
-                        "attempts": recovery.attempts,
-                        "stage": stage,
-                    },
-                )
-                return
-            if recovery.terminal_exhaust:
-                await self._halt_goal_stage(
-                    goal_id,
-                    project_id,
-                    stage=f"{stage}_NEEDS_HUMAN",
-                    message=recovery.message,
-                    terminal=GoalCommand.WAIT_FOR_HUMAN,
-                    actor=actor,
-                    event_type="HUMAN_TASK_REQUIRED",
-                    extra={
-                        "gap_kind": recovery.gap_kind,
-                        "attempts": recovery.attempts,
-                        "gac": "GAC-A4",
-                        **(extra or {}),
-                    },
-                )
+            if await self._apply_delivery_verdict(
+                recovery,
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+                recovered_log="deploy failure recovery scheduled",
+                stage_exhausted=f"{stage}_NEEDS_HUMAN",
+                extra_exhausted={
+                    "gap_kind": recovery.gap_kind,
+                    "attempts": recovery.attempts,
+                    "gac": "GAC-A4",
+                    **(extra or {}),
+                },
+            ):
                 return
         await self._halt_goal_stage(
             goal_id,
@@ -3730,6 +3676,44 @@ class ExecutionOrchestrator:
                     "halt terminal transition skipped",
                     extra={"goal_id": str(goal_id), "command": terminal.value},
                 )
+
+    async def _apply_delivery_verdict(
+        self,
+        recovery: "DeliveryGapRecoveryResult",
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        actor: str,
+        recovered_log: str,
+        stage_exhausted: str,
+        extra_exhausted: dict[str, object] | None = None,
+        append_conversation: bool = True,
+    ) -> bool:
+        """收口 DeliveryGapRecovery 终态（AC1 集中化）。
+
+        复刻既有 ``if recovered … elif terminal_exhaust: _halt_goal_stage(WAIT_FOR_HUMAN)``
+        行为；返回 True 表示已处理（调用方应 return），否则调用方继续其既有 fallback。
+        """
+        if recovery.recovered:
+            logger.info(
+                recovered_log,
+                extra={"goal_id": str(goal_id), "attempts": recovery.attempts},
+            )
+            return True
+        if recovery.terminal_exhaust:
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage=stage_exhausted,
+                message=recovery.message,
+                terminal=GoalCommand.WAIT_FOR_HUMAN,
+                actor=actor,
+                event_type="HUMAN_TASK_REQUIRED",
+                extra=extra_exhausted,
+                append_conversation=append_conversation,
+            )
+            return True
+        return False
 
     # ---------------------------------------------------------------------------
     # Helper methods

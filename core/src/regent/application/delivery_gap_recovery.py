@@ -38,6 +38,8 @@ from regent.application.capability_ladder import (
     composed_capability_name,
     plan_escalation,
 )
+from regent.application.delivery_state import recovery_budget_multiplier
+from regent.config import get_settings
 from regent.application.capability_resolution_service import (
     CapabilityCandidate,
     CapabilityGap,
@@ -299,7 +301,12 @@ class DeliveryGapRecoveryService:
             prior_halt = dict(metadata.get("halt") or {})
             merged_halt = {**prior_halt, **dict(halt_context or {})}
             attempts = int(metadata.get("delivery_gap_recovery_attempts") or 0)
-            plan = plan_escalation(attempts)
+            # AC5: persona scales the auto-recovery ladder. balanced -> unchanged.
+            _persona = getattr(get_settings(), "delivery_profile", "balanced")
+            _effective_max = int(
+                round(MAX_ATTAINMENT_ESCALATION_ATTEMPTS * recovery_budget_multiplier(_persona))
+            )
+            plan = plan_escalation(attempts, max_attempts=_effective_max)
 
             if plan.exhausted or plan.step is EscalationStep.STOP:
                 # Ladder spent: hand off to human — never calm EXHAUST / fake-complete.
@@ -826,7 +833,12 @@ class DeliveryGapRecoveryService:
         actor: str,
         gate_status: str,
     ) -> DeliveryGapRecoveryResult:
-        """GAC-D4: before EXHAUST on gate failure, escalate capability + org once more."""
+        """GAC-D4: before EXHAUST on gate failure, escalate capability + org once more.
+
+        When ``terminal_exhaust=True``, callers must route via
+        ``_apply_delivery_verdict`` / ``WAIT_FOR_HUMAN`` (``HUMAN_TASK_REQUIRED``);
+        this method signals exhaustion only — it does not invent a calm STOP.
+        """
         surface_id = await ensure_product_surface_capability(self._sessions)
         review_id = await ensure_delivery_review_capability(self._sessions)
         http_id = await ensure_allowlisted_http_capability(self._sessions)
@@ -871,7 +883,7 @@ class DeliveryGapRecoveryService:
                     "Gate 阶梯已穷举，需要你介入后继续。",
                     attempts,
                     gap_kind,
-                    True,
+                    terminal_exhaust=True,
                 )
 
             candidates = await self._load_candidates(

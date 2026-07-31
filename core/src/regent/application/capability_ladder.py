@@ -48,13 +48,22 @@ class EscalationPlan:
     exhausted: bool
 
 
-def plan_escalation(prior_attempts: int) -> EscalationPlan:
-    """Prior attempts already spent; return the next step to apply."""
+def plan_escalation(
+    prior_attempts: int, max_attempts: int | None = None
+) -> EscalationPlan:
+    """Prior attempts already spent; return the next step to apply.
+
+    ``max_attempts`` overrides ``MAX_ATTAINMENT_ESCALATION_ATTEMPTS`` (AC5 persona
+    budget). When ``max_attempts`` exceeds the ladder length, the ladder wraps so
+    an aggressive persona simply repeats cycles instead of raising IndexError.
+    """
+    cap = int(max_attempts) if max_attempts is not None else MAX_ATTAINMENT_ESCALATION_ATTEMPTS
     next_attempt = int(prior_attempts) + 1
-    if next_attempt > MAX_ATTAINMENT_ESCALATION_ATTEMPTS:
+    if next_attempt > cap:
         return EscalationPlan(next_attempt, EscalationStep.STOP, exhausted=True)
     index = next_attempt - 1
-    return EscalationPlan(next_attempt, _LADDER[index], exhausted=False)
+    step = _LADDER[index] if index < len(_LADDER) else _LADDER[index % len(_LADDER)]
+    return EscalationPlan(next_attempt, step, exhausted=False)
 
 
 def composed_capability_name(gap_kind: str) -> str:

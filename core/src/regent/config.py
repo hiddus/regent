@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Shadow tasks: forbid publish / external side effects (contract flag for runners).
     generation_strategy_shadow_mode: bool = False
     delivery_batch_enabled: bool = False
+    # Delivery autonomy profile (AC5): drives auto-recovery budget + handoff threshold.
+    # Default "balanced" matches the CON confirmation domain default. Env: REGENT_DELIVERY_PROFILE.
+    delivery_profile: Literal["aggressive", "balanced", "conservative"] = "balanced"
     agent_max_turns: int = Field(default=40, ge=1, le=200)
     agent_max_tokens: int = Field(default=200_000, ge=1_000)
     agent_max_wall_seconds: int = Field(default=900, ge=30)

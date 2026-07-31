@@ -8,13 +8,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.agent.generator import AgenticCodeGenerator
-from regent.agent.types import AgentBudget
 from regent.application.generator_metadata import (
     GenerationStrategy,
     assert_generator_consistency,
     metadata_for_strategy,
 )
 from regent.application.generation_strategy_policy import resolve_effective_generation_strategy
+from regent.application.delivery_state import resolve_delivery_budget, resolve_delivery_persona
 from regent.config import Settings
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.code_generator import ArtifactBackedCodeGenerator
@@ -44,10 +44,11 @@ def build_code_generator(
             provider,
             artifacts,
             workspace_root=Path(settings.workspace_root),
-            budget=AgentBudget(
-                max_turns=settings.agent_max_turns,
-                max_tokens=settings.agent_max_tokens,
-                max_wall_seconds=settings.agent_max_wall_seconds,
+            budget=resolve_delivery_budget(
+                resolve_delivery_persona(settings.delivery_profile),
+                settings.agent_max_turns,
+                settings.agent_max_tokens,
+                settings.agent_max_wall_seconds,
             ),
             sessions=sessions,
         )
@@ -108,10 +109,11 @@ class GeneratorSelector:
                 self._provider,
                 self._artifacts,
                 workspace_root=Path(self._settings.workspace_root),
-                budget=AgentBudget(
-                    max_turns=self._settings.agent_max_turns,
-                    max_tokens=self._settings.agent_max_tokens,
-                    max_wall_seconds=self._settings.agent_max_wall_seconds,
+                budget=resolve_delivery_budget(
+                    resolve_delivery_persona(self._settings.delivery_profile),
+                    self._settings.agent_max_turns,
+                    self._settings.agent_max_tokens,
+                    self._settings.agent_max_wall_seconds,
                 ),
                 sessions=self._sessions,
             )
