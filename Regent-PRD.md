@@ -406,7 +406,9 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 - artifact-backed 路径保留下游依赖构建、真实构建与部署后浏览器/smoke 验证，但反馈发生在较晚阶段、纠错成本高；必须补充**会话内、低延迟**的「运行—读错—修改」自纠正闭环（见 Tech-Spec §13.5）；
 - `VerificationAgent` 现有 `compileall` + 起服务 + 端点探测之外，应补充 pytest / 项目测试命令能力，并把真实构建、测试与 smoke 失败可靠回灌至同一次生成会话，而非仅由下游恢复流程处理（见 Tech-Spec §13.5、§13.6）；
 - 将 `agentic` 设为默认前，必须以隔离影子任务或小比例 canary 对照 artifact-backed 与 agentic，在预注册的代表性冻结任务集上比较成功率、成本、延迟、首次可运行率、修正轮次和人工介入率；门槛、样本量、停止规则与安全护栏必须在实验前冻结（见 Tech-Spec §13.7、Plan §13）；
+- GQ-3 canary 必须经强制控制流启用：canary 仅当 `generation_strategy_canary_gate=True`（GQ-2 反馈闭环验证后）**且** `canary_percent>0` 时，按 `stable_canary_bucket(goal_id)` 对**具体 goal** 选 `agentic` 生成器；`canary_rollout_allowed` 在策略解析中强制 GQ-2→GQ-3 顺序，闸门默认 False（见 Tech-Spec §13.7、§13.4）；
 - 固定 Hive 的净收益目前未经真实任务实验确认，既不应假定必然改善，也不应假定必然放大；固定 Hive 与自适应组织的评估必须建立在上述强单 Agent 基线之上（见 Plan §13）。
+- GQ-4 默认切换必须经强制控制流：运行 GQ-3 实验后，唯有 `gq4_default_switch_gate` 判定 `PROMOTE_AGENTIC_CANDIDATE` 且无 kill switch 时，`apply_gq4_promotion` 才允许晋级；未通过则 `DomainError` 阻止翻转 `generation_strategy`。运行时默认仍由 `generation_strategy` 驱动，kill switch 始终覆盖。晋级须形成 DecisionRecord（见 Tech-Spec §13.7、Plan §13）。
 
 ---
 

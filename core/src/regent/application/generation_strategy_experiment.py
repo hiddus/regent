@@ -356,3 +356,27 @@ def gq4_default_switch_gate(
             "new Runs use fallback; in-flight complete frozen plan or cancel"
         ),
     }
+
+
+def drive_generation_strategy_experiment(
+    config: GenerationStrategyExperimentConfig,
+    runner: Any,
+) -> "GenerationStrategyExperiment":
+    """Run both arms over the frozen task set and return the populated harness.
+
+    ``runner(variant: str, task: FrozenTaskSpec) -> StrategyRunResult`` is
+    injected so production wiring (real generators + sandbox) and tests (fakes)
+    share one contract. Each ``StrategyRunResult`` carries the user-quality
+    fields (``first_runnable`` / ``repair_rounds`` / ``human_intervened`` /
+    ``latency_ms``) that ``report()`` aggregates into ``UserQualityMetrics`` —
+    this is the producer that was missing before (O9/O10).
+
+    The harness enforces arm labels (no P2-4 org dimensions) and computes the
+    GQ-4 decision via its own ``report()``.
+    """
+    experiment = GenerationStrategyExperiment(config)
+    for task in config.task_set.tasks:
+        for variant in GQ_VARIANTS:
+            result = runner(variant, task)
+            experiment.record(result)
+    return experiment

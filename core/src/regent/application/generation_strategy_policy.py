@@ -29,27 +29,42 @@ def resolve_effective_generation_strategy(
     settings: Any,
     *,
     goal_id: str | None = None,
+    gq2_closed: bool | None = None,
 ) -> GenerationStrategy:
     """Resolve runtime strategy with kill switch and optional canary.
 
     Order:
     1. Kill switch → fallback (never agentic while switch is on).
-    2. Canary percent > 0 and goal_id present → stable bucket may select canary variant.
+    2. Canary requires BOTH ``canary_percent > 0`` AND the GQ-2 feedback loop
+       closed (``generation_strategy_canary_gate``), enforced via
+       ``canary_rollout_allowed``. This is the diagnosis order: GQ-2 before GQ-3.
+       When active and ``goal_id`` is present, a stable bucket may select the
+       canary variant.
     3. Otherwise settings.generation_strategy.
     """
     fallback: GenerationStrategy = getattr(
         settings, "generation_strategy_fallback", "artifact-backed"
     )
-    if bool(getattr(settings, "generation_strategy_kill_switch", False)):
+    kill_switch: bool = bool(getattr(settings, "generation_strategy_kill_switch", False))
+    if kill_switch:
         return fallback
 
     canary_percent = int(getattr(settings, "generation_strategy_canary_percent", 0) or 0)
     canary_variant: GenerationStrategy = getattr(
         settings, "generation_strategy_canary_variant", "agentic"
     )
-    if canary_percent > 0 and goal_id:
-        if stable_canary_bucket(str(goal_id)) < canary_percent:
-            return canary_variant
+    if canary_variant not in {"artifact-backed", "agentic"}:
+        canary_variant = "agentic"
+    if gq2_closed is None:
+        # Operator sets this True only after GQ-2 feedback loop is verified.
+        gq2_closed = bool(getattr(settings, "generation_strategy_canary_gate", False))
+    if (
+        canary_percent > 0
+        and goal_id
+        and canary_rollout_allowed(kill_switch=kill_switch, gq2_closed=gq2_closed)
+        and stable_canary_bucket(str(goal_id)) < canary_percent
+    ):
+        return canary_variant
 
     strategy = getattr(settings, "generation_strategy", "artifact-backed")
     if strategy not in {"artifact-backed", "agentic"}:

@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Canary percent 0..100; diagnosis order requires GQ-2 closed before enabling (>0).
     generation_strategy_canary_percent: int = Field(default=0, ge=0, le=100)
     generation_strategy_canary_variant: Literal["artifact-backed", "agentic"] = "agentic"
+    # GQ-3 canary gate: must be explicitly True AFTER GQ-2 feedback loop is verified.
+    # Default False keeps canary inert even if canary_percent > 0 (diagnosis order).
+    generation_strategy_canary_gate: bool = False
     # Shadow tasks: forbid publish / external side effects (contract flag for runners).
     generation_strategy_shadow_mode: bool = False
     delivery_batch_enabled: bool = False

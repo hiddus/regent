@@ -25,7 +25,7 @@ from regent.application.release_service import (
     ReleaseService,
     RequestDeployment,
 )
-from regent.application.generator_factory import build_code_generator
+from regent.application.generator_factory import build_generator_selector
 from regent.config import get_settings
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.code_generator import ArtifactUriResolver
@@ -43,7 +43,7 @@ router = APIRouter(tags=["app-delivery"])
 
 def _build_generator(settings, artifacts: FileArtifactStore, sessions=None):
     provider = build_model_provider(settings)
-    return build_code_generator(
+    return build_generator_selector(
         settings,
         provider,
         artifacts,

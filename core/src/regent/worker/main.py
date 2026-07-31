@@ -23,7 +23,7 @@ from regent.application.runtime_profile_service import RuntimeProfileService
 from regent.application.scheduler_service import SchedulerService
 from regent.config import get_settings
 from regent.infrastructure.artifact_store import FileArtifactStore
-from regent.application.generator_factory import build_code_generator
+from regent.application.generator_factory import build_generator_selector
 from regent.infrastructure.code_generator import ArtifactUriResolver
 from regent.infrastructure.database import create_engine, create_session_factory
 from regent.infrastructure.delivery_review_capability import ensure_delivery_review_capability
@@ -250,8 +250,9 @@ def create_worker() -> tuple[Worker, object]:
     generator = None
     workspace_writer = None
     if model_provider is not None:
-        # GQ-1: dispatch by effective generation_strategy (fail-closed on metadata mismatch).
-        generator = build_code_generator(
+        # GQ-1/GQ-3: build a per-goal GeneratorSelector (fail-closed on mismatch).
+        # A single injected generator would cap canary at the startup default.
+        generator = build_generator_selector(
             settings,
             model_provider,
             artifacts,

@@ -311,8 +311,8 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 - `WP-GEN-SELECT`：两种策略下生成器分派正确；`generator_ref` 标签、对象类型与策略三者不一致时 fail closed，并写入 Evidence；
 - `WP-GEN-FEEDBACK`：构建/测试/smoke 真实失败进入下一轮修正的结构化输入；`ArtifactBackedCodeGenerator` 再生成携带真实报错；
 - `WP-VERIFY-TEST`：VerificationAgent 能解析并执行 pytest/项目测试命令；测试缺失有明确降级而非静默跳过；
-- `WP-CANARY`：对照在冻结模型/工具/预算下可复算，产出成功率/成本/延迟与 95% CI；
-- `WP-DEFAULT-GATE`：默认切换由版本化门槛门控，且具备回滚路径。
+- `WP-CANARY`：对照在冻结模型/工具/预算下可复算，产出成功率/成本/延迟与 95% CI；`GeneratorSelector` + `canary_gate` 已使 canary 真正按 `goal_id` 选生成器，且强制 GQ-2→GQ-3 顺序；
+- `WP-DEFAULT-GATE`：默认切换由版本化门槛门控，且具备回滚路径；`apply_gq4_promotion` 已把 `gq4_default_switch_gate` 接成强制门，未过即 `DomainError`，kill switch 运行时覆盖。
 
 ### 13.6 明确不做
 
@@ -328,11 +328,11 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 | GQ-0 合同冻结 | ✅ 已完成 | 元数据协议、FailureEnvelope/RepairAttempt（迁移 `0041`）、独立生成策略实验合同、预注册门槛、影子/kill-switch 合同、`docs/gq0-baseline-report-2026-07-31.md` |
 | GQ-1 生成器选择一致性 | ✅ 已完成 | Worker/`app_delivery` 经 `generator_factory` 分派；`assert_generator_consistency` fail-closed + Evidence |
 | GQ-2 会话内反馈 + Verification | ✅ 半落地 | FailureEnvelope 注入再生成；VerificationAgent pytest/项目测试；AgentRunner 一次受控修正；完整生产成功率窗待观测 |
-| GQ-3 影子 / Canary | ✅ 钩子（未开流量） | 稳定分桶 + `canary_rollout_allowed`（要求 GQ-2 后再 canary）；canary% 默认 0 |
-| GQ-4 默认切换决策 | ✅ 钩子 | `gq4_default_switch_gate` + kill switch；默认仍 `artifact-backed`，未晋级 |
+| GQ-3 影子 / Canary | ✅ 控制流已实现 | `GeneratorSelector` 按 `goal_id` 选生成器；`canary_rollout_allowed` + `canary_gate` 强制 GQ-2→GQ-3；canary% 默认 0、闸门默认 False（不开流量） |
+| GQ-4 默认切换决策 | ✅ 控制流已实现 | `drive_generation_strategy_experiment` + `apply_gq4_promotion` 强制门（未过则 `DomainError`）；**代码默认**仍 `artifact-backed`，正式晋级需 DecisionRecord + 翻转 env |
 | GQ-5 / MA-5 固定 Hive 重评 | ⏳ 未开 | 依赖 GQ-4；生产既有 CERTIFIED_HIVE opt-in **保持不扩容** |
 
-工作包：`WP-GEN-SELECT`/`WP-GEN-FEEDBACK`/`WP-VERIFY-TEST` 有单测（`test_generation_quality.py`）；`WP-CANARY`/`WP-DEFAULT-GATE` 为可复算钩子，完整实验窗口仍属后续交付。
+工作包：`WP-GEN-SELECT`/`WP-GEN-FEEDBACK`/`WP-VERIFY-TEST`/`WP-CANARY`/`WP-DEFAULT-GATE` 控制流均已落地并有单测（`test_generation_quality.py`）。`WP-CANARY` 的流量开关（`canary_gate`/`canary_percent`）与 `WP-DEFAULT-GATE` 的晋级门（`apply_gq4_promotion`）为代码强制不变式；**完整真实任务实验窗口**（真实模型/工具/预算下跑双臂、产出 95% CI）仍属后续交付，但此时已有可驱动、可复算的控制流支撑，不再只是空钩子。生产运行时策略可由运维以 `REGENT_GENERATION_STRATEGY` 覆盖（≠ GQ-4 晋级）；部署不得擅自改写。详见 `docs/gq34-promotion-control-flow-2026-07-31.md`。
 
 ## P1 编码基线
 

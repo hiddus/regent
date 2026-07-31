@@ -1416,10 +1416,13 @@ class ExecutionOrchestrator:
 
         # Fail closed before freezing plan if injected generator disagrees.
         if self._generator is not None:
+            gen = self._generator
+            if hasattr(gen, "select"):
+                gen = gen.select(str(goal_id))
             try:
                 assert_generator_consistency(
                     strategy=strategy,
-                    generator=self._generator,
+                    generator=gen,
                     plan_id=None,
                     run_id=None,
                     contract_generator_ref=generator_ref,

@@ -200,22 +200,27 @@ class GenerationService:
     ) -> WorkspaceSnapshotModel:
         plan_payload = await self._claim(run_id)
         try:
-            # GQ-1: fail closed when injected generator disagrees with strategy / plan labels.
+            # GQ-1/GQ-3: select the concrete generator for this goal before any
+            # consistency check or generation call. A GeneratorSelector resolves
+            # the per-goal effective strategy; a plain generator is used directly.
             settings = get_settings()
             goal_id = None
             acceptance = plan_payload.get("acceptance_contract") or {}
             if isinstance(acceptance, dict):
                 goal_id = acceptance.get("goal_id")
+            gen = self._generator
+            if hasattr(gen, "select"):
+                gen = gen.select(str(goal_id) if goal_id else None)
             strategy = resolve_effective_generation_strategy(settings, goal_id=str(goal_id) if goal_id else None)
             assert_generator_consistency(
                 strategy=strategy,
-                generator=self._generator,
+                generator=gen,
                 plan_id=str(plan_payload.get("plan_id") or plan_payload.get("id") or ""),
                 run_id=str(run_id),
                 contract_generator_ref=str(plan_payload.get("generator_ref") or "") or None,
                 contract_prompt_version=str(plan_payload.get("prompt_version") or "") or None,
             )
-            generate = self._generator.generate
+            generate = gen.generate
             try:
                 generated = await generate(plan_payload, on_progress=on_progress)
             except TypeError:

@@ -424,6 +424,19 @@ artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依
 
 影子任务必须运行在独立 sandbox 与 Artifact namespace，禁止发布和外部副作用；canary 使用稳定分桶。配置须提供 kill switch，回滚时新 Run 使用旧策略，在途 Run 按已冻结 GenerationPlan 完成或显式取消，禁止中途无证据换生成器。
 
+#### 13.7.1 GQ-3 Canary 控制流
+
+- 启动期构造 `GeneratorSelector`（`generator_factory.build_generator_selector`），同时持有 `ArtifactBackedCodeGenerator` 与 `AgenticCodeGenerator`；编排器与 API 注入选择器而非单例。
+- 生成时按 `goal_id` 调用 `GeneratorSelector.select(goal_id)`，由 `resolve_effective_generation_strategy` 解析有效策略后返回对应生成器，再对该具体生成器做 `assert_generator_consistency`。由此 canary 选中的 `agentic` goal 真正使用 agentic 生成器，而非因单例不符而 fail-closed（历史 bug）。
+- canary 排序强制：解析中先查 kill switch，再经 `canary_rollout_allowed(kill_switch, gq2_closed)` 校验 `generation_strategy_canary_gate`（GQ-2 验证后由运维置 True）。`canary_gate=False`（默认）或 `canary_percent=0` 时，任何 goal 都回落默认策略。
+
+#### 13.7.2 GQ-4 默认切换控制流
+
+- 实验驱动 `drive_generation_strategy_experiment(config, runner)` 注入 `runner(variant, task) -> StrategyRunResult`，跑通双臂并聚合 `UserQualityMetrics`（O9/O10 producer 即 runner）。
+- 晋级须经强制门：`apply_gq4_promotion(experiment_report, kill_switch=, decision_record_ref=)` 调用 `gq4_default_switch_gate`；仅当 `PROMOTE_AGENTIC_CANDIDATE` 且无 kill switch 才返回允许，否则 `DomainError(POLICY_DENIED)` 阻止晋级。`evaluate_gq4_promotion` 为非抛出版本供巡检。
+- 运行时默认仍由 `generation_strategy` 驱动（Settings 代码默认 `artifact-backed`）；晋级步骤为「实验报告 → `apply_gq4_promotion` 通过 → 记录 DecisionRecord → 运维翻转 `REGENT_GENERATION_STRATEGY=agentic`」。kill switch 在运行时始终覆盖默认。
+- **运维覆盖**：生产 `.env` 可设置 `REGENT_GENERATION_STRATEGY=agentic` 作为运维侧运行时覆盖，**不等于** GQ-4 已正式晋级；部署流程不得擅自改写生产策略，除非 DecisionRecord 明确要求。
+
 ---
 
 ## 14. Runtime Profile 认证（P2-2）
@@ -684,7 +697,7 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 
 ## 25. 当前实现状态
 
-> 截至 2026-07-31，代码统计：core 含多 Agent 补足模块（metrics/MAST/member_contract/TaskFeatures/DispatchDecision/ExecutionPlanItem 等），迁移 head `20260731_0039`。
+> 截至 2026-07-31，代码统计：core 含多 Agent 补足模块（metrics/MAST/member_contract/TaskFeatures/DispatchDecision/ExecutionPlanItem 等）与 GQ 生成质量控制流，迁移 head `20260731_0041`。
 
 ### 已完成
 
@@ -700,7 +713,7 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **确认后自主执行闭环**：Confirm/Start 分离、Outbox 指数退避与死信（0022）。
 - **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。该 flag 现受 §18.5 / MA-2 整体认证摘要约束（成员契约 + 五类 hash + 回归；摘要变更即旧认证失效）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
 - **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同、MAST 词表、成员契约、`ExecutionPlanItem` / `DispatchDecision`（迁移 `0039`）与模板认证回填（迁移 `0040`）。固定 Hive 候选必须通过五类摘要复算，opt-in 不得绕过 TaskFeatures 裁剪；Agent 生成主链已接入 todo 持久化、大结果卸载与压缩前 Transcript Artifact，固定 Hive 派工已接入过程审计。P2-4 仍是实验骨架，**P2-5 自适应拓扑仍禁止启用**。见 Plan §12。
-- **单 Agent 生成质量基线（GQ-0～GQ-4，2026-07-31）**：生成器元数据协议与 fail-closed 一致性（`GENERATOR_METADATA_MISMATCH`）；Worker 按 `generation_strategy` 分派；`FailureEnvelope`/`RepairAttempt`（迁移 `0041`）；独立生成策略实验合同（不占用 P2-4 组织维）；用户质量指标骨架；VerificationAgent pytest/项目测试与一次受控修正；canary/kill-switch 钩子（默认 canary%=0，默认策略仍 artifact-backed）。GQ-3 流量窗与 GQ-4 默认切换 DecisionRecord、GQ-5 Hive 重评尚未开。生产 CERTIFIED_HIVE 既有 opt-in **不扩容**。见 Plan §13、`docs/gq0-baseline-report-2026-07-31.md`。
+- **单 Agent 生成质量基线（GQ-0～GQ-4，2026-07-31）**：生成器元数据协议与 fail-closed 一致性（`GENERATOR_METADATA_MISMATCH`）；Worker 按 `generation_strategy` 分派；`FailureEnvelope`/`RepairAttempt`（迁移 `0041`）；独立生成策略实验合同（不占用 P2-4 组织维）；用户质量指标骨架；VerificationAgent pytest/项目测试与一次受控修正；GQ-3/GQ-4 控制流已实现（`GeneratorSelector` + `canary_gate` / `apply_gq4_promotion`；默认 canary%=0、闸门 False，**代码默认**策略仍 `artifact-backed`）。**运维可在生产 `.env` 以 `REGENT_GENERATION_STRATEGY` 覆盖运行时策略**（与 GQ-4 正式晋级无关；部署脚本不得擅自改写该值）。GQ-3 真实流量窗与 GQ-4 晋级 DecisionRecord、GQ-5 Hive 重评尚未开。生产 CERTIFIED_HIVE 既有 opt-in **不扩容**。见 Plan §13、§13.7.1–§13.7.2、`docs/gq0-baseline-report-2026-07-31.md`、`docs/gq34-promotion-control-flow-2026-07-31.md`。
 - **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局；右侧以 `status.agents` + SSE/`live_action` 驱动参与 Agent 名册与对话进度卡详略，产物与预览为可折叠次要区（见 `apps/regent-console/README.md`）。
 - **桌面端（探索性）**：Tauri 桌面应用骨架存在于仓库；PRD 主交付范围为 Core + Web Console，桌面端未纳入 P0/P1 验收。
 
