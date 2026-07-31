@@ -23,6 +23,7 @@ from regent.application.context_artifact import (
 from regent.application.dispatch_decision import DispatchDecisionInput, DispatchDecisionService
 from regent.application.execution_plan import ExecutionPlanService, UpsertPlanItem
 from regent.application.mast_failure import MAST_CODES, classify_mast_failure, is_mast_code
+from regent.domain.errors import DomainError, ErrorCode
 from regent.application.member_contract import (
     compute_template_certification,
     certified_hive_member_contracts,
@@ -481,7 +482,11 @@ def test_a2a_projection_boundary() -> None:
     assert proj["auth"] == "auth_required"
     assert proj["internal_envelope_retained"] is True
     assert_not_replacing_kernel("CrewAI", replaces_kernel=False)
-    with pytest.raises(ValueError):
+    with pytest.raises(DomainError) as raised:
         assert_not_replacing_kernel("CrewAI", replaces_kernel=True)
+    assert raised.value.code == ErrorCode.POLICY_DENIED
+    assert raised.value.details and raised.value.details.get("confirmation", {}).get(
+        "safety_invariant"
+    )
     with pytest.raises(ValueError):
         project_run_state("FUTURE_UNKNOWN")

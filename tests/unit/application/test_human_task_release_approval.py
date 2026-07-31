@@ -125,3 +125,33 @@ async def test_reemit_stuck_release_approval(db_sessions) -> None:
         task = await session.get(HumanTaskModel, task_id)
         assert task is not None
         assert task.response.get("decision") == "APPROVE"
+
+
+@pytest.mark.asyncio
+async def test_timeout_due_applies_default_deny_and_emits(db_sessions) -> None:
+    """CON-2: past-due OPEN tasks get timeout default (deny under balanced)."""
+    goal_id, task_id = await _seed_goal_with_release_task(db_sessions)
+    async with db_sessions() as session, session.begin():
+        task = await session.get(HumanTaskModel, task_id)
+        assert task is not None
+        task.due_at = datetime.now(UTC) - timedelta(minutes=1)
+
+    svc = HumanTaskService(db_sessions)
+    n = await svc.timeout_due()
+    assert n == 1
+
+    async with db_sessions() as session:
+        task = await session.get(HumanTaskModel, task_id)
+        assert task is not None
+        assert task.status == "COMPLETED"
+        assert task.response.get("decision") == "REJECT"
+        assert task.response.get("reason") == "timeout_default"
+        events = (
+            await session.execute(
+                select(OutboxEventModel).where(
+                    OutboxEventModel.event_type == RELEASE_APPROVAL_COMPLETED
+                )
+            )
+        ).scalars().all()
+        assert len(events) == 1
+        assert events[0].payload.get("approved") is False

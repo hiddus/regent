@@ -3637,12 +3637,17 @@ class ExecutionOrchestrator:
             if terminal == GoalCommand.WAIT_FOR_HUMAN:
                 metadata["awaiting_human_intervention"] = True
             goal.metadata_json = metadata
+            from regent.application.confirmation_present import enrich_halt_extra
+
+            event_meta = enrich_halt_extra(
+                event_type, stage, message, {"goal_id": str(goal_id), "stage": stage, **(extra or {})}
+            )
             await self._append_conversation_event(
                 session,
                 project_id,
                 event_type,
                 message,
-                {"goal_id": str(goal_id), "stage": stage, **(extra or {})},
+                event_meta,
             )
         if terminal is not None and status == "ACTIVE":
             try:

@@ -681,7 +681,31 @@ body {
   border-radius: 12px;
   background: #131b2a;
 }
+.task-card.risk-high { border-color: var(--danger); background: #1c1418; }
+.task-card.risk-low { border-color: #2d4a42; background: #131f1b; }
 .task-card h4 { margin: 0 0 8px; color: var(--info); font-size: 14px; }
+.task-risk-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  background: var(--hover);
+  color: var(--muted);
+}
+.task-card.risk-high .task-risk-badge { color: var(--danger); }
+.task-meta-line,
+.task-rationale,
+.task-consequences,
+.task-countdown {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.task-countdown { color: var(--warn); font-weight: 600; }
+.task-countdown.safety { color: var(--danger); }
 
 .task-actions { display: flex; gap: 8px; margin-top: 10px; }
 .task-btn {
@@ -696,7 +720,32 @@ body {
 .task-btn.approve { background: var(--accent); color: white; }
 .task-btn.reject { background: var(--danger); color: white; }
 .task-btn:hover { opacity: 0.85; }
+.task-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .task-done { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+.task-detail-fold { margin-top: 10px; }
+.task-detail-toggle {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.task-detail-body {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: #0d1117;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+  color: var(--muted);
+}
 
 /* Correction card */
 .correction-card {

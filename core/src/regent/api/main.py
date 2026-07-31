@@ -78,10 +78,17 @@ def create_app() -> FastAPI:
             status_code = 403
         else:
             status_code = 409
-        return JSONResponse(
-            status_code=status_code,
-            content={"error": {"code": error.code.value, "message": error.message}},
-        )
+        body: dict[str, object] = {
+            "code": error.code.value,
+            "message": error.message,
+        }
+        if error.details:
+            confirmation = error.details.get("confirmation")
+            if confirmation is not None:
+                body["confirmation"] = confirmation
+            else:
+                body["details"] = error.details
+        return JSONResponse(status_code=status_code, content={"error": body})
 
     @app.exception_handler(ModelConfigurationError)
     async def model_configuration_handler(

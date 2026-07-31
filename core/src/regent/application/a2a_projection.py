@@ -87,7 +87,23 @@ def assert_not_replacing_kernel(
 ) -> None:
     """Reject framework use only when it replaces Regent kernel responsibilities."""
     if framework_name and replaces_kernel:
-        raise ValueError(
+        from regent.application.confirmation import safety_invariant_request
+        from regent.domain.errors import DomainError, ErrorCode
+
+        detail = (
             f"{framework_name} must not replace Regent Kernel "
             "(Outbox/Lease/state machines/evidence chain)"
+        )
+        raise DomainError(
+            ErrorCode.POLICY_DENIED,
+            detail,
+            details={
+                "confirmation": safety_invariant_request(
+                    action="assert_not_replacing_kernel",
+                    summary="禁止用外部框架替换 Kernel 职责",
+                    rationale="Outbox/Lease/状态机/证据链必须由 Regent Kernel 持有",
+                    rules_applied=("kernel_capability_boundary", "assert_not_replacing_kernel"),
+                    detail=detail,
+                ).as_dict()
+            },
         )

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, Mapping
 
 from regent.domain.errors import DomainError, ErrorCode
+from regent.application.confirmation import safety_invariant_request
 
 GenerationStrategy = Literal["artifact-backed", "agentic"]
 
@@ -124,4 +125,16 @@ def assert_generator_consistency(
         ErrorCode.GENERATOR_METADATA_MISMATCH,
         f"generator metadata mismatch ({', '.join(mismatches)}); "
         f"evidence={evidence.as_dict()}",
+        details={
+            "confirmation": safety_invariant_request(
+                action="assert_generator_consistency",
+                summary="生成器元数据与策略不一致，已拒绝继续",
+                rationale="strategy / generator_ref / object type 必须一致（fail-closed）",
+                rules_applied=("gq0_generator_metadata", "assert_generator_consistency"),
+                detail=(
+                    f"mismatch_fields={list(mismatches)}; "
+                    f"evidence={evidence.as_dict()}"
+                ),
+            ).as_dict()
+        },
     )

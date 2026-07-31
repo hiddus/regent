@@ -83,6 +83,7 @@ def test_assert_generator_consistency_fail_closed_on_mismatch(tmp_path) -> None:
         )
     assert exc.value.code == ErrorCode.GENERATOR_METADATA_MISMATCH
     assert "generator_type" in exc.value.message
+    assert exc.value.details and exc.value.details["confirmation"]["safety_invariant"] is True
 
 
 def test_assert_generator_consistency_ok_when_aligned(tmp_path) -> None:
@@ -409,6 +410,7 @@ def test_gq4_promotion_gate_enforced() -> None:
     with pytest.raises(DomainError) as exc:
         apply_gq4_promotion(report, kill_switch=True, decision_record_ref="DR-1")
     assert exc.value.code == ErrorCode.POLICY_DENIED
+    assert exc.value.details and exc.value.details["confirmation"]["safety_invariant"] is True
 
     blocked = evaluate_gq4_promotion(report, kill_switch=True, decision_record_ref="DR-1")
     assert blocked["activation_allowed"] is False

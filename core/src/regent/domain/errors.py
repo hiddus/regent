@@ -1,4 +1,5 @@
 from enum import StrEnum
+from typing import Any
 
 
 class ErrorCode(StrEnum):
@@ -36,11 +37,19 @@ class DomainError(Exception):
 
     code: ErrorCode
     message: str
+    details: dict[str, Any] | None
 
-    def __init__(self, code: ErrorCode, message: str) -> None:
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+        self.details = details
 
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"

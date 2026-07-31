@@ -329,6 +329,23 @@ def verify_template_certification(
     )
     return validate_certification_inheritance(previous=approved, current=current)
 
+
+def certification_safety_confirmation(
+    check: CertificationCheck,
+    *,
+    template_id: str,
+) -> dict[str, Any]:
+    """Wrap a failed certification check as ConfirmationRequest payload."""
+    from regent.application.confirmation import safety_invariant_request
+
+    return safety_invariant_request(
+        action="verify_template_certification",
+        summary=f"模板认证未通过：{template_id}",
+        rationale="未通过认证的 hive/template 不得进入可行候选（fail-closed）",
+        rules_applied=("template_certification", "verify_template_certification"),
+        detail=f"reason={check.reason}; expected={check.expected_hash}; provided={check.provided_hash}",
+    ).as_dict()
+
 TEMPLATE_REGRESSION_SCENARIOS: tuple[str, ...] = (
     "happy_path",
     "clarification_required",

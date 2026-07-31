@@ -351,6 +351,10 @@ class OrganizationEngine:
                     topology=topology,
                 )
                 if not certification.accepted:
+                    from regent.application.member_contract import (
+                        certification_safety_confirmation,
+                    )
+
                     candidate_reports.append(
                         {
                             "template_id": template_name,
@@ -364,6 +368,9 @@ class OrganizationEngine:
                                 certification.reason,
                             ],
                             "policy_outcome": "DENY",
+                            "confirmation": certification_safety_confirmation(
+                                certification, template_id=template_name
+                            ),
                         }
                     )
                     continue

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from sqlalchemy import func, update
@@ -228,13 +228,71 @@ class HumanTaskService:
             return {"task_id": str(task_id), "task_type": row.task_type}
 
     async def timeout_due(self) -> int:
+        """Mark due OPEN tasks timed out and apply preference default decisions.
+
+        Avoids dead-wait: RELEASE_APPROVAL / QUALITY_APPROVAL emit completion
+        events with the timeout default (deny for balanced/conservative).
+        """
+        from regent.application.confirmation import TimeoutDefault, preference_timeout_default
+        from regent.application.decision_policy import load_decision_policy_from_config
+        from sqlalchemy import select
+
+        applied = 0
         async with self._sessions() as session, session.begin():
-            result = cast(
-                CursorResult[Any],
+            rows = (
                 await session.execute(
-                    update(HumanTaskModel)
-                    .where(HumanTaskModel.status == "OPEN", HumanTaskModel.due_at <= func.now())
-                    .values(status="TIMED_OUT")
-                ),
-            )
-            return result.rowcount
+                    select(HumanTaskModel).where(
+                        HumanTaskModel.status == "OPEN",
+                        HumanTaskModel.due_at <= func.now(),
+                    )
+                )
+            ).scalars().all()
+            if not rows:
+                return 0
+            try:
+                policy = load_decision_policy_from_config()
+                timeout_default = preference_timeout_default(policy.preference)
+            except Exception:
+                timeout_default = TimeoutDefault.DENY
+
+            for row in rows:
+                approved = timeout_default is TimeoutDefault.ALLOW
+                # Safety / high-stakes approvals never auto-allow on timeout.
+                if row.task_type in {"RELEASE_APPROVAL", "QUALITY_APPROVAL", "PERMIT_APPROVAL"}:
+                    if timeout_default is not TimeoutDefault.ALLOW:
+                        approved = False
+                    # balanced/conservative → deny; aggressive may allow only
+                    # when preference timeout default is allow AND not deny-listed.
+                    from regent.config import get_settings
+
+                    settings = get_settings()
+                    deny = {
+                        a.strip()
+                        for a in (settings.decision_deny_actions or "").split(",")
+                        if a.strip()
+                    }
+                    action_key = row.task_type.lower()
+                    if action_key in deny or row.task_type.lower() in deny:
+                        approved = False
+                    if settings.decision_preference != "aggressive":
+                        approved = False
+
+                response = {
+                    "approved": approved,
+                    "decision": "APPROVE" if approved else "REJECT",
+                    "reason": "timeout_default",
+                    "default_on_timeout": timeout_default.value,
+                }
+                row.status = "COMPLETED"
+                row.assigned_to = "regent-core:timeout-default"
+                row.response = response
+                row.completed_at = datetime.now(UTC)
+                flag_modified(row, "response")
+                await self._emit_gate_completion_events(
+                    session,
+                    row,
+                    assigned_to="regent-core:timeout-default",
+                    response=response,
+                )
+                applied += 1
+        return applied

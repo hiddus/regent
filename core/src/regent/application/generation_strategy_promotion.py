@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from regent.application.generation_strategy_experiment import gq4_default_switch_gate
+from regent.application.confirmation import safety_invariant_request
 from regent.domain.errors import DomainError, ErrorCode
 
 
@@ -55,10 +56,22 @@ def apply_gq4_promotion(
     """
     gate = gq4_default_switch_gate(experiment_report, kill_switch=kill_switch)
     if not gate["activation_allowed"]:
+        detail = (
+            f"GQ-4 promotion blocked (decision_record_ref={decision_record_ref}): "
+            f"{gate['reason']}"
+        )
         raise DomainError(
             ErrorCode.POLICY_DENIED,
-            f"GQ-4 promotion blocked (decision_record_ref={decision_record_ref}): "
-            f"{gate['reason']}",
+            detail,
+            details={
+                "confirmation": safety_invariant_request(
+                    action="gq4_default_switch_gate",
+                    summary="默认生成策略晋级被拒绝",
+                    rationale="仅当实验决策为 PROMOTE_AGENTIC_CANDIDATE 且无 kill switch 才允许切换",
+                    rules_applied=("gq4_default_switch_gate", "fail_closed_promotion"),
+                    detail=detail,
+                ).as_dict()
+            },
         )
     return {
         **gate,

@@ -296,12 +296,19 @@ class AppGuidanceService:
                     .limit(5)
                 )
             ).scalars().all()
+            from regent.application.confirmation_present import confirmation_for_human_task
+
             pending_tasks = [
                 {
                     "id": str(t.id),
                     "task_type": t.task_type,
                     "prompt": t.prompt,
                     "due_at": t.due_at.isoformat() if t.due_at else None,
+                    "confirmation": confirmation_for_human_task(
+                        task_type=t.task_type,
+                        summary=t.task_type,
+                        prompt=t.prompt,
+                    ),
                 }
                 for t in human_tasks
             ]

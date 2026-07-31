@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     aar1_certified_hive: bool = False
     # When True, ReleaseCandidate approve requires a completed human APPROVE task.
     require_release_human_approval: bool = True
+    # Console confirmation preference (docs/console-dialog-prd-2026-07-31.md).
+    # balanced = default; aggressive / conservative via settings/env.
+    decision_preference: Literal["aggressive", "balanced", "conservative"] = "balanced"
+    # Comma-separated action allow/deny lists (minimal set: goal_confirm,
+    # release_approval, quality_approval, delivery_gap_intervene, external_effect).
+    decision_allow_actions: str = ""
+    decision_deny_actions: str = ""
+    # Default HumanTask / confirmation timeout for non-safety prompts (seconds).
+    confirmation_timeout_seconds: int = Field(default=300, ge=0)
     # Worker reconciliation sweep interval (seconds) for stale ExternalOperations.
     reconciliation_interval_seconds: float = Field(default=300.0, ge=30.0)
     # PRD §7.1–7.3 privacy: consent gate + retention anonymization.
