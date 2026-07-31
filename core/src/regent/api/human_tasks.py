@@ -7,7 +7,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 
+from regent.application.confirmation_present import action_key_for_task_type
 from regent.application.human_task_service import HumanTaskService
 from regent.domain.errors import DomainError
 from regent.infrastructure.models import (
@@ -138,6 +140,24 @@ async def complete_human_task(
             approved = False
         goal = await session.get(GoalModel, row.goal_id)
         project_id = goal.app_project_id if goal is not None else None
+
+        # CD-3.5: "总是允许" persistence — record the action in goal metadata so future
+        # confirmations for the same action can be auto-resolved by decision_policy.
+        always_allow = bool(
+            payload.response.get("always_allow") or payload.response.get("always")
+        )
+        metadata_dirty = False
+        if always_allow and goal is not None:
+            metadata = dict(goal.metadata_json or {})
+            allow_actions = list(metadata.get("decision_allow_actions") or [])
+            action_key = action_key_for_task_type(row.task_type)
+            if action_key not in allow_actions:
+                allow_actions.append(action_key)
+                metadata["decision_allow_actions"] = allow_actions
+                goal.metadata_json = metadata
+                flag_modified(goal, "metadata_json")
+                metadata_dirty = True
+
         if project_id is not None:
             conversation = await session.scalar(
                 select(ConversationModel).where(ConversationModel.app_project_id == project_id)
@@ -172,6 +192,10 @@ async def complete_human_task(
                     )
                 )
                 await session.commit()
+            elif metadata_dirty:
+                await session.commit()
+        elif metadata_dirty:
+            await session.commit()
 
         return HumanTaskResponse(
             id=row.id,

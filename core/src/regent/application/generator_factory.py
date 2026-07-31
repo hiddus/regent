@@ -57,6 +57,7 @@ def build_code_generator(
             provider,
             artifacts,
             semantic_alignment_enabled=settings.goal_semantic_alignment_enabled,
+            workspace_root=Path(settings.workspace_root),
         )
 
     if enforce_consistency:
@@ -75,8 +76,8 @@ class GeneratorSelector:
     """Per-goal generator selection with lazy agentic construction.
 
     Eagerly holds the lightweight artifact-backed generator; constructs
-    ``AgenticCodeGenerator`` only on the first ``select()`` that resolves to
-    ``agentic``. Fail-closed consistency checks remain on construct / select.
+    ``AgenticCodeGenerator`` keyed by delivery budget (CD-7.4) so a frozen
+    first-call budget cannot leak across goals / profile changes.
     """
 
     def __init__(
@@ -90,7 +91,7 @@ class GeneratorSelector:
         enforce_consistency: bool = True,
     ) -> None:
         self._artifact_backed = artifact_backed
-        self._agentic: Any | None = None
+        self._agentic_by_budget: dict[tuple[Any, ...], Any] = {}
         self._settings = settings
         self._provider = provider
         self._artifacts = artifacts
@@ -104,22 +105,33 @@ class GeneratorSelector:
         return self._artifact_backed
 
     def _ensure_agentic(self) -> Any:
-        if self._agentic is None:
-            self._agentic = AgenticCodeGenerator(
-                self._provider,
-                self._artifacts,
-                workspace_root=Path(self._settings.workspace_root),
-                budget=resolve_delivery_budget(
-                    resolve_delivery_persona(self._settings.delivery_profile),
-                    self._settings.agent_max_turns,
-                    self._settings.agent_max_tokens,
-                    self._settings.agent_max_wall_seconds,
-                ),
-                sessions=self._sessions,
-            )
-            if self._enforce_consistency:
-                assert_generator_consistency(strategy="agentic", generator=self._agentic)
-        return self._agentic
+        persona = resolve_delivery_persona(self._settings.delivery_profile)
+        budget = resolve_delivery_budget(
+            persona,
+            self._settings.agent_max_turns,
+            self._settings.agent_max_tokens,
+            self._settings.agent_max_wall_seconds,
+        )
+        key = (
+            persona.value,
+            getattr(budget, "max_turns", None),
+            getattr(budget, "max_tokens", None),
+            getattr(budget, "max_wall_seconds", None),
+        )
+        cached = self._agentic_by_budget.get(key)
+        if cached is not None:
+            return cached
+        agentic = AgenticCodeGenerator(
+            self._provider,
+            self._artifacts,
+            workspace_root=Path(self._settings.workspace_root),
+            budget=budget,
+            sessions=self._sessions,
+        )
+        if self._enforce_consistency:
+            assert_generator_consistency(strategy="agentic", generator=agentic)
+        self._agentic_by_budget[key] = agentic
+        return agentic
 
 
 def build_generator_selector(
@@ -141,6 +153,7 @@ def build_generator_selector(
         provider,
         artifacts,
         semantic_alignment_enabled=settings.goal_semantic_alignment_enabled,
+        workspace_root=Path(settings.workspace_root),
     )
     if enforce_consistency:
         assert_generator_consistency(strategy="artifact-backed", generator=artifact_backed)

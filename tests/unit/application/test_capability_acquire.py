@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 
+import pytest
 from regent.application.capability_acquire_service import (
     AcquireRequest,
     _check_content_hash,
@@ -245,3 +246,39 @@ def test_acquire_request_with_authorized_urls() -> None:
         authorized_urls=("https://example.com/capabilities",),
     )
     assert len(req.authorized_urls) == 1
+
+
+@pytest.mark.asyncio
+async def test_acquire_fails_closed_without_egress_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CD-7.2: no proxy → no bare httpx (fail-closed before Permit)."""
+    from regent.application.capability_acquire_service import CapabilityAcquireService
+
+    class _Cfg:
+        dependency_egress_proxy = None
+
+    monkeypatch.setattr(
+        "regent.application.capability_acquire_service.get_settings",
+        lambda: _Cfg(),
+    )
+
+    class _Sessions:
+        def __call__(self):
+            raise AssertionError("must not open DB when failing closed on egress")
+
+    svc = CapabilityAcquireService(_Sessions(), egress_proxy="")  # type: ignore[arg-type]
+    # Force past existing-check by stubbing _find_existing
+    async def _none(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(svc, "_find_existing", _none)
+    result = await svc.acquire(
+        AcquireRequest(
+            capability_name="acquired-x-v1",
+            requirement_key="delivery.acquire.x",
+            goal_id=uuid.uuid4(),
+        )
+    )
+    assert result.success is False
+    assert "egress" in (result.failure_reason or "").lower()

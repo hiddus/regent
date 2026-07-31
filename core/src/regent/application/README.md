@@ -2,6 +2,14 @@
 
 应用服务层：目标服务、执行编排（execution_orchestrator）、组织引擎（organization_engine）、能力解析与构建、交付批次与评审、实验平台、调度、许可（permit_service）、策略引擎（policy_engine）、恢复与对账（reconciliation_worker）、Outbox 死信（outbox_dead_letter_service）等。
 
+**本层是状态转换的唯一执行者**：LLM 只能提出结构化 Command，所有状态写入由本层的确定性 Application Service 完成。
+
+## 状态说明（F-8 已闭环）
+
+- `_apply_delivery_verdict` **已完成生产接线**（调用点见 `execution_orchestrator.py:3719/3726/3734`）。Technical-Spec §25 曾将 CD-1 记为「未接线」属文档低报，现已更正（`Regent-Technical-Spec.md:767`）。
+- 交付拒绝已类型化为 `delivery_rejection.py:10` 的 `DeliveryRejection(DomainError)`；`:32` 保留 legacy 字符串仅作向后兼容，不再是唯一判据。
+- `app_guidance_service.py` 的 `guide()`（:252）已升格为**多步工具循环**（`:278` 受 `_MAX_GUIDANCE_STEPS` 约束），guidance handler 经 `available_tools()`（:229）注册为 `ToolSpec` —— 即 PRD §4.4.2 / CD-4 已落地，不再是单次意图分类器。
+
 ## 目录内容
 
 文件：

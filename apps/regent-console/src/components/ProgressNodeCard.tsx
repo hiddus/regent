@@ -89,6 +89,11 @@ export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardPro
               {NODE_STATUS_LABEL[node.status]}
             </span>
           )}
+          {isLive && node.toolTrace && node.toolTrace.length > 0 && (
+            <span className="progress-node-tool-hint" title="最近调用的工具">
+              🔧 {node.toolTrace[node.toolTrace.length - 1]}
+            </span>
+          )}
           <span
             className={`progress-node-arrow ${mode === 'detail' ? 'expanded' : ''}`}
             aria-hidden
@@ -124,6 +129,14 @@ export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardPro
                 </li>
               ))}
             </ul>
+          )}
+          {mode === 'detail' && node.toolTrace && node.toolTrace.length > 0 && (
+            <div className="progress-node-tools">
+              <span className="tools-label">最近工具轨迹：</span>
+              {node.toolTrace.map((tool, i) => (
+                <span key={`${tool}-${i}`} className="tool-chip">{tool}</span>
+              ))}
+            </div>
           )}
           {mode === 'detail' && node.updatedAt && (
             <span className="progress-node-time">{formatTime(node.updatedAt)}</span>

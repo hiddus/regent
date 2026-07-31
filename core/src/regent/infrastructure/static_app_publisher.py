@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.delivery_review_service import review_files_for_delivery
 from regent.domain.errors import DomainError, ErrorCode
 
@@ -72,15 +73,12 @@ class StaticAppPublisher:
             },
         ]
         if not all(bool(item["passed"]) for item in checks):
-            raise DomainError(
-                ErrorCode.INVALID_STATE,
-                "delivery-review-v1 rejected non-deliverable surface: "
-                f"{delivery.summary}; "
-                + "; ".join(
-                    f"{c.name}: {c.detail or 'failed'}"
-                    for c in delivery.checks
-                    if not c.passed
-                ),
+            failed_reasons = [
+                f"{c.name}: {c.detail or 'failed'}" for c in delivery.checks if not c.passed
+            ] or [delivery.summary]
+            raise DeliveryRejection(
+                reasons=failed_reasons,
+                producer_ref="static-app-publisher",
             )
         manifest = {
             name: hashlib.sha256(content.encode("utf-8")).hexdigest()

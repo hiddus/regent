@@ -147,8 +147,11 @@ class ReleaseService:
                 if decision == "REJECT":
                     approved = False
                 if task is None or task.status != "COMPLETED" or not response or not approved:
+                    # Not a dead end: normal control flow while the human task is still
+                    # open. Caller retries after HumanTaskCompleted; no handoff needed
+                    # here because one is already pending.
                     raise DomainError(
-                        ErrorCode.POLICY_DENIED, "release approval task is incomplete"
+                        ErrorCode.POLICY_DENIED, "release approval task is still pending"
                     )
             candidate.status = "APPROVED"
             candidate.version += 1

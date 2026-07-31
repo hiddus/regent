@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.goal_anchor_service import validate_goal_alignment
 from regent.infrastructure.delivery_review_capability import (
     CAPABILITY_NAME,
@@ -51,8 +52,10 @@ class DeliveryReviewResult:
         if self.passed:
             return
         failed = [c for c in self.checks if not c.passed]
-        reasons = "; ".join(f"{c.name}: {c.detail or 'failed'}" for c in failed)
-        raise ValueError(f"{self.capability} rejected non-deliverable surface: {reasons}")
+        raise DeliveryRejection(
+            reasons=[f"{c.name}: {c.detail or 'failed'}" for c in failed],
+            producer_ref=self.capability,
+        )
 
 
 def _strip_tags(html: str) -> str:
@@ -529,6 +532,32 @@ def review_files_for_delivery(
             else f"{file_count} files",
         )
     )
+
+    # CD-3.4: reviewable engineering package — README always required; a
+    # non-SMALL goal must also ship at least one test (SMALL goals may relax
+    # the test requirement — single-milestone products are simpler).
+    goal_scale = str(contract.get("goal_scale") or "")
+    has_readme = any(name.lower() == "readme.md" for name in files)
+    all_checks.append(
+        DeliveryReviewCheck(
+            "require-readme",
+            has_readme,
+            "missing README.md" if not has_readme else "ok",
+        )
+    )
+    if goal_scale != "SMALL":
+        has_tests = any(
+            name.replace("\\", "/").lower().startswith("tests/")
+            or name.lower().startswith("test_")
+            for name in files
+        )
+        all_checks.append(
+            DeliveryReviewCheck(
+                "require-tests",
+                has_tests,
+                "missing tests/ directory or test_*.py file" if not has_tests else "ok",
+            )
+        )
 
     passed = all(c.passed for c in all_checks)
     summary = (

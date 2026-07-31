@@ -1,4 +1,7 @@
-"""Server-Sent Events endpoint for real-time console updates."""
+"""Server-Sent Events endpoint for real-time console updates.
+
+CD-5：自适应轮询；LISTEN/NOTIFY 仍为后续增强。
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,10 @@ from fastapi import APIRouter, Query, Request
 from sqlalchemy import text
 
 router = APIRouter(prefix="/events", tags=["events"])
+
+_ADAPTIVE_POLL_MIN = 0.25
+_ADAPTIVE_POLL_MAX = 1.0
+_ADAPTIVE_POLL_STEP = 0.25
 
 
 async def _poll_changes(
@@ -122,6 +129,7 @@ async def event_stream(
         last_ordinal = 0
         last_status_fingerprint: str | None = None
         pid = uuid.UUID(project_id) if project_id else None
+        poll_backoff = _ADAPTIVE_POLL_MIN
 
         yield (
             "data: "
@@ -166,10 +174,16 @@ async def event_stream(
                 + "\n\n"
             )
 
+            if changes:
+                poll_backoff = _ADAPTIVE_POLL_MIN
+            else:
+                poll_backoff = min(_ADAPTIVE_POLL_MAX, poll_backoff + _ADAPTIVE_POLL_STEP)
+
+            wait_seconds = min(poll_interval, poll_backoff)
             try:
                 await asyncio.wait_for(
                     request.is_disconnected(),
-                    timeout=poll_interval,
+                    timeout=wait_seconds,
                 )
                 break
             except TimeoutError:

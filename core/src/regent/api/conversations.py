@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime
 from typing import Annotated, Any
@@ -10,6 +11,8 @@ from regent.application.conversation_service import (
     ConversationService,
     CreateConversation,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"])
 
@@ -100,12 +103,56 @@ async def append_message(
     conversation_id: uuid.UUID,
     payload: AppendMessageBody,
     conversations: ServiceDep,
+    request: Request,
 ) -> MessageResponse:
-    return message_response(
-        await conversations.append(
-            AppendConversationMessage(conversation_id=conversation_id, **payload.model_dump())
-        )
+    """Append a USER message and, when the conversation is bound to an app
+    project, drive AppGuidanceService.guide() in the same request (CD-4.2).
+
+    This turns the endpoint from pure message CRUD into a conversational agent
+    entry point: the guidance loop persists its own USER+ASSISTANT pair, so the
+    caller sees both this appended message and (best effort) an assistant reply
+    on the next `GET .../messages` poll.
+    """
+    message = await conversations.append(
+        AppendConversationMessage(conversation_id=conversation_id, **payload.model_dump())
     )
+    await _maybe_run_guidance(
+        request,
+        conversations,
+        conversation_id=conversation_id,
+        content=payload.content,
+        actor=payload.actor,
+    )
+    return message_response(message)
+
+
+async def _maybe_run_guidance(
+    request: Request,
+    conversations: ConversationService,
+    *,
+    conversation_id: uuid.UUID,
+    content: str,
+    actor: str,
+) -> None:
+    """Best-effort guidance dispatch — must never break the base CRUD contract."""
+    conversation = await conversations.get(conversation_id)
+    project_id = conversation.app_project_id
+    if project_id is None:
+        return
+    try:
+        from regent.application.app_guidance_service import AppGuidanceService
+        from regent.config import get_settings
+        from regent.model.factory import build_model_provider
+
+        guidance = AppGuidanceService(
+            request.app.state.sessions, build_model_provider(get_settings())
+        )
+        await guidance.guide(project_id, message=content, actor=actor)
+    except Exception:  # noqa: BLE001 — CRUD append must stay usable if guidance fails
+        logger.exception(
+            "guidance loop failed for conversation append",
+            extra={"conversation_id": str(conversation_id), "project_id": str(project_id)},
+        )
 
 
 @router.get("/{conversation_id}/messages", response_model=list[MessageResponse])

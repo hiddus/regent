@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from regent.application.auto_fix_service import AutoFixService
+from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.delivery_review_service import review_files_for_delivery
 from regent.application.p1_ports import (
     DeploymentRequest,
@@ -270,6 +271,9 @@ class StaticPreviewDeploymentProvider:
                     },
                 },
             )
+        except DeliveryRejection:
+            # Typed delivery rejection — re-raise so the orchestrator can trigger recovery.
+            raise
         except ValueError as exc:
             # Re-raise delivery-review-v1 failures so the orchestrator can trigger recovery.
             if "delivery-review-v1" in str(exc):

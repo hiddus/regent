@@ -42,7 +42,11 @@ async def test_generator_materializes_content_as_immutable_artifact(tmp_path: Pa
     )
     store = FileArtifactStore(tmp_path / "artifacts")
     provider = FakeProvider(bundle)
-    generator = ArtifactBackedCodeGenerator(provider, store)  # type: ignore[arg-type]
+    # Narrow unit test for artifact materialization only — opt out of the
+    # full delivery-review gate (covered separately by delivery_review tests).
+    generator = ArtifactBackedCodeGenerator(
+        provider, store, enforce_delivery_verification=False
+    )  # type: ignore[arg-type]
     result = await generator.generate(
         {
             "planned_paths": ["src/app.py"],
@@ -79,6 +83,7 @@ async def test_generator_default_skips_semantic_alignment_llm(tmp_path: Path) ->
     generator = ArtifactBackedCodeGenerator(
         provider,
         FileArtifactStore(tmp_path / "artifacts"),  # type: ignore[arg-type]
+        enforce_delivery_verification=False,
     )
     await generator.generate(
         {

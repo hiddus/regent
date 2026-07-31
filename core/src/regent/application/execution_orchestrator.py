@@ -33,6 +33,8 @@ from regent.application.compliance_risk_service import (
     ComplianceStatus,
 )
 from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
+from regent.application.delivery_rejection import DeliveryRejection, reasons_from_exception
+from regent.application.delivery_state import DeliveryState, decide_delivery_verdict
 from regent.application.discovery_worker import DiscoveryWorker
 from regent.application.evidence_policy import (
     collect_authorized_urls,
@@ -45,6 +47,7 @@ from regent.application.execution_events import (
     CAPABILITY_RESOLUTION_SATISFIED,
     DEPENDENCY_RESOLUTION_REQUESTED,
     DELIVERY_GAP_HUMAN_APPROVED,
+    DELIVERY_STATE_CHANGED,
     DISCOVERY_COMPLETED,
     DISCOVERY_ROUND_REQUESTED,
     FAILURE_COMPLIANCE,
@@ -139,6 +142,7 @@ from regent.infrastructure.models import (
     GenerationRunModel,
     GoalModel,
     GoalSpecModel,
+    HumanTaskModel,
     HypothesisDecisionModel,
     ProductHypothesisModel,
     RequirementRevisionModel,
@@ -1238,10 +1242,22 @@ class ExecutionOrchestrator:
             "planned_paths",
             ["src/app.py", "src/index.html", "requirements.txt", "README.md"],
         )
-        # Ensure mandatory project files are always included
+        # Ensure mandatory project files are always included (CD-3.4).
         for mandatory in ("requirements.txt", "README.md"):
             if mandatory not in planned_paths:
                 planned_paths.append(mandatory)
+        # Non-SMALL goals must plan at least one test path so generators freeze it.
+        _scale_hint = str(
+            (req_content.get("acceptance_contract") or {}).get("goal_scale")
+            or req_content.get("goal_scale")
+            or ""
+        ).upper()
+        if _scale_hint != "SMALL" and not any(
+            str(p).replace("\\", "/").lower().startswith("tests/")
+            or str(p).lower().startswith("test_")
+            for p in planned_paths
+        ):
+            planned_paths.append("tests/test_smoke.py")
         dependency_intents = req_content.get("dependency_intents", [])
         verification_commands = req_content.get(
             "verification_commands", ["python -c 'import app'"]
@@ -1294,6 +1310,13 @@ class ExecutionOrchestrator:
             acceptance_contract["goal_anchor_text"] = goal_meta_row.original_input
         if goal_meta.get("goal_scale"):
             acceptance_contract["goal_scale"] = goal_meta["goal_scale"]
+        # CD-3.4 follow-up: once goal_scale is known from metadata, ensure tests path.
+        if str(acceptance_contract.get("goal_scale") or "").upper() != "SMALL" and not any(
+            str(p).replace("\\", "/").lower().startswith("tests/")
+            or str(p).lower().startswith("test_")
+            for p in planned_paths
+        ):
+            planned_paths.append("tests/test_smoke.py")
         first_deliverable = str(
             goal_meta.get("first_deliverable")
             or (spec.success_criteria or {}).get("first_deliverable")
@@ -1519,12 +1542,21 @@ class ExecutionOrchestrator:
                 from regent.application.live_action import set_goal_live_action
 
                 async def _on_generation_progress(summary: str) -> None:
+                    tool: str | None = None
+                    if summary.startswith("执行工具 "):
+                        rest = summary[len("执行工具 ") :]
+                        if "：" in rest:
+                            tool = rest.split("：", 1)[0].strip()
+                        elif ":" in rest:
+                            tool = rest.split(":", 1)[0].strip()
                     await set_goal_live_action(
                         self._sessions,
                         goal_id,
                         summary,
                         stage="GENERATING",
                         event_type="GENERATION_RUN_REQUESTED",
+                        tool=tool,
+                        tool_event={"tool": tool, "summary": summary} if tool else None,
                     )
 
                 await set_goal_live_action(
@@ -1544,14 +1576,39 @@ class ExecutionOrchestrator:
             if exc.code == ErrorCode.LEASE_CONFLICT:
                 # In-flight generate under a prior lease — retry outbox later.
                 raise
-            if "delivery-review-v1" in str(exc):
-                reasons = [
-                    part.strip()
-                    for part in str(exc).split("rejected non-deliverable surface:", 1)[-1].split(
-                        ";"
+            if isinstance(exc, DeliveryRejection):
+                # CD-7.5 / N-6: transcript DB jitter must not burn the capability ladder;
+                # sidecar is already on disk for audit.
+                if exc.code == ErrorCode.TRANSCRIPT_PERSIST_FAILED:
+                    logger.error(
+                        "transcript persist failed; sidecar retained; skipping ladder burn",
+                        extra={
+                            "goal_id": str(goal_id),
+                            "error_code": exc.code.value,
+                            "retryable": bool(getattr(exc, "retryable", False)),
+                            "draft_uri": getattr(exc, "draft_uri", None),
+                            "reasons": list(exc.reasons)[:3],
+                        },
                     )
-                    if part.strip()
-                ][:12] or [str(exc)[:200]]
+                    async with self._sessions() as session, session.begin():
+                        await self._append_conversation_message(
+                            session,
+                            project_id,
+                            role="ASSISTANT",
+                            message_type="TRANSCRIPT_PERSIST_FAILED",
+                            content=(
+                                "生成 transcript 写入数据库失败（sidecar 已保留）。"
+                                "这不消耗能力阶梯；请稍后重试或检查存储。"
+                            ),
+                            metadata={
+                                "goal_id": str(goal_id),
+                                "error_code": exc.code.value,
+                                "retryable": True,
+                                "draft_uri": getattr(exc, "draft_uri", None),
+                            },
+                        )
+                    return
+                reasons = reasons_from_exception(exc)
                 recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                     goal_id=goal_id,
                     project_id=project_id,
@@ -1625,15 +1682,13 @@ class ExecutionOrchestrator:
             logger.exception("generation failed", extra={"goal_id": str(goal_id)})
             raise
         except ValueError as exc:
-            # delivery-review-v1 / goal-attainment failure: organize capability, do not publish.
+            # Legacy fallback: DeliveryRejection producers now raise a typed
+            # DomainError subclass (caught above); this branch only remains
+            # for any stray bare ValueError still carrying the legacy string.
             if "delivery-review-v1" not in str(exc):
                 logger.exception("generation failed", extra={"goal_id": str(goal_id)})
                 raise
-            reasons = [
-                part.strip()
-                for part in str(exc).split("rejected non-deliverable surface:", 1)[-1].split(";")
-                if part.strip()
-            ][:12] or [str(exc)[:200]]
+            reasons = reasons_from_exception(exc)
             recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                 goal_id=goal_id,
                 project_id=project_id,
@@ -2369,6 +2424,19 @@ class ExecutionOrchestrator:
                 },
             )
             return
+        # resume → recover already created a HumanTask + conversation card when
+        # terminal_exhaust (goal_intent / ladder handoff). Do not stack a second
+        # HUMAN_TASK_REQUIRED without task id (Console「总是允许」死循环观感).
+        if recovery.terminal_exhaust:
+            logger.info(
+                "delivery gap human approve landed on handoff; skip RESUME_BLOCKED card",
+                extra={
+                    "goal_id": str(goal_id),
+                    "gap_kind": recovery.gap_kind,
+                    "message": (recovery.message or "")[:200],
+                },
+            )
+            return
         await self._halt_goal_stage(
             goal_id,
             project_id,
@@ -2432,7 +2500,7 @@ class ExecutionOrchestrator:
             )
             result = await release_service.execute(deployment.id)
         except Exception as exc:
-            if "delivery-review-v1" in str(exc):
+            if isinstance(exc, DeliveryRejection) or "delivery-review-v1" in str(exc):
                 req_uuid: uuid.UUID | None = None
                 plan_uuid: uuid.UUID | None = None
                 async with self._sessions() as session:
@@ -2471,13 +2539,7 @@ class ExecutionOrchestrator:
                             req_uuid = gen.requirement_revision_id
                             plan_uuid = gen.capability_resolution_plan_id
                 if req_uuid is not None and plan_uuid is not None:
-                    reasons = [
-                        part.strip()
-                        for part in str(exc)
-                        .split("rejected non-deliverable surface:", 1)[-1]
-                        .split(";")
-                        if part.strip()
-                    ][:12] or [str(exc)[:200]]
+                    reasons = reasons_from_exception(exc)
                     recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                         goal_id=goal_id,
                         project_id=project_id,
@@ -3653,11 +3715,64 @@ class ExecutionOrchestrator:
 
             flag_modified(goal, "metadata_json")
             if append_conversation:
-                from regent.application.confirmation_present import enrich_halt_extra
+                from regent.application.confirmation_present import (
+                    confirmation_for_human_task,
+                    enrich_halt_extra,
+                )
 
                 event_meta = enrich_halt_extra(
-                    event_type, stage, message, {"goal_id": str(goal_id), "stage": stage, **(extra or {})}
+                    event_type,
+                    stage,
+                    message,
+                    {"goal_id": str(goal_id), "stage": stage, **(extra or {})},
                 )
+                # HUMAN_TASK_REQUIRED without a real HumanTask id leaves Console
+                # TaskCard stuck on「缺少 task id」— allow/always-allow cannot complete.
+                if event_type == "HUMAN_TASK_REQUIRED" and not (
+                    event_meta.get("id") or event_meta.get("human_task_id")
+                ):
+                    task_id = uuid.uuid4()
+                    task_type = str(
+                        event_meta.get("task_type") or "DELIVERY_GAP_INTERVENE"
+                    )
+                    confirmation = event_meta.get("confirmation")
+                    if not isinstance(confirmation, dict):
+                        confirmation = confirmation_for_human_task(
+                            task_type=task_type,
+                            summary=message[:200],
+                            rationale=f"阶段 {stage} 需要人工确认",
+                            detail=message[:500],
+                            prompt=message,
+                            extra_rules=[f"stage:{stage}"],
+                        )
+                        event_meta["confirmation"] = confirmation
+                    timeout_sec = int(
+                        (confirmation or {}).get("timeout_seconds") or 300
+                    )
+                    session.add(
+                        HumanTaskModel(
+                            id=task_id,
+                            goal_id=goal_id,
+                            work_id=None,
+                            run_id=None,
+                            task_type=task_type,
+                            prompt=message[:2000],
+                            requested_by=actor,
+                            due_at=datetime.now(UTC)
+                            + timedelta(seconds=max(timeout_sec, 60)),
+                            status="OPEN",
+                        )
+                    )
+                    event_meta["id"] = str(task_id)
+                    event_meta["human_task_id"] = str(task_id)
+                    event_meta["task_type"] = task_type
+                    metadata["pending_delivery_gap_human"] = {
+                        "human_task_id": str(task_id),
+                        "gap_kind": str((extra or {}).get("gap_kind") or ""),
+                        "stage": stage,
+                    }
+                    goal.metadata_json = metadata
+                    flag_modified(goal, "metadata_json")
                 await self._append_conversation_event(
                     session,
                     project_id,
@@ -3693,7 +3808,39 @@ class ExecutionOrchestrator:
 
         复刻既有 ``if recovered … elif terminal_exhaust: _halt_goal_stage(WAIT_FOR_HUMAN)``
         行为；返回 True 表示已处理（调用方应 return），否则调用方继续其既有 fallback。
+
+        CD-1.2/CD-5: 用 ``decide_delivery_verdict`` 把 recovery 结果映射为显式
+        ``DeliveryState``，写入 ``goal.metadata_json`` 并发 ``DeliveryStateChanged``
+        Outbox 事件，使状态转移可被观测/统计（north_star handoff_rate 等）。
         """
+        if recovery.recovered:
+            verdict = decide_delivery_verdict(
+                success=False,
+                needs_human=False,
+                recoverable=True,
+                budget_left=True,
+            )
+        elif recovery.terminal_exhaust:
+            verdict = decide_delivery_verdict(
+                success=False,
+                needs_human=True,
+                recoverable=True,
+                budget_left=False,
+                review_prompt=recovery.message,
+            )
+        else:
+            verdict = decide_delivery_verdict(
+                success=False,
+                needs_human=False,
+                recoverable=False,
+                budget_left=False,
+            )
+        await self._record_delivery_state(
+            goal_id,
+            state=verdict.state,
+            gap_kind=recovery.gap_kind,
+            attempts=recovery.attempts,
+        )
         if recovery.recovered:
             logger.info(
                 recovered_log,
@@ -3714,6 +3861,43 @@ class ExecutionOrchestrator:
             )
             return True
         return False
+
+    async def _record_delivery_state(
+        self,
+        goal_id: uuid.UUID,
+        *,
+        state: DeliveryState,
+        gap_kind: str,
+        attempts: int,
+    ) -> None:
+        """CD-1.2/CD-5: persist ``delivery_state`` + emit ``DeliveryStateChanged``."""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                return
+            metadata = dict(goal.metadata_json or {})
+            metadata["delivery_state"] = state.value
+            goal.metadata_json = metadata
+            flag_modified(goal, "metadata_json")
+            session.add(
+                make_outbox_event(
+                    EventEnvelope(
+                        event_type=DELIVERY_STATE_CHANGED,
+                        aggregate_type="goal",
+                        aggregate_id=goal.id,
+                        aggregate_version=goal.version,
+                        payload={
+                            "goal_id": str(goal.id),
+                            "delivery_state": state.value,
+                            "gap_kind": gap_kind,
+                            "attempts": attempts,
+                        },
+                        correlation_id=goal.correlation_id,
+                    )
+                )
+            )
 
     # ---------------------------------------------------------------------------
     # Helper methods

@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import socket
-import sys
 from typing import Any
-
-import httpx
 
 from regent.agent.tools import WorkspaceToolkit
 from regent.agent.types import VerificationGap, VerificationVerdict
@@ -136,9 +131,14 @@ class VerificationAgent:
         files: dict[str, str],
         success_criteria: dict[str, Any],
     ) -> dict[str, Any]:
-        """compileall → start app on ephemeral port → HTTP probe core routes."""
+        """compileall → start app → HTTP probe — all via toolkit sandbox (F-3 / §13.8).
+
+        Long-lived host ``create_subprocess_exec`` is forbidden. The smoke probe
+        is a single sandboxed ``python`` invocation that starts the app in-process
+        (background thread), probes routes, then exits.
+        """
         compile_result = await self._toolkit.run_command(
-            f"{sys.executable} -m compileall -q .",
+            "python -m compileall -q .",
             timeout_seconds=60,
         )
         if not compile_result.startswith("exit=0"):
@@ -164,92 +164,92 @@ class VerificationAgent:
 
         port = _pick_free_port()
         module = "src.app" if app_rel.startswith("src/") else "app"
-        server_script = self._toolkit.root / ".regent_smoke_server.py"
-        server_script.write_text(
-            _server_launcher(module=module, port=port),
+        routes = _routes_from_criteria(success_criteria)
+        probe_script = self._toolkit.root / ".regent_smoke_probe.py"
+        probe_script.write_text(
+            _smoke_probe_script(module=module, port=port, routes=routes),
             encoding="utf-8",
         )
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(server_script),
-            cwd=str(self._toolkit.root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        log_chunks: list[str] = []
         try:
-            ready = await _wait_port(port, timeout=20.0)
-            if not ready:
-                out = await _drain(process, timeout=1.0)
-                log_chunks.append(out)
-                return {
-                    "attempted": True,
-                    "passed": False,
-                    "error": f"server did not bind :{port}",
-                    "log": "\n".join(log_chunks),
-                }
-
-            routes = _routes_from_criteria(success_criteria)
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                for route in routes:
-                    url = f"http://127.0.0.1:{port}{route}"
-                    try:
-                        resp = await client.get(url)
-                    except Exception as exc:  # noqa: BLE001
-                        return {
-                            "attempted": True,
-                            "passed": False,
-                            "error": f"request {route} failed: {exc}",
-                            "log": "\n".join(log_chunks),
-                            "port": port,
-                            "routes": routes,
-                        }
-                    log_chunks.append(f"GET {route} -> {resp.status_code}")
-                    if resp.status_code >= 500:
-                        return {
-                            "attempted": True,
-                            "passed": False,
-                            "error": f"{route} returned {resp.status_code}",
-                            "log": "\n".join(log_chunks),
-                            "port": port,
-                            "routes": routes,
-                        }
+            log = await self._toolkit.run_command(
+                "python .regent_smoke_probe.py",
+                timeout_seconds=90,
+            )
+            passed = log.startswith("exit=0") and "SMOKE_OK" in log
             return {
                 "attempted": True,
-                "passed": True,
-                "error": None,
-                "log": "\n".join(log_chunks),
+                "passed": passed,
+                "error": None if passed else "app failed smoke",
+                "log": log,
                 "port": port,
                 "routes": routes,
             }
         finally:
-            process.kill()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(process.wait(), timeout=5)
-            server_script.unlink(missing_ok=True)
+            probe_script.unlink(missing_ok=True)
 
 
-def _server_launcher(*, module: str, port: int) -> str:
+def _smoke_probe_script(*, module: str, port: int, routes: list[str]) -> str:
+    """Self-contained probe: start app in a daemon thread, HTTP GET routes, exit."""
+    routes_lit = repr(list(routes))
     return f"""
 import importlib
+import socket
+import threading
+import time
+import urllib.request
 
-mod = importlib.import_module({module!r})
-app = getattr(mod, "app", None)
-if app is None:
-    raise SystemExit("no app object")
+MODULE = {module!r}
+PORT = {port}
+ROUTES = {routes_lit}
+LOG = []
 
-# Flask
-if hasattr(app, "run") and not hasattr(app, "router"):
-    app.run(host="127.0.0.1", port={port}, debug=False, use_reloader=False)
-    raise SystemExit(0)
+def _serve():
+    mod = importlib.import_module(MODULE)
+    app = getattr(mod, "app", None)
+    if app is None:
+        raise SystemExit("no app object")
+    if hasattr(app, "run") and not hasattr(app, "router"):
+        app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
+        return
+    try:
+        import uvicorn
+        uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="error")
+    except Exception:
+        from werkzeug.serving import run_simple
+        run_simple("127.0.0.1", PORT, app, use_reloader=False, use_debugger=False)
 
-# ASGI (FastAPI/Starlette)
-try:
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port={port}, log_level="error")
-except Exception:
-    from werkzeug.serving import run_simple
-    run_simple("127.0.0.1", {port}, app, use_reloader=False, use_debugger=False)
+thread = threading.Thread(target=_serve, daemon=True)
+thread.start()
+
+deadline = time.time() + 20.0
+while time.time() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", PORT), timeout=0.5):
+            break
+    except OSError:
+        time.sleep(0.2)
+else:
+    print("SMOKE_FAIL: server did not bind")
+    raise SystemExit(1)
+
+for route in ROUTES:
+    url = f"http://127.0.0.1:{{PORT}}{{route}}"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            code = getattr(resp, "status", 200)
+            LOG.append(f"GET {{route}} -> {{code}}")
+            if int(code) >= 500:
+                print("\\n".join(LOG))
+                print(f"SMOKE_FAIL: {{route}} returned {{code}}")
+                raise SystemExit(1)
+    except Exception as exc:
+        print("\\n".join(LOG))
+        print(f"SMOKE_FAIL: request {{route}} failed: {{exc}}")
+        raise SystemExit(1)
+
+print("\\n".join(LOG))
+print("SMOKE_OK")
+raise SystemExit(0)
 """
 
 
@@ -277,11 +277,13 @@ def _resolve_test_command(
         if isinstance(raw, str) and raw.strip():
             return raw.strip()
     if "pytest.ini" in files or "pyproject.toml" in files:
-        # Prefer pytest when project declares it; still require a tests path or default.
-        if any(p.startswith("tests/") or p.startswith("test_") for p in files):
-            return f"{sys.executable} -m pytest -q --tb=line"
-    if any(p.startswith("tests/") for p in files):
-        return f"{sys.executable} -m pytest -q --tb=line"
+        if any(
+            p.replace("\\", "/").startswith("tests/") or p.startswith("test_")
+            for p in files
+        ):
+            return "pytest -q --tb=line"
+    if any(p.replace("\\", "/").startswith("tests/") for p in files):
+        return "pytest -q --tb=line"
     return None
 
 
@@ -289,26 +291,3 @@ def _pick_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-async def _wait_port(port: int, *, timeout: float) -> bool:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            writer.close()
-            await writer.wait_closed()
-            return True
-        except OSError:
-            await asyncio.sleep(0.25)
-    return False
-
-
-async def _drain(process: asyncio.subprocess.Process, *, timeout: float) -> str:
-    try:
-        assert process.stdout is not None
-        out = await asyncio.wait_for(process.stdout.read(8_000), timeout=timeout)
-        return out.decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        return ""

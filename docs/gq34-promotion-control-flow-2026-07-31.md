@@ -66,3 +66,12 @@
 
 - **真实任务实验窗口**：在真实模型/工具/预算下跑双臂、产出带 95% CI 的成功率/成本/延迟与用户结果，仍需真实 runner 接入（生产 wiring）。控制流已可驱动、可复算，不再是空钩子。
 - O1 / O3 / O4（artifact-backed 路径不跑 VerificationAgent、pytest 超时硬编码、新增生成入口需同接线一致性检查）仍为非阻塞可选增强。
+
+## 七、合规前置更正（2026-07-31 重订）
+
+> 对照架构评审 C2 / Tech-Spec §13.8 / 审计 §8：**仅有 CD-0.1 名义隔离不足以开生产 canary**。开窗前必须：
+>
+> 1. **CD-6 全绿**：N-3 专用 agent-exec 镜像 + entrypoint；N-3c uid 写盘；N-3d `host_path_map` fail-closed；N-3b 支持矩阵或 DinD；T1–T6；三联验收（echo + 写文件 + pytest）。见 [`cd6-execution-plan-2026-07-31.md`](./cd6-execution-plan-2026-07-31.md)。
+> 2. **CD-7 全绿**：技 P1-1…4 + N-4/N-6。见 [`conversational-delivery-next-plan-2026-07-31.md`](./conversational-delivery-next-plan-2026-07-31.md)。
+>
+> 沙箱不合规或硬债未收口时开流量 = 无效实验 / 规范违反。GQ-4 仍见 PENDING DecisionNote。

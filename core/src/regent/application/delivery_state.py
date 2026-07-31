@@ -118,7 +118,7 @@ def decide_delivery_verdict(
 def as_delivery_state(*, recovered: bool, terminal_exhaust: bool) -> DeliveryState:
     """Map an existing ``DeliveryGapRecoveryResult`` to the explicit ``DeliveryState``."""
     if recovered:
-        return DeliveryState.DELIVERED
+        return DeliveryState.AUTO_RECOVERING
     if terminal_exhaust:
         return DeliveryState.DELIVERED_FOR_REVIEW
     return DeliveryState.AUTO_RECOVERING
@@ -140,6 +140,21 @@ def resolve_delivery_persona(value: Any) -> DecisionPreference:
 def recovery_budget_multiplier(persona: Any) -> float:
     """Multiplier applied to autonomous recovery budget by persona (AC5)."""
     return _DELIVERY_BUDGET_MULTIPLIER.get(resolve_delivery_persona(persona), 1.0)
+
+
+# Gate reorganization base budget (COMPOSE→BUILD→ACQUIRE cycles). Scaled by persona (CD-7.3).
+_GATE_REORG_BASE_MAX = 6
+_GATE_REORG_CYCLE: tuple[str, ...] = ("COMPOSE", "BUILD", "ACQUIRE")
+
+
+def gate_reorg_max(persona: Any) -> int:
+    """Effective gate-reorg attempt ceiling after persona multiplier (CD-7.3)."""
+    return max(1, int(round(_GATE_REORG_BASE_MAX * recovery_budget_multiplier(persona))))
+
+
+def gate_reorg_step_name(attempt_index: int) -> str:
+    """Map zero-based gate attempt index onto COMPOSE→BUILD→ACQUIRE cycle."""
+    return _GATE_REORG_CYCLE[attempt_index % len(_GATE_REORG_CYCLE)]
 
 
 def resolve_delivery_budget(

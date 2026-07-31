@@ -541,7 +541,10 @@ class SingleAgentExecutionService:
                 select(ArtifactModel).where(ArtifactModel.run_id == run_id)
             )
             if goal is None or evidence is None or artifact is None:
-                raise RuntimeError("execution receipt is incomplete")
+                # Internal invariant violation (not a delivery-recoverable gap): the
+                # run's goal/evidence/artifact lineage is corrupt. Crash loudly so the
+                # caller retries/investigates rather than silently degrading receipts.
+                raise RuntimeError("execution receipt is missing required lineage records")
             usage = run.resource_usage
             return ExecutionReceipt(
                 goal_id=goal.id,

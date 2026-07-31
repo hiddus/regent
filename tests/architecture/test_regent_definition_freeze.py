@@ -10,10 +10,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEF_PATH = ROOT / "docs" / "definitions" / "REGENT-DEFINITION-1.0.txt"
 HASH_PATH = ROOT / "docs" / "definitions" / "REGENT-DEFINITION-1.0.sha256"
-PRD_PATH = ROOT / "Regent-PRD-v2.md"
-TECH_PATH = ROOT / "Regent-Technical-Spec-v2.md"
+PRD_PATH = ROOT / "Regent-PRD.md"
+TECH_PATH = ROOT / "Regent-Technical-Spec.md"
 
 DEFINITION_ID = "REGENT-DEFINITION-1.0"
+
+
+def test_freeze_guard_paths_exist() -> None:
+    """Meta-guard: wrong paths must fail as clear asserts, not FileNotFoundError."""
+    assert PRD_PATH.is_file(), f"PRD baseline missing at {PRD_PATH}"
+    assert TECH_PATH.is_file(), f"Technical Spec baseline missing at {TECH_PATH}"
+    assert DEF_PATH.is_file(), f"canonical definition missing at {DEF_PATH}"
+    assert HASH_PATH.is_file(), f"canonical hash missing at {HASH_PATH}"
 
 
 def normalize_definition_bytes(raw: bytes) -> bytes:

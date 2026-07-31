@@ -360,15 +360,16 @@ def test_generator_selector_picks_per_goal_strategy(tmp_path) -> None:
     selector = build_generator_selector(settings, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
     assert isinstance(selector, GeneratorSelector)
     # Agentic must remain lazy until first agentic hit.
-    assert selector._agentic is None
+    assert selector._agentic_by_budget == {}
     # No goal_id → default artifact-backed (canary needs a goal).
     assert isinstance(selector.select(None), ArtifactBackedCodeGenerator)
-    assert selector._agentic is None
+    assert selector._agentic_by_budget == {}
     # canary_percent=100 → every goal bucket selects agentic (constructed on first hit).
-    assert isinstance(selector.select("goal-x"), AgenticCodeGenerator)
-    assert selector._agentic is not None
-    # Second agentic select reuses the same instance.
-    assert selector.select("goal-y") is selector._agentic
+    first = selector.select("goal-x")
+    assert isinstance(first, AgenticCodeGenerator)
+    assert len(selector._agentic_by_budget) == 1
+    # Second agentic select reuses the same budget-keyed instance.
+    assert selector.select("goal-y") is first
     # Gate off → canary inert → artifact-backed even for canary bucket.
     settings_off = Settings(
         generation_strategy="artifact-backed",
@@ -379,7 +380,7 @@ def test_generator_selector_picks_per_goal_strategy(tmp_path) -> None:
     )
     selector_off = build_generator_selector(settings_off, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
     assert isinstance(selector_off.select("goal-x"), ArtifactBackedCodeGenerator)
-    assert selector_off._agentic is None
+    assert selector_off._agentic_by_budget == {}
 
 
 def test_generator_selector_lazy_skips_agentic_at_build(tmp_path) -> None:
@@ -393,9 +394,9 @@ def test_generator_selector_lazy_skips_agentic_at_build(tmp_path) -> None:
     )
     selector = build_generator_selector(settings, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
     assert isinstance(selector, GeneratorSelector)
-    assert selector._agentic is None
+    assert selector._agentic_by_budget == {}
     assert isinstance(selector.select(None), ArtifactBackedCodeGenerator)
-    assert selector._agentic is None
+    assert selector._agentic_by_budget == {}
 
 
 

@@ -33,6 +33,15 @@ def test_classify_evidence() -> None:
     assert classify_delivery_gap_kind(["goal-outbound-links: https links=0 < 3"]) == "evidence"
 
 
+def test_classify_bare_http_not_evidence() -> None:
+    """CD-7.1: bare 'http' / 'observed' substrings must not force evidence routing."""
+    assert (
+        classify_delivery_gap_kind(["stylesheet missing; see https://example.com"])
+        != "evidence"
+    )
+    assert classify_delivery_gap_kind(["http fetch failed in build log"]) != "evidence"
+
+
 def test_classify_goal_intent() -> None:
     assert (
         classify_delivery_gap_kind(["goal-first-deliverable: missing tokens"]) == "goal_intent"
@@ -368,6 +377,120 @@ async def test_resume_after_human_resets_attempts_and_recovers() -> None:
         or ""
     ) or result.method in {"REUSE", "CONFIGURE", "COMPOSE", "BUILD", "ACQUIRE"}
 
+
+@pytest.mark.asyncio
+async def test_resume_after_goal_intent_does_not_rehandoff() -> None:
+    """Approve must enter the ladder — not immediately short-circuit to another card."""
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=2,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        app_project_id=project_id,
+        metadata_json={
+            "delivery_gap_recovery_attempts": 0,
+            "awaiting_human_intervention": True,
+            "delivery_gap_kind": "goal_intent",
+            "requirement_revision_id": str(req_id),
+            "capability_resolution_plan_id": str(plan_id),
+            "pending_delivery_gap_human": {
+                "human_task_id": str(uuid.uuid4()),
+                "gap_kind": "goal_intent",
+                "gap_reasons": ["goal-first-deliverable: missing tokens"],
+            },
+            "termination": {
+                "gap_reasons": ["goal-first-deliverable: missing tokens"],
+                "handoff": "WAITING_HUMAN",
+            },
+        },
+    )
+    factory = _goal_session(goal, None)
+    reorg = _fake_reorg(goal_id)
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
+    ):
+        svc = DeliveryGapRecoveryService(factory)
+        svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
+        result = await svc.resume_after_human(
+            goal_id=goal_id,
+            project_id=project_id,
+            actor="user",
+            human_message="批准",
+        )
+
+    assert result.recovered is True
+    assert result.terminal_exhaust is False
+    assert result.method in {"REUSE", "CONFIGURE", "COMPOSE", "BUILD", "ACQUIRE"}
+    assert goal.metadata_json.get("awaiting_human_intervention") is False
+
+
+@pytest.mark.asyncio
+async def test_goal_intent_runs_ladder_without_human_ask() -> None:
+    """goal_intent is normal repair work — auto ladder, no authorization card."""
+    goal_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=1,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        metadata_json={"delivery_gap_recovery_attempts": 0},
+    )
+    factory = _goal_session(goal, None)
+    reorg = _fake_reorg(goal_id)
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
+    ):
+        svc = DeliveryGapRecoveryService(factory)
+        svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
+        result = await svc.recover(
+            goal_id=goal_id,
+            project_id=uuid.uuid4(),
+            requirement_revision_id=uuid.uuid4(),
+            capability_resolution_plan_id=uuid.uuid4(),
+            actor="test",
+            gap_reasons=["goal-first-deliverable: missing tokens"],
+        )
+
+    assert result.recovered is True
+    assert result.terminal_exhaust is False
+    assert result.method in {"REUSE", "CONFIGURE", "COMPOSE", "BUILD", "ACQUIRE"}
+    assert result.gap_kind == "goal_intent"
 
 @pytest.mark.asyncio
 async def test_recover_routes_presentation_to_product_surface() -> None:

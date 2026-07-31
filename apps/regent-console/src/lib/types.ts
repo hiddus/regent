@@ -90,3 +90,27 @@ export interface GuidanceResult {
 }
 
 export interface ProjectStatus extends GoalStatus {}
+
+/** CD-3.2 / CD-3.5: option-based handoff shown on TaskCard instead of plain allow/deny. */
+export interface HandoffOption {
+  id: string
+  label: string
+  cost_hint?: string
+}
+
+/** CD-3.3 budget summary (turns/tokens), shown when the API provides it. */
+export interface DeliveryReviewBudget {
+  turns?: number
+  max_turns?: number
+  input_tokens?: number
+  output_tokens?: number
+  max_tokens?: number
+}
+
+/** CD-3.1: read-only review payload (plan / transcript / verification / budget). */
+export interface DeliveryReview {
+  plan?: Record<string, unknown> | null
+  transcript?: unknown[] | null
+  verification?: Record<string, unknown> | null
+  budget?: DeliveryReviewBudget | null
+}

@@ -34,6 +34,8 @@ export interface ProgressNode {
   messageIds: string[]
   /** User-friendly highlights (preview URL, deliverable name, etc.) */
   highlights?: Record<string, string>
+  /** CD-3.3: most recent tool names observed for this stage (from live_action / tool_events). */
+  toolTrace?: string[]
 }
 
 interface StageDef {
@@ -238,6 +240,29 @@ function extractHighlights(m: Message): Record<string, string> {
 }
 
 /**
+ * CD-3.3: most-recent-tool trace, sourced from either `metadata.tool_events`
+ * (explicit array of tool names) or `metadata.live_action.tool` (single latest
+ * tool). Both are optional / backend-may-not-populate-yet — return [] if absent.
+ */
+function extractToolTrace(m: Message): string[] {
+  const meta = m.metadata || {}
+  const trace: string[] = []
+  const events = meta.tool_events
+  if (Array.isArray(events)) {
+    for (const item of events) {
+      if (typeof item === 'string' && item.trim()) trace.push(item.trim())
+      else if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).tool === 'string') {
+        trace.push(String((item as Record<string, unknown>).tool))
+      }
+    }
+  }
+  const liveAction = meta.live_action as Record<string, unknown> | undefined
+  const liveTool = liveAction?.tool
+  if (typeof liveTool === 'string' && liveTool.trim()) trace.push(liveTool.trim())
+  return trace
+}
+
+/**
  * Collapse EVENT stream into ordered progress nodes.
  * Only nodes that have received at least one event are returned.
  */
@@ -301,6 +326,10 @@ export function buildProgressNodes(messages: Message[]): ProgressNode[] {
     node.updatedAt = m.created_at
     node.messageIds.push(m.id)
     Object.assign(node.highlights || {}, extractHighlights(m))
+    const toolTrace = extractToolTrace(m)
+    if (toolTrace.length > 0) {
+      node.toolTrace = [...(node.toolTrace || []), ...toolTrace].slice(-5)
+    }
   }
 
   // Auto-complete earlier stages once a later stage has started — avoids
@@ -377,6 +406,7 @@ export type TimelineItem =
  * - USER / confirmation / task / correction stay as messages
  * - EVENT progress collapses into nodes inserted at first occurrence
  * - Preview events are shown in the artifact panel, not inline
+ * - Historical task/handoff cards collapse: only latest open + last stub remain
  */
 export function buildTimeline(messages: Message[]): TimelineItem[] {
   const nodes = buildProgressNodes(messages)
@@ -387,36 +417,61 @@ export function buildTimeline(messages: Message[]): TimelineItem[] {
   const consumedNodeKeys = new Set<NodeKey>()
   const items: TimelineItem[] = []
 
-  for (const m of messages) {
+  const taskSurfaceIndexes: number[] = []
+  messages.forEach((m, i) => {
+    const t = m.message_type
+    if (
+      t === 'HUMAN_TASK_REQUIRED' ||
+      t === 'DELIVERY_GAP_EXHAUSTED' ||
+      t === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
+      t === 'RESEARCH_MORE_ADAPT_EXHAUSTED'
+    ) {
+      taskSurfaceIndexes.push(i)
+    }
+  })
+  const keepTaskIds = new Set<string>()
+  if (taskSurfaceIndexes.length > 0) {
+    // Always keep the chronologically last task message (active or compact stub).
+    keepTaskIds.add(messages[taskSurfaceIndexes[taskSurfaceIndexes.length - 1]].id)
+  }
+
+  for (let mi = 0; mi < messages.length; mi += 1) {
+    const m = messages[mi]
+    const isTaskSurface =
+      m.message_type === 'HUMAN_TASK_REQUIRED' ||
+      m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
+      m.message_type === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
+      m.message_type === 'RESEARCH_MORE_ADAPT_EXHAUSTED'
+
     const node = nodeByFirstMsg.get(m.id)
     if (node && !consumedNodeKeys.has(node.key)) {
       items.push({ kind: 'node', node })
       consumedNodeKeys.add(node.key)
       // Keep interactive chat / confirmation surfaces (incl. exhausted handoffs)
       if (isChatSurfaceMessage(m) && m.role !== 'EVENT') {
-        items.push({ kind: 'message', message: m })
+        if (!isTaskSurface || keepTaskIds.has(m.id)) {
+          items.push({ kind: 'message', message: m })
+        }
       } else if (
         m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
-        m.message_type === 'HUMAN_TASK_REQUIRED' ||
-        m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
-        m.message_type === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
-        m.message_type === 'RESEARCH_MORE_ADAPT_EXHAUSTED' ||
-        m.message_type === 'CORRECTION_APPLIED'
+        m.message_type === 'CORRECTION_APPLIED' ||
+        (isTaskSurface && keepTaskIds.has(m.id))
       ) {
         items.push({ kind: 'message', message: m })
       }
-      // Preview events are NOT shown inline — they go to artifact panel
       continue
     }
 
     // Skip subsequent events already folded into a node
     if (isProgressEvent(m) && TYPE_INDEX.has(m.message_type)) {
-      // Preview events: skip inline, handled by artifact panel
       continue
     }
 
     if (m.role === 'EVENT' && !TYPE_INDEX.has(m.message_type)) {
-      // Unknown internal events: hide from main stream
+      continue
+    }
+
+    if (isTaskSurface && !keepTaskIds.has(m.id)) {
       continue
     }
 

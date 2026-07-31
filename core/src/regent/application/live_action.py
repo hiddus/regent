@@ -40,6 +40,8 @@ EVENT_LIVE_SUMMARY: dict[str, str] = {
     "DELIVERY_GAP_HUMAN_APPROVED": "已批准，正在重新规划并继续生成",
 }
 
+_MAX_TOOL_EVENTS = 20
+
 
 def build_live_action(
     summary: str,
@@ -48,8 +50,9 @@ def build_live_action(
     detail: str | None = None,
     turn: int | None = None,
     event_type: str | None = None,
+    tool: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "summary": summary[:240],
         "stage": stage,
         "detail": (detail[:400] if detail else None),
@@ -57,6 +60,9 @@ def build_live_action(
         "event_type": event_type,
         "updated_at": datetime.now(UTC).isoformat(),
     }
+    if tool:
+        payload["tool"] = tool[:128]
+    return payload
 
 
 def summary_for_event(message_type: str, content: str | None = None) -> str:
@@ -69,6 +75,14 @@ def summary_for_event(message_type: str, content: str | None = None) -> str:
     return f"正在执行：{message_type}"
 
 
+def _append_tool_event(meta: dict[str, Any], tool_event: dict[str, Any], tool: str | None) -> None:
+    events = meta.get("tool_events")
+    if not isinstance(events, list):
+        events = []
+    events.append(dict(tool_event))
+    meta["tool_events"] = events[-_MAX_TOOL_EVENTS:]
+
+
 def merge_live_action_into_metadata(
     metadata: dict[str, Any] | None,
     summary: str,
@@ -77,14 +91,20 @@ def merge_live_action_into_metadata(
     detail: str | None = None,
     turn: int | None = None,
     event_type: str | None = None,
+    tool: str | None = None,
+    tool_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     meta = dict(metadata or {})
+    resolved_tool = tool or (str(tool_event.get("tool")) if tool_event and tool_event.get("tool") else None)
+    if tool_event is not None:
+        _append_tool_event(meta, tool_event, resolved_tool)
     meta["live_action"] = build_live_action(
         summary,
         stage=stage or (str(meta.get("execution_stage")) if meta.get("execution_stage") else None),
         detail=detail,
         turn=turn,
         event_type=event_type,
+        tool=resolved_tool,
     )
     return meta
 
@@ -98,6 +118,8 @@ async def set_goal_live_action(
     detail: str | None = None,
     turn: int | None = None,
     event_type: str | None = None,
+    tool: str | None = None,
+    tool_event: dict[str, Any] | None = None,
 ) -> None:
     """Short transaction: update only live_action for console SSE/status."""
     async with sessions() as session, session.begin():
@@ -111,6 +133,8 @@ async def set_goal_live_action(
             detail=detail,
             turn=turn,
             event_type=event_type,
+            tool=tool,
+            tool_event=tool_event,
         )
         flag_modified(goal, "metadata_json")
 
@@ -123,6 +147,8 @@ def apply_live_action_on_goal(
     detail: str | None = None,
     turn: int | None = None,
     event_type: str | None = None,
+    tool: str | None = None,
+    tool_event: dict[str, Any] | None = None,
 ) -> None:
     """In-session update (caller owns the transaction)."""
     goal.metadata_json = merge_live_action_into_metadata(
@@ -132,5 +158,7 @@ def apply_live_action_on_goal(
         detail=detail,
         turn=turn,
         event_type=event_type,
+        tool=tool,
+        tool_event=tool_event,
     )
     flag_modified(goal, "metadata_json")

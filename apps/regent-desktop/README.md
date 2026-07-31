@@ -1,6 +1,8 @@
 # Regent Desktop
 
 > **状态（与需求文档对齐）**：Tauri 桌面端是 **探索性非目标（PRD §12 / Technical-Spec §25）**，不计入 P0/P1/P2 验收范围；产品的正式交付面是 **Core（API/Worker）+ Web Console**（`apps/regent-console`）。本目录当前为骨架/参考实现，请勿据此判断产品成熟度。桌面端通过 iframe 内嵌 Web Console，默认连接 `http://localhost:8000`。
+>
+> 相应地，本目录**未纳入根 `compose.yaml` 的编排**（该文件仅含 `api` / `worker` / `postgres` 三项服务），也不参与 Core 的验收门禁。
 
 Desktop application wrapper for Regent using Tauri.
 

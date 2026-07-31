@@ -24,14 +24,19 @@ from regent.api.experiments import router as experiments_router
 from regent.api.feedback import router as feedback_router
 from regent.api.goals import router as goals_router
 from regent.api.governance import router as governance_router
+from regent.api.human_tasks import router as human_tasks_router
 from regent.api.memories import router as memories_router
 from regent.api.observations import router as observations_router
 from regent.api.product_creation import router as product_creation_router
+from regent.api.public_deploy import router as public_deploy_router
+from regent.api.reports import router as reports_router
 from regent.api.runtime_profiles import router as runtime_profiles_router
 from regent.api.scheduler import router as scheduler_router
 from regent.api.self_improvement import router as self_improvement_router
 from regent.api.side_effects import router as side_effects_router
 from regent.api.tools import router as tools_router
+from regent.api.uploads import router as uploads_router
+from regent.api.webhooks import router as webhooks_router
 from regent.api.works import router as works_router
 from regent.api.preview_security import PREVIEW_CONTENT_SECURITY_POLICY
 from regent.application.runtime_profile_service import RuntimeProfileService
@@ -280,6 +285,13 @@ def create_app() -> FastAPI:
     app.include_router(runtime_profiles_router)
     app.include_router(eval_runs_router)
     app.include_router(memories_router)
+    # F-1 (2026-07-31): previously defined but unmounted — Console depends on
+    # human-tasks + uploads; webhooks/reports/public-deploy complete the surface.
+    app.include_router(human_tasks_router)
+    app.include_router(uploads_router)
+    app.include_router(webhooks_router)
+    app.include_router(reports_router)
+    app.include_router(public_deploy_router)
     return app
 
 

@@ -24,3 +24,9 @@ Core 启动时（见 `core/src/regent/api/main.py` 的 lifespan）会：
 2. `ensure_delivery_review_capability()` / `ensure_product_surface_capability()` 确保对应能力已登记。
 
 新增能力应遵循"声明 + 验证 + 可替换"的原则，并通过 `docs/contracts/` 中的能力契约（如 `evidence-acquisition-v1`、`dependency-sandbox-v1`）对齐接口。
+
+## 范围说明（避免误读 ADR-0003）
+
+`docs/adr/0003-kernel-capability-boundary.md` 枚举了 7 类能力**范畴**（内核与能力池的边界划分），这是**边界定义，不是交付清单**。当前引导期实际只落地上表 3 个能力，二者不构成冲突。判断「某能力是否可用」应以本目录 `bootstrap/` 下的 `capability.json` 为准，而非 ADR 的范畴枚举。
+
+> 能力尚未与 Agent Loop 的 tool schema 打通 —— LLM 目前无法直接发现并调用能力池中的能力，该桥接属 PRD §4.4 / CD-4 范围，尚未开工。

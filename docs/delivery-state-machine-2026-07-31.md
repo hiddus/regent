@@ -1,5 +1,10 @@
 # 交付状态机落地设计（2026-07-31）— 基于真实代码校正版
 
+> **实现状态更新（2026-07-31 晚）**：薄层代码（`delivery_state.py`、画像预算、`_apply_delivery_verdict` helper、AC1 门禁脚本）已落地；
+> 但 `decide_delivery_verdict` **尚未被生产路径消费**（仅测试引用）。§1 表中「goal_intent 短路已存在」为**错误断言**——真实代码仅在阶梯耗尽后交人。
+> 接线与纠正纳入 [`conversational-delivery-plan-2026-07-31.md`](./conversational-delivery-plan-2026-07-31.md) **CD-1**；门禁盲区修复为 **CD-0.3**。
+> Tech-Spec 权威条目：§13.8.3。
+
 > 本文是对「PM+Tech 混合路径实现分析」的落地级校正。
 > 结论先行：**方向正确，但约 70% 设想能力在仓库中已存在**，首版应做"薄层收口 + 画像预算耦合 + grep 门禁"，而非从零重建，否则会与 `DeliveryGapRecoveryService` 重复。
 
@@ -16,7 +21,7 @@
 | 恢复服务 + 结果结构 | `application/delivery_gap_recovery.py:254` `recover()` → `DeliveryGapRecoveryResult(recovered, method, message, attempts, gap_kind, terminal_exhaust, recovery_work_id, organization_id)`（`:145-155`） | — |
 | "可恢复→重跑；耗尽→交人"收尾 | `execution_orchestrator.py` 中 8 处：`1568 / 1612 / 1669 / 2121 / 2395 / 2527 / 3174 / 3594`，均为 `if recovery.recovered: ... elif recovery.terminal_exhaust: _halt_goal_stage(..., terminal=GoalCommand.WAIT_FOR_HUMAN, event_type="HUMAN_TASK_REQUIRED")` | AC2/AC3 |
 | 最优产出不丢弃（agentic 路径） | `agent/generator.py:178-205` 验证失败时 `_persist_verification_draft(...)` 保留草稿树 + artifact URI，再抛错 | AC4 |
-| 需主观判断即交人（短路） | `delivery_gap_recovery.py:306-318` `gap_kind=="goal_intent"` → `goal_attainment_needs_human` → `WAITING_HUMAN` | AC3 |
+| 需主观判断即交人（短路） | ~~`delivery_gap_recovery.py:306-318` 曾被误记为 `goal_intent` 短路~~ **纠正**：该段实为阶梯耗尽后交人；真正的 `goal_intent` 早交人属 CD-1.3 待做 | AC3 |
 | "非死端/禁止裸阻塞"门禁 | `ops/console_confirm_gate.py`（CON-5）：禁止产品代码中的裸 `confirm/input` 阻塞模式 | AC1 同源 |
 | 画像枚举 + 默认 balanced | `application/confirmation.py:14` `DecisionPreference(AGGRESSIVE/BALANCED/CONSERVATIVE)`；CON 域默认 `balanced`（见 `docs/decision-note-console-dialog-2026-07-31.md:10`） | AC5 锚点 |
 | 语义对齐 LLM 调用已默认关闭 | `infrastructure/code_generator.py:150-156, 248-269`；`validate_goal_alignment_semantic` 仅 `REGENT_GOAL_SEMANTIC_ALIGNMENT_ENABLED=true` 时调用（DecisionNote dead-weight-trim ACCEPTED） | Q2 已解决 |

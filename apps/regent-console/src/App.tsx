@@ -101,9 +101,16 @@ export default function App() {
     }
   }, [ws])
 
-  const handleTaskAction = useCallback(async (taskId: string, approved: boolean) => {
+  const handleTaskAction = useCallback(async (
+    taskId: string,
+    approved: boolean,
+    opts?: { always?: boolean; optionId?: string; reason?: string },
+  ) => {
     try {
-      await api.completeTask(taskId, approved)
+      await api.completeTask(taskId, approved, opts?.reason, {
+        always_allow: opts?.always,
+        option_id: opts?.optionId,
+      })
       await ws.refresh()
       ws.showHint(approved ? '已批准' : '已拒绝')
     } catch (e) {

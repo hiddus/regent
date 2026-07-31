@@ -526,6 +526,29 @@ body {
   font-size: 12px;
 }
 
+/* CD-3.3: tool trace (recent tool names, when backend metadata provides them) */
+.progress-node-tool-hint {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.progress-node-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.progress-node-tools .tools-label { color: var(--muted); }
+.progress-node-tools .tool-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--text);
+}
+
 .progress-node-highlights .highlight-k { color: var(--muted); }
 .progress-node-highlights .highlight-v {
   color: var(--text);
@@ -675,39 +698,89 @@ body {
 
 /* Task card */
 .task-card {
-  margin-top: 12px;
-  padding: 14px;
+  margin-top: 8px;
+  padding: 12px 14px;
   border: 1px solid var(--info);
   border-radius: 12px;
   background: #131b2a;
 }
 .task-card.risk-high { border-color: var(--danger); background: #1c1418; }
 .task-card.risk-low { border-color: #2d4a42; background: #131f1b; }
-.task-card h4 { margin: 0 0 8px; color: var(--info); font-size: 14px; }
+.task-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.task-permit-title {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+.task-permit {
+  margin: 0 0 10px;
+  display: grid;
+  gap: 4px;
+}
+.task-permit > div {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.task-permit dt {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 500;
+}
+.task-permit dd {
+  margin: 0;
+  color: var(--text);
+}
 .task-risk-badge {
   display: inline-block;
   font-size: 11px;
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 6px;
-  margin-bottom: 8px;
   background: var(--hover);
   color: var(--muted);
 }
 .task-card.risk-high .task-risk-badge { color: var(--danger); }
-.task-meta-line,
-.task-rationale,
-.task-consequences,
-.task-countdown {
-  margin: 0 0 6px;
+.task-countdown-inline {
+  font-size: 11px;
+  color: var(--warn);
+  font-weight: 600;
+}
+.task-card-compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-top: 6px;
+  opacity: 0.72;
+}
+.task-compact-badge {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--hover);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.task-compact-text {
   font-size: 12px;
   color: var(--muted);
-  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.task-countdown { color: var(--warn); font-weight: 600; }
-.task-countdown.safety { color: var(--danger); }
+.message-task .meta { margin-bottom: 0; }
 
-.task-actions { display: flex; gap: 8px; margin-top: 10px; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .task-btn {
   padding: 6px 16px;
   border: 0;
@@ -728,7 +801,24 @@ body {
 .task-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .task-done { color: var(--muted); font-size: 12px; margin-top: 8px; }
 
-.task-detail-fold { margin-top: 10px; }
+.task-more-fold { margin-top: 8px; }
+.task-handoff-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.task-btn.option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 6px 12px;
+  text-align: left;
+}
+.task-btn.option:hover { border-color: var(--accent); }
+.task-btn.option-stop { border-color: var(--danger); color: var(--danger); }
+.task-btn.option .option-label { font-weight: 600; font-size: 13px; }
+
+.task-detail-fold { margin-top: 8px; }
 .task-detail-toggle {
   background: transparent;
   border: 0;
@@ -747,7 +837,7 @@ body {
   font-size: 11px;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 180px;
+  max-height: 120px;
   overflow: auto;
   color: var(--muted);
 }
@@ -1280,6 +1370,32 @@ body {
   gap: 12px;
   padding-top: 4px;
 }
+
+/* CD-3.1 / CD-3.3: review section (plan / transcript / verification / budget) */
+.review-section { display: flex; flex-direction: column; gap: 12px; }
+.review-block { display: flex; flex-direction: column; gap: 6px; }
+.review-pre {
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #0d1117;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+  color: var(--muted);
+}
+.review-transcript {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+  max-height: 220px;
+  overflow: auto;
+}
+.review-budget { margin: 0; font-size: 12px; color: var(--muted); }
 
 /* Mobile */
 .mobile-menu {

@@ -115,7 +115,7 @@ def test_resolve_delivery_budget_scales_turns_only():
 
 
 def test_as_delivery_state():
-    assert as_delivery_state(recovered=True, terminal_exhaust=False) is DeliveryState.DELIVERED
+    assert as_delivery_state(recovered=True, terminal_exhaust=False) is DeliveryState.AUTO_RECOVERING
     assert (
         as_delivery_state(recovered=False, terminal_exhaust=True)
         is DeliveryState.DELIVERED_FOR_REVIEW
@@ -124,6 +124,18 @@ def test_as_delivery_state():
         as_delivery_state(recovered=False, terminal_exhaust=False)
         is DeliveryState.AUTO_RECOVERING
     )
+
+
+def test_decide_delivery_verdict_has_production_caller():
+    """CD-6.5: behavior-level check — orchestrator imports and calls the verdict API."""
+    import inspect
+
+    from regent.application import execution_orchestrator as orch
+    from regent.application.delivery_state import decide_delivery_verdict
+
+    assert orch.decide_delivery_verdict is decide_delivery_verdict
+    src = inspect.getsource(orch.ExecutionOrchestrator)
+    assert "decide_delivery_verdict(" in src
 
 
 # --- capability ladder override (AC5 recovery budget) ---
@@ -148,6 +160,31 @@ def test_plan_escalation_max_attempts_override():
     assert extended.step is EscalationStep.REUSE
 
 
+def test_gate_reorg_max_scales_with_persona() -> None:
+    from regent.application.delivery_state import gate_reorg_max, gate_reorg_step_name
+
+    assert gate_reorg_max("balanced") == 6
+    assert gate_reorg_max("aggressive") == 9
+    assert gate_reorg_max("conservative") == 3
+    assert gate_reorg_step_name(0) == "COMPOSE"
+    assert gate_reorg_step_name(2) == "ACQUIRE"
+    assert gate_reorg_step_name(3) == "COMPOSE"
+
+
+def test_delivery_rejection_transcript_code() -> None:
+    from regent.application.delivery_rejection import DeliveryRejection
+    from regent.domain.errors import ErrorCode
+
+    exc = DeliveryRejection(
+        reasons=["transcript-persist-failed: boom"],
+        code=ErrorCode.TRANSCRIPT_PERSIST_FAILED,
+        retryable=True,
+    )
+    assert exc.code is ErrorCode.TRANSCRIPT_PERSIST_FAILED
+    assert exc.retryable is True
+    assert "transcript-persist-failed" in exc.reasons[0]
+
+
 # --- AC1 grep gate ---
 
 
@@ -159,3 +196,21 @@ def test_ac1_gate_passes_on_repo():
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_ac1_gate_detects_intentional_dead_end(tmp_path: Path):
+    """Meta-test: a method that sets terminal_exhaust=True without handoff must fail."""
+    import importlib.util
+
+    bad = tmp_path / "dead_end_sample.py"
+    bad.write_text(
+        "async def recover_without_exit(self):\n"
+        "    return dict(terminal_exhaust=True, recovered=False)\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("delivery_dead_end_gate", GATE_SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    violations = mod.check_file(bad)
+    assert violations, "gate must report the intentional dead-end"

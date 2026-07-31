@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.delivery_review_service import review_html_for_delivery
 from regent.infrastructure.delivery_review_capability import (
     CAPABILITY_NAME,
@@ -116,7 +117,7 @@ def test_observed_entries_must_render() -> None:
 
 def test_raise_if_failed() -> None:
     result = review_html_for_delivery("<html><body>hi</body></html>")
-    with pytest.raises(ValueError, match="delivery-review-v1"):
+    with pytest.raises(DeliveryRejection, match="delivery-review-v1"):
         result.raise_if_failed()
 
 
@@ -130,3 +131,50 @@ def test_unrendered_jinja_markers_are_rejected() -> None:
     assert any(
         c.name == "forbid-unrendered-templates" and not c.passed for c in result.checks
     )
+
+
+def test_cd34_project_requires_readme() -> None:
+    from regent.application.delivery_review_service import review_files_for_delivery
+
+    files = {
+        "index.html": _styled_digest_html(),
+        "src/app.py": "from flask import Flask\napp = Flask(__name__)\n",
+        "requirements.txt": "flask\n",
+    }
+    result = review_files_for_delivery(files, acceptance_contract={"goal_scale": "SMALL"})
+    assert any(c.name == "require-readme" and not c.passed for c in result.checks)
+    assert result.passed is False
+
+
+def test_cd34_non_small_requires_tests() -> None:
+    from regent.application.delivery_review_service import review_files_for_delivery
+
+    files = {
+        "index.html": _styled_digest_html(),
+        "src/app.py": "from flask import Flask\napp = Flask(__name__)\n",
+        "requirements.txt": "flask\n",
+        "README.md": "# App\n\nRun: flask run\n",
+    }
+    result = review_files_for_delivery(files, acceptance_contract={"goal_scale": "MEDIUM"})
+    assert any(c.name == "require-tests" and not c.passed for c in result.checks)
+
+
+def test_cd34_small_passes_without_tests_when_readme_present() -> None:
+    from regent.application.delivery_review_service import review_files_for_delivery
+
+    files = {
+        "index.html": _styled_digest_html(),
+        "src/app.py": (
+            "from flask import Flask, jsonify\n"
+            "app = Flask(__name__)\n"
+            "@app.get('/api/health')\n"
+            "def health():\n"
+            "    return jsonify({'ok': True})\n"
+        ),
+        "requirements.txt": "flask\n",
+        "README.md": "# Digest\n\nRun with flask.\n",
+    }
+    result = review_files_for_delivery(files, acceptance_contract={"goal_scale": "SMALL"})
+    names = {c.name: c.passed for c in result.checks}
+    assert names.get("require-readme") is True
+    assert "require-tests" not in names

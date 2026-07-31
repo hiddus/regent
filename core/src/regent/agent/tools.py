@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Protocol
 
 from regent.agent.types import ToolCall, ToolSpec
 
@@ -52,7 +51,7 @@ TOOL_SPECS: list[ToolSpec] = [
     ToolSpec(
         name="run_command",
         description=(
-            "Run a shell command inside the sandbox (pip install, pytest, "
+            "Run a shell command inside the isolated sandbox (pip install, pytest, "
             "python -m compileall, curl smoke checks). Working directory is the workspace root."
         ),
         parameters={
@@ -100,14 +99,37 @@ TOOL_SPECS: list[ToolSpec] = [
 ]
 
 
+class CommandSandbox(Protocol):
+    async def exec_in_workspace(
+        self,
+        workspace: Path,
+        shell_command: str,
+        *,
+        timeout_seconds: int = 60,
+        allow_network: bool = False,
+    ) -> str: ...
+
+
+# CD-7.5 / N-4: pip/curl may request network, but DockerSandboxDriver fail-closes
+# without REGENT_DEPENDENCY_EGRESS_PROXY (no bare bridge).
+_NETWORK_PREFIXES: tuple[str, ...] = ("pip ", "curl ")
+
+
 class WorkspaceToolkit:
     """Bounded file/command tools confined to a sandbox workspace root."""
 
-    def __init__(self, root: Path, *, allowed_commands_prefix: tuple[str, ...] | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        allowed_commands_prefix: tuple[str, ...] | None = None,
+        command_sandbox: CommandSandbox | None = None,
+    ) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.todos: list[dict[str, str]] = []
         self.recent_writes: list[str] = []
+        self._command_sandbox = command_sandbox
         self._allowed = allowed_commands_prefix or (
             "pip ",
             "python ",
@@ -209,25 +231,18 @@ class WorkspaceToolkit:
             raise ValueError(
                 f"command not allowed: {cmd!r}. Allowed prefixes: {', '.join(self._allowed)}"
             )
-        timeout = max(1, min(int(timeout_seconds or 60), 120))
-        process = await asyncio.create_subprocess_shell(
+        if self._command_sandbox is None:
+            raise RuntimeError(
+                "WorkspaceToolkit has no command_sandbox; refusing host subprocess "
+                "(Tech-Spec §13.8 / CD-0.1)"
+            )
+        allow_network = any(cmd.startswith(p) for p in _NETWORK_PREFIXES)
+        return await self._command_sandbox.exec_in_workspace(
+            self.root,
             cmd,
-            cwd=str(self.root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            timeout_seconds=timeout_seconds,
+            allow_network=allow_network,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            return f"TIMEOUT after {timeout}s: {cmd}"
-        out = stdout.decode("utf-8", errors="replace")
-        err = stderr.decode("utf-8", errors="replace")
-        combined = (out + ("\n" + err if err else "")).strip()
-        code = process.returncode
-        preview = combined[:8_000] + ("\n...[truncated]" if len(combined) > 8_000 else "")
-        return f"exit={code}\n{preview}"
 
     async def execute(self, call: ToolCall) -> str:
         try:

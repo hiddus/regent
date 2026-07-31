@@ -2,6 +2,20 @@
   "name": "product-surface-v1",
   "status": "VERIFIED",
   "description": "Certified product-surface delivery capability. Bound when a generated app fails goal-attainment / delivery review. Guides regeneration toward a shippable independent app that satisfies GoalSpec success criteria — not a demo dump.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "gap_summary": {
+        "type": "string",
+        "description": "Why the current surface failed delivery review / goal attainment."
+      },
+      "success_criteria": {
+        "type": "object",
+        "description": "Frozen GoalSpec success_criteria to target on the next attempt."
+      }
+    },
+    "required": ["gap_summary"]
+  },
   "verification": {
     "protocol": "product-surface-v1",
     "fail_closed": true,

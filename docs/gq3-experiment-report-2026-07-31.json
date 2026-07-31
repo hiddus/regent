@@ -1,0 +1,114 @@
+{
+  "report": {
+    "version": "gq-generation-strategy/v1",
+    "quality_metrics_contract_version": "gq-user-quality/v1",
+    "name": "gq3-production-goal-stream",
+    "task_set_hash": "88da0fb414c6decee0dc83436c3f3d8f12f1d268d66792b108df3bea8482f577",
+    "task_set_name": "gq-generation-strategy-v1",
+    "blind_eval_owner": "regent-gq-blind-eval",
+    "thresholds": {
+      "min_success_rate_lift": 0.05,
+      "non_inferiority_margin": 0.02,
+      "max_mean_cost_degradation": 0.25,
+      "max_p95_latency_degradation": 0.3,
+      "min_sample_size_per_arm": 30,
+      "max_repair_rounds_mean": 3.0,
+      "max_human_intervention_rate": 0.2
+    },
+    "model_freeze": "production-live",
+    "tool_freeze": "production-live",
+    "budget_units": 0.0,
+    "confidence_level": 0.95,
+    "shadow_isolation": false,
+    "canary_allowed": true,
+    "variants": [
+      "artifact_backed",
+      "agentic"
+    ],
+    "not_p24_org_dimensions": true,
+    "summaries": {
+      "artifact_backed": {
+        "n": 4,
+        "pass_rate": 0.0,
+        "ci95": {
+          "low": 0.0,
+          "high": 0.4899
+        },
+        "mean_cost": 0.0,
+        "cost_per_verified_success": null,
+        "p95_latency_ms": 245636.573,
+        "user_quality": {
+          "n": 4,
+          "first_runnable_rate": 0.0,
+          "mean_repair_rounds": 2.25,
+          "human_intervention_rate": 0.75,
+          "mean_wall_time_to_usable_ms": null,
+          "status": "OK",
+          "contract_version": "gq-user-quality/v1"
+        },
+        "safety_incidents": 0,
+        "status": "OK"
+      },
+      "agentic": {
+        "n": 1,
+        "pass_rate": 0.0,
+        "ci95": {
+          "low": 0.0,
+          "high": 0.7935
+        },
+        "mean_cost": 0.0,
+        "cost_per_verified_success": null,
+        "p95_latency_ms": 1207181.799,
+        "user_quality": {
+          "n": 1,
+          "first_runnable_rate": 0.0,
+          "mean_repair_rounds": 5.0,
+          "human_intervention_rate": 1.0,
+          "mean_wall_time_to_usable_ms": null,
+          "status": "OK",
+          "contract_version": "gq-user-quality/v1"
+        },
+        "safety_incidents": 0,
+        "status": "OK"
+      }
+    },
+    "decision": "INSUFFICIENT_EVIDENCE",
+    "rationale": "need ≥30 samples/arm (got artifact=4, agentic=1)",
+    "guardrail_trips": [],
+    "actor": "gq3-production-report",
+    "created_at": "2026-07-31T10:48:29.826049+00:00",
+    "experiment_id": "77a6e1e5-c8fe-4026-92ac-8b2d4db3bcef",
+    "content_hash": "55f3aa2c2848877f4551140d30758cd6f0fa155143cee713d36c5464ba3200c2",
+    "production_window": {
+      "opened_at": "2026-07-31T10:00:00+00:00",
+      "max_days": 21,
+      "sample_since": "2026-07-31T10:00:00+00:00",
+      "sample_until": null,
+      "unit_of_analysis": "independent_goal",
+      "assignment": "intent_to_treat_first_plan_in_window",
+      "success_definition": "goal.status == ACHIEVED",
+      "n_goals": 5,
+      "n_by_variant": {
+        "artifact_backed": 4,
+        "agentic": 1
+      }
+    },
+    "stop_rule": {
+      "triggered": false,
+      "reason": "agentic_fail_rate - control_fail_rate = 0.000 (threshold 0.15)",
+      "delta": 0.0,
+      "artifact_backed_fail_rate": 1.0,
+      "agentic_fail_rate": 1.0,
+      "threshold": 0.15
+    },
+    "source": "production_goal_stream"
+  },
+  "gq4_gate_preview": {
+    "activation_allowed": false,
+    "proposed_default": "artifact-backed",
+    "reason": "decision=INSUFFICIENT_EVIDENCE",
+    "in_flight_run_semantics": "new Runs use fallback; in-flight complete frozen plan or cancel",
+    "decision_record_ref": "pending-gq4-decision-note"
+  },
+  "observations_n": 5
+}

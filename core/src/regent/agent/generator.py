@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -19,10 +20,15 @@ from regent.agent.types import (
     BudgetExhaustedError,
     VerificationGap,
 )
+from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.p1_contracts import FileChange, FileChangeSet, FileMode, FileOperation
 from regent.application.p1_ports import GeneratedFileChangeSet
+from regent.domain.errors import ErrorCode
 from regent.infrastructure.artifact_store import FileArtifactStore
+from regent.infrastructure.sandbox import build_agent_sandbox
 from regent.model import ModelProvider
+
+logger = logging.getLogger(__name__)
 
 GENERATOR_REF = "agentic-generation-v1"
 PROMPT_VERSION = "agentic-generation-v1"
@@ -87,7 +93,7 @@ class AgenticCodeGenerator:
             or _load_regent_md(plan)
         )
 
-        toolkit = WorkspaceToolkit(sandbox)
+        toolkit = WorkspaceToolkit(sandbox, command_sandbox=build_agent_sandbox())
         prior_gaps = _gaps_from_plan(plan)
         acceptance = dict(plan.get("acceptance_contract") or {})
         run_smoke = bool(acceptance.get("batch_run_smoke", True))
@@ -119,6 +125,16 @@ class AgenticCodeGenerator:
             if on_progress is not None:
                 await on_progress(summary)
 
+        async def _on_event(event: dict[str, Any]) -> None:
+            # CD-3.3: bridge AgentRunner tool-call events into the same
+            # live_action channel on_progress already feeds, so long-running
+            # turns show real tool activity instead of only a turn counter.
+            if on_progress is None:
+                return
+            tool = str(event.get("tool") or "")
+            preview = str(event.get("args_preview") or "")
+            await on_progress(f"执行工具 {tool}：{preview}"[:200])
+
         try:
             if on_progress is not None:
                 await on_progress("正在启动多轮生成…")
@@ -128,11 +144,12 @@ class AgenticCodeGenerator:
                 verify=True,
                 run_smoke=run_smoke,
                 on_turn=_on_turn if on_progress else None,
+                on_event=_on_event if on_progress else None,
             )
         except BudgetExhaustedError as exc:
-            raise ValueError(
-                f"delivery-review-v1 rejected non-deliverable surface: "
-                f"EXHAUSTED_BUDGET: {exc.reason}"
+            raise DeliveryRejection(
+                reasons=[f"EXHAUSTED_BUDGET: {exc.reason}"],
+                producer_ref=GENERATOR_REF,
             ) from exc
 
         # Always persist transcript for audit (even on verification failure).
@@ -144,8 +161,25 @@ class AgenticCodeGenerator:
                     generation_run_id=uuid.UUID(str(generation_run_id)),
                     turns=result.transcript,
                 )
-            except Exception:  # noqa: BLE001 — sidecar already written; DB is best-effort
-                pass
+            except Exception as exc:
+                # CD-0.2: transcript loss must not be silent. Sidecar is already
+                # written to disk (audit trail preserved); block the delivery
+                # instead of continuing as if nothing happened.
+                logger.exception(
+                    "agent transcript DB persist failed; sidecar retained on disk",
+                    extra={
+                        "generation_run_id": str(generation_run_id),
+                        "sandbox": str(sandbox),
+                    },
+                )
+                raise DeliveryRejection(
+                    reasons=[f"transcript-persist-failed: {exc}"[:400]],
+                    draft_uri=sandbox.resolve().as_uri(),
+                    producer_ref=GENERATOR_REF,
+                    code=ErrorCode.TRANSCRIPT_PERSIST_FAILED,
+                    retryable=True,
+                    message="transcript DB persist failed; sidecar retained",
+                ) from exc
 
         gaps = []
         if result.verification is not None and not result.verification.passed:
@@ -170,7 +204,10 @@ class AgenticCodeGenerator:
                 generator_ref=GENERATOR_REF,
             )
         except Exception:  # noqa: BLE001 — memory must not block delivery path
-            pass
+            logger.exception(
+                "project memory distill failed (best-effort; delivery continues)",
+                extra={"goal_id": str(plan.get("goal_id") or "")},
+            )
 
         planned = set(plan.get("planned_paths") or [])
         scope = uuid.UUID(str(plan["hypothesis_decision_id"]))
@@ -197,13 +234,18 @@ class AgenticCodeGenerator:
                     )
                 )
             except Exception:  # noqa: BLE001 — draft artifacts best-effort
+                logger.exception("draft artifact materialize failed (best-effort)")
                 draft_changes = 0
-            reasons = "; ".join(gaps[:8])
-            raise ValueError(
-                f"delivery-review-v1 rejected non-deliverable surface: "
-                f"verification-agent: {reasons or result.verification.summary}"
-                f"; draft_files={len(result.files)} draft_artifacts={draft_changes}"
-                f"{('; draft_workspace=' + draft_note) if draft_note else ''}"
+            reject_reasons = [
+                f"verification-agent: {reason}" for reason in gaps[:8]
+            ] or [f"verification-agent: {result.verification.summary}"]
+            reject_reasons.append(
+                f"draft_files={len(result.files)} draft_artifacts={draft_changes}"
+            )
+            raise DeliveryRejection(
+                reasons=reject_reasons,
+                draft_uri=draft_note or None,
+                producer_ref=GENERATOR_REF,
             )
 
         changes = _materialize_incremental_changes(
@@ -286,6 +328,7 @@ def _persist_verification_draft(
         )
         return str(draft)
     except Exception:  # noqa: BLE001 — never block the rejection path
+        logger.exception("verification draft persist failed (best-effort)")
         return ""
 
 

@@ -20,6 +20,7 @@ from regent.agent.subagent import SubagentBrief, SubagentRunner
 from regent.agent.tools import WorkspaceToolkit
 from regent.agent.types import AgentBudget, VerificationGap
 from regent.agent.verification import VerificationAgent
+from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.delivery_batch_service import (
     BATCH_GENERATING,
     BATCH_MERGED,
@@ -34,6 +35,7 @@ from regent.application.delivery_batch_service import (
 from regent.application.p1_contracts import FileChange, FileChangeSet, FileMode, FileOperation
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.models import DeliveryBatchModel
+from regent.infrastructure.sandbox import build_agent_sandbox
 from regent.infrastructure.workspace_writer import WorkspaceCommit, WorkspaceWriter
 
 logger = logging.getLogger(__name__)
@@ -209,9 +211,9 @@ class DeliveryBatchPipeline:
                         f"第 {spec.ordinal} 批生成失败：{exc}",
                         {"batch_id": str(batch_id), "batch_key": spec.key},
                     )
-                raise ValueError(
-                    f"delivery-review-v1 rejected non-deliverable surface: "
-                    f"batch-{spec.key}: {exc}"
+                raise DeliveryRejection(
+                    reasons=[f"batch-{spec.key}: {exc}"],
+                    producer_ref="agentic-batch-v1",
                 ) from exc
 
             input_tokens += result.input_tokens
@@ -249,9 +251,11 @@ class DeliveryBatchPipeline:
                             "verification": batch_verdict,
                         },
                     )
-                raise ValueError(
-                    f"delivery-review-v1 rejected non-deliverable surface: "
-                    f"batch-verify-{spec.key}: {gaps or batch_verdict.get('summary')}"
+                raise DeliveryRejection(
+                    reasons=[
+                        f"batch-verify-{spec.key}: {gaps or batch_verdict.get('summary')}"
+                    ],
+                    producer_ref="agentic-batch-v1",
                 )
 
             if event_sink is not None:
@@ -284,9 +288,9 @@ class DeliveryBatchPipeline:
                     verification=batch_verdict,
                     summary={"merge_error": str(exc)[:500], **result.summary},
                 )
-                raise ValueError(
-                    f"delivery-review-v1 rejected non-deliverable surface: "
-                    f"batch-merge-{spec.key}: {exc}"
+                raise DeliveryRejection(
+                    reasons=[f"batch-merge-{spec.key}: {exc}"],
+                    producer_ref="agentic-batch-v1",
                 ) from exc
 
             merged_path = commit.workspace_path
@@ -351,9 +355,9 @@ class DeliveryBatchPipeline:
                     f"批次已全部合并，但整体验收未通过：{gaps or global_verdict.get('summary')}",
                     {"verification": global_verdict, "batches": batch_summaries},
                 )
-            raise ValueError(
-                f"delivery-review-v1 rejected non-deliverable surface: "
-                f"global-verify: {gaps or global_verdict.get('summary')}"
+            raise DeliveryRejection(
+                reasons=[f"global-verify: {gaps or global_verdict.get('summary')}"],
+                producer_ref="agentic-batch-v1",
             )
 
         if event_sink is not None:
@@ -387,7 +391,7 @@ class DeliveryBatchPipeline:
         run_smoke: bool,
         workspace: Path,
     ) -> dict[str, Any]:
-        toolkit = WorkspaceToolkit(workspace)
+        toolkit = WorkspaceToolkit(workspace, command_sandbox=build_agent_sandbox())
         for relative, content in files.items():
             try:
                 toolkit.write_text(relative, content)
@@ -458,7 +462,7 @@ class DeliveryBatchPipeline:
         acceptance: dict[str, Any],
         success_criteria: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        toolkit = WorkspaceToolkit(workspace)
+        toolkit = WorkspaceToolkit(workspace, command_sandbox=build_agent_sandbox())
         global_acceptance = {
             **acceptance,
             "acceptance_scope": "goal_full",

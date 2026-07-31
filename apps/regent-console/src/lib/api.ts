@@ -6,6 +6,7 @@ import type {
   GuidanceResult,
   ProjectStatus,
   HealthStatus,
+  DeliveryReview,
 } from './types'
 
 const ACTOR = 'trial-user'
@@ -77,13 +78,27 @@ export const api = {
       idempotency_key: `console-start-${goalId}`,
     }),
 
-  completeTask: (taskId: string, approved: boolean, reason?: string) =>
+  completeTask: (
+    taskId: string,
+    approved: boolean,
+    reason?: string,
+    opts?: { always_allow?: boolean; option_id?: string },
+  ) =>
     request<Record<string, unknown>>(`/v1/human-tasks/${taskId}/complete`, {
       assigned_to: ACTOR,
-      response: approved
-        ? { approved: true, decision: 'APPROVE' }
-        : { approved: false, decision: 'REJECT', rejection_reason: reason || '未提供原因' },
+      response: {
+        ...(approved
+          ? { approved: true, decision: 'APPROVE' }
+          : { approved: false, decision: 'REJECT', rejection_reason: reason || '未提供原因' }),
+        ...(opts?.always_allow ? { always_allow: true } : {}),
+        ...(opts?.option_id ? { option_id: opts.option_id } : {}),
+      },
     }),
+
+  // CD-3.2: read-only delivery review (plan/transcript/verification/budget).
+  // Backend endpoint may not exist yet — callers should handle rejection gracefully.
+  getDeliveryReview: (projectId: string) =>
+    request<DeliveryReview>(`/v1/app-projects/${projectId}/delivery-review`),
 
   uploadFile: async (file: File, projectId?: string) => {
     const form = new FormData()

@@ -23,6 +23,20 @@
 - Goal 仍在进行中（`liveMode`）且节点为 running/waiting 时，默认展开 **详情**；结束后默认 **概览**，可再点进 **压缩**。
 - 点击标题区循环切换详略（进行中在详情 ↔ 概览间切换；已结束后概览 → 压缩 → 详情 → 概览）。
 
+## 后端依赖状态（F-1 / F-7 已闭环）
+
+`src/lib/api.ts` 调用的后端端点均已在 `core/src/regent/api/main.py:266-294` 挂载：
+
+| 调用位置 | 端点 | 状态 |
+|---|---|---|
+| `src/lib/api.ts:81` | `POST /v1/human-tasks/{taskId}/complete` | ✅ 已挂载（`main.py:290`） |
+| `src/lib/api.ts:93` | `POST /v1/uploads` | ✅ 已挂载（`main.py:291`） |
+| `src/lib/api.ts:100` | `GET /v1/app-projects/{id}/delivery-review` | ✅ 已挂载（`api/app_projects.py:106`） |
+
+PRD §4.3.4「可审阅交付物」已由 CD-3 落地：`delivery-review` 返回 plan / transcript / verification / budget，前端入口见 `components/ArtifactPanel.tsx:124`。
+
+> 仍待完善：PRD §4.3.5「失败交人带答案」要求交人界面提供 2–3 个带代价估计的可执行选项，`ConfirmationCard` 目前尚未实现选项化。
+
 ## 目录结构
 
 ```

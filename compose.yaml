@@ -16,6 +16,12 @@ services:
     build: {context: ., dockerfile: core/Dockerfile}
     command: ["regent-api"]
     env_file: ${REGENT_ENV_FILE:-.env}
+    environment:
+      # CD-6.4/6.6 Path B: default local — containerized worker has no docker.sock.
+      # For docker agent sandbox on host Path A, set REGENT_SANDBOX_MODE=docker outside compose.
+      REGENT_SANDBOX_MODE: ${REGENT_SANDBOX_MODE:-local}
+      REGENT_AGENT_SANDBOX_IMAGE: ${REGENT_AGENT_SANDBOX_IMAGE:-regent-agent-exec-v1:1}
+      REGENT_HOST_PATH_MAP: ${REGENT_HOST_PATH_MAP:-}
     ports: ["8000:8000"]
     volumes:
       - /opt/regent/artifacts:/var/lib/regent/artifacts
@@ -27,6 +33,10 @@ services:
     build: {context: ., dockerfile: core/Dockerfile}
     command: ["regent-worker"]
     env_file: ${REGENT_ENV_FILE:-.env}
+    environment:
+      REGENT_SANDBOX_MODE: ${REGENT_SANDBOX_MODE:-local}
+      REGENT_AGENT_SANDBOX_IMAGE: ${REGENT_AGENT_SANDBOX_IMAGE:-regent-agent-exec-v1:1}
+      REGENT_HOST_PATH_MAP: ${REGENT_HOST_PATH_MAP:-}
     volumes:
       - /opt/regent/artifacts:/var/lib/regent/artifacts
       - /opt/regent/workspaces:/var/lib/regent/workspaces

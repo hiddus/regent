@@ -17,6 +17,10 @@ class ErrorCode(StrEnum):
     POLICY_DENIED = "POLICY_DENIED"
     # GQ-0/GQ-1: strategy / generator_ref / object type must agree (fail-closed).
     GENERATOR_METADATA_MISMATCH = "GENERATOR_METADATA_MISMATCH"
+    # Delivery review / verification rejected a non-deliverable surface (typed).
+    DELIVERY_REJECTED = "DELIVERY_REJECTED"
+    # CD-7.5 / N-6: transcript DB persist failed; sidecar may still exist (retryable).
+    TRANSCRIPT_PERSIST_FAILED = "TRANSCRIPT_PERSIST_FAILED"
     # AAR-1 Foundation
     NO_ACTIVE_CONSTITUTION = "NO_ACTIVE_CONSTITUTION"
     POLICY_EVALUATION_FAILED = "POLICY_EVALUATION_FAILED"

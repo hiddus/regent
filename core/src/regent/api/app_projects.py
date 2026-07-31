@@ -1,11 +1,12 @@
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, Field
 
 from regent.application.app_project_service import AppProjectService
+from regent.application.delivery_review_api import DeliveryReviewQueryService
 from regent.application.goal_execution_service import GoalExecutionService
 from regent.config import get_settings
 from regent.model.factory import build_model_provider
@@ -100,6 +101,12 @@ async def list_app_projects(
 @router.get("/{project_id}", response_model=AppProjectResponse)
 async def get_app_project(project_id: uuid.UUID, projects: ServiceDep) -> AppProjectResponse:
     return project_response(await projects.get(project_id))
+
+
+@router.get("/{project_id}/delivery-review")
+async def get_delivery_review(project_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """CD-3.1: read-only plan / transcript / verification / budget for Console review."""
+    return await DeliveryReviewQueryService(request.app.state.sessions).get_for_project(project_id)
 
 
 @router.post("/{project_id}/confirm", response_model=ConfirmAppResponse)

@@ -1,11 +1,12 @@
 # Regent Vibe Coding 项目计划书
 
-> 更新：2026-07-31（Multi-Agent 研究吸收与补足计划）
+> 更新：2026-07-31（对话式完整交付统一计划 CD-0…CD-5）
 
 > 状态：唯一有效编码基线  
 > 配套需求：[Regent-PRD.md](./Regent-PRD.md)  
 > 技术规范：[Regent-Technical-Spec.md](./Regent-Technical-Spec.md)  
-> 测量框架：[Regent-Measurement-Decision-Framework.md](./Regent-Measurement-Decision-Framework.md)
+> 测量框架：[Regent-Measurement-Decision-Framework.md](./Regent-Measurement-Decision-Framework.md)  
+> 对话式交付计划：[docs/conversational-delivery-plan-2026-07-31.md](./docs/conversational-delivery-plan-2026-07-31.md)
 
 ## 1. 实现方式
 
@@ -333,6 +334,51 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 | GQ-5 / MA-5 固定 Hive 重评 | ⏳ 未开 | 依赖 GQ-4；生产既有 CERTIFIED_HIVE opt-in **保持不扩容** |
 
 工作包：`WP-GEN-SELECT`/`WP-GEN-FEEDBACK`/`WP-VERIFY-TEST`/`WP-CANARY`/`WP-DEFAULT-GATE` 控制流均已落地并有单测（`test_generation_quality.py`）。`WP-CANARY` 的流量开关（`canary_gate`/`canary_percent`）与 `WP-DEFAULT-GATE` 的晋级门（`apply_gq4_promotion`）为代码强制不变式；**完整真实任务实验窗口**（真实模型/工具/预算下跑双臂、产出 95% CI）仍属后续交付，但此时已有可驱动、可复算的控制流支撑，不再只是空钩子。生产运行时策略可由运维以 `REGENT_GENERATION_STRATEGY` 覆盖（≠ GQ-4 晋级）；部署不得擅自改写。详见 `docs/gq34-promotion-control-flow-2026-07-31.md`。
+
+**阻塞更正（2026-07-31）**：GQ-3 真实流量窗另受 Tech-Spec §13.8 约束——agent 工具须先改走 Docker 沙箱（统一计划 CD-0.1）后方可合规打开 canary。详见 §14。
+
+**状态更新（2026-07-31 重订）**：CD-0.1 名义沙箱已完成，但 **N-3 族**（entrypoint 吞命令、**N-3c** uid 写盘失败、**N-3d** 路径静默挂空、N-3b DinD）使 docker 模式尚未「真执行」。**CD-6 全绿前打开 canary 只会得到无效或假绿数据**。权威下一步：[`docs/conversational-delivery-next-plan-2026-07-31.md`](./docs/conversational-delivery-next-plan-2026-07-31.md)；CD-6 工作包：[`docs/cd6-execution-plan-2026-07-31.md`](./docs/cd6-execution-plan-2026-07-31.md)。
+
+## 14. 对话式完整交付计划（2026-07-31）
+
+> CD-0…5：[`docs/conversational-delivery-plan-2026-07-31.md`](./docs/conversational-delivery-plan-2026-07-31.md)。  
+> **下一步（CD-6…CD-12，ACTIVE 重订）**：[`docs/conversational-delivery-next-plan-2026-07-31.md`](./docs/conversational-delivery-next-plan-2026-07-31.md)。  
+> **CD-6 执行级**：[`docs/cd6-execution-plan-2026-07-31.md`](./docs/cd6-execution-plan-2026-07-31.md)。  
+> 需求：[Regent-PRD.md](./Regent-PRD.md)；技术：[Regent-Technical-Spec.md](./Regent-Technical-Spec.md) §13.8 / §25。
+
+### 14.1 批次与依赖（CD-0…CD-5）
+
+| 批次 | 名称 | 依赖 | 状态 |
+|---|---|---|---|
+| CD-0 | 止血：沙箱 / transcript 审计 / AC1 门禁可信 | 无 | ✅ 已完成（名义隔离；真执行见 CD-6） |
+| CD-1 | 交付状态机接线 + 类型化拒绝 + goal_intent 早交人 | CD-0.3/0.4 | ✅ 已完成 |
+| CD-2 | 合规 GQ-3 窗 + 统一 Verification 闸门 + GQ-4 | CD-0.1 + §13 GQ-2 | 🟡 控制流就绪；**阻塞于 CD-6/7** |
+| CD-3 | WorkBuddy 体验：审阅面 / 交人选项 / 成本 / 工具轨迹 | CD-1 | ✅ 已完成 |
+| CD-4 | 对话层 agent loop（PRD §4.4 新需求） | DecisionNote §4.4 ACCEPTED | ✅ 已完成 |
+| CD-5 | 恢复度量 / SSE 自适应轮询 / 结构瘦身 | CD-1 | ✅ 最小完成（Coordinator/token 流持续） |
+
+### 14.4 下一步（CD-6…CD-12）— 2026-07-31 重订
+
+| 批次 | 名称 | 依赖 | 状态 |
+|---|---|---|---|
+| CD-6 | 沙箱真执行：N-3 族 + T1–T6 | CD-0.1 | ✅ S0 已验证（镜像+worker e2e） |
+| CD-7 | 技 P1-1…4 + N-4/N-6 | CD-6 全绿 | 🟡 7.1 marker + 7.4 预算隔离已落地；7.2/7.3/7.5 待 |
+| CD-8 | GQ-3 真实 canary 实验窗 | CD-6+7 | 🟡 待运维 |
+| CD-9 | GQ-4 条件晋级 | CD-8 报告 | 🟡 PENDING |
+| CD-10 | capability 执行适配器 | CD-8 后 | ⚪ 优先于推流 |
+| CD-11 | token 流 / LISTEN | 不阻塞 | ⚪ |
+| CD-12 | Coordinator + F-10 | CD-7 稳定后 | ⚪ 现在不抽 |
+
+### 14.2 门禁
+
+1. **CD-6 未全绿**（含 N-3c/N-3d，且不得仅用 `echo ok` 验收）：禁止生产 `canary_gate` / 提高 `canary_percent`。
+2. **CD-7 未绿**：禁止开 GQ-3 窗。
+3. CD-6 期间默认禁 `_NETWORK_PREFIXES` 裸开网；N-4 完整治理在 CD-7.5（除非 Owner 加速）。
+4. 不删除 Permit / Outbox / Evidence / Audit / Reconciler；`.env=agentic` ≠ GQ-4。
+
+### 14.3 与同事评审文档关系
+
+[`docs/conversational-delivery-architecture-review-2026-07-31.md`](./docs/conversational-delivery-architecture-review-2026-07-31.md) 为 REVIEW 输入（§9 修正为准）。编码基线：§14 + CD-0…5 计划 + **重订 next-plan CD-6…12** + CD-6 执行级。
 
 ## P1 编码基线
 

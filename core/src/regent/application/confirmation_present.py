@@ -26,6 +26,47 @@ def _preference_and_timeout() -> tuple[DecisionPreference, int]:
         return DecisionPreference.BALANCED, 300
 
 
+# CD-3.5: default handoff options attached to every human-task confirmation so the
+# Console TaskCard can render "bring back an answer" style choices instead of a
+# bare allow/deny. Kept intentionally generic (goal-agnostic); callers may extend.
+DEFAULT_HANDOFF_OPTIONS: tuple[dict[str, str], ...] = (
+    {
+        "id": "narrow_scope",
+        "label": "缩小范围",
+        "cost_hint": "减少本轮改动范围，更快见效但覆盖更少",
+    },
+    {
+        "id": "keep_trying",
+        "label": "继续尝试",
+        "cost_hint": "保持当前方案继续自动重试，可能消耗更多轮次/时间",
+    },
+    {
+        "id": "stop",
+        "label": "停止",
+        "cost_hint": "停止自动推进，保持当前状态等待你的下一步指示",
+    },
+)
+
+
+def default_handoff_options() -> list[dict[str, str]]:
+    return [dict(option) for option in DEFAULT_HANDOFF_OPTIONS]
+
+
+def action_key_for_task_type(task_type: str) -> str:
+    """Map a HumanTask.task_type to the decision-policy action vocabulary.
+
+    Shared by ``confirmation_for_human_task`` (confirmation envelope) and the
+    ``/human-tasks/{id}/complete`` route (CD-3.5 always_allow persistence) so the
+    two stay in sync.
+    """
+    action = task_type.lower()
+    if action == "release_approval":
+        return "release_approval"
+    if action == "quality_approval":
+        return "quality_approval"
+    return "delivery_gap_intervene"
+
+
 def confirmation_for_human_task(
     *,
     task_type: str,
@@ -36,13 +77,7 @@ def confirmation_for_human_task(
     extra_rules: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build confirmation metadata for HUMAN_TASK_REQUIRED / TaskCard."""
-    action = task_type.lower()
-    if action == "release_approval":
-        action_key = "release_approval"
-    elif action == "quality_approval":
-        action_key = "quality_approval"
-    else:
-        action_key = "delivery_gap_intervene"
+    action_key = action_key_for_task_type(task_type)
 
     pref, timeout = _preference_and_timeout()
     risk = ACTION_RISK.get(action_key, RiskLevel.MEDIUM)
@@ -58,15 +93,19 @@ def confirmation_for_human_task(
         summary=summary,
         risk_level=risk,
         rationale=rationale
-        or "需要你确认后 Core 才能继续；超时将按决策偏好应用默认动作。",
-        on_allow="继续执行后续步骤（部署/验证/恢复）",
-        on_deny="停止自动推进，保持等待你的下一步指示",
+        or "需要你确认后才能继续。",
+        on_allow="继续",
+        on_deny="停止",
         preference=pref,
         rules_applied=rules,
         timeout_seconds=timeout,
         detail=detail or prompt,
     )
-    return req.as_dict()
+    payload = req.as_dict()
+    # CD-3.2/CD-3.5: attach default handoff options (narrow_scope/keep_trying/stop)
+    # so Console can render option buttons instead of plain allow/deny.
+    payload["handoff_options"] = default_handoff_options()
+    return payload
 
 
 def enrich_halt_extra(

@@ -1,11 +1,14 @@
 # Regent 产品定义与需求文档
 
 > 状态：CURRENT  
-> 日期：2026-07-31（吸收 Multi-Agent landscape 调研结论）
+> 日期：2026-07-31（对话式交付 CD-0…5 闭环；下一步 CD-6…12 重订）  
 > 性质：权威执行基线（Owner 批准）  
 > 配套技术规范：[`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md)  
 > 测量框架：[`Regent-Measurement-Decision-Framework.md`](./Regent-Measurement-Decision-Framework.md)  
-> 编码门禁：`P2StartDecisionRecord` 已签署 → **允许** `p2-scheduler-01`
+> 编码执行清单：[`Regent-Plan.md`](./Regent-Plan.md) §14；CD-0…5：[`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md)  
+> **下一步（ACTIVE）**：[`docs/conversational-delivery-next-plan-2026-07-31.md`](docs/conversational-delivery-next-plan-2026-07-31.md)（CD-6…12）；CD-6 执行级：[`docs/cd6-execution-plan-2026-07-31.md`](docs/cd6-execution-plan-2026-07-31.md)  
+> 对齐审计：[`docs/doc-implementation-alignment-audit-2026-07-31.md`](docs/doc-implementation-alignment-audit-2026-07-31.md) §8  
+> 编码门禁：`P2StartDecisionRecord` 已签署 → **允许** `p2-scheduler-01`；**CD-6/7 未绿禁止生产 canary**
 
 ---
 
@@ -132,11 +135,16 @@ regent/
 
 ### 4.1 成功路径
 
+> 旅程语义以 DecisionNote [`docs/decision-note-auto-start-journey-2026-07-31.md`](docs/decision-note-auto-start-journey-2026-07-31.md) 为准（ACCEPTED）。
+
 1. 创建意图 → 可解释 GoalSpec（显式约束、推断、未知项、非目标）。
-2. 用户确认 → FROZEN GoalSpec → Start。
-3. Evidence → 实质不同假设 → 唯一 HypothesisDecision。
-4. Requirement → Capability Resolution → Generation → 隔离 Build → Preview。
-5. 真实 Observation → Gate → CONTINUE / REVISE / STOP。
+2. **快照启动**：主链路允许系统在低风险范围内以机器身份写入执行快照并 Start（Audit：`SNAPSHOT_GOAL_SPEC_FOR_EXECUTION`；`confirmed_by` 可为 `regent-core:auto-snapshot`）。这**不是**人类确认意图。
+3. **事后纠偏**：用户随时可通过确认/修订入口更正约束、范围或停止；高影响行动（权限、根目标变更、生产发布等）仍须显式 HumanTask / 审批。
+4. Evidence → 实质不同假设 → 唯一 HypothesisDecision。
+5. Requirement → Capability Resolution → Generation → 隔离 Build → Preview。
+6. 真实 Observation → Gate → CONTINUE / REVISE / STOP。
+
+控制台「确认」卡在主链路上的产品角色是**纠偏与知情**，不是「允许系统开始干活」的门闩。`/confirm` 端点保留给对话修订路径。
 
 ### 4.2 失败与例外路径
 
@@ -155,7 +163,25 @@ Web Console 是主交付面；下列为产品语义，不规定具体组件实�
 
 1. **对话流动态进度**：执行过程中进度信息应详略得当——进行中默认展示足够细节以便跟进；节点结束后默认收敛为概览，并允许用户进一步压缩已完成内容，避免长会话被历史进度淹没。用户可主动切换详略。
 2. **参与 Agent 名册**：右侧主视图展示当前 Goal 的参与 Agent 及其活动状态（如主助手、Hive 角色），而不是以「汇总执行进度」作为默认主视图。产物与预览属于次要信息，需要时再展开。
-3. **与 Core 信号对齐**：名册与活动态应对齐 Core 提供的参与 Agent 列表及实时活动信号（含 live 活动摘要）；无列表时允许控制台用既有 Goal/组织信息做最小回退，但不得编造未部署的 Agent。
+3. **与 Core 信号对齐**：名册与活动态应对齐 Core 提供的参与 Agent 列表及实时活动信号（含 live 活动摘要）；无列表时允许控制台用既有 Goal/组织信息做最小回退，但不得编造未部署的 Agent。Core 已在 guidance status 中提供 `agents` 时，控制台**必须**优先使用该列表，不得长期运行在推导回退分支。
+4. **可审阅交付物**：用户须能查看本轮改动摘要（文件/计划）、验证结论（含 smoke/测试日志摘要）与成本/剩余预算；仅预览 URL + zip 不足以宣称「完整交付」。
+5. **失败交人带答案**：自动恢复耗尽或需主观判断时，交人界面须提供 2–3 个可执行选项及大致代价（轮次/预算），不得只给「允许 / 拒绝」而把开放式难题甩回用户。
+
+### 4.4 对话式完整交付（新增需求）
+
+> 本条为**新增产品条目**（见架构评审 §9.4），不是对既有 bug 的修复说明。编码前须遵循 [`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md) CD-4 门禁。
+
+目标体验：用户通过自然对话让 Core **完整交付**可验证结果，接近 Claude Code / WorkBuddy 的「边说边做、过程可见、预算内自纠正」。
+
+产品要求：
+
+1. **单一自然语言入口**：用户消息应进入同一对话执行环；不得长期并存一条「可执行」入口与一条「纯 CRUD 死路」而不在文档中标明。
+2. **对话层具备多步工具循环**：对话编排不得止步于单次意图分类枚举；须能在同一轮用户意图下多步澄清、调用已注册工具（含现有 guidance handler 升格为工具）并推进执行——状态写入仍由确定性 Application Service 完成。
+3. **过程可见**：生成/修复过程须展示具名工具轨迹（读/写/命令与结果摘要），而非仅轮次计数。
+4. **上下文可引用**：对话历史与相关 Evidence 须可被检索进入执行上下文（压缩与预算约束见 §10.4）。
+5. **治理不降级**：沙箱内可逆效应可事后审计全速循环；不可逆/外部效应仍须前置 ExecutionPermit。不得为了顺滑删除 Outbox / Evidence / Audit / Reconciler。
+
+验收锚点（摘要；细节见统一开发计划 CD-3/CD-4）：用户一句话可触发多步执行；工具轨迹可观测；失败交人带选项与产物；交付物可审阅。
 
 ---
 
@@ -407,8 +433,10 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 - `VerificationAgent` 现有 `compileall` + 起服务 + 端点探测之外，应补充 pytest / 项目测试命令能力，并把真实构建、测试与 smoke 失败可靠回灌至同一次生成会话，而非仅由下游恢复流程处理（见 Tech-Spec §13.5、§13.6）；
 - 将 `agentic` 设为默认前，必须以隔离影子任务或小比例 canary 对照 artifact-backed 与 agentic，在预注册的代表性冻结任务集上比较成功率、成本、延迟、首次可运行率、修正轮次和人工介入率；门槛、样本量、停止规则与安全护栏必须在实验前冻结（见 Tech-Spec §13.7、Plan §13）；
 - GQ-3 canary 必须经强制控制流启用：canary 仅当 `generation_strategy_canary_gate=True`（GQ-2 反馈闭环验证后）**且** `canary_percent>0` 时，按 `stable_canary_bucket(goal_id)` 对**具体 goal** 选 `agentic` 生成器；`canary_rollout_allowed` 在策略解析中强制 GQ-2→GQ-3 顺序，闸门默认 False（见 Tech-Spec §13.7、§13.4）；
+- **GQ-3 合规前置**：agent 工具循环必须在独立 sandbox 内执行（不得在持有 DB/Provider 凭据的 worker 宿主上 `subprocess` 跑白名单命令）。不满足则**禁止**打开 canary / 影子流量，即使控制流代码已就绪（见 Tech-Spec §13.8、统一计划 CD-0）；
 - 固定 Hive 的净收益目前未经真实任务实验确认，既不应假定必然改善，也不应假定必然放大；固定 Hive 与自适应组织的评估必须建立在上述强单 Agent 基线之上（见 Plan §13）。
 - GQ-4 默认切换必须经强制控制流：运行 GQ-3 实验后，唯有 `gq4_default_switch_gate` 判定 `PROMOTE_AGENTIC_CANDIDATE` 且无 kill switch 时，`apply_gq4_promotion` 才允许晋级；未通过则 `DomainError` 阻止翻转 `generation_strategy`。运行时默认仍由 `generation_strategy` 驱动，kill switch 始终覆盖。晋级须形成 DecisionRecord（见 Tech-Spec §13.7、Plan §13）。
+- **运维 `.env` 覆盖 `REGENT_GENERATION_STRATEGY=agentic` 不等于 GQ-4 晋级**，也不得替代上述沙箱前置与实验窗。
 
 ---
 
@@ -446,7 +474,10 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 P1 Graduation
 → P2-1 调度（承诺）
 → P2-2 Runtime（承诺）
-→ GQ-0…GQ-4：建立并晋级强单 Agent 基线
+→ CD-0：agent 沙箱合规 + 审计/门禁可信（对话式交付计划）
+→ GQ-0…GQ-4：建立并晋级强单 Agent 基线（GQ-3 依赖 CD-0）
+→ CD-1…CD-3：交付状态机接线 + WorkBuddy 级交付体验
+→ CD-4：对话层 agent loop（§4.4，独立需求批次）
 → MA-5 / P2-4：以强单 Agent 为 champion 运行组织对照实验
 → GQ-5 / MA-6：固定 Hive 重评与条件激活 DecisionRecord
 → P2-3 记忆（条件） / P2-5 自适应组织（条件） / P2-6 实验平台（条件）

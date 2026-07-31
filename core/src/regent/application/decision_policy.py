@@ -1,6 +1,10 @@
 """Session-level decision preference + per-action allow/deny rules.
 
-Priority: safety invariant > deny rules > preference default > allow rules > ask.
+Priority: safety invariant > deny rules > allow rules > preference default > ask.
+
+Explicit allow (Console「总是允许」→ goal.metadata decision_allow_actions) must
+beat preference-matrix auto-deny (e.g. balanced×HIGH), otherwise always-allow
+is a no-op for delivery_gap_intervene and similar high-risk actions.
 See docs/console-dialog-prd-2026-07-31.md.
 """
 
@@ -8,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from regent.application.confirmation import (
     ConfirmationRequest,
@@ -38,11 +42,13 @@ KNOWN_ACTIONS: frozenset[str] = frozenset(
 )
 
 # Default risk when building confirmations for known actions.
+# delivery_gap_intervene = continue/replan inside the goal — not a dangerous side effect.
+# Ask only when the auto-recovery ladder is exhausted (needs new direction), not on every gap.
 ACTION_RISK: dict[str, RiskLevel] = {
     "goal_confirm": RiskLevel.LOW,
     "release_approval": RiskLevel.MEDIUM,
     "quality_approval": RiskLevel.MEDIUM,
-    "delivery_gap_intervene": RiskLevel.HIGH,
+    "delivery_gap_intervene": RiskLevel.MEDIUM,
     "external_effect": RiskLevel.HIGH,
 }
 
@@ -94,6 +100,19 @@ class DecisionPolicy:
             ),
         )
 
+    def with_extra_allow_actions(self, extra: Iterable[str] | None) -> DecisionPolicy:
+        """Return a copy that unions ``extra`` into allow_actions (goal-scoped)."""
+        added = _parse_action_set(extra)
+        if not added:
+            return self
+        return DecisionPolicy(
+            preference=self.preference,
+            rules=DecisionRules(
+                allow_actions=self.rules.allow_actions | added,
+                deny_actions=self.rules.deny_actions,
+            ),
+        )
+
     def evaluate(
         self,
         action: str,
@@ -110,6 +129,11 @@ class DecisionPolicy:
         if action in self.rules.deny_actions:
             applied.append(f"deny_rule:{action}")
             return PolicyDecision.DENY, tuple(applied)
+
+        # Explicit allow beats preference auto-deny (「总是允许」).
+        if action in self.rules.allow_actions:
+            applied.append(f"allow_rule:{action}")
+            return PolicyDecision.ALLOW, tuple(applied)
 
         risk = RiskLevel(risk_level) if risk_level is not None else ACTION_RISK.get(
             action, RiskLevel.MEDIUM
@@ -136,11 +160,6 @@ class DecisionPolicy:
             applied.append("preference_default:deny")
             return PolicyDecision.DENY, tuple(applied)
 
-        # CANCEL / ask — allow-list may still auto-approve
-        if action in self.rules.allow_actions:
-            applied.append(f"allow_rule:{action}")
-            return PolicyDecision.ALLOW, tuple(applied)
-
         applied.append("ask")
         return PolicyDecision.ASK, tuple(applied)
 
@@ -154,3 +173,36 @@ def load_decision_policy_from_config() -> DecisionPolicy:
         allow_actions=settings.decision_allow_actions,
         deny_actions=settings.decision_deny_actions,
     )
+
+
+def decision_policy_for_goal_metadata(
+    metadata: Mapping[str, Any] | None,
+) -> DecisionPolicy:
+    """Config policy + goal.metadata_json.decision_allow_actions (CD-3.5)."""
+    base = load_decision_policy_from_config()
+    raw = (metadata or {}).get("decision_allow_actions")
+    if isinstance(raw, str):
+        extra: Iterable[str] = [p.strip() for p in raw.split(",") if p.strip()]
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        extra = raw
+    else:
+        extra = ()
+    return base.with_extra_allow_actions(extra)
+
+
+def action_preauthorized(
+    metadata: Mapping[str, Any] | None,
+    action: str,
+    *,
+    risk_level: RiskLevel | str | None = None,
+) -> bool:
+    """True only for explicit allow-list (「总是允许」), not preference auto-allow.
+
+    Preference matrix (e.g. balanced×LOW→ALLOW) must not silently pre-authorize
+    delivery recovery — that would infinite-reset the ladder on exhaustion.
+    """
+    del risk_level  # explicit allow-list only; risk unused
+    policy = decision_policy_for_goal_metadata(metadata)
+    if action in policy.rules.deny_actions:
+        return False
+    return action in policy.rules.allow_actions

@@ -86,6 +86,48 @@ def test_allow_rule_overrides_ask() -> None:
     assert "allow_rule:goal_confirm" in rules
 
 
+def test_allow_rule_beats_balanced_high_preference_deny() -> None:
+    """「总是允许」must work for HIGH actions (delivery_gap_intervene)."""
+    policy = DecisionPolicy.from_settings(
+        preference="balanced",
+        allow_actions="delivery_gap_intervene",
+        deny_actions="",
+    )
+    decision, rules = policy.evaluate(
+        "delivery_gap_intervene", risk_level=RiskLevel.HIGH
+    )
+    assert decision is PolicyDecision.ALLOW
+    assert "allow_rule:delivery_gap_intervene" in rules
+
+
+def test_goal_metadata_allow_actions_preauthorize() -> None:
+    from regent.application.decision_policy import (
+        DecisionPolicy,
+        action_preauthorized,
+        decision_policy_for_goal_metadata,
+    )
+
+    base = DecisionPolicy.from_settings(
+        preference="balanced", allow_actions="", deny_actions=""
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "regent.application.decision_policy.load_decision_policy_from_config",
+            lambda: base,
+        )
+        policy = decision_policy_for_goal_metadata(
+            {"decision_allow_actions": ["delivery_gap_intervene"]}
+        )
+        assert "delivery_gap_intervene" in policy.rules.allow_actions
+        assert action_preauthorized(
+            {"decision_allow_actions": ["delivery_gap_intervene"]},
+            "delivery_gap_intervene",
+        )
+        # Preference auto-allow must NOT count as preauth (would infinite-reset ladder).
+        assert not action_preauthorized({}, "goal_confirm")
+        assert not action_preauthorized({}, "delivery_gap_intervene")
+
+
 def test_safety_beats_allow_rule() -> None:
     policy = DecisionPolicy.from_settings(
         preference="aggressive",

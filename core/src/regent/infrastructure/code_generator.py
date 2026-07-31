@@ -1,5 +1,6 @@
 import hashlib
 import json
+import tempfile
 import uuid
 from enum import StrEnum
 from pathlib import Path
@@ -8,6 +9,9 @@ from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field, model_validator
 
+from regent.agent.tools import WorkspaceToolkit
+from regent.agent.verification import VerificationAgent
+from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.p1_contracts import (
     FileChange,
     FileChangeSet,
@@ -16,6 +20,7 @@ from regent.application.p1_contracts import (
 )
 from regent.application.p1_ports import GeneratedFileChangeSet
 from regent.infrastructure.artifact_store import FileArtifactStore
+from regent.infrastructure.sandbox import build_agent_sandbox
 from regent.application.goal_anchor_service import build_goal_anchored_prompt
 from regent.infrastructure.html_evidence import (
     ensure_semantic_main,
@@ -148,12 +153,21 @@ class ArtifactBackedCodeGenerator:
         artifacts: FileArtifactStore,
         *,
         semantic_alignment_enabled: bool = False,
+        workspace_root: Path | None = None,
+        enforce_delivery_verification: bool = True,
     ) -> None:
         self._provider = provider
         self._artifacts = artifacts
         # Opt-in only. Default False: not quality verification, not fail-closed.
         # See validate_goal_alignment_semantic / REGENT_GOAL_SEMANTIC_ALIGNMENT_ENABLED.
         self._semantic_alignment_enabled = semantic_alignment_enabled
+        self._workspace_root = (
+            workspace_root or Path(tempfile.gettempdir()) / "regent-artifact-backed"
+        ).resolve()
+        # CD-1.4 / CD-2.2: VerificationAgent becomes the unified delivery gate for
+        # BOTH generators (not an agentic-only capability). Callers that only need
+        # raw artifact materialization (e.g. narrow unit tests) may opt out.
+        self._enforce_delivery_verification = enforce_delivery_verification
 
     async def generate(
         self,
@@ -200,6 +214,9 @@ class ArtifactBackedCodeGenerator:
         seen: set[str] = set()
         # Collect generated HTML for semantic alignment check
         generated_htmls: list[str] = []
+        # CD-1.4/CD-2.2: mirror final (post-enhancement) text so the unified
+        # verification gate reviews exactly what will be shipped.
+        materialized: dict[str, str] = {}
         for generated in response.output.files:
             normalized = generated.relative_path.replace("\\", "/")
             if normalized not in planned_paths:
@@ -231,6 +248,7 @@ class ArtifactBackedCodeGenerator:
                 content_bytes = text.encode("utf-8")
                 generated_htmls.append(text)
             content = content_bytes
+            materialized[normalized] = content.decode("utf-8", errors="replace")
             digest = hashlib.sha256(content).hexdigest()
             artifact = self._artifacts.put(scope, f"generated/{digest[:2]}/{digest}", content)
             changes.append(
@@ -263,10 +281,19 @@ class ArtifactBackedCodeGenerator:
             )
             if not semantic_result.aligned:
                 reason = "; ".join(semantic_result.details[:2])
-                raise ValueError(
-                    f"delivery-review-v1 rejected non-deliverable surface: "
-                    f"goal-semantic-alignment: score={semantic_result.score:.0%} — {reason}"
+                raise DeliveryRejection(
+                    reasons=[
+                        f"goal-semantic-alignment: score={semantic_result.score:.0%} — {reason}"
+                    ],
+                    producer_ref=self.generator_ref,
                 )
+        if self._enforce_delivery_verification:
+            await self._verify_or_reject(
+                acceptance=acceptance,
+                success_criteria=success_criteria,
+                materialized=materialized,
+                scope=scope,
+            )
         change_set = FileChangeSet(
             changes=changes,
             generator_ref=self.generator_ref,
@@ -277,6 +304,40 @@ class ArtifactBackedCodeGenerator:
             model_ref=response.model,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+        )
+
+    async def _verify_or_reject(
+        self,
+        *,
+        acceptance: dict[str, Any],
+        success_criteria: Any,
+        materialized: dict[str, str],
+        scope: uuid.UUID,
+    ) -> None:
+        """CD-1.4/CD-2.2: unified delivery gate — verify before returning changes.
+
+        Materializes the exact shipped content into a draft workspace and runs
+        the same ``VerificationAgent`` the agentic path uses. On failure the
+        draft directory is retained (never discarded, AC4) and a typed
+        ``DeliveryRejection`` is raised instead of a bare ``ValueError``.
+        """
+        draft_root = (self._workspace_root / "drafts" / str(scope)).resolve()
+        toolkit = WorkspaceToolkit(draft_root, command_sandbox=build_agent_sandbox())
+        for relative, text in materialized.items():
+            toolkit.write_text(relative, text)
+        run_smoke = bool(acceptance.get("batch_run_smoke", True))
+        verdict = await VerificationAgent(toolkit).verify(
+            acceptance_contract=acceptance,
+            success_criteria=success_criteria,
+            run_smoke=run_smoke,
+        )
+        if verdict.passed:
+            return
+        reasons = [f"{g.code}: {g.detail}" for g in verdict.gaps] or [verdict.summary]
+        raise DeliveryRejection(
+            reasons=reasons,
+            draft_uri=draft_root.as_uri(),
+            producer_ref=self.generator_ref,
         )
 
     @staticmethod

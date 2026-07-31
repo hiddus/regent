@@ -22,6 +22,16 @@ from regent.agent.types import (
 from regent.agent.verification import VerificationAgent
 
 
+def _preview(value: Any, limit: int = 240) -> str:
+    """Truncated, JSON-safe preview for on_event tool-call payloads."""
+    try:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 class ChatProvider(Protocol):
     async def chat(
         self,
@@ -84,8 +94,16 @@ class AgentRunner:
         verify: bool = True,
         run_smoke: bool = True,
         on_turn: Callable[[int, str], Awaitable[None]] | None = None,
-        _allow_nested_repair: bool = True,
+        on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        _nested_repair_budget: int | None = None,
     ) -> AgentRunResult:
+        # CD-1.5/CD-3.3: repair-round budget is configurable (settings.agent_nested_repair_max)
+        # instead of a hard-coded single-shot bool, so recoverable defects can self-heal
+        # within a persona-appropriate budget instead of always escalating after one retry.
+        if _nested_repair_budget is None:
+            from regent.config import get_settings
+
+            _nested_repair_budget = get_settings().agent_nested_repair_max
         assembler = ContextAssembler(
             plan=plan,
             toolkit=self._toolkit,
@@ -188,6 +206,16 @@ class AgentRunner:
             for call in assistant.tool_calls:
                 result_text = await self._toolkit.execute(call)
                 message_result = result_text
+                if on_event is not None:
+                    await on_event(
+                        {
+                            "type": "tool_call",
+                            "turn": turn,
+                            "tool": call.name,
+                            "args_preview": _preview(call.arguments),
+                            "result_preview": _preview(result_text),
+                        }
+                    )
                 if self._context_artifacts is not None and self._goal_id is not None:
                     ref = await self._context_artifacts.offload_tool_result(
                         goal_id=self._goal_id,
@@ -265,9 +293,10 @@ class AgentRunner:
                 success_criteria=acceptance.get("success_criteria"),
                 run_smoke=run_smoke,
             )
-            # GQ-2: exactly one controlled repair when verification fails.
+            # GQ-2/CD-1.5: controlled repair rounds, bounded by a configurable budget
+            # (settings.agent_nested_repair_max) instead of a single hard-coded retry.
             if (
-                _allow_nested_repair
+                _nested_repair_budget > 0
                 and verification is not None
                 and not verification.passed
                 and verification.gaps
@@ -280,7 +309,8 @@ class AgentRunner:
                     verify=True,
                     run_smoke=run_smoke,
                     on_turn=on_turn,
-                    _allow_nested_repair=False,
+                    on_event=on_event,
+                    _nested_repair_budget=_nested_repair_budget - 1,
                 )
                 if repaired.verification is not None:
                     smoke = dict(repaired.verification.smoke or {})

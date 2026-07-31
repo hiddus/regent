@@ -73,6 +73,17 @@ PROVIDER_CAPABILITY_MATRIX: dict[str, ProviderCapabilityProfile] = {
         ),
         irreversible=True,
     ),
+    # CD-7.2: controlled capability package download (read-side; still EO-tracked).
+    "capability-acquire-v1": ProviderCapabilityProfile(
+        name="capability-acquire-v1",
+        capabilities=frozenset(
+            {
+                ProviderCapability.IDEMPOTENT_REPLAY,
+                ProviderCapability.QUERY_BY_OPERATION_KEY,
+            }
+        ),
+        irreversible=False,
+    ),
 }
 
 

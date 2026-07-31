@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { LiveAction } from '../lib/liveActivity'
-import type { Message, Project, ProjectStatus } from '../lib/types'
+import type { DeliveryReview, Message, Project, ProjectStatus } from '../lib/types'
 import {
   ACTIVITY_LABEL,
   agentInitials,
@@ -89,6 +89,10 @@ export function ArtifactPanel({
 }: ArtifactPanelProps) {
   const [previewExpanded, setPreviewExpanded] = useState(false)
   const [artifactsOpen, setArtifactsOpen] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [review, setReview] = useState<DeliveryReview | null>(null)
+  const [reviewLoading, setReviewLoading] = useState(false)
+  const [reviewError, setReviewError] = useState<string | null>(null)
   const agents = useMemo(
     () => deriveAgents(status, liveAction, messages),
     [status, liveAction, messages],
@@ -104,6 +108,47 @@ export function ArtifactPanel({
   useEffect(() => {
     if (hasPreview) setArtifactsOpen(true)
   }, [hasPreview])
+
+  // CD-3.1: reset review data when switching projects — it is project-scoped.
+  useEffect(() => {
+    setReview(null)
+    setReviewError(null)
+    setReviewOpen(false)
+  }, [project?.id])
+
+  const loadReview = useCallback(async () => {
+    if (!project) return
+    setReviewLoading(true)
+    setReviewError(null)
+    try {
+      const data = await api.getDeliveryReview(project.id)
+      setReview(data)
+    } catch (e) {
+      // Backend endpoint may not exist yet (CD-3.2 client-first) — degrade quietly.
+      setReviewError((e as Error).message || '暂无审阅数据')
+    } finally {
+      setReviewLoading(false)
+    }
+  }, [project])
+
+  const toggleReview = useCallback(() => {
+    setReviewOpen(open => {
+      const next = !open
+      if (next && !review && !reviewLoading) {
+        loadReview()
+      }
+      return next
+    })
+  }, [review, reviewLoading, loadReview])
+
+  const budget = review?.budget
+  const budgetTurnsText = budget?.turns != null
+    ? `${budget.turns}${budget.max_turns != null ? ` / ${budget.max_turns}` : ''} 轮`
+    : null
+  const budgetTokens = (budget?.input_tokens || 0) + (budget?.output_tokens || 0)
+  const budgetTokensText = budget && (budget.input_tokens != null || budget.output_tokens != null)
+    ? `${budgetTokens.toLocaleString()}${budget.max_tokens != null ? ` / ${budget.max_tokens.toLocaleString()}` : ''} tokens`
+    : null
 
   return (
     <>
@@ -228,6 +273,70 @@ export function ArtifactPanel({
                   {!hasPreview && status?.goal?.status !== 'ACHIEVED' && (
                     <div className="artifact-empty compact">
                       <p>预览就绪后会显示在这里。</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {project && (
+            <div className="artifact-fold-section">
+              <button
+                type="button"
+                className={`artifact-fold-toggle ${reviewOpen ? 'open' : ''}`}
+                onClick={toggleReview}
+              >
+                <span>审阅</span>
+                <span className="artifact-fold-arrow" aria-hidden>›</span>
+              </button>
+              {reviewOpen && (
+                <div className="artifact-fold-body">
+                  {reviewLoading && (
+                    <div className="artifact-empty compact"><p>正在加载审阅数据...</p></div>
+                  )}
+                  {!reviewLoading && reviewError && (
+                    <div className="artifact-empty compact"><p>暂无审阅数据（{reviewError}）</p></div>
+                  )}
+                  {!reviewLoading && !reviewError && review && (
+                    <div className="review-section">
+                      {(budgetTurnsText || budgetTokensText) && (
+                        <div className="review-block">
+                          <div className="artifact-section-title"><span>预算摘要</span></div>
+                          <p className="review-budget">
+                            {[budgetTurnsText, budgetTokensText].filter(Boolean).join(' · ')}
+                          </p>
+                        </div>
+                      )}
+                      {review.plan != null && (
+                        <div className="review-block">
+                          <div className="artifact-section-title"><span>执行计划</span></div>
+                          <pre className="review-pre">{JSON.stringify(review.plan, null, 2)}</pre>
+                        </div>
+                      )}
+                      {review.verification != null && (
+                        <div className="review-block">
+                          <div className="artifact-section-title"><span>验证结论</span></div>
+                          <pre className="review-pre">{JSON.stringify(review.verification, null, 2)}</pre>
+                        </div>
+                      )}
+                      {Array.isArray(review.transcript) && review.transcript.length > 0 && (
+                        <div className="review-block">
+                          <div className="artifact-section-title"><span>执行摘要</span></div>
+                          <ul className="review-transcript">
+                            {review.transcript.slice(0, 20).map((item, idx) => (
+                              <li key={idx}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {review.plan == null &&
+                        review.verification == null &&
+                        (!Array.isArray(review.transcript) || review.transcript.length === 0) &&
+                        !budgetTurnsText &&
+                        !budgetTokensText && (
+                        <div className="artifact-empty compact"><p>审阅数据为空。</p></div>
+                      )}
                     </div>
                   )}
                 </div>

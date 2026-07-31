@@ -46,12 +46,22 @@ class DockerSandboxDriver:
         root: Path,
         image: str,
         runner: CommandRunner = subprocess_runner,
+        host_path_map: dict[str, str] | None = None,
+        run_as_user: str | None = None,
+        require_host_path_map_in_container: bool = False,
+        egress_proxy: str | None = None,
     ) -> None:
         self._root = root.resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._image = image
         self._runner = runner
         self._requests: dict[str, Path] = {}
+        self._host_path_map = dict(host_path_map or {})
+        self._run_as_user = run_as_user or "65532:65532"
+        self._require_host_path_map_in_container = require_host_path_map_in_container
+        self._egress_proxy = (egress_proxy or "").strip() or None
+        if self._run_as_user.startswith("0:") or self._run_as_user == "0":
+            raise ValueError("agent sandbox --user must not be root (CD-6.2)")
 
     async def build(self, request: SandboxBuildRequest) -> SandboxBuildResult:
         operation_id = uuid.uuid4().hex
@@ -150,6 +160,120 @@ class DockerSandboxDriver:
             f"type=bind,src={operation / 'output'},dst=/output",
             self._image,
         ]
+
+    def workspace_exec_command(
+        self,
+        workspace: Path,
+        shell_command: str,
+        *,
+        allow_network: bool = False,
+    ) -> list[str]:
+        """Docker argv for an agent shell command confined to ``workspace``.
+
+        CD-6.1: always pass ``--entrypoint sh`` so build-sandbox ENTRYPOINT cannot
+        swallow the command. CD-6.2/6.3: ``--user`` and host path map apply here.
+        """
+        if (
+            self._require_host_path_map_in_container
+            and running_in_container()
+            and not self._host_path_map
+        ):
+            raise RuntimeError(
+                "REGENT_HOST_PATH_MAP is required when sandbox_mode=docker "
+                "runs inside a container (CD-6.3 / N-3d); refusing silent empty mounts"
+            )
+        mount_src = apply_host_path_map(workspace.resolve(), self._host_path_map)
+        # CD-7.5 / N-4: never bare-bridge without controlled egress proxy.
+        if allow_network:
+            from urllib.parse import urlparse
+
+            if (
+                not self._egress_proxy
+                or urlparse(self._egress_proxy).scheme not in {"http", "https"}
+            ):
+                raise PermissionError(
+                    "agent network requires REGENT_DEPENDENCY_EGRESS_PROXY "
+                    "(CD-7.5 / N-4); refusing bare bridge"
+                )
+        network = "bridge" if allow_network else "none"
+        argv = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            network,
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=256m",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "512m",
+            "--cpus",
+            "1",
+            "--user",
+            self._run_as_user,
+            "--workdir",
+            "/workspace",
+            "--mount",
+            f"type=bind,src={mount_src},dst=/workspace",
+        ]
+        if allow_network and self._egress_proxy:
+            argv.extend(
+                [
+                    "--env",
+                    f"HTTPS_PROXY={self._egress_proxy}",
+                    "--env",
+                    f"HTTP_PROXY={self._egress_proxy}",
+                    "--env",
+                    f"https_proxy={self._egress_proxy}",
+                    "--env",
+                    f"http_proxy={self._egress_proxy}",
+                ]
+            )
+        argv.extend(
+            [
+                "--entrypoint",
+                "sh",
+                self._image,
+                "-lc",
+                shell_command,
+            ]
+        )
+        return argv
+
+    async def exec_in_workspace(
+        self,
+        workspace: Path,
+        shell_command: str,
+        *,
+        timeout_seconds: int = 60,
+        allow_network: bool = False,
+    ) -> str:
+        """Run a whitelisted agent command inside an isolated container."""
+        timeout = max(1, min(int(timeout_seconds or 60), 120))
+        argv = self.workspace_exec_command(
+            workspace, shell_command, allow_network=allow_network
+        )
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            return f"TIMEOUT after {timeout}s: {shell_command}"
+        out = stdout.decode("utf-8", errors="replace")
+        err = stderr.decode("utf-8", errors="replace")
+        combined = (out + ("\n" + err if err else "")).strip()
+        preview = combined[:8_000] + ("\n...[truncated]" if len(combined) > 8_000 else "")
+        return f"exit={process.returncode}\n{preview}"
 
     @staticmethod
     def _local_artifact(uri: str) -> Path:
@@ -339,6 +463,153 @@ class LocalSandboxDriver:
         if not path.is_file() or path.is_symlink():
             raise ValueError("sandbox input artifact is invalid")
         return path
+
+    async def exec_in_workspace(
+        self,
+        workspace: Path,
+        shell_command: str,
+        *,
+        timeout_seconds: int = 60,
+        allow_network: bool = False,
+    ) -> str:
+        """Dev/test-only host execution. Production must use DockerSandboxDriver."""
+        del allow_network  # host path has no network isolation; tests only
+        timeout = max(1, min(int(timeout_seconds or 60), 120))
+        process = await asyncio.create_subprocess_shell(
+            shell_command,
+            cwd=str(workspace.resolve()),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            return f"TIMEOUT after {timeout}s: {shell_command}"
+        out = stdout.decode("utf-8", errors="replace")
+        err = stderr.decode("utf-8", errors="replace")
+        combined = (out + ("\n" + err if err else "")).strip()
+        preview = combined[:8_000] + ("\n...[truncated]" if len(combined) > 8_000 else "")
+        return f"exit={process.returncode}\n{preview}"
+
+
+def parse_host_path_map(raw: str | None) -> dict[str, str]:
+    """Parse ``REGENT_HOST_PATH_MAP`` as ``container=host;container2=host2``."""
+    if not raw or not str(raw).strip():
+        return {}
+    mapping: dict[str, str] = {}
+    for part in str(raw).split(";"):
+        piece = part.strip()
+        if not piece:
+            continue
+        if "=" not in piece:
+            raise ValueError(
+                f"invalid REGENT_HOST_PATH_MAP entry {piece!r}; expected container=host"
+            )
+        left, right = piece.split("=", 1)
+        container_prefix = left.strip().rstrip("/") or "/"
+        host_prefix = right.strip().rstrip("/") or "/"
+        mapping[container_prefix] = host_prefix
+    return mapping
+
+
+def docker_fs_path(path: Path) -> str:
+    """POSIX path string for Docker bind mounts (Linux daemon).
+
+    On Windows, ``Path('/var/lib/...').resolve()`` gains a drive letter; strip it
+    so ``REGENT_HOST_PATH_MAP`` keys still match.
+    """
+    text = path.as_posix()
+    if len(text) >= 3 and text[1] == ":" and text[2] == "/":
+        text = text[2:]
+    return text
+
+
+def apply_host_path_map(path: Path, path_map: dict[str, str]) -> str:
+    """Translate a container-visible path to the host path Docker daemon expects."""
+    text = docker_fs_path(path if path.is_absolute() else path.resolve())
+    if not path_map:
+        return text
+    for container_prefix, host_prefix in sorted(
+        path_map.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        if text == container_prefix or text.startswith(container_prefix + "/"):
+            suffix = text[len(container_prefix) :]
+            return host_prefix + suffix
+    return text
+
+
+def running_in_container() -> bool:
+    """Best-effort detection for CD-6.3 fail-closed (N-3d)."""
+    if Path("/.dockerenv").is_file():
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup")
+        if cgroup.is_file():
+            body = cgroup.read_text(encoding="utf-8", errors="replace")
+            if "docker" in body or "containerd" in body or "kubepods" in body:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def resolve_agent_sandbox_user(settings: Any) -> str:
+    """CD-6.2: align sandbox uid with the process that writes workspace files."""
+    override = getattr(settings, "agent_sandbox_uid", None)
+    if override is not None and str(override).strip():
+        user = str(override).strip()
+        if user.startswith("0:") or user == "0":
+            raise ValueError("REGENT_AGENT_SANDBOX_UID must not be root")
+        return user if ":" in user else f"{user}:{user}"
+    try:
+        import os
+
+        uid = int(os.getuid())  # type: ignore[attr-defined]
+        gid = int(os.getgid())  # type: ignore[attr-defined]
+    except AttributeError:
+        # Windows / non-POSIX: keep historical non-root default
+        return "65532:65532"
+    if uid == 0:
+        raise ValueError(
+            "refusing to run agent sandbox as root; set REGENT_AGENT_SANDBOX_UID "
+            "to a non-root uid:gid (CD-6.2)"
+        )
+    return f"{uid}:{gid}"
+
+
+def build_agent_sandbox(*, settings: Any | None = None) -> DockerSandboxDriver | LocalSandboxDriver:
+    """Construct the sandbox used for agent tool command execution.
+
+    Production always uses Docker. ``local`` is allowed only outside production.
+    CD-6.1 uses ``agent_sandbox_image`` (not the build sandbox image).
+    """
+    from regent.config import get_settings
+
+    cfg = settings or get_settings()
+    mode = str(getattr(cfg, "sandbox_mode", "local"))
+    env = str(getattr(cfg, "environment", "development"))
+    if env == "production" and mode != "docker":
+        raise RuntimeError(
+            "REGENT_SANDBOX_MODE=local is forbidden in production "
+            "(Tech-Spec §13.8 / CD-0.1)"
+        )
+    root = Path(str(getattr(cfg, "build_root", "/var/lib/regent/builds"))) / "agent-sandbox"
+    if mode == "docker":
+        path_map = parse_host_path_map(getattr(cfg, "host_path_map", None))
+        return DockerSandboxDriver(
+            root=root,
+            image=str(
+                getattr(cfg, "agent_sandbox_image", None)
+                or getattr(cfg, "sandbox_image", "regent-agent-exec-v1:1")
+            ),
+            host_path_map=path_map,
+            run_as_user=resolve_agent_sandbox_user(cfg),
+            require_host_path_map_in_container=True,
+            egress_proxy=getattr(cfg, "dependency_egress_proxy", None),
+        )
+    return LocalSandboxDriver(root=root)
 
 
 class DockerDependencyMaterializer:

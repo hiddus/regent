@@ -57,6 +57,11 @@ class NorthStarReport:
     status: str  # OK | INSUFFICIENT_EVIDENCE | GUARDRAIL_RED
     guardrails: list[GuardrailResult] = field(default_factory=list)
     cost_breakdown: dict[str, float] = field(default_factory=dict)
+    # CD-5: proportion of window goals currently handed off to a human
+    # (WAITING_HUMAN status, or delivery_state == DELIVERED_FOR_REVIEW in
+    # metadata). None when the window has no goals at all (not measurable,
+    # distinct from a real 0.0 rate).
+    handoff_rate: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +72,7 @@ class NorthStarReport:
             "cost_per_verified_success": self.cost_per_verified_success,
             "status": self.status,
             "cost_breakdown": self.cost_breakdown,
+            "handoff_rate": self.handoff_rate,
             "guardrails": [
                 {
                     "name": g.name,
@@ -106,6 +112,7 @@ class NorthStarMetricsService:
             guardrails = await self._evaluate_guardrails(
                 session, start, clock, verified_ids, len(verified)
             )
+            handoff_rate = await self._handoff_rate(session, start, clock)
 
         vs_count = len(verified)
         if vs_count < MIN_VERIFIED_SUCCESS:
@@ -118,6 +125,7 @@ class NorthStarMetricsService:
                 status="INSUFFICIENT_EVIDENCE",
                 guardrails=guardrails,
                 cost_breakdown=breakdown,
+                handoff_rate=handoff_rate,
             )
 
         cpvs = total_cost / vs_count
@@ -140,7 +148,38 @@ class NorthStarMetricsService:
             status=status,
             guardrails=guardrails,
             cost_breakdown=breakdown,
+            handoff_rate=handoff_rate,
         )
+
+    async def _handoff_rate(
+        self, session: AsyncSession, start: datetime, end: datetime
+    ) -> float | None:
+        """CD-5: proportion of window goals currently handed off to a human.
+
+        Counts goals whose status is ``WAITING_HUMAN`` or whose metadata
+        records ``delivery_state == DELIVERED_FOR_REVIEW`` (CD-1.2 verdict
+        write-back) — the two observable handoff signals in this codebase.
+        """
+        total = await session.scalar(
+            select(func.count())
+            .select_from(GoalModel)
+            .where(GoalModel.updated_at >= start, GoalModel.updated_at < end)
+        )
+        total = int(total or 0)
+        if total == 0:
+            return None
+        goals = await session.scalars(
+            select(GoalModel).where(GoalModel.updated_at >= start, GoalModel.updated_at < end)
+        )
+        handed_off = 0
+        for goal in goals:
+            if goal.status == "WAITING_HUMAN":
+                handed_off += 1
+                continue
+            meta = dict(goal.metadata_json or {})
+            if meta.get("delivery_state") == "DELIVERED_FOR_REVIEW":
+                handed_off += 1
+        return handed_off / total
 
     async def _verified_success_goals(
         self, session: AsyncSession, start: datetime, end: datetime

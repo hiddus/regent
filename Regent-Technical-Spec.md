@@ -1,9 +1,11 @@
 # Regent 技术架构与实施规范
 
 > 状态：CURRENT  
-> 日期：2026-07-31（吸收 Multi-Agent landscape 调研结论）
+> 日期：2026-07-31（吸收对话式交付架构评审 + 交付可靠性差距审查 + 文档—实现对齐审计修复）
 > 性质：权威执行基线（Owner 批准）  
 > 配套需求：[`Regent-PRD.md`](./Regent-PRD.md)  
+> 永久定义（唯一规范源，仅引用不复述正文）：[`docs/definitions/REGENT-DEFINITION-1.0.txt`](docs/definitions/REGENT-DEFINITION-1.0.txt)（`REGENT-DEFINITION-1.0`）  
+> 编码执行清单：[`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md)（与 `Regent-Plan.md` §14 互指）  
 > 附录：  
 > - [`docs/appendices/State-Machines-and-Invariants.md`](docs/appendices/State-Machines-and-Invariants.md)  
 > - [`docs/appendices/Durable-Execution-and-External-Effects.md`](docs/appendices/Durable-Execution-and-External-Effects.md)  
@@ -438,6 +440,35 @@ artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依
 - 运行时默认仍由 `generation_strategy` 驱动（Settings 代码默认 `artifact-backed`）；晋级步骤为「实验报告 → `apply_gq4_promotion` 通过 → 记录 DecisionRecord → 运维翻转 `REGENT_GENERATION_STRATEGY=agentic`」。kill switch 在运行时始终覆盖默认。
 - **运维覆盖**：生产 `.env` 可设置 `REGENT_GENERATION_STRATEGY=agentic` 作为运维侧运行时覆盖，**不等于** GQ-4 已正式晋级；部署流程不得擅自改写生产策略，除非 DecisionRecord 明确要求。
 
+### 13.8 Agent 工具执行环境与两级 Effect（对话式交付前置）
+
+> 依据：架构评审 C2 / R0-1；统一计划 CD-0；PRD §4.4 / §10.5。
+
+#### 13.8.1 沙箱强制
+
+- `AgentRunner` / `agent/tools.py` 中的命令与文件效应**必须**经 `infrastructure/sandbox.py` 的 `DockerSandboxDriver`（或等价隔离驱动）执行；**禁止**在持有数据库凭据与 Provider API key 的 worker 宿主进程内直接 `create_subprocess_shell`。
+- 生产配置：`sandbox_mode` 必须为 `docker`；`local` 仅允许显式测试/开发环境，且不得接入生产 canary。
+- 白名单含 `pip` / `python` / `curl` 时，隔离与出网策略必须满足 §19「网络默认拒绝」与 §13「断网非 root 构建」的等价约束（影子任务禁止发布与外部副作用）。
+- **本条未满足前，禁止**将 `generation_strategy_canary_gate` 置 True 或提高 `canary_percent` 于生产（即使 §13.7.1 控制流代码已就绪）。
+
+#### 13.8.2 两级 Effect 模型
+
+正式承认 Agent 循环内已存在的分层，并补齐审计：
+
+| 效应类型 | 治理 | 要求 |
+|---|---|---|
+| 沙箱内可逆效应（写工作区文件、跑测试、读代码） | **事后** Effect / Transcript 日志 | append-only；与 Outbox **同事务或同幂等键可对账**；不得 `except: pass` 静默丢弃 |
+| 不可逆 / 外部效应（部署、付费 API、对外发消息、生产发布） | **前置** ExecutionPermit | 复用 `REQUESTED→GRANTED→CLAIMED→CONSUMED` |
+
+LLM 仍只提出结构化 Command / Tool 调用；聚合状态转换由确定性 Application Service 执行。不得为顺滑删除 Permit / Outbox / Evidence / Audit / Reconciler。
+
+#### 13.8.3 交付状态机接线
+
+- `application/delivery_state.py` 的 `decide_delivery_verdict` / `DeliveryState` **必须**被 `execution_orchestrator` 生产路径消费，并写入 `goal.metadata_json["delivery_state"]`。
+- 交付拒绝须使用类型化错误（建议 `DeliveryRejection`），携带 `gap_kind`、`reasons`、`draft_uri`；禁止仅依赖魔法字符串 `delivery-review-v1 rejected...` 作为唯一契约。
+- `goal_intent` / 需主观判断的 gap：在能力阶梯耗尽**之前**转入 `DELIVERED_FOR_REVIEW`（或等价 WAITING_HUMAN），并保留当前最优产出。
+- AC1 门禁（`ops/delivery_dead_end_gate.py`）须覆盖嵌套函数所在方法体，TARGETS 含真实终态文件，并进入 CI。
+
 ---
 
 ## 14. Runtime Profile 认证（P2-2）
@@ -629,20 +660,36 @@ Production：独立批准、Secret Broker、迁移与回滚计划、Canary/蓝�
 - 状态 API 返回事实投影与对象引用；
 - 稳定游标分页；错误含 `error_code`、`message`、`correlation_id`。
 
-用户入口：
+### 21.1 规范意图 ↔ 实际路由（双列对照）
+
+> 以 `core/src/regent/api/main.py` 的 `include_router` 为**唯一上线真相**。勿为对齐文档新增废弃形态端点。
+
+| 规范意图 | 实际实现 | 状态 |
+|---|---|---|
+| `POST /goals` | `POST /v1/goals`；Console 主链路为 `POST /v1/app-projects/drafts`（含 auto-start） | ✅ |
+| `GET /goals/{id}` | `GET /v1/goals/{id}` | ✅ |
+| `POST /goals/{id}/freeze` | 无独立端点；显式确认路径为 `POST /v1/app-projects/{id}/confirm`；主链路快照见 DecisionNote auto-start | ✅ 产品包装 |
+| `POST /goals/{id}/resume\|cancel` | `POST /v1/goals/{id}/transitions`（Command：`RESUME` / `CANCEL` 等） | ✅ |
+| `POST /humantasks/{id}/approve\|reject` | `POST /v1/human-tasks/{id}/complete`（`decision` 字段分流 allow/deny） | ✅ 已挂载 |
+| `GET /decisions/{id}` | `GET /v1/scheduler/decisions/{id}`；另有 `GET /v2/organizations/{goal_id}/decisions` | ✅ 命名空间不同 |
+| `GET /audit/{goal_id}` | 经 governance / goal 投影与审计导出能力提供；无顶层 `/audit` 别名 | 🟡 能力存在、路径不同 |
+
+**Console / 对话主链路（已挂载）：**
 
 ```text
-POST /goals                     # 提交自然语言目标
-GET  /goals/{id}                # 查询目标状态与证据
-POST /goals/{id}/freeze         # 冻结 GoalSpec
-POST /goals/{id}/resume         # 从 PAUSED 恢复
-POST /goals/{id}/cancel         # 取消目标
-POST /humantasks/{id}/approve   # 批准人工任务
-POST /humantasks/{id}/reject    # 拒绝人工任务
-GET  /decisions/{id}            # 查询决策与证据链
-GET  /audit/{goal_id}           # 导出审计链
+POST /v1/app-projects/drafts
+POST /v1/app-projects/{id}/guidance
+POST /v1/app-projects/{id}/confirm
+GET  /v1/app-projects/{id}/delivery-review
+POST /v1/conversations/{id}/messages          # CD-4：绑定 AppProject 时触发 guidance
+POST /v1/human-tasks/{id}/complete
+POST /v1/uploads
 ```
 
+**其它已挂载族（规范未逐一枚举，以实现为准）：**  
+`/v1/works`、`/v1/observations`、`/v1/baselines`、`/v1/governance`、`/v1/side-effects`、`/v1/experiments`、`/v1/self-improvement-runs`、`/v1/tools`、`/v1/memories`、`/v1/eval-runs`、`/v1/scheduler`、`/v1/runtime-profiles`、`/v1/webhooks`、`/v1/reports`、`/v1/public-deploy`、`/v1/deployments/*`、`/v2/*`（aar1）。
+
+App-projects 入口族是对 Goals 清单的**产品包装**，不是静默废弃 Goal 状态机。破坏性路径变更进入 `/v2`。
 ---
 
 ## 22. 可观测性
@@ -708,25 +755,49 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **P1 R1–R6**：Goal 解释与分解、Discovery 编排、证据连接器、假设决策、需求修订、能力解析、WorkspaceWriter、Generation Service、Docker 沙箱构建、Preview 发布、观测回流、Gate 评估与 Iteration Decision。
 - **P1 R7**：DeploymentSmokeTestService 实现简化可体验性 Gate。
 - **P1 R8**：IterationLoopService 实现 Observation→Decision→REVISE 端到端闭环。
-- **对话与 App 身份**：Conversation 持久化、AppProject、GoalSpec DRAFT/FROZEN/SUPERSEDED、确认闸门、对话驱动修订（0019）。
+- **对话与 App 身份**：Conversation 持久化、AppProject、GoalSpec DRAFT/FROZEN/SUPERSEDED、对话驱动修订（0019）。主链路 GoalSpec 冻结语义见 DecisionNote `docs/decision-note-auto-start-journey-2026-07-31.md`（快照启动 + 事后纠偏）；`/confirm` 保留为纠偏路径。
 - **真实 App 预览**：StaticAppPublisher、CSP 预览、观测钩子（0020）。
 - **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
-- **确认后自主执行闭环**：Confirm/Start 分离、Outbox 指数退避与死信（0022）。
+- **确认后自主执行闭环**：Outbox 指数退避与死信（0022）。产品语义已从「Confirm/Start 硬分离」更新为「快照启动 + 纠偏」（同上 DecisionNote）；发布审批仍独立且默认需要人类批准。
 - **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。该 flag 现受 §18.5 / MA-2 整体认证摘要约束（成员契约 + 五类 hash + 回归；摘要变更即旧认证失效）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
 - **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同、MAST 词表、成员契约、`ExecutionPlanItem` / `DispatchDecision`（迁移 `0039`）与模板认证回填（迁移 `0040`）。固定 Hive 候选必须通过五类摘要复算，opt-in 不得绕过 TaskFeatures 裁剪；Agent 生成主链已接入 todo 持久化、大结果卸载与压缩前 Transcript Artifact，固定 Hive 派工已接入过程审计。P2-4 仍是实验骨架，**P2-5 自适应拓扑仍禁止启用**。见 Plan §12。
-- **单 Agent 生成质量基线（GQ-0～GQ-4，2026-07-31）**：生成器元数据协议与 fail-closed 一致性（`GENERATOR_METADATA_MISMATCH`）；Worker 按 `generation_strategy` 分派；`FailureEnvelope`/`RepairAttempt`（迁移 `0041`）；独立生成策略实验合同（不占用 P2-4 组织维）；用户质量指标骨架；VerificationAgent pytest/项目测试与一次受控修正；GQ-3/GQ-4 控制流已实现（`GeneratorSelector` + `canary_gate` / `apply_gq4_promotion`；默认 canary%=0、闸门 False，**代码默认**策略仍 `artifact-backed`）。**运维可在生产 `.env` 以 `REGENT_GENERATION_STRATEGY` 覆盖运行时策略**（与 GQ-4 正式晋级无关；部署脚本不得擅自改写该值）。GQ-3 真实流量窗与 GQ-4 晋级 DecisionRecord、GQ-5 Hive 重评尚未开。生产 CERTIFIED_HIVE 既有 opt-in **不扩容**。见 Plan §13、§13.7.1–§13.7.2、`docs/gq0-baseline-report-2026-07-31.md`、`docs/gq34-promotion-control-flow-2026-07-31.md`。
-- **控制台前端**：React 19 + Vite + TS，SSE 实时推送，三栏布局；右侧以 `status.agents` + SSE/`live_action` 驱动参与 Agent 名册与对话进度卡详略，产物与预览为可折叠次要区（见 `apps/regent-console/README.md`）。
-- **桌面端（探索性）**：Tauri 桌面应用骨架存在于仓库；PRD 主交付范围为 Core + Web Console，桌面端未纳入 P0/P1 验收。
+- **单 Agent 生成质量基线（GQ-0～GQ-4，2026-07-31）**：生成器元数据协议与 fail-closed 一致性；Worker 按 generation_strategy 分派；FailureEnvelope/RepairAttempt；独立生成策略实验合同；VerificationAgent pytest/项目测试与预算化修正；GQ-3/GQ-4 **控制流已实现**（标签：**已实现但默认不可启用** — canary_gate=False、canary_percent=0、代码默认 artifact-backed）。生产 .env 覆盖 ≠ GQ-4 晋级。GQ-3 真实流量窗与 GQ-4 DecisionRecord 仍待运维实验（见 docs/decision-note-gq4-pending-2026-07-31.md）。生产 CERTIFIED_HIVE opt-in **不扩容**。
+- **控制台前端**：React 19 + Vite + TS；SSE 自适应轮询；三栏布局；status.agents + live_action；GET /v1/app-projects/{id}/delivery-review 审阅面（plan/transcript/verification/budget）。
+- **桌面端（探索性）**：Tauri 骨架；未纳入 P0/P1 验收。
+- **交付状态机（CD-1，2026-07-31）**：decide_delivery_verdict **已接入** _apply_delivery_verdict；DeliveryRejection 类型化；goal_intent 早交人；AC1 门禁进 CI。
+- **下一步（CD-6…CD-12）**：**CD-6 代码侧已落地**（agent-exec 镜像、`--entrypoint sh`、`host_path_map` fail-closed、uid 对齐、T1–T6；见 `docs/cd6-execution-plan-2026-07-31.md`）。CD-7.1/7.4 已落地；7.2/7.3/7.5 与 GQ-3 窗仍待。权威：`docs/conversational-delivery-next-plan-2026-07-31.md`。生产 docker 三联未在目标主机验收前禁止开 canary。
+- **API 挂载（F-1 修复）**：human_tasks / uploads / webhooks / reports / public_deploy 已在 `api/main.py` `include_router`。
 
 ### 已知非阻塞限制
 
-1. ~~ReleaseCandidate 在 P1 执行链上自动批准~~ **已修复（2026-07-30）**：预览链创建 `RELEASE_APPROVAL` HumanTask；`require_release_human_approval` 默认 true；人工完成任务后经 `ReleaseApprovalCompleted` 继续部署。
-2. 完整浏览器级 R7 gate：无 Playwright 时 `browser_journey` 为 dry-run（步骤标记 passed，非真浏览器验收）；有 Playwright 时执行真实旅程。
-3. ExternalOperation 完整闭环：Worker 已挂载 `ReconciliationWorker` 周期扫描（stale→RECONCILING）并调用 `resolve_reconciling_via_query`（Deployment durable probe / 超期 MANUAL_REVIEW）；调度 `dispatch_with_eo` 创建真实 EO。跨 provider 真实网络 query→resolve 生产对账仍为后续切片。
-4. Eval Harness 已改为交付信号/Goal 证据评分（无 `hash%2` 桩）。P0#5 签署产物已纳入 `docs/experiments/p0-v1-artifacts/`，可按 SHA 与 DecisionRecord 字段仓内复核。
-5. ~~PRD §7.1–7.3 隐私缺口~~ **已修复（2026-07-30）**：consent 记录与采集闸门、PII 分级最小化、可配置保留期与超期匿名化已落地（见 `privacy_service.py` / 迁移 0038）。
+1. ~~ReleaseCandidate 在 P1 执行链上自动批准~~ **已修复（2026-07-30）**。
+2. 完整浏览器级 R7 gate：无 Playwright 时 browser_journey 为 dry-run。
+3. ExternalOperation 跨 provider 真实网络 query→resolve 生产对账仍为后续切片。
+4. Eval Harness 已改为交付信号/Goal 证据评分。
+5. ~~PRD §7.1–7.3 隐私缺口~~ **已修复（2026-07-30）**。
+6. SSE LISTEN/NOTIFY、token 流式、DeliveryRecoveryCoordinator 抽离仍为体验/结构持续项。
 
-> 更正（2026-07-30）：此前误报「Evidence Connector 仍为空实现」「Deployment Provider 为内存实现」。现状为 `AllowlistedHttpEvidenceConnector` / `GoalIntentEvidenceConnector` 已接线；生产预览为 `StaticPreviewDeploymentProvider`（`InMemoryDeploymentProvider` 仅测试用）。
+> 更正（2026-07-30）：Evidence Connector / StaticPreviewDeploymentProvider 已接线。
+
+### 状态标签约定（F-9）
+
+| 标签 | 含义 |
+|---|---|
+| **已完成** | 生产路径可用且默认启用 |
+| **已实现但默认不可启用** | 控制流/代码就绪，须门禁或 DecisionRecord 后方可开流量（如 GQ-3/GQ-4） |
+| **门禁就绪，实验窗待运维** | 前置合规已满足代码侧；缺真实流量实验 |
+| **PENDING** | DecisionNote 未 ACCEPTED（如 GQ-4 晋级） |
+
+### 已关闭的历史阻塞（对齐审计 F-1…F-3 / CD）
+
+1. ~~Agent 工具宿主 create_subprocess_shell~~ → WorkspaceToolkit + build_agent_sandbox；smoke 改沙箱探针脚本。
+2. ~~Transcript except: pass~~ → 失败抛 DeliveryRejection。
+3. ~~对话层纯分类 / conversations 死路~~ → CD-4 guidance 链式 + append 触发。
+4. ~~decide_delivery_verdict 未接线~~ → 已接入 orchestrator。
+5. ~~5 个 API router 未挂载~~ → 已挂载。
+6. ~~定义冻结测试指向 -v2.md~~ → 指向 CURRENT Regent-PRD.md / Regent-Technical-Spec.md。
+
+> 更正（2026-07-31）：「agentic 默认不可达是缺陷」已撤销；status.agents 未填充已证伪。
 
 ---
 

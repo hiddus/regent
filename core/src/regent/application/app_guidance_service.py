@@ -3,7 +3,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from regent.application.evidence_policy import extract_urls_from_text
+from regent.model.chat import ToolSpec
 from regent.application.execution_events import (
     DISCOVERY_ROUND_REQUESTED,
     EventEnvelope,
@@ -136,6 +137,32 @@ class GuidanceInterpretation(BaseModel):
     )
     # APPROVE/REJECT fields
     rejection_reason: str | None = None
+    # CD-4.1: bounded chaining — optional immediate follow-up command executed
+    # within the same guide() call (e.g. QUERY to clarify state, then CONTINUE to
+    # resume execution). See AppGuidanceService._MAX_GUIDANCE_STEPS.
+    follow_up_command: Literal[
+        "QUERY",
+        "MODIFY",
+        "CONTINUE",
+        "PAUSE",
+        "RESUME",
+        "CORRECT",
+        "APPROVE",
+        "REJECT",
+    ] | None = Field(
+        default=None,
+        description=(
+            "Optional immediate follow-up command to run right after this one "
+            "resolves, e.g. command_type=QUERY with follow_up_command=CONTINUE when "
+            "the user's message clearly implies 'tell me where we are, then proceed'. "
+            "Only set when a single user message unambiguously implies two sequential "
+            "steps; leave unset otherwise."
+        ),
+    )
+    follow_up_summary: str | None = Field(
+        default=None,
+        description="Summary/message to use for the follow_up_command dispatch.",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +175,11 @@ class GuidanceReceipt:
 
 
 class AppGuidanceService:
+    # CD-4.1: bounded multi-step loop — guide() may dispatch at most this many
+    # commands (main + chained follow-ups) per call. Keeps chaining safe/finite
+    # without requiring a full chat+tools provider rewrite.
+    _MAX_GUIDANCE_STEPS = 5
+
     def __init__(
         self,
         sessions: async_sessionmaker[AsyncSession],
@@ -155,6 +187,63 @@ class AppGuidanceService:
     ) -> None:
         self._sessions = sessions
         self._provider = provider
+
+    # ------------------------------------------------------------------
+    # Internal tool table — the 8 _handle_* capabilities, addressable by name.
+    # Not yet wired into a chat+tools provider loop; exposed so guide()'s
+    # dispatch is table-driven and so future provider tool-calling (or tests)
+    # can introspect available capabilities without re-deriving them.
+    # ------------------------------------------------------------------
+
+    def _handler_table(
+        self,
+    ) -> dict[
+        str,
+        Callable[
+            [uuid.UUID, str, str, GuidanceInterpretation, str],
+            Awaitable[GuidanceReceipt],
+        ],
+    ]:
+        return {
+            "QUERY": self._handle_query,
+            "CONTINUE": self._handle_continue,
+            "MODIFY": self._handle_modify,
+            "PAUSE": self._handle_pause,
+            "RESUME": self._handle_resume,
+            "CORRECT": self._handle_correct,
+            "APPROVE": self._handle_approve,
+            "REJECT": self._handle_reject,
+        }
+
+    _TOOL_DESCRIPTIONS: dict[str, str] = {
+        "QUERY": "Answer questions about goal status, progress, or pending tasks.",
+        "CONTINUE": "Start or resume execution without changing the goal.",
+        "MODIFY": "Create a new goal revision from a significant redirect.",
+        "PAUSE": "Temporarily halt an ACTIVE goal.",
+        "RESUME": "Resume a PAUSED goal.",
+        "CORRECT": "Apply a lightweight mid-execution correction (no new revision).",
+        "APPROVE": "Approve a pending human task / gate.",
+        "REJECT": "Reject a pending human task / gate, trigger revision.",
+    }
+
+    def available_tools(self) -> list[ToolSpec]:
+        """Expose the guidance handlers as ToolSpec entries (CD-4.1 tool table).
+
+        Useful for introspection/tests today; a future provider that supports
+        native tool-calling can pass this list straight to ``chat(tools=...)``.
+        """
+        return [
+            ToolSpec(
+                name=name.lower(),
+                description=description,
+                parameters={
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                },
+            )
+            for name, description in self._TOOL_DESCRIPTIONS.items()
+        ]
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -176,21 +265,49 @@ class AppGuidanceService:
         if resumed is not None:
             return resumed
 
-        handler = {
-            "QUERY": self._handle_query,
-            "CONTINUE": self._handle_continue,
-            "MODIFY": self._handle_modify,
-            "PAUSE": self._handle_pause,
-            "RESUME": self._handle_resume,
-            "CORRECT": self._handle_correct,
-            "APPROVE": self._handle_approve,
-            "REJECT": self._handle_reject,
-        }.get(interpretation.command_type)
-        if handler is None:
-            return await self._handle_query(
-                project_id, message, actor, interpretation, generated.model
+        receipt = await self._dispatch(project_id, message, actor, interpretation, generated.model)
+
+        # CD-4.1: bounded multi-step loop. A single user message can trigger a
+        # short chain (e.g. QUERY → CONTINUE) when the interpretation says so;
+        # manually-constructed follow-up interpretations never carry their own
+        # follow_up_command, so this naturally terminates after one hop today —
+        # the loop bound exists so future richer follow-up chains stay capped.
+        steps = 1
+        pending = interpretation.follow_up_command
+        follow_summary = interpretation.follow_up_summary
+        while pending is not None and steps < self._MAX_GUIDANCE_STEPS:
+            follow_interpretation = GuidanceInterpretation(
+                command_type=pending,
+                summary=follow_summary or f"自动继续跟进（{pending}）",
             )
-        return await handler(project_id, message, actor, interpretation, generated.model)
+            follow_receipt = await self._dispatch(
+                project_id, message, actor, follow_interpretation, generated.model
+            )
+            receipt = GuidanceReceipt(
+                command_id=follow_receipt.command_id,
+                command_type=f"{receipt.command_type}+{follow_receipt.command_type}",
+                resulting_goal_id=follow_receipt.resulting_goal_id or receipt.resulting_goal_id,
+                requires_confirmation=receipt.requires_confirmation
+                or follow_receipt.requires_confirmation,
+                response=f"{receipt.response}\n\n{follow_receipt.response}",
+            )
+            steps += 1
+            pending = follow_interpretation.follow_up_command
+            follow_summary = follow_interpretation.follow_up_summary
+        return receipt
+
+    async def _dispatch(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        handler = self._handler_table().get(interpretation.command_type)
+        if handler is None:
+            return await self._handle_query(project_id, message, actor, interpretation, model)
+        return await handler(project_id, message, actor, interpretation, model)
 
     # ------------------------------------------------------------------
     # System prompt builder — gives LLM full context
@@ -240,6 +357,12 @@ class AppGuidanceService:
             "and correction_detail (the specific change requested).",
             "For MODIFY, return a complete revised proposal using supplied context and the user's message.",
             "Never execute or grant permissions.",
+            "",
+            "Bounded chaining (CD-4.1): if the user's single message clearly implies two "
+            "sequential steps (e.g. 'what's the status, and if it's fine just continue' → "
+            "QUERY then CONTINUE), set follow_up_command to the second step's command_type "
+            "and follow_up_summary to a short description of that step. Leave both unset for "
+            "ordinary single-step messages — chaining is capped and should be used sparingly.",
         ])
         return "\n".join(parts)
 

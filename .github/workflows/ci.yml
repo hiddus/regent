@@ -10,6 +10,10 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
       - run: mypy
+      - name: AC1 delivery dead-end gate
+        run: python ops/delivery_dead_end_gate.py
+      - name: CON-5 console confirm gate
+        run: python ops/console_confirm_gate.py
       - run: pytest
       # Marker smoke: unknown markers must fail collection; empty selection is OK.
       - run: pytest -m governance --collect-only

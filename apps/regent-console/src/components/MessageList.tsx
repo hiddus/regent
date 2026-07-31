@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm'
 import type { Message } from '../lib/types'
 import { buildTimeline } from '../lib/progressNodes'
 import { ConfirmationCard } from './ConfirmationCard'
-import { TaskCard } from './TaskCard'
+import { TaskCard, type TaskActionOptions } from './TaskCard'
 import { ProgressNodeCard } from './ProgressNodeCard'
 
 interface MessageListProps {
@@ -11,7 +11,7 @@ interface MessageListProps {
   currentProjectId?: string | null
   goalStatus?: string | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
-  onTaskAction: (taskId: string, approved: boolean) => void
+  onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
 }
 
 function goalAlreadyMoving(items: Message[], goalId?: string) {
@@ -54,7 +54,7 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   m: Message
   messages: Message[]
   onConfirm: (projectId: string, goalId: string, hash: string) => void
-  onTaskAction: (taskId: string, approved: boolean) => void
+  onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
 }) {
   const isConfirmation = m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
     m.message_type === 'GOAL_UNDERSTANDING_READY'
@@ -65,7 +65,6 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   const avatarLabel = m.role === 'USER' ? '你' : 'R'
   const metaLabel = m.role === 'USER' ? '你' : 'Regent'
 
-  // Skip preview messages — they are shown in the artifact panel
   if (m.message_type === 'PREVIEW_READY' || m.message_type === 'PREVIEW_DEPLOYMENT_SUCCEEDED') {
     return null
   }
@@ -80,19 +79,16 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
       (Boolean(taskMeta.confirmation) ||
         String(taskMeta.stage || '').includes('DELIVERY_GAP') ||
         String(taskMeta.stage || '').includes('NEEDS_HUMAN')))
-  // Historical exhausted messages may lack confirmation/task id — still show operable card.
+
   if (isExhaustedHandoff && !taskMeta.confirmation) {
     taskMeta.confirmation = {
       action: String(taskMeta.task_type || 'DELIVERY_GAP_INTERVENE'),
       summary: '自动修复已用尽，需要你介入',
       rules_applied: ['stage:DELIVERY_GAP_EXHAUSTED'],
       risk_level: 'high',
-      rationale: '能力阶梯已穷尽；批准后将重新规划生成，拒绝则保持等待你的下一步指示。',
-      on_allow: '重置恢复计数并继续生成',
-      on_deny: '停止自动推进，等待你补充方向',
       timeout_seconds: 300,
       default_on_timeout: 'deny',
-      detail: m.content?.slice(0, 800) || null,
+      detail: m.content?.slice(0, 400) || null,
     }
   }
   if (isExhaustedHandoff && !taskMeta.task_type) {
@@ -101,17 +97,28 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   if (isExhaustedHandoff && !taskMeta.prompt) {
     taskMeta.prompt = m.content
   }
+
   const showTaskCard =
     m.message_type === 'HUMAN_TASK_REQUIRED' || isExhaustedHandoff
+  const resolved = showTaskCard
+    ? approveAlreadyDone(
+        messages,
+        (taskMeta.goal_id as string | undefined) || (m.metadata?.goal_id as string | undefined),
+        taskId || undefined,
+      )
+    : false
 
   return (
-    <article className={`message ${roleClass}`}>
+    <article className={`message ${roleClass}${showTaskCard ? ' message-task' : ''}`}>
       <div className="avatar">{avatarLabel}</div>
       <div className="body">
         <div className="meta">{metaLabel}</div>
-        <div className="content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-        </div>
+        {/* Task card already states the ask — do not also dump the long assistant essay. */}
+        {!showTaskCard && (
+          <div className="content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+          </div>
+        )}
 
         {isConfirmation && (
           <ConfirmationCard
@@ -138,11 +145,8 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
         {showTaskCard && (
           <TaskCard
             task={taskMeta}
-            resolved={approveAlreadyDone(
-              messages,
-              (taskMeta.goal_id as string | undefined) || (m.metadata?.goal_id as string | undefined),
-              taskId || undefined,
-            )}
+            resolved={resolved}
+            compact={resolved}
             onAction={onTaskAction}
           />
         )}

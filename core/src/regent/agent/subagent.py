@@ -9,6 +9,7 @@ from typing import Any
 from regent.agent.agent_runner import AgentRunResult, AgentRunner, ChatProvider
 from regent.agent.tools import WorkspaceToolkit
 from regent.agent.types import AgentBudget, VerificationGap
+from regent.infrastructure.sandbox import build_agent_sandbox
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +67,7 @@ class SubagentRunner:
             / f"{brief.milestone_ordinal}-{brief.milestone_key}"
         )
         sandbox.mkdir(parents=True, exist_ok=True)
-        toolkit = WorkspaceToolkit(sandbox)
+        toolkit = WorkspaceToolkit(sandbox, command_sandbox=build_agent_sandbox())
         plan = {
             "goal_anchor_text": goal_anchor_text,
             "planned_paths": list(brief.planned_paths),

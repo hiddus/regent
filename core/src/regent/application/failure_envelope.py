@@ -49,6 +49,7 @@ STAGE_REPAIR_POLICY: dict[str, dict[str, Any]] = {
         "timeout_seconds": 1200,
         "non_retryable_codes": ("GENERATOR_METADATA_MISMATCH", "POLICY_DENIED"),
         "human_handoff_on_exhaust": True,
+        # TRANSCRIPT_PERSIST_FAILED is intentionally NOT non-retryable (CD-7.5 / N-6).
     },
 }
 

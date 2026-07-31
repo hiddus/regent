@@ -1,6 +1,6 @@
 # Ops（运维脚本归档）
 
-> **一致性说明（2026-07-30 复检）**：历史一次性脚本归档**仍在进行中**——`archive/oneoff/` 已收纳大量 `diag_*`/`fix_*`/`check_*`/`q*`/`verify_*` 脚本，但 `ops/` 根目录**仍残留**部分一次性脚本（`poll_*.py`、`*_fix_*.py`、`verify_bb40_*.py`、`unstick_*.py`、`reclaim_*.py`、`check_round3.py`、`_remote_fix_*.py`、`pull_server_orchestrator.py`、`remove_console_nginx.py` 等），尚未全部迁至 `archive/oneoff/`。请勿据此 README 判断"清理已完成"。
+> **一致性说明（2026-07-31 复检，状态未变）**：历史一次性脚本归档**仍在进行中**——`archive/oneoff/` 已收纳大量 `diag_*`/`fix_*`/`check_*`/`q*`/`verify_*` 脚本，但 `ops/` 根目录**仍残留**部分一次性脚本（`poll_*.py`、`*_fix_*.py`、`verify_bb40_*.py`、`unstick_*.py`、`reclaim_*.py`、`check_round3.py`、`_remote_fix_*.py`、`pull_server_orchestrator.py`、`remove_console_nginx.py` 等），尚未全部迁至 `archive/oneoff/`。请勿据此 README 判断"清理已完成"。
 
 ## 可复用入口（节选）
 
