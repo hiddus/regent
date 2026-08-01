@@ -260,6 +260,23 @@ class AppGuidanceService:
         )
         interpretation = generated.output
 
+        # WAITING_HUMAN + pending task: directional free text is approve+resume,
+        # not a silent CORRECT that leaves the goal stuck.
+        goal_status = str((context.get("goal") or {}).get("status") or "")
+        pending = context.get("pending_human_tasks") or []
+        if (
+            goal_status == "WAITING_HUMAN"
+            and pending
+            and interpretation.command_type in {"CORRECT", "CONTINUE", "MODIFY"}
+        ):
+            interpretation = GuidanceInterpretation(
+                command_type="APPROVE",
+                summary=interpretation.summary
+                or interpretation.correction_detail
+                or "按补充方向批准并继续",
+                correction_detail=interpretation.correction_detail or message,
+            )
+
         # Check for URL-based research resume first
         resumed = await self._maybe_resume_research_more(project_id, message, actor)
         if resumed is not None:
@@ -336,7 +353,12 @@ class AppGuidanceService:
         if goal_status == "PAUSED":
             parts.append("Hint: goal is paused, user likely wants to RESUME or CORRECT.")
         if goal_status == "WAITING_HUMAN":
-            parts.append("Hint: goal is waiting for human input, user should APPROVE or REJECT.")
+            parts.append(
+                "Hint: goal is waiting for human input. If there are pending human tasks, "
+                "directional supplements (how to fix / what to change) MUST be APPROVE — "
+                "the user message becomes the resume guidance. Use CORRECT only when there "
+                "is no pending task. Pure status questions remain QUERY."
+            )
 
         parts.extend([
             "",
@@ -471,6 +493,14 @@ class AppGuidanceService:
                 metadata=metadata if isinstance(metadata, dict) else {},
             )
 
+            generation_progress = await self._generation_progress_for_console(
+                session,
+                goal_id=goal.id,
+                goal_status=goal.status,
+                metadata=metadata if isinstance(metadata, dict) else {},
+                stage=stage,
+            )
+
             return {
                 "project": {
                     "name": project.name,
@@ -499,6 +529,7 @@ class AppGuidanceService:
                 "pending_human_tasks": pending_tasks,
                 "active_corrections": active_corrections,
                 "agents": agents,
+                "generation_progress": generation_progress,
             }
 
     async def _conversation_history(
@@ -531,6 +562,69 @@ class AppGuidanceService:
     # ------------------------------------------------------------------
     # Console agents (Hive deployments / AgentSpec / live_action fallback)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _generation_progress_for_console(
+        session: AsyncSession,
+        *,
+        goal_id: uuid.UUID,
+        goal_status: str,
+        metadata: dict[str, Any],
+        stage: dict[str, str] | None,
+    ) -> str:
+        """Honest generation sub-state for console badges.
+
+        queued         — GenerationRunRequested waiting in outbox
+        calling_model  — active GENERATING run
+        stalled        — stage says GENERATING but no open work
+        needs_continue — terminal-ish failure states with continue CTA
+        waiting_human  — human gate
+        idle           — not in generation path
+        """
+        if goal_status in {"FAILED", "EXHAUSTED", "BLOCKED"}:
+            return "needs_continue"
+        if goal_status == "WAITING_HUMAN":
+            return "waiting_human"
+
+        stage_name = ""
+        if isinstance(stage, dict):
+            stage_name = str(stage.get("stage") or "")
+        if not stage_name:
+            stage_name = str(metadata.get("execution_stage") or "")
+
+        has_run = await session.scalar(
+            select(GenerationRunModel.id)
+            .join(
+                GenerationPlanModel,
+                GenerationRunModel.plan_id == GenerationPlanModel.id,
+            )
+            .join(
+                RequirementRevisionModel,
+                GenerationPlanModel.requirement_revision_id
+                == RequirementRevisionModel.id,
+            )
+            .where(
+                RequirementRevisionModel.goal_id == goal_id,
+                GenerationRunModel.status == "GENERATING",
+            )
+            .limit(1)
+        )
+        if has_run is not None:
+            return "calling_model"
+
+        has_queue = await session.scalar(
+            select(OutboxEventModel.id).where(
+                OutboxEventModel.aggregate_id == goal_id,
+                OutboxEventModel.event_type == "GenerationRunRequested",
+                OutboxEventModel.status.in_(("PENDING", "DISPATCHING", "FAILED")),
+            ).limit(1)
+        )
+        if has_queue is not None:
+            return "queued"
+
+        if stage_name == "GENERATING" and goal_status == "ACTIVE":
+            return "stalled"
+        return "idle"
 
     @staticmethod
     async def _goal_agents_for_console(
@@ -1013,6 +1107,7 @@ class AppGuidanceService:
         should_start = goal_status in {"DRAFT", "READY"} or (
             goal_status == "ACTIVE" and stage == "FAILED"
         )
+        should_replan = goal_status in {"EXHAUSTED", "FAILED", "BLOCKED"}
 
         if goal_status == "READY":
             response = "Core 已接受继续请求并开始执行。"
@@ -1022,11 +1117,52 @@ class AppGuidanceService:
             )
         elif goal_status == "PAUSED":
             response = "目标已暂停。发送“恢复”或“resume”以继续执行。"
+        elif should_replan:
+            response = "已收到继续请求，正在从上次中断处重新规划并恢复执行。"
         else:
             response = f"当前 Goal 状态为 {goal_status}, 当前不可直接继续。"
         receipt = await self._persist_simple(
             project_id, message, actor, interpretation, model, response
         )
+        if should_replan:
+            from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
+
+            goal_id = uuid.UUID(str(context["goal"]["id"]))
+            goal_version = int(context["goal"].get("version", 0))
+            try:
+                await TransitionService(self._sessions).transition_goal(
+                    TransitionContext(
+                        aggregate_id=goal_id,
+                        expected_version=goal_version,
+                        actor=actor,
+                        correlation_id=uuid.uuid4(),
+                    ),
+                    GoalCommand.REPLAN,
+                )
+            except DomainError as exc:
+                return await self._persist_simple(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    model,
+                    f"无法续跑：{exc.message}",
+                )
+            # Prefer delivery-gap resume when lineage/pending gap exists.
+            if await self._goal_needs_delivery_gap_resume(goal_id):
+                await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    actor=actor,
+                    human_message=message,
+                )
+            else:
+                await GoalExecutionService(self._sessions).start(
+                    goal_id,
+                    actor=actor,
+                    idempotency_key=f"guidance-continue:{receipt.command_id}",
+                )
+            return receipt
         if should_start:
             await GoalExecutionService(self._sessions).start(
                 uuid.UUID(str(context["goal"]["id"])),

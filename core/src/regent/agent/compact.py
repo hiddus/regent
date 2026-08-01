@@ -223,9 +223,12 @@ class ContextCompactor:
                 + json.dumps(dict(structured.permit_state), ensure_ascii=False),
                 "OPEN_HUMAN_TASKS:\n"
                 + json.dumps(list(structured.open_human_tasks), ensure_ascii=False),
+                "OPEN_RISKS_AND_FAILURES:\n"
+                + json.dumps(list(structured.open_risks), ensure_ascii=False),
                 "RECENT FILES:\n" + ("\n".join(files_blob) or "(none)"),
                 "PRIOR SUMMARY:\n" + summary,
-                "Continue from this state. Do not re-ask already settled questions.",
+                "Continue from this state. Do not re-ask already settled questions. "
+                "Re-read workspace files as needed instead of relying on cleared tool args.",
             ]
         )
         return [

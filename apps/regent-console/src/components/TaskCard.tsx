@@ -14,6 +14,10 @@ interface ConfirmationEnvelope {
   safety_invariant?: boolean
   detail?: string | null
   handoff_options?: HandoffOption[]
+  primary_failure_code?: string
+  budget_summary?: string
+  diagnostic_artifact_uri?: string
+  recovery_options?: HandoffOption[]
 }
 
 /** Extra decision metadata carried alongside the plain approve/deny signal. */
@@ -138,14 +142,17 @@ export function TaskCard({
   const permit = describePermit(task, confirmation)
   const handoffOptions = useMemo(() => {
     const fromConfirmation = confirmation.handoff_options
+    const fromRecovery = confirmation.recovery_options
     const fromMetadata = task.handoff_options
     const candidate = isHandoffOptionArray(fromConfirmation)
       ? fromConfirmation
-      : isHandoffOptionArray(fromMetadata)
-        ? (fromMetadata as HandoffOption[])
-        : []
+      : isHandoffOptionArray(fromRecovery)
+        ? fromRecovery
+        : isHandoffOptionArray(fromMetadata)
+          ? (fromMetadata as HandoffOption[])
+          : []
     return candidate
-  }, [confirmation.handoff_options, task.handoff_options])
+  }, [confirmation.handoff_options, confirmation.recovery_options, task.handoff_options])
 
   const timeoutSeconds = Number(confirmation.timeout_seconds ?? 0)
   const dueMs = useMemo(() => {
@@ -165,16 +172,46 @@ export function TaskCard({
     return () => window.clearInterval(id)
   }, [done, compact, dueMs, confirmation.safety_invariant, timeoutSeconds])
 
+  const taskStatus = String(task.status || '').toUpperCase()
+  const terminalStatus =
+    taskStatus === 'COMPLETED' ||
+    taskStatus === 'TIMED_OUT' ||
+    taskStatus === 'CANCELLED'
   const remainingSec =
     dueMs != null ? Math.max(0, Math.ceil((dueMs - now) / 1000)) : null
   const defaultOnTimeout = confirmation.default_on_timeout || 'deny'
+  const timedOutClient =
+    remainingSec === 0 &&
+    dueMs != null &&
+    !confirmation.safety_invariant &&
+    timeoutSeconds !== 0 &&
+    defaultOnTimeout === 'deny'
+  const forceCompact = compact || resolved || terminalStatus || timedOutClient
+  const effectivelyDone = done || forceCompact
   const detailText = String(confirmation.detail || task.prompt || '').trim()
 
-  if (compact) {
+  if (forceCompact) {
+    const isTimedOut =
+      timedOutClient ||
+      taskStatus === 'TIMED_OUT' ||
+      (remainingSec === 0 && dueMs != null && taskStatus !== 'COMPLETED' && taskStatus !== 'CANCELLED')
+    const label = isTimedOut ? '已过期' : '已处理'
     return (
       <div className={`task-card task-card-compact risk-${(confirmation.risk_level || 'medium').toLowerCase()}`}>
-        <span className="task-compact-badge">{done || resolved ? '已处理' : '已过期'}</span>
+        <span className="task-compact-badge">{label}</span>
         <span className="task-compact-text">{permit.what}</span>
+        {isTimedOut && taskId ? (
+          <button
+            type="button"
+            className="task-btn approve task-continue-btn"
+            onClick={() => {
+              setDone(true)
+              onAction(taskId, true, { reason: 'continue_after_timeout' })
+            }}
+          >
+            继续此目标
+          </button>
+        ) : null}
       </div>
     )
   }
@@ -185,7 +222,11 @@ export function TaskCard({
         <span className="task-risk-badge">{riskLabel(confirmation.risk_level)}</span>
         {remainingSec != null && !confirmation.safety_invariant && timeoutSeconds !== 0 ? (
           <span className="task-countdown-inline">
-            {remainingSec}s 后默认{defaultOnTimeout === 'allow' ? '允许' : '拒绝'}
+            {defaultOnTimeout === 'deny'
+              ? `${remainingSec}s 后默认拒绝`
+              : defaultOnTimeout === 'allow'
+                ? `${remainingSec}s 后默认允许`
+                : '等待你的方向（超时不会自动拒绝）'}
           </span>
         ) : null}
       </div>
@@ -210,7 +251,27 @@ export function TaskCard({
         </div>
       </dl>
 
-      {!done && taskId && (
+      {(confirmation.primary_failure_code ||
+        confirmation.budget_summary ||
+        confirmation.diagnostic_artifact_uri) && (
+        <div className="task-failure-panel">
+          {confirmation.primary_failure_code ? (
+            <p className="task-primary-failure">
+              失败码：<code>{confirmation.primary_failure_code}</code>
+            </p>
+          ) : null}
+          {confirmation.budget_summary ? (
+            <p className="task-budget-summary">预算：{confirmation.budget_summary}</p>
+          ) : null}
+          {confirmation.diagnostic_artifact_uri ? (
+            <p className="task-diagnostic-link">
+              诊断产物：<code>{confirmation.diagnostic_artifact_uri}</code>
+            </p>
+          ) : null}
+        </div>
+      )}
+
+      {!effectivelyDone && taskId && (
         <div className="task-actions">
           <button
             className="task-btn approve"
@@ -246,13 +307,13 @@ export function TaskCard({
         </div>
       )}
 
-      {!done && !taskId && (
+      {!effectivelyDone && !taskId && (
         <p className="task-done">请在输入框发送「批准」或「拒绝」</p>
       )}
 
-      {done && <p className="task-done">已处理</p>}
+      {effectivelyDone && <p className="task-done">已处理</p>}
 
-      {!done && taskId && handoffOptions.length > 0 && (
+      {!effectivelyDone && taskId && handoffOptions.length > 0 && (
         <div className="task-more-fold">
           <button
             type="button"

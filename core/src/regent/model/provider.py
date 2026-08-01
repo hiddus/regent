@@ -1,4 +1,7 @@
+import asyncio
 import json
+import random
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
@@ -9,13 +12,29 @@ from regent.model.chat import ChatMessage, ChatResponse, ChatUsage, ToolCall, To
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
+# M1-2: retryable HTTP statuses; 400/401/403 never retry.
+_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_NO_RETRY_STATUS = frozenset({400, 401, 403})
+
 
 class ModelConfigurationError(RuntimeError):
     pass
 
 
 class ModelOutputError(RuntimeError):
-    pass
+    failure_code: str = "UNKNOWN"
+
+
+class ModelTruncatedError(ModelOutputError):
+    """finish_reason=length or output truncated before a complete tool turn."""
+
+    failure_code = "MODEL_TRUNCATED"
+
+
+class ToolCallInvalidError(ModelOutputError):
+    """Malformed tool call envelope or non-JSON function arguments."""
+
+    failure_code = "TOOL_CALL_INVALID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,18 +77,33 @@ class OpenAICompatibleProvider:
         model: str,
         timeout_seconds: float = 180,
         max_structured_attempts: int = 3,
+        max_output_tokens: int | None = 8192,
+        max_http_retries: int = 3,
+        retry_deadline_seconds: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not base_url or not api_key or not model:
             raise ModelConfigurationError("base URL, API key and model are required")
         if max_structured_attempts < 1:
             raise ModelConfigurationError("structured output attempts must be positive")
+        if max_output_tokens is not None and max_output_tokens < 1:
+            raise ModelConfigurationError("max_output_tokens must be positive when set")
+        if max_http_retries < 0:
+            raise ModelConfigurationError("max_http_retries must be >= 0")
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._timeout = timeout_seconds
         self._max_structured_attempts = max_structured_attempts
+        self._max_output_tokens = max_output_tokens
+        self._max_http_retries = max_http_retries
+        self._retry_deadline_seconds = (
+            float(retry_deadline_seconds)
+            if retry_deadline_seconds is not None
+            else float(timeout_seconds)
+        )
         self._client = client
+        self.last_http_attempts: list[dict[str, Any]] = []
 
     async def generate_structured(
         self,
@@ -165,63 +199,125 @@ class OpenAICompatibleProvider:
         tools: list[ToolSpec] | None = None,
         temperature: float = 0,
     ) -> ChatResponse:
-        """Multi-turn chat with optional OpenAI-style tool calling."""
+        """Multi-turn chat with optional OpenAI-style tool calling + M1-2 HTTP retry."""
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        self.last_http_attempts = []
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [self._serialize_message(m) for m in messages],
+            "temperature": temperature,
+        }
+        if self._max_output_tokens is not None:
+            payload["max_tokens"] = int(self._max_output_tokens)
+        if tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                }
+                for t in tools
+            ]
+            payload["tool_choice"] = "auto"
+        started = time.monotonic()
+        attempt = 0
         try:
-            payload: dict[str, Any] = {
-                "model": self._model,
-                "messages": [self._serialize_message(m) for m in messages],
-                "temperature": temperature,
-            }
-            if tools:
-                payload["tools"] = [
+            while True:
+                attempt += 1
+                try:
+                    response = await client.post(
+                        f"{self._base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        json=payload,
+                    )
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    self.last_http_attempts.append(
+                        {
+                            "attempt": attempt,
+                            "error": type(exc).__name__,
+                            "retryable": True,
+                        }
+                    )
+                    if not self._should_retry_transport(attempt=attempt, started=started):
+                        raise ModelOutputError(
+                            f"model transport failed after {attempt} attempt(s): {exc}"
+                        ) from exc
+                    await self._sleep_backoff(attempt=attempt, retry_after=None)
+                    continue
+
+                status = int(response.status_code)
+                self.last_http_attempts.append(
                     {
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        },
+                        "attempt": attempt,
+                        "status": status,
+                        "retryable": status in _RETRYABLE_STATUS,
                     }
-                    for t in tools
-                ]
-                payload["tool_choice"] = "auto"
-            response = await client.post(
-                f"{self._base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=payload,
-            )
-            response.raise_for_status()
-            try:
-                body = response.json()
-                choice = body["choices"][0]
-                raw_message = choice["message"]
-                model_name = str(body.get("model", self._model))
-                finish_reason = str(choice.get("finish_reason") or "stop")
-            except (KeyError, IndexError, TypeError, ValueError) as exc:
-                raise ModelOutputError("model chat response envelope is invalid") from exc
-            usage = body.get("usage", {})
-            tool_calls = self._parse_tool_calls(raw_message.get("tool_calls"))
-            content = raw_message.get("content")
-            if content is not None and not isinstance(content, str):
-                content = str(content)
-            return ChatResponse(
-                message=ChatMessage(
-                    role="assistant",
-                    content=content,
-                    tool_calls=tool_calls,
-                ),
-                usage=ChatUsage(
-                    input_tokens=int(usage.get("prompt_tokens", 0)),
-                    output_tokens=int(usage.get("completion_tokens", 0)),
-                ),
-                model=model_name,
-                finish_reason=finish_reason,
-            )
+                )
+                if status in _NO_RETRY_STATUS:
+                    response.raise_for_status()
+                if status in _RETRYABLE_STATUS:
+                    if not self._should_retry_transport(attempt=attempt, started=started):
+                        response.raise_for_status()
+                    retry_after = response.headers.get("Retry-After")
+                    await self._sleep_backoff(attempt=attempt, retry_after=retry_after)
+                    continue
+                response.raise_for_status()
+                try:
+                    body = response.json()
+                    choice = body["choices"][0]
+                    raw_message = choice["message"]
+                    model_name = str(body.get("model", self._model))
+                    finish_reason = str(choice.get("finish_reason") or "stop")
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    raise ModelOutputError("model chat response envelope is invalid") from exc
+                usage = body.get("usage", {})
+                content = raw_message.get("content")
+                if content is not None and not isinstance(content, str):
+                    content = str(content)
+                reason_l = finish_reason.lower()
+                if reason_l == "length":
+                    raise ModelTruncatedError(
+                        "model output truncated (finish_reason=length); "
+                        f"content_chars={len(content or '')}"
+                    )
+                tool_calls = self._parse_tool_calls(raw_message.get("tool_calls"))
+                return ChatResponse(
+                    message=ChatMessage(
+                        role="assistant",
+                        content=content,
+                        tool_calls=tool_calls,
+                    ),
+                    usage=ChatUsage(
+                        input_tokens=int(usage.get("prompt_tokens", 0)),
+                        output_tokens=int(usage.get("completion_tokens", 0)),
+                    ),
+                    model=model_name,
+                    finish_reason=finish_reason,
+                )
         finally:
             if owns_client:
                 await client.aclose()
+
+    def _should_retry_transport(self, *, attempt: int, started: float) -> bool:
+        if attempt > self._max_http_retries + 1:
+            return False
+        if time.monotonic() - started >= self._retry_deadline_seconds:
+            return False
+        return attempt <= self._max_http_retries
+
+    async def _sleep_backoff(self, *, attempt: int, retry_after: str | None) -> None:
+        if retry_after:
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = min(2 ** max(0, attempt - 1), 8.0) + random.uniform(0, 0.25)
+        else:
+            delay = min(2 ** max(0, attempt - 1), 8.0) + random.uniform(0, 0.25)
+        await asyncio.sleep(delay)
 
     @staticmethod
     def _serialize_message(message: ChatMessage) -> dict[str, Any]:
@@ -252,28 +348,54 @@ class OpenAICompatibleProvider:
     def _parse_tool_calls(raw: Any) -> list[ToolCall]:
         if not raw:
             return []
+        if not isinstance(raw, list):
+            raise ToolCallInvalidError(
+                f"tool_calls must be a list, got {type(raw).__name__}"
+            )
         calls: list[ToolCall] = []
-        for item in raw:
+        errors: list[str] = []
+        for index, item in enumerate(raw):
             try:
+                if not isinstance(item, dict):
+                    raise TypeError(f"tool_call[{index}] is not an object")
                 fn = item["function"]
+                if not isinstance(fn, dict):
+                    raise TypeError(f"tool_call[{index}].function is not an object")
                 arguments_raw = fn.get("arguments") or "{}"
                 if isinstance(arguments_raw, str):
-                    arguments = json.loads(arguments_raw) if arguments_raw.strip() else {}
+                    if not arguments_raw.strip():
+                        arguments: dict[str, Any] = {}
+                    else:
+                        parsed = json.loads(arguments_raw)
+                        if not isinstance(parsed, dict):
+                            raise ToolCallInvalidError(
+                                f"tool_call[{index}] arguments must be a JSON object"
+                            )
+                        arguments = parsed
                 elif isinstance(arguments_raw, dict):
                     arguments = arguments_raw
                 else:
-                    arguments = {}
-                if not isinstance(arguments, dict):
-                    arguments = {}
+                    raise ToolCallInvalidError(
+                        f"tool_call[{index}] arguments type {type(arguments_raw).__name__}"
+                    )
+                name = fn.get("name")
+                if not name:
+                    raise KeyError("function.name")
                 calls.append(
                     ToolCall(
                         id=str(item.get("id") or f"call_{len(calls)}"),
-                        name=str(fn["name"]),
+                        name=str(name),
                         arguments=arguments,
                     )
                 )
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                continue
+            except ToolCallInvalidError as exc:
+                errors.append(str(exc))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                errors.append(f"tool_call[{index}]: {exc}")
+        if errors:
+            raise ToolCallInvalidError(
+                "malformed tool_calls; refusing silent drop: " + "; ".join(errors[:6])
+            )
         return calls
 
     @staticmethod

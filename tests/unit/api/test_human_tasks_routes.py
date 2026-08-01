@@ -151,3 +151,5 @@ def test_confirmation_for_human_task_includes_default_handoff_options() -> None:
     for opt in options:
         assert opt.get("label")
         assert opt.get("cost_hint")
+    assert confirmation.get("default_on_timeout") == "cancel"
+    assert int(confirmation.get("timeout_seconds") or 0) >= 7 * 24 * 3600

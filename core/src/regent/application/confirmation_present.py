@@ -52,6 +52,35 @@ def default_handoff_options() -> list[dict[str, str]]:
     return [dict(option) for option in DEFAULT_HANDOFF_OPTIONS]
 
 
+def default_recovery_options(*, primary_failure: str | None = None) -> list[dict[str, str]]:
+    """M4-4: actionable recoveries bound to backend actions."""
+    code = (primary_failure or "").upper()
+    options = [
+        {
+            "id": "retry_repair",
+            "label": "基于当前草稿继续修复",
+            "action": "retry_repair",
+        },
+        {
+            "id": "revise_from_accepted",
+            "label": "从已验收快照增量修订",
+            "action": "revise_from_accepted_snapshot",
+        },
+        {
+            "id": "stop_and_review",
+            "label": "停止并查看诊断产物",
+            "action": "open_diagnostics",
+        },
+    ]
+    if code in {"BUDGET_EXHAUSTED", "MODEL_TRUNCATED"}:
+        options[0] = {
+            "id": "retry_with_budget",
+            "label": "提高预算后重试（不晋级当前草稿）",
+            "action": "retry_with_budget",
+        }
+    return options
+
+
 def action_key_for_task_type(task_type: str) -> str:
     """Map a HumanTask.task_type to the decision-policy action vocabulary.
 
@@ -75,6 +104,9 @@ def confirmation_for_human_task(
     detail: str | None = None,
     prompt: str | None = None,
     extra_rules: list[str] | None = None,
+    primary_failure_code: str | None = None,
+    budget_summary: str | None = None,
+    diagnostic_artifact_uri: str | None = None,
 ) -> dict[str, Any]:
     """Build confirmation metadata for HUMAN_TASK_REQUIRED / TaskCard."""
     action_key = action_key_for_task_type(task_type)
@@ -85,8 +117,12 @@ def confirmation_for_human_task(
     rules.append(f"task_type:{task_type}")
 
     # RELEASE_APPROVAL historically uses 24h due_at; keep longer timeout for that type.
+    # DELIVERY_GAP_INTERVENE is "need your direction" after long work — never a 5-minute
+    # auto-reject trap (balanced preference defaults to deny on short timeouts).
     if action_key == "release_approval":
         timeout = max(timeout, 24 * 3600)
+    elif action_key == "delivery_gap_intervene":
+        timeout = max(timeout, 7 * 24 * 3600)
 
     req = build_confirmation(
         action=action_key,
@@ -102,9 +138,22 @@ def confirmation_for_human_task(
         detail=detail or prompt,
     )
     payload = req.as_dict()
+    if action_key == "delivery_gap_intervene":
+        # cancel = do not auto-resolve; worker extends due instead of REJECT.
+        payload["default_on_timeout"] = "cancel"
+        payload["timeout_seconds"] = timeout
     # CD-3.2/CD-3.5: attach default handoff options (narrow_scope/keep_trying/stop)
     # so Console can render option buttons instead of plain allow/deny.
     payload["handoff_options"] = default_handoff_options()
+    if primary_failure_code:
+        payload["primary_failure_code"] = primary_failure_code
+        payload["recovery_options"] = default_recovery_options(
+            primary_failure=primary_failure_code
+        )
+    if budget_summary:
+        payload["budget_summary"] = budget_summary
+    if diagnostic_artifact_uri:
+        payload["diagnostic_artifact_uri"] = diagnostic_artifact_uri
     return payload
 
 

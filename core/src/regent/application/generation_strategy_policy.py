@@ -7,9 +7,12 @@ artifact-backed until a GQ-4 DecisionRecord promotes agentic.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Literal
+import logging
+from typing import Any
 
 from regent.application.generator_metadata import GenerationStrategy
+
+logger = logging.getLogger(__name__)
 
 IN_FLIGHT_RUN_SEMANTICS = (
     "On kill-switch or rollback: new Runs use the fallback strategy; "
@@ -30,6 +33,7 @@ def resolve_effective_generation_strategy(
     *,
     goal_id: str | None = None,
     gq2_closed: bool | None = None,
+    live_active: bool | None = None,
 ) -> GenerationStrategy:
     """Resolve runtime strategy with kill switch and optional canary.
 
@@ -39,16 +43,13 @@ def resolve_effective_generation_strategy(
        closed (``generation_strategy_canary_gate``), enforced via
        ``canary_rollout_allowed``. This is the diagnosis order: GQ-2 before GQ-3.
        When active and ``goal_id`` is present, a stable bucket may select the
-       canary variant.
+       canary variant. Pass ``live_active=False`` to skip canary on zombie goals.
     3. Otherwise settings.generation_strategy.
     """
     fallback: GenerationStrategy = getattr(
         settings, "generation_strategy_fallback", "artifact-backed"
     )
     kill_switch: bool = bool(getattr(settings, "generation_strategy_kill_switch", False))
-    if kill_switch:
-        return fallback
-
     canary_percent = int(getattr(settings, "generation_strategy_canary_percent", 0) or 0)
     canary_variant: GenerationStrategy = getattr(
         settings, "generation_strategy_canary_variant", "agentic"
@@ -56,20 +57,64 @@ def resolve_effective_generation_strategy(
     if canary_variant not in {"artifact-backed", "agentic"}:
         canary_variant = "agentic"
     if gq2_closed is None:
-        # Operator sets this True only after GQ-2 feedback loop is verified.
         gq2_closed = bool(getattr(settings, "generation_strategy_canary_gate", False))
-    if (
+
+    reason = "default"
+    selected: GenerationStrategy
+    bucket: int | None = None
+
+    if kill_switch:
+        reason = "kill_switch"
+        selected = fallback
+    elif live_active is False:
+        # Zombie / no-progress goals must not enter canary sample (P1 discipline).
+        reason = "canary_skipped_not_live_active"
+        strategy = getattr(settings, "generation_strategy", "artifact-backed")
+        selected = (
+            strategy if strategy in {"artifact-backed", "agentic"} else "artifact-backed"
+        )
+    elif (
         canary_percent > 0
         and goal_id
         and canary_rollout_allowed(kill_switch=kill_switch, gq2_closed=gq2_closed)
-        and stable_canary_bucket(str(goal_id)) < canary_percent
     ):
-        return canary_variant
+        bucket = stable_canary_bucket(str(goal_id))
+        if bucket < canary_percent:
+            reason = "canary_hit"
+            selected = canary_variant
+        else:
+            reason = "canary_miss"
+            strategy = getattr(settings, "generation_strategy", "artifact-backed")
+            selected = (
+                strategy if strategy in {"artifact-backed", "agentic"} else "artifact-backed"
+            )
+    else:
+        strategy = getattr(settings, "generation_strategy", "artifact-backed")
+        if strategy not in {"artifact-backed", "agentic"}:
+            selected = "artifact-backed"
+        else:
+            selected = strategy  # type: ignore[assignment]
+        if canary_percent > 0 and not goal_id:
+            reason = "canary_skipped_no_goal_id"
+        elif canary_percent > 0 and not gq2_closed:
+            reason = "canary_gate_closed"
+        else:
+            reason = "default"
 
-    strategy = getattr(settings, "generation_strategy", "artifact-backed")
-    if strategy not in {"artifact-backed", "agentic"}:
-        return "artifact-backed"
-    return strategy  # type: ignore[return-value]
+    logger.info(
+        "generation_strategy_resolved",
+        extra={
+            "event": "generation_strategy_resolved",
+            "goal_id": goal_id,
+            "bucket": bucket,
+            "canary_percent": canary_percent,
+            "gate": bool(gq2_closed),
+            "kill_switch": kill_switch,
+            "selected": selected,
+            "reason": reason,
+        },
+    )
+    return selected
 
 
 def shadow_isolation_contract() -> dict[str, Any]:
@@ -98,6 +143,4 @@ def kill_switch_contract() -> dict[str, Any]:
 
 def canary_rollout_allowed(*, kill_switch: bool, gq2_closed: bool) -> bool:
     """Diagnosis order: feedback loop (GQ-2) before canary (GQ-3)."""
-    if kill_switch:
-        return False
-    return gq2_closed
+    return (not kill_switch) and bool(gq2_closed)

@@ -39,9 +39,12 @@ packages = ["core/src/regent"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "core/src/regent/capabilities_bootstrap/allowlisted_http_source_v1.json" = "regent/capabilities_bootstrap/allowlisted_http_source_v1.json"
+"core/src/regent/agent/skill_packs" = "regent/agent/skill_packs"
 
 [tool.pytest.ini_options]
-addopts = "-q --basetemp=.pytest_tmp"
+# Per-run basetemp under repo (QA: avoid shared system Temp WinError 5; xdist workers
+# override via PYTEST_XDIST_WORKER in tests/conftest.py when possible).
+addopts = "-q --basetemp=.pytest_tmp/pytest"
 pythonpath = ["core/src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"

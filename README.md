@@ -11,13 +11,13 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 - 对话式交付 CD-0…CD-5 代码侧已落地；**下一步 ACTIVE**：[`docs/conversational-delivery-next-plan-2026-07-31.md`](./docs/conversational-delivery-next-plan-2026-07-31.md)（CD-6…12 重订）。GQ-4 仍 PENDING。
 - 对齐审计 F-1…F-9 已闭环；§8 登记 N-3 族阻断真执行（见下表）。
 
-### 已知阻断（2026-07-31；CD-6 须全绿）
+### 已知阻断（2026-07-31；CD-6 须全绿；2026-08-01 更新：N-3 entrypoint 已修复）
 
 | # | 问题 | 影响 |
 |---|---|---|
-| N-3 | 构建镜像 ENTRYPOINT 吞掉 `sh -lc`；须专用 agent-exec 镜像 | 命令未真执行 |
-| **N-3c** | worker uid 65534 vs 沙箱 65532 → 写盘 EACCES | `echo` 可假绿 |
-| **N-3d** | 容器路径当 `--mount src` → 常静默挂空目录 | 看不到 workspace 文件 |
+| N-3 | 构建镜像 ENTRYPOINT 吞掉 `sh -lc`（**已修复 2026-08-01**：`core/src/regent/infrastructure/sandbox.py:237-245` 已显式传 `--entrypoint sh`） | 命令未真执行 → 已收敛 |
+| **N-3c** | worker uid 65534 vs 沙箱 65532 → 写盘 EACCES（残留，未强制校验） | `echo` 可假绿；待生产主机验收 |
+| **N-3d** | 容器路径当 `--mount src` → 常静默挂空目录（残留，已 fail-closed 兜底） | 看不到 workspace 文件；待生产主机验收 |
 | N-3b | compose 无 docker.sock | 容器化 worker 无法 DinD |
 | N-2 | 运维未声明 sandbox 模式 / 支持矩阵 | Path B/A 配套缺失 |
 | — | F-1/F-3 等修复缺 T1–T6 守卫 | 已修问题可复发；CD-6.5 补齐 |

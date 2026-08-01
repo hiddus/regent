@@ -129,10 +129,16 @@ class _Scripted:
                 finish_reason="tool_calls",
             )
         return ChatResponse(
-            message=ChatMessage(role="assistant", content="done"),
+            message=ChatMessage(
+                role="assistant",
+                content="done",
+                tool_calls=[
+                    ToolCall(id="s", name="submit", arguments={"summary": "milestone"}),
+                ],
+            ),
             usage=ChatUsage(1, 1),
             model="fake",
-            finish_reason="stop",
+            finish_reason="tool_calls",
         )
 
 

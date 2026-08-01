@@ -136,6 +136,17 @@ class Worker:
                             )
                     except Exception:
                         logger.exception("reconciliation worker tick failed")
+                    if self.sessions is not None:
+                        try:
+                            from regent.application.delivery_progress_watchdog import (
+                                tick_stale_delivery_progress,
+                            )
+
+                            stale_stats = await tick_stale_delivery_progress(self.sessions)
+                            if stale_stats.get("warned") or stale_stats.get("handed_off"):
+                                logger.info("stale delivery progress", extra=stale_stats)
+                        except Exception:
+                            logger.exception("stale delivery progress tick failed")
                     self._next_reconciliation = monotonic() + self._reconciliation_interval
                 if (
                     self._privacy_retention is not None
@@ -262,18 +273,30 @@ def create_worker() -> tuple[Worker, object]:
         resolver = ArtifactUriResolver(artifact_root)
         workspace_writer = WorkspaceWriter(Path(settings.workspace_root), resolver)
 
+    from regent.infrastructure.sandbox import (
+        parse_host_path_map,
+        resolve_agent_sandbox_user,
+    )
+
+    path_map = parse_host_path_map(getattr(settings, "host_path_map", None))
+    sandbox_user = resolve_agent_sandbox_user(settings)
     if settings.sandbox_mode == "local":
         sandbox = LocalSandboxDriver(root=Path(settings.build_root) / "sandbox")
     else:
         sandbox = DockerSandboxDriver(
             root=Path(settings.build_root) / "sandbox",
             image=settings.sandbox_image,
+            host_path_map=path_map,
+            run_as_user=sandbox_user,
+            require_host_path_map_in_container=True,
         )
     materializer = DockerDependencyMaterializer(
         root=Path(settings.build_root) / "deps",
         image=settings.dependency_resolver_image,
         egress_proxy=settings.dependency_egress_proxy,
         permit_validator=validate_permit,
+        host_path_map=path_map,
+        run_as_user=sandbox_user,
     )
 
     orchestrator = ExecutionOrchestrator(
@@ -298,10 +321,13 @@ def create_worker() -> tuple[Worker, object]:
             **p1_handlers,
             "WorkStateChanged": log_state_change,
             "RunStateChanged": log_state_change,
+            # Observability-only: delivery state is already on goal.metadata.
+            "DeliveryStateChanged": log_state_change,
             # TimerFired handled by orchestrator (GAC-C2) via p1_handlers override.
         },
         # Generation/discovery LLM calls routinely exceed short leases; avoid mid-handler reclaim.
         lease_seconds=max(settings.worker_lease_seconds, 900),
+        dispatch_concurrency=settings.worker_dispatch_concurrency,
     )
     scheduler = SchedulerService(sessions) if settings.scheduler_enabled else None
     scheduler_org_keys = [

@@ -52,11 +52,19 @@ class GoalArmObservation:
     first_plan_at: str | None
     generator_ref: str
     safety_incident: bool = False
+    preview_ready: bool = False
 
 
 def observation_passed(goal_status: str) -> bool:
     """Success = Goal attained (ACHIEVED). Other terminals count as fail/incomplete."""
     return str(goal_status).upper() == "ACHIEVED"
+
+
+def observation_preview_ready(obs: GoalArmObservation) -> bool:
+    """Parallel product signal: preview URL / stage reached (does not replace ACHIEVED)."""
+    if obs.preview_ready:
+        return True
+    return str(obs.goal_status).upper() == "ACHIEVED"
 
 
 def observation_to_result(obs: GoalArmObservation) -> StrategyRunResult:
@@ -80,6 +88,7 @@ def observation_to_result(obs: GoalArmObservation) -> StrategyRunResult:
             "input_tokens": obs.input_tokens,
             "output_tokens": obs.output_tokens,
             "first_plan_at": obs.first_plan_at,
+            "preview_ready": observation_preview_ready(obs),
         },
     )
 
@@ -202,4 +211,63 @@ def enrich_report(
         out["guardrail_trips"] = list(report.get("guardrail_trips") or []) + [
             "fail_rate_delta_15pp"
         ]
+
+    # Funnel health gate: zero pass_rate with meaningful sample ⇒ degraded window.
+    # Blocks GQ-4 narrative until delivery pipeline is healthy again.
+    summaries = dict(out.get("summaries") or {})
+    n_goals = len(observations)
+    degraded = False
+    degraded_reasons: list[str] = []
+    if n_goals >= 10:
+        for arm in ("artifact-backed", "agentic"):
+            arm_summary = summaries.get(arm) or {}
+            n_arm = int(arm_summary.get("n") or 0)
+            pass_rate = arm_summary.get("pass_rate")
+            if n_arm >= 3 and pass_rate is not None and float(pass_rate) <= 0.0:
+                degraded = True
+                degraded_reasons.append(f"{arm}_pass_rate_zero_n={n_arm}")
+    out["funnel_degraded"] = degraded
+    out["funnel_health"] = {
+        "degraded": degraded,
+        "reasons": degraded_reasons,
+        "recovery_criteria": [
+            "stale_active_over_2h_ratio < 20%",
+            "generation_run_requested_pending_backlog near zero",
+            "daily_goals_reaching_plan healthy",
+            "at least one arm pass_rate > 0 with n>=10 before lifting degraded",
+        ],
+    }
+    if degraded:
+        prior = out.get("decision")
+        if prior == "PROMOTE_AGENTIC_CANDIDATE":
+            out["decision"] = "KEEP_ARTIFACT_BACKED"
+        out["rationale"] = (
+            f"{out.get('rationale') or ''}; funnel_degraded: "
+            + ", ".join(degraded_reasons)
+            + " → pause GQ-4 promotion until delivery pipeline is healthy"
+        ).strip("; ")
+
+    # Parallel product metric (does not affect ACHIEVED / promotion contract).
+    preview_by_arm: dict[str, dict[str, float | int]] = {}
+    for variant_key, label in (
+        ("artifact_backed", "artifact-backed"),
+        ("agentic", "agentic"),
+    ):
+        arm_obs = [o for o in observations if o.variant == variant_key]
+        n = len(arm_obs)
+        ready_n = sum(1 for o in arm_obs if observation_preview_ready(o))
+        preview_by_arm[label] = {
+            "n": n,
+            "preview_ready_n": ready_n,
+            "preview_ready_rate": (ready_n / n) if n else 0.0,
+        }
+    all_n = len(observations)
+    all_ready = sum(1 for o in observations if observation_preview_ready(o))
+    out["preview_ready"] = {
+        "n": all_n,
+        "preview_ready_n": all_ready,
+        "preview_ready_rate": (all_ready / all_n) if all_n else 0.0,
+        "by_arm": preview_by_arm,
+        "note": "product signal only; GQ-4 promotion still requires ACHIEVED pass_rate contract",
+    }
     return out

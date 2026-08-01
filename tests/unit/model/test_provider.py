@@ -91,3 +91,37 @@ async def test_openai_compatible_provider_rejects_invalid_output() -> None:
             await provider.generate_structured(
                 system_prompt="Return JSON", user_prompt="answer", response_model=Answer
             )
+
+
+async def test_openai_compatible_provider_chat_sends_max_tokens() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "test-model",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "hi"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="test-model",
+            max_output_tokens=1024,
+            client=client,
+        )
+        from regent.model.chat import ChatMessage
+
+        result = await provider.chat(messages=[ChatMessage(role="user", content="x")])
+    assert seen["max_tokens"] == 1024
+    assert result.message.content == "hi"

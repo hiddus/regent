@@ -75,6 +75,8 @@ def test_build_report_insufficient_then_stop_override() -> None:
     )
     assert enriched["decision"] == "KEEP_ARTIFACT_BACKED"
     assert "fail_rate_delta_15pp" in enriched["guardrail_trips"]
+    assert "preview_ready" in enriched
+    assert enriched["preview_ready"]["n"] == 10
 
 
 def test_window_expired() -> None:

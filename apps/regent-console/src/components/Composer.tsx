@@ -6,9 +6,10 @@ interface ComposerProps {
   disabled: boolean
   hint: string
   hintError: boolean
+  goalStatus?: string | null
 }
 
-export function Composer({ onSend, onUpload, disabled, hint, hintError }: ComposerProps) {
+export function Composer({ onSend, onUpload, disabled, hint, hintError, goalStatus }: ComposerProps) {
   const [text, setText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -42,7 +43,11 @@ export function Composer({ onSend, onUpload, disabled, hint, hintError }: Compos
           value={text}
           onChange={e => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="描述目标，或指导 Regent 调整方向..."
+          placeholder={
+            goalStatus === 'WAITING_HUMAN'
+              ? '补充方向即批准并继续…'
+              : '描述目标，或指导 Regent 调整方向...'
+          }
           rows={1}
           disabled={disabled}
         />

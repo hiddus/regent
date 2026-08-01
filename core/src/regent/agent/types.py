@@ -9,6 +9,7 @@ from regent.model.chat import ChatMessage, ChatResponse, ChatUsage, ToolCall, To
 
 __all__ = [
     "AgentBudget",
+    "ArtifactIncompleteError",
     "BudgetExhaustedError",
     "ChatMessage",
     "ChatResponse",
@@ -47,11 +48,13 @@ class VerificationGap:
     code: str
     detail: str
     artifact_snippet: str = ""
+    blocked_by: str | None = None
+    status: Literal["FAIL", "BLOCKED"] = "FAIL"
 
 
 @dataclass(frozen=True, slots=True)
 class VerificationVerdict:
-    verdict: Literal["PASS", "FAIL"]
+    verdict: Literal["PASS", "FAIL", "BLOCKED"]
     gaps: list[VerificationGap] = field(default_factory=list)
     smoke: dict[str, Any] = field(default_factory=dict)
     summary: str = ""
@@ -61,13 +64,33 @@ class VerificationVerdict:
         return self.verdict == "PASS"
 
 
+class ArtifactIncompleteError(RuntimeError):
+    """Raised when the agent stops without an explicit submit (M1-3)."""
+
+    def __init__(self, reason: str = "agent stopped without submit") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.failure_code = "ARTIFACT_INCOMPLETE"
+
+
 class BudgetExhaustedError(RuntimeError):
     """Raised when agent budget (turns/tokens/wall time) is exhausted."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        diagnostic_manifest: dict[str, Any] | None = None,
+        files: dict[str, str] | None = None,
+        ledger: Any | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
-        self.failure_code = "EXHAUSTED_BUDGET"
+        # Canonical primary code (M0-2); EXHAUSTED_BUDGET remains an alias in taxonomy.
+        self.failure_code = "BUDGET_EXHAUSTED"
+        self.diagnostic_manifest = dict(diagnostic_manifest or {})
+        self.files = dict(files or {})
+        self.ledger = ledger
 
 
 class VerificationFailedError(RuntimeError):

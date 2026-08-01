@@ -41,14 +41,16 @@ class TestLoadFrozenTaskSet:
             assert task_set["version"] == "v1"
 
     @pytest.mark.asyncio
-    async def test_load_fallback_for_unknown_ref(self) -> None:
-        """Unknown artifact ref returns default task set."""
+    async def test_load_fail_closed_for_unknown_ref(self) -> None:
+        """Unknown artifact ref must fail closed (QA gate)."""
+        from regent.domain.errors import DomainError, ErrorCode
+
         mock_sessions = MagicMock()
         svc = EvalHarnessService(mock_sessions)
 
-        task_set = await svc.load_frozen_task_set("nonexistent-artifact")
-        assert "tasks" in task_set
-        assert len(task_set["tasks"]) >= 1
+        with pytest.raises(DomainError) as exc:
+            await svc.load_frozen_task_set("nonexistent-artifact")
+        assert exc.value.code is ErrorCode.NOT_FOUND
 
 
 class TestBlindEvaluation:

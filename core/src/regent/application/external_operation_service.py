@@ -343,12 +343,19 @@ class ExternalOperationService:
         failure_code: str | None = None,
         summary: dict[str, Any] | None = None,
     ) -> None:
+        # Failure / unknown may close a never-dispatched PREPARED EO so callers
+        # never hang on "cannot mark FAILED_TERMINAL". Success still requires
+        # an in-flight dispatch (DISPATCHING / UNKNOWN / RECONCILING).
+        if status in {"FAILED_TERMINAL", "UNKNOWN"}:
+            allowed_from = ("PREPARED", "DISPATCHING", "UNKNOWN", "RECONCILING")
+        else:
+            allowed_from = ("DISPATCHING", "UNKNOWN", "RECONCILING")
         async with self._sessions() as session, session.begin():
             result = await session.execute(
                 update(ExternalOperationModel)
                 .where(
                     ExternalOperationModel.id == operation_id,
-                    ExternalOperationModel.status.in_(("DISPATCHING", "UNKNOWN", "RECONCILING")),
+                    ExternalOperationModel.status.in_(allowed_from),
                 )
                 .values(
                     status=status,
@@ -357,5 +364,10 @@ class ExternalOperationService:
                     result_summary=summary or {},
                 )
             )
-            if result.rowcount != 1:  # type: ignore[attr-defined]
-                raise DomainError(ErrorCode.INVALID_STATE, f"cannot mark {status}")
+            if result.rowcount == 1:  # type: ignore[attr-defined]
+                return
+            # Idempotent: already at the requested terminal status.
+            eo = await session.get(ExternalOperationModel, operation_id)
+            if eo is not None and eo.status == status:
+                return
+            raise DomainError(ErrorCode.INVALID_STATE, f"cannot mark {status}")

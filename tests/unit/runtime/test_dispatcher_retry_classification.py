@@ -101,3 +101,74 @@ async def test_dispatch_once_dead_letters_invalid_state_without_retry_loop() -> 
     _args, kwargs = dispatcher.fail.await_args
     assert kwargs.get("retryable") is False
     assert "INVALID_STATE" in _args[2]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_once_runs_handlers_concurrently() -> None:
+    import asyncio
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    in_flight = 0
+    max_in_flight = 0
+
+    async def slow(_payload: dict) -> None:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        started.set()
+        await release.wait()
+        in_flight -= 1
+
+    events = []
+    for _ in range(3):
+        claimed = MagicMock()
+        claimed.id = uuid.uuid4()
+        claimed.event_type = "GoalStateChanged"
+        claimed.payload = {}
+        claimed.attempt = 1
+        claimed.correlation_id = uuid.uuid4()
+        events.append(claimed)
+
+    dispatcher = OutboxDispatcher(
+        MagicMock(),
+        handlers={"GoalStateChanged": slow},
+        dispatch_concurrency=3,
+    )
+    dispatcher.claim = AsyncMock(return_value=events)  # type: ignore[method-assign]
+    dispatcher.fail = AsyncMock()  # type: ignore[method-assign]
+    dispatcher.ack = AsyncMock()  # type: ignore[method-assign]
+
+    task = asyncio.create_task(dispatcher.dispatch_once("worker-parallel"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    # Give gather a tick to enter all handlers.
+    await asyncio.sleep(0.05)
+    assert max_in_flight >= 2
+    release.set()
+    count = await asyncio.wait_for(task, timeout=2)
+    assert count == 3
+    assert dispatcher.ack.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_missing_handler_is_non_retryable() -> None:
+    event_id = uuid.uuid4()
+    claimed = MagicMock()
+    claimed.id = event_id
+    claimed.event_type = "DeliveryStateChanged"
+    claimed.payload = {"goal_id": str(uuid.uuid4())}
+    claimed.attempt = 1
+    claimed.correlation_id = uuid.uuid4()
+
+    dispatcher = OutboxDispatcher(MagicMock(), handlers={}, max_attempts=8)
+    dispatcher.claim = AsyncMock(return_value=[claimed])  # type: ignore[method-assign]
+    dispatcher.fail = AsyncMock()  # type: ignore[method-assign]
+    dispatcher.ack = AsyncMock()  # type: ignore[method-assign]
+
+    count = await dispatcher.dispatch_once("worker-1")
+    assert count == 1
+    dispatcher.ack.assert_not_awaited()
+    dispatcher.fail.assert_awaited_once()
+    _args, kwargs = dispatcher.fail.await_args
+    assert kwargs.get("retryable") is False
+    assert "no handler registered" in _args[2]

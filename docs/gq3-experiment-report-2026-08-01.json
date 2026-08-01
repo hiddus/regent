@@ -1,0 +1,145 @@
+{
+  "report": {
+    "version": "gq-generation-strategy/v1",
+    "quality_metrics_contract_version": "gq-user-quality/v1",
+    "name": "gq3-production-goal-stream",
+    "task_set_hash": "88da0fb414c6decee0dc83436c3f3d8f12f1d268d66792b108df3bea8482f577",
+    "task_set_name": "gq-generation-strategy-v1",
+    "blind_eval_owner": "regent-gq-blind-eval",
+    "thresholds": {
+      "min_success_rate_lift": 0.05,
+      "non_inferiority_margin": 0.02,
+      "max_mean_cost_degradation": 0.25,
+      "max_p95_latency_degradation": 0.3,
+      "min_sample_size_per_arm": 30,
+      "max_repair_rounds_mean": 3.0,
+      "max_human_intervention_rate": 0.2
+    },
+    "model_freeze": "production-live",
+    "tool_freeze": "production-live",
+    "budget_units": 0.0,
+    "confidence_level": 0.95,
+    "shadow_isolation": false,
+    "canary_allowed": true,
+    "variants": [
+      "artifact_backed",
+      "agentic"
+    ],
+    "not_p24_org_dimensions": true,
+    "summaries": {
+      "artifact_backed": {
+        "n": 35,
+        "pass_rate": 0.0,
+        "ci95": {
+          "low": 0.0,
+          "high": 0.0989
+        },
+        "mean_cost": 0.0,
+        "cost_per_verified_success": null,
+        "p95_latency_ms": 67475699.716,
+        "user_quality": {
+          "n": 35,
+          "first_runnable_rate": 0.0,
+          "mean_repair_rounds": 4.542857142857143,
+          "human_intervention_rate": 1.0,
+          "mean_wall_time_to_usable_ms": null,
+          "status": "OK",
+          "contract_version": "gq-user-quality/v1"
+        },
+        "safety_incidents": 0,
+        "status": "OK"
+      },
+      "agentic": {
+        "n": 4,
+        "pass_rate": 0.0,
+        "ci95": {
+          "low": 0.0,
+          "high": 0.4899
+        },
+        "mean_cost": 0.0,
+        "cost_per_verified_success": null,
+        "p95_latency_ms": 68794016.63,
+        "user_quality": {
+          "n": 4,
+          "first_runnable_rate": 0.0,
+          "mean_repair_rounds": 5.5,
+          "human_intervention_rate": 1.0,
+          "mean_wall_time_to_usable_ms": null,
+          "status": "OK",
+          "contract_version": "gq-user-quality/v1"
+        },
+        "safety_incidents": 0,
+        "status": "OK"
+      }
+    },
+    "decision": "INSUFFICIENT_EVIDENCE",
+    "rationale": "need ≥30 samples/arm (got artifact=35, agentic=4); funnel_degraded: agentic_pass_rate_zero_n=4 → pause GQ-4 promotion until delivery pipeline is healthy",
+    "guardrail_trips": [],
+    "actor": "gq3-production-report",
+    "created_at": "2026-08-01T06:06:55.596058+00:00",
+    "experiment_id": "0909936b-441e-4744-9038-e75a93a6b52b",
+    "content_hash": "687ad8465ad46c684066e7e94aeffc063a3dad2d6a3f9a0cf0edefa2764ce8ec",
+    "production_window": {
+      "opened_at": "2026-07-31T10:00:00+00:00",
+      "max_days": 21,
+      "sample_since": "2026-07-31T10:00:00+00:00",
+      "sample_until": null,
+      "unit_of_analysis": "independent_goal",
+      "assignment": "intent_to_treat_first_plan_in_window",
+      "success_definition": "goal.status == ACHIEVED",
+      "n_goals": 39,
+      "n_by_variant": {
+        "artifact_backed": 35,
+        "agentic": 4
+      }
+    },
+    "stop_rule": {
+      "triggered": false,
+      "reason": "agentic_fail_rate - control_fail_rate = 0.000 (threshold 0.15)",
+      "delta": 0.0,
+      "artifact_backed_fail_rate": 1.0,
+      "agentic_fail_rate": 1.0,
+      "threshold": 0.15
+    },
+    "source": "production_goal_stream",
+    "funnel_degraded": true,
+    "funnel_health": {
+      "degraded": true,
+      "reasons": [
+        "agentic_pass_rate_zero_n=4"
+      ],
+      "recovery_criteria": [
+        "stale_active_over_2h_ratio < 20%",
+        "generation_run_requested_pending_backlog near zero",
+        "daily_goals_reaching_plan healthy",
+        "at least one arm pass_rate > 0 with n>=10 before lifting degraded"
+      ]
+    },
+    "preview_ready": {
+      "n": 39,
+      "preview_ready_n": 1,
+      "preview_ready_rate": 0.02564102564102564,
+      "by_arm": {
+        "artifact-backed": {
+          "n": 35,
+          "preview_ready_n": 1,
+          "preview_ready_rate": 0.02857142857142857
+        },
+        "agentic": {
+          "n": 4,
+          "preview_ready_n": 0,
+          "preview_ready_rate": 0.0
+        }
+      },
+      "note": "product signal only; GQ-4 promotion still requires ACHIEVED pass_rate contract"
+    }
+  },
+  "gq4_gate_preview": {
+    "activation_allowed": false,
+    "proposed_default": "artifact-backed",
+    "reason": "funnel_degraded",
+    "in_flight_run_semantics": "new Runs use fallback; in-flight complete frozen plan or cancel",
+    "decision_record_ref": "pending-gq4-decision-note"
+  },
+  "observations_n": 39
+}

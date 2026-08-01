@@ -1,0 +1,32 @@
+{
+  "id": "provider-normal-tool-call",
+  "description": "Valid tool call envelope replays successfully",
+  "http_status": 200,
+  "response": {
+    "model": "replay-model",
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_ok",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{\"path\": \"README.md\", \"content\": \"ok\\n\"}"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {"prompt_tokens": 20, "completion_tokens": 8}
+  },
+  "expect": {
+    "ok": true,
+    "tool_name": "write_file"
+  }
+}

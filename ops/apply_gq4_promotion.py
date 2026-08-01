@@ -49,6 +49,8 @@ def main() -> None:
 
     print(f"report={path}")
     print(f"decision={report.get('decision')} rationale={report.get('rationale')}")
+    if report.get("funnel_degraded"):
+        print(f"FUNNEL_DEGRADED={json.dumps(report.get('funnel_health'), ensure_ascii=False)}")
     preview = evaluate_gq4_promotion(
         report, kill_switch=False, decision_record_ref=decision_ref
     )

@@ -1,0 +1,9 @@
+{
+  "skill_id": "web-app-scaffold",
+  "version": "1.0.0",
+  "title": "Web App Scaffold",
+  "description": "Minimal Flask/FastAPI scaffold with persistence and a first Journey.",
+  "applies_when": ["todo", "crud", "persist", "sqlite", "notes", "scaffold", "flask", "website"],
+  "anti_examples": ["single-file dump without routes or templates"],
+  "gap_codes": ["ARTIFACT_INCOMPLETE", "STATIC_FAILED", "forbid-pure-static-backend", "forbid-demo-shell"]
+}

@@ -1,0 +1,31 @@
+{
+  "id": "provider-malformed-tool-args",
+  "description": "Non-JSON tool arguments must become TOOL_CALL_INVALID (never silently dropped)",
+  "http_status": 200,
+  "response": {
+    "model": "replay-model",
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_bad",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{not-json"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {"prompt_tokens": 40, "completion_tokens": 12}
+  },
+  "expect": {
+    "primary_failure_code": "TOOL_CALL_INVALID"
+  }
+}

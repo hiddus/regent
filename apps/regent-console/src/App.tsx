@@ -170,6 +170,7 @@ export default function App() {
           disabled={sending}
           hint={ws.hint}
           hintError={ws.hintError}
+          goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
         />
       </main>
       <ArtifactPanel

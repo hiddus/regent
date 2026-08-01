@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import func, update
@@ -73,8 +73,7 @@ class HumanTaskService:
                     update(HumanTaskModel)
                     .where(
                         HumanTaskModel.id == task_id,
-                        HumanTaskModel.status == "OPEN",
-                        HumanTaskModel.due_at > func.now(),
+                        HumanTaskModel.status.in_(("OPEN", "TIMED_OUT")),
                     )
                     .values(
                         status="COMPLETED",
@@ -298,6 +297,14 @@ class HumanTaskService:
                 timeout_default = TimeoutDefault.DENY
 
             for row in rows:
+                # Direction / delivery handoffs must never auto-REJECT just because
+                # the human was away — that discards days of work from the UX.
+                if row.task_type == "DELIVERY_GAP_INTERVENE":
+                    row.due_at = datetime.now(UTC) + timedelta(days=7)
+                    await self._append_waiting_nudge(session, row)
+                    applied += 1
+                    continue
+
                 approved = timeout_default is TimeoutDefault.ALLOW
                 # Safety / high-stakes approvals never auto-allow on timeout.
                 if row.task_type in {"RELEASE_APPROVAL", "QUALITY_APPROVAL", "PERMIT_APPROVAL"}:
@@ -325,7 +332,7 @@ class HumanTaskService:
                     "reason": "timeout_default",
                     "default_on_timeout": timeout_default.value,
                 }
-                row.status = "COMPLETED"
+                row.status = "TIMED_OUT"
                 row.assigned_to = "regent-core:timeout-default"
                 row.response = response
                 row.completed_at = datetime.now(UTC)
@@ -336,5 +343,108 @@ class HumanTaskService:
                     assigned_to="regent-core:timeout-default",
                     response=response,
                 )
+                await self._append_timeout_chat_result(
+                    session,
+                    row,
+                    approved=approved,
+                )
                 applied += 1
         return applied
+
+    @staticmethod
+    async def _append_waiting_nudge(session: AsyncSession, row: HumanTaskModel) -> None:
+        """Soft reminder when a delivery-gap task is extended instead of rejected."""
+        from sqlalchemy import select
+
+        from regent.infrastructure.models import (
+            ConversationMessageModel,
+            ConversationModel,
+        )
+
+        goal = await session.get(GoalModel, row.goal_id)
+        project_id = goal.app_project_id if goal is not None else None
+        if project_id is None:
+            return
+        conversation = await session.scalar(
+            select(ConversationModel).where(ConversationModel.app_project_id == project_id)
+        )
+        if conversation is None:
+            return
+        last = await session.scalar(
+            select(ConversationMessageModel.ordinal)
+            .where(ConversationMessageModel.conversation_id == conversation.id)
+            .order_by(ConversationMessageModel.ordinal.desc())
+            .limit(1)
+        )
+        session.add(
+            ConversationMessageModel(
+                id=uuid.uuid4(),
+                conversation_id=conversation.id,
+                ordinal=(last or 0) + 1,
+                role="ASSISTANT",
+                message_type="HUMAN_TASK_WAITING",
+                content=(
+                    "仍在等待你的方向——不会因为超时自动拒绝或放弃已完成的工作。"
+                    "随时补充说明或点「允许」继续。"
+                ),
+                metadata_json={
+                    "task_id": str(row.id),
+                    "task_type": row.task_type,
+                    "goal_id": str(row.goal_id),
+                    "source": "timeout_extend",
+                },
+                created_by="regent-core:timeout-extend",
+            )
+        )
+
+    @staticmethod
+    async def _append_timeout_chat_result(
+        session: AsyncSession,
+        row: HumanTaskModel,
+        *,
+        approved: bool,
+    ) -> None:
+        """Mirror HTTP complete: write APPROVE/REJECT_RESULT so TaskCards collapse."""
+        from sqlalchemy import select
+
+        from regent.infrastructure.models import (
+            ConversationMessageModel,
+            ConversationModel,
+        )
+
+        goal = await session.get(GoalModel, row.goal_id)
+        project_id = goal.app_project_id if goal is not None else None
+        if project_id is None:
+            return
+        conversation = await session.scalar(
+            select(ConversationModel).where(ConversationModel.app_project_id == project_id)
+        )
+        if conversation is None:
+            return
+        last = await session.scalar(
+            select(ConversationMessageModel.ordinal)
+            .where(ConversationMessageModel.conversation_id == conversation.id)
+            .order_by(ConversationMessageModel.ordinal.desc())
+            .limit(1)
+        )
+        content = (
+            f"任务已超时默认{'批准' if approved else '拒绝'}: {row.task_type}"
+        )
+        session.add(
+            ConversationMessageModel(
+                id=uuid.uuid4(),
+                conversation_id=conversation.id,
+                ordinal=(last or 0) + 1,
+                role="ASSISTANT",
+                message_type="APPROVE_RESULT" if approved else "REJECT_RESULT",
+                content=content,
+                metadata_json={
+                    "task_id": str(row.id),
+                    "task_type": row.task_type,
+                    "approved": approved,
+                    "source": "timeout_default",
+                    "goal_id": str(row.goal_id),
+                },
+                created_by="regent-core:timeout-default",
+            )
+        )

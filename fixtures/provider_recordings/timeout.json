@@ -1,0 +1,9 @@
+{
+  "id": "provider-timeout",
+  "description": "Synthetic timeout marker (no HTTP body); harness raises TimeoutException",
+  "error": "timeout",
+  "expect": {
+    "retryable": true,
+    "error": "timeout"
+  }
+}

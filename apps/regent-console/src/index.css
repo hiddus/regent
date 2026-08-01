@@ -121,10 +121,29 @@ body {
 .dot-terminal { background: var(--muted); opacity: 0.5; }
 
 .sidefoot {
+  margin-top: auto;
   padding: 14px 18px;
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
+}
+
+.sidebar-toggle-terminal {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 4px 12px 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--line, #334155);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sidebar-toggle-terminal:hover {
+  color: var(--text, #e2e8f0);
+  border-color: var(--accent, #38bdf8);
 }
 
 /* Main area */

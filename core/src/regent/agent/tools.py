@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
+from regent.agent.file_manifest import (
+    DEFAULT_MAX_FILE_BYTES,
+    DEFAULT_MAX_FILES,
+    DEFAULT_MAX_TOTAL_BYTES,
+    WorkspaceManifest,
+    build_workspace_manifest,
+)
 from regent.agent.types import ToolCall, ToolSpec
 
 TOOL_SPECS: list[ToolSpec] = [
@@ -20,6 +30,33 @@ TOOL_SPECS: list[ToolSpec] = [
                     "description": "Relative directory to list (default '.').",
                 }
             },
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
+        name="glob",
+        description="Glob files under the workspace (e.g. '**/*.py', 'tests/**/*.ts').",
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern relative to root."},
+                "limit": {"type": "integer", "description": "Max matches (default 200)."},
+            },
+            "required": ["pattern"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
+        name="grep",
+        description="Search file contents with a regex; returns matching lines.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "glob": {"type": "string", "description": "Optional file glob filter."},
+                "limit": {"type": "integer"},
+            },
+            "required": ["pattern"],
             "additionalProperties": False,
         },
     ),
@@ -49,6 +86,36 @@ TOOL_SPECS: list[ToolSpec] = [
         },
     ),
     ToolSpec(
+        name="edit_file",
+        description=(
+            "Exact text replacement in a file. old_text must match uniquely, "
+            "or provide expected_sha256 of the current file contents."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+                "expected_sha256": {"type": "string"},
+            },
+            "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
+        name="read_artifact",
+        description="Read an offloaded artifact by URI or workspace-relative ref (hash verified).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string"},
+                "path": {"type": "string", "description": "Relative path under .regent/artifacts/"},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
         name="run_command",
         description=(
             "Run a shell command inside the isolated sandbox (pip install, pytest, "
@@ -57,14 +124,8 @@ TOOL_SPECS: list[ToolSpec] = [
         parameters={
             "type": "object",
             "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "Shell command to execute.",
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "description": "Timeout in seconds (default 60, max 120).",
-                },
+                "command": {"type": "string"},
+                "timeout_seconds": {"type": "integer"},
             },
             "required": ["command"],
             "additionalProperties": False,
@@ -96,6 +157,20 @@ TOOL_SPECS: list[ToolSpec] = [
             "additionalProperties": False,
         },
     ),
+    ToolSpec(
+        name="submit",
+        description=(
+            "Declare the workspace ready for independent verification. "
+            "Required before any ReleaseCandidate; stopping without submit is incomplete."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "What was delivered."},
+            },
+            "additionalProperties": False,
+        },
+    ),
 ]
 
 
@@ -110,9 +185,32 @@ class CommandSandbox(Protocol):
     ) -> str: ...
 
 
-# CD-7.5 / N-4: pip/curl may request network, but DockerSandboxDriver fail-closes
-# without REGENT_DEPENDENCY_EGRESS_PROXY (no bare bridge).
 _NETWORK_PREFIXES: tuple[str, ...] = ("pip ", "curl ")
+
+
+@dataclass(slots=True)
+class SnapshotFilesReport:
+    files: dict[str, str]
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    truncated: bool = False
+    considered: int = 0
+    max_files: int = DEFAULT_MAX_FILES
+    max_bytes: int = DEFAULT_MAX_FILE_BYTES
+    integrity_ok: bool = True
+    manifest: WorkspaceManifest | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "file_count": len(self.files),
+            "files": sorted(self.files.keys()),
+            "skipped": list(self.skipped),
+            "truncated": self.truncated,
+            "considered": self.considered,
+            "max_files": self.max_files,
+            "max_bytes": self.max_bytes,
+            "integrity_ok": self.integrity_ok,
+            "manifest": self.manifest.as_dict() if self.manifest else None,
+        }
 
 
 class WorkspaceToolkit:
@@ -129,6 +227,10 @@ class WorkspaceToolkit:
         self.root.mkdir(parents=True, exist_ok=True)
         self.todos: list[dict[str, str]] = []
         self.recent_writes: list[str] = []
+        self.last_snapshot_report: SnapshotFilesReport | None = None
+        self.submitted: bool = False
+        self.submit_summary: str = ""
+        self.artifact_index: dict[str, dict[str, Any]] = {}
         self._command_sandbox = command_sandbox
         self._allowed = allowed_commands_prefix or (
             "pip ",
@@ -153,7 +255,7 @@ class WorkspaceToolkit:
         if not normalized or normalized in {".", "./"}:
             return self.root
         parts = Path(normalized).parts
-        if any(p in {"", ".", ".."} for p in parts) or parts[0] in {".git", ".regent"}:
+        if any(p in {"", ".", ".."} for p in parts) or parts[0] in {".git"}:
             raise ValueError(f"illegal path: {relative}")
         path = (self.root / normalized).resolve()
         if path != self.root and self.root not in path.parents:
@@ -174,6 +276,40 @@ class WorkspaceToolkit:
                 break
         return entries
 
+    def glob_files(self, pattern: str, *, limit: int = 200) -> list[str]:
+        matches: list[str] = []
+        for path in sorted(self.root.glob(pattern)):
+            if path.is_file() and not path.is_symlink():
+                matches.append(path.relative_to(self.root).as_posix())
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def grep_files(
+        self, pattern: str, *, file_glob: str = "**/*", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        rx = re.compile(pattern)
+        hits: list[dict[str, Any]] = []
+        for path in sorted(self.root.glob(file_glob)):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if rx.search(line):
+                    hits.append(
+                        {
+                            "path": path.relative_to(self.root).as_posix(),
+                            "line": lineno,
+                            "text": line[:240],
+                        }
+                    )
+                    if len(hits) >= limit:
+                        return hits
+        return hits
+
     def read_text(self, relative: str, *, max_chars: int = 40_000) -> str:
         path = self.resolve(relative)
         if not path.is_file():
@@ -192,36 +328,116 @@ class WorkspaceToolkit:
             self.recent_writes.append(rel)
         return rel
 
-    def snapshot_files(self, *, max_files: int = 80, max_bytes: int = 200_000) -> dict[str, str]:
-        files: dict[str, str] = {}
-        for path in sorted(self.root.rglob("*")):
-            if not path.is_file() or path.is_symlink():
-                continue
-            if path.suffix.lower() not in {
-                ".py",
-                ".html",
-                ".htm",
-                ".css",
-                ".js",
-                ".json",
-                ".md",
-                ".txt",
-                ".toml",
-                ".yml",
-                ".yaml",
-            } and path.name.lower() != "requirements.txt":
-                continue
-            rel = path.relative_to(self.root).as_posix()
-            raw = path.read_bytes()
-            if len(raw) > max_bytes:
-                continue
-            try:
-                files[rel] = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-            if len(files) >= max_files:
-                break
-        return files
+    def edit_file(
+        self,
+        relative: str,
+        *,
+        old_text: str,
+        new_text: str,
+        expected_sha256: str | None = None,
+    ) -> str:
+        path = self.resolve(relative)
+        if not path.is_file():
+            raise FileNotFoundError(relative)
+        current = path.read_text(encoding="utf-8")
+        digest = hashlib.sha256(current.encode("utf-8")).hexdigest()
+        if expected_sha256 and expected_sha256 != digest:
+            raise ValueError(
+                f"edit conflict: expected_sha256 mismatch for {relative}"
+            )
+        count = current.count(old_text)
+        if count == 0:
+            raise ValueError(f"edit failed: old_text not found in {relative}")
+        if count > 1:
+            raise ValueError(
+                f"edit failed: old_text matches {count} times in {relative}; must be unique"
+            )
+        updated = current.replace(old_text, new_text, 1)
+        path.write_text(updated, encoding="utf-8")
+        rel = path.relative_to(self.root).as_posix()
+        if rel not in self.recent_writes:
+            self.recent_writes.append(rel)
+        return f"edited {rel}"
+
+    def register_artifact(
+        self, *, ref: str, text: str, sha256: str | None = None
+    ) -> dict[str, Any]:
+        digest = sha256 or hashlib.sha256(text.encode("utf-8")).hexdigest()
+        art_dir = self.root / ".regent" / "artifacts"
+        art_dir.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", ref)[:80]
+        path = art_dir / f"{safe}-{digest[:12]}.txt"
+        path.write_text(text, encoding="utf-8")
+        meta = {
+            "ref": ref,
+            "path": path.relative_to(self.root).as_posix(),
+            "sha256": digest,
+            "bytes": len(text.encode("utf-8")),
+            "retention": "run",
+        }
+        self.artifact_index[ref] = meta
+        self.artifact_index[meta["path"]] = meta
+        (art_dir / "index.json").write_text(
+            json.dumps(self.artifact_index, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return meta
+
+    def read_artifact(self, *, uri: str | None = None, path: str | None = None) -> str:
+        key = (uri or path or "").strip()
+        if not key:
+            raise ValueError("read_artifact requires uri or path")
+        meta = self.artifact_index.get(key)
+        if meta is None and path:
+            meta = self.artifact_index.get(path)
+        rel = str((meta or {}).get("path") or path or "")
+        if not rel:
+            raise FileNotFoundError(f"dangling artifact ref: {key}")
+        text = self.read_text(rel, max_chars=200_000)
+        if meta and meta.get("sha256"):
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if digest != meta["sha256"]:
+                raise ValueError(f"artifact hash mismatch for {rel}")
+        return text
+
+    def snapshot_files(
+        self,
+        *,
+        max_files: int = DEFAULT_MAX_FILES,
+        max_bytes: int = DEFAULT_MAX_FILE_BYTES,
+    ) -> dict[str, str]:
+        return self.snapshot_files_report(max_files=max_files, max_bytes=max_bytes).files
+
+    def snapshot_files_report(
+        self,
+        *,
+        max_files: int = DEFAULT_MAX_FILES,
+        max_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    ) -> SnapshotFilesReport:
+        manifest = build_workspace_manifest(
+            self.root,
+            max_files=max_files,
+            max_file_bytes=max_bytes,
+            max_total_bytes=max_total_bytes,
+        )
+        skipped = [
+            {"path": e.path, "reason": e.reason, "bytes": e.bytes}
+            for e in manifest.entries
+            if not e.included and e.reason
+        ]
+        report = SnapshotFilesReport(
+            files=dict(manifest.files),
+            skipped=skipped,
+            truncated=manifest.truncated,
+            considered=len(manifest.entries),
+            max_files=max_files,
+            max_bytes=max_bytes,
+            integrity_ok=manifest.integrity_ok,
+            manifest=manifest,
+        )
+        self.last_snapshot_report = report
+        return report
 
     async def run_command(self, command: str, *, timeout_seconds: int = 60) -> str:
         cmd = command.strip()
@@ -248,8 +464,20 @@ class WorkspaceToolkit:
         try:
             if call.name == "list_files":
                 directory = str(call.arguments.get("directory") or ".")
-                entries = self.list_tree(directory)
-                return json.dumps(entries, ensure_ascii=False)
+                return json.dumps(self.list_tree(directory), ensure_ascii=False)
+            if call.name == "glob":
+                pattern = str(call.arguments["pattern"])
+                limit = int(call.arguments.get("limit") or 200)
+                return json.dumps(self.glob_files(pattern, limit=limit), ensure_ascii=False)
+            if call.name == "grep":
+                return json.dumps(
+                    self.grep_files(
+                        str(call.arguments["pattern"]),
+                        file_glob=str(call.arguments.get("glob") or "**/*"),
+                        limit=int(call.arguments.get("limit") or 50),
+                    ),
+                    ensure_ascii=False,
+                )
             if call.name == "read_file":
                 return self.read_text(str(call.arguments["path"]))
             if call.name == "write_file":
@@ -266,6 +494,22 @@ class WorkspaceToolkit:
                         )
                 rel = self.write_text(rel_path, content)
                 return f"wrote {rel}"
+            if call.name == "edit_file":
+                return self.edit_file(
+                    str(call.arguments["path"]),
+                    old_text=str(call.arguments["old_text"]),
+                    new_text=str(call.arguments["new_text"]),
+                    expected_sha256=(
+                        str(call.arguments["expected_sha256"])
+                        if call.arguments.get("expected_sha256")
+                        else None
+                    ),
+                )
+            if call.name == "read_artifact":
+                return self.read_artifact(
+                    uri=str(call.arguments["uri"]) if call.arguments.get("uri") else None,
+                    path=str(call.arguments["path"]) if call.arguments.get("path") else None,
+                )
             if call.name == "run_command":
                 return await self.run_command(
                     str(call.arguments["command"]),
@@ -285,6 +529,13 @@ class WorkspaceToolkit:
                     if isinstance(item, dict)
                 ]
                 return json.dumps(self.todos, ensure_ascii=False)
+            if call.name == "submit":
+                self.submitted = True
+                self.submit_summary = str(call.arguments.get("summary") or "")
+                return json.dumps(
+                    {"submitted": True, "summary": self.submit_summary},
+                    ensure_ascii=False,
+                )
             return f"unknown tool: {call.name}"
         except Exception as exc:  # noqa: BLE001 — tool errors become model-visible results
             return f"ERROR: {type(exc).__name__}: {exc}"

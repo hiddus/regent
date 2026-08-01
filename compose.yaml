@@ -37,11 +37,19 @@ services:
       REGENT_SANDBOX_MODE: ${REGENT_SANDBOX_MODE:-local}
       REGENT_AGENT_SANDBOX_IMAGE: ${REGENT_AGENT_SANDBOX_IMAGE:-regent-agent-exec-v1:1}
       REGENT_HOST_PATH_MAP: ${REGENT_HOST_PATH_MAP:-}
+      # Parallelism: N replicas × in-process dispatch concurrency.
+      REGENT_WORKER_DISPATCH_CONCURRENCY: ${REGENT_WORKER_DISPATCH_CONCURRENCY:-2}
+      REGENT_MAX_CONCURRENT_GENERATING: ${REGENT_MAX_CONCURRENT_GENERATING:-12}
+      # Used by effective_max_concurrent_generating auto mode (replicas × dispatch × 2).
+      REGENT_WORKER_REPLICAS: ${REGENT_WORKER_REPLICAS:-1}
     volumes:
       - /opt/regent/artifacts:/var/lib/regent/artifacts
       - /opt/regent/workspaces:/var/lib/regent/workspaces
       - /opt/regent/builds:/var/lib/regent/builds
     depends_on:
       postgres: {condition: service_healthy}
+    # Horizontal scale (compose v2): docker compose up -d --scale worker=3
+    # Outbox claim uses SKIP LOCKED; each process gets a unique worker_id.
+    # On S0 (docker run fleet) use: python ops/scale_workers.py --replicas 3 --execute
 volumes:
   regent-postgres:

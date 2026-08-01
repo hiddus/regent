@@ -19,6 +19,7 @@ from regent.application.p1_contracts import (
     FileOperation,
 )
 from regent.application.p1_ports import GeneratedFileChangeSet
+from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.sandbox import build_agent_sandbox
 from regent.application.goal_anchor_service import build_goal_anchored_prompt
@@ -177,7 +178,9 @@ class ArtifactBackedCodeGenerator:
     ) -> GeneratedFileChangeSet:
         planned_paths = set(plan.get("planned_paths", []))
         if not planned_paths:
-            raise ValueError("generation plan must freeze planned paths")
+            raise DomainError(
+                ErrorCode.POLICY_DENIED, "generation plan must freeze planned paths"
+            )
         if on_progress is not None:
             await on_progress("正在请求模型生成应用代码…")
         # GAC-GA: GoalAnchor — inject original goal text into user prompt
@@ -219,10 +222,15 @@ class ArtifactBackedCodeGenerator:
         materialized: dict[str, str] = {}
         for generated in response.output.files:
             normalized = generated.relative_path.replace("\\", "/")
-            if normalized not in planned_paths:
-                raise ValueError(f"generated path is outside frozen plan: {normalized}")
+            from regent.application.planned_path_policy import is_path_within_frozen_plan
+
+            if not is_path_within_frozen_plan(normalized, planned_paths):
+                # Soft-skip unsafe / unexpected paths (aligned with agentic).
+                continue
             if normalized in seen:
-                raise ValueError(f"duplicate generated path: {normalized}")
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED, f"duplicate generated path: {normalized}"
+                )
             seen.add(normalized)
             if generated.operation is SourceFileOperation.DELETE:
                 changes.append(
@@ -293,6 +301,12 @@ class ArtifactBackedCodeGenerator:
                 success_criteria=success_criteria,
                 materialized=materialized,
                 scope=scope,
+            )
+        if not changes:
+            raise DeliveryRejection(
+                reasons=["empty-changeset: no materializable files after planned-path filter"],
+                gap_kind="empty-changeset",
+                producer_ref=self.generator_ref,
             )
         change_set = FileChangeSet(
             changes=changes,

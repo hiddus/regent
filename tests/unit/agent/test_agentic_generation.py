@@ -164,10 +164,16 @@ class _ScriptedProvider:
                 finish_reason="tool_calls",
             )
         return ChatResponse(
-            message=ChatMessage(role="assistant", content="done"),
+            message=ChatMessage(
+                role="assistant",
+                content="done",
+                tool_calls=[
+                    ToolCall(id="submit", name="submit", arguments={"summary": "ready"}),
+                ],
+            ),
             usage=ChatUsage(input_tokens=5, output_tokens=5),
             model="fake-agent",
-            finish_reason="stop",
+            finish_reason="tool_calls",
         )
 
 

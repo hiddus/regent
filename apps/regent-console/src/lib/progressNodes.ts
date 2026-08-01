@@ -195,6 +195,16 @@ const INTERACTIVE_TASK_TYPES = new Set([
 
 export function isProgressEvent(m: Message): boolean {
   if (INTERACTIVE_TASK_TYPES.has(m.message_type)) return false
+  // Keep learning / attempt history as visible chat bubbles (do not fold away).
+  if (
+    m.role === 'ASSISTANT' &&
+    (m.message_type === 'DELIVERY_GAP_CAPABILITY_ESCALATED' ||
+      m.message_type === 'GENERATION_ATTEMPT_FAILED' ||
+      m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
+      m.message_type === 'BUILD_DELIVERY_GAP_EXHAUSTED')
+  ) {
+    return false
+  }
   if (m.role === 'EVENT') return true
   return TYPE_INDEX.has(m.message_type)
 }
@@ -236,6 +246,12 @@ function extractHighlights(m: Message): Record<string, string> {
   if (meta.next_key) highlights['下一步'] = String(meta.next_key)
   const dv = meta.delivery_verification as Record<string, unknown> | undefined
   if (dv?.summary) highlights['验证结果'] = String(dv.summary)
+  const gaps = meta.gap_reasons
+  if (Array.isArray(gaps) && gaps.length > 0) {
+    highlights['失败原因'] = gaps.slice(0, 3).map(String).join('；')
+  }
+  if (meta.error_code) highlights['错误码'] = String(meta.error_code)
+  if (meta.draft_uri) highlights['草稿'] = '已保留，下一轮会接着改'
   return highlights
 }
 

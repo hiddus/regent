@@ -9,10 +9,12 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from regent.application.budget_ledger import COST_MODEL_INPUT, COST_MODEL_OUTPUT, BudgetLedger
 from regent.application.build_service import (
@@ -1194,10 +1196,32 @@ class ExecutionOrchestrator:
         resolution_plan_id = uuid.UUID(str(payload["capability_resolution_plan_id"]))
         actor = str(payload.get("actor", "regent-core"))
         idempotency_key = str(payload.get("idempotency_key", ""))
+        generation_run_id: uuid.UUID | None = None
+        generation_plan_id: uuid.UUID | None = None
 
         if self._generator is None or self._workspace_writer is None:
             logger.warning("generation skipped: generator or workspace writer not configured")
             return
+
+        # Soft concurrency gate: defer via retryable LEASE_CONFLICT rather than drop.
+        from regent.application.delivery_success_policy import (
+            effective_max_concurrent_generating,
+        )
+        from regent.config import get_settings
+
+        max_generating = effective_max_concurrent_generating(get_settings())
+        if max_generating > 0:
+            async with self._sessions() as session:
+                active = await session.scalar(
+                    select(func.count())
+                    .select_from(GenerationRunModel)
+                    .where(GenerationRunModel.status == "GENERATING")
+                )
+            if int(active or 0) >= max_generating:
+                raise DomainError(
+                    ErrorCode.LEASE_CONFLICT,
+                    f"generation concurrency cap reached ({max_generating})",
+                )
 
         gen_service = GenerationService(
             self._sessions, self._generator, self._workspace_writer
@@ -1238,26 +1262,20 @@ class ExecutionOrchestrator:
 
         # Derive generation plan from requirement content (R10: no hardcoding)
         req_content = dict(revision.content_json) if revision else {}
-        planned_paths = req_content.get(
-            "planned_paths",
-            ["src/app.py", "src/index.html", "requirements.txt", "README.md"],
+        from regent.application.planned_path_policy import (
+            DEFAULT_PLANNED_PATHS,
+            expand_planned_paths,
         )
-        # Ensure mandatory project files are always included (CD-3.4).
-        for mandatory in ("requirements.txt", "README.md"):
-            if mandatory not in planned_paths:
-                planned_paths.append(mandatory)
-        # Non-SMALL goals must plan at least one test path so generators freeze it.
+
         _scale_hint = str(
             (req_content.get("acceptance_contract") or {}).get("goal_scale")
             or req_content.get("goal_scale")
             or ""
         ).upper()
-        if _scale_hint != "SMALL" and not any(
-            str(p).replace("\\", "/").lower().startswith("tests/")
-            or str(p).lower().startswith("test_")
-            for p in planned_paths
-        ):
-            planned_paths.append("tests/test_smoke.py")
+        planned_paths = expand_planned_paths(
+            req_content.get("planned_paths", list(DEFAULT_PLANNED_PATHS)),
+            goal_scale=_scale_hint,
+        )
         dependency_intents = req_content.get("dependency_intents", [])
         verification_commands = req_content.get(
             "verification_commands", ["python -c 'import app'"]
@@ -1385,7 +1403,16 @@ class ExecutionOrchestrator:
         failure_lessons = list(goal_meta.get("failure_lessons") or [])
         if failure_lessons:
             acceptance_contract["failure_lessons"] = failure_lessons[-8:]
-        # GQ-2: inject durable FailureEnvelope summaries (real build/test/smoke errors).
+        # Always surface latest gap reasons (not only attainment policy path).
+        prior_gaps = list(
+            goal_meta.get("delivery_gap_reasons") or payload.get("gap_reasons") or []
+        )[:12]
+        if prior_gaps and "delivery_gap_reasons" not in acceptance_contract:
+            acceptance_contract["delivery_gap_reasons"] = prior_gaps
+        draft_uri = str(goal_meta.get("last_good_draft_uri") or "").strip()
+        if draft_uri:
+            acceptance_contract["last_good_draft_uri"] = draft_uri
+        # GQ-2: inject durable FailureEnvelope summaries (real build/test/smoke/generation errors).
         try:
             from regent.application.failure_envelope import FailureEnvelopeService
 
@@ -1433,7 +1460,30 @@ class ExecutionOrchestrator:
         )
 
         settings = get_settings()
-        strategy = resolve_effective_generation_strategy(settings, goal_id=str(goal_id))
+        live_active: bool | None = None
+        async with self._sessions() as session:
+            goal_row = await session.get(GoalModel, goal_id)
+            if goal_row is not None:
+                gmeta = dict(goal_row.metadata_json or {})
+                if gmeta.get("awaiting_human_intervention") or gmeta.get(
+                    "stale_progress_handoff_at"
+                ):
+                    live_active = False
+                else:
+                    live = gmeta.get("live_action")
+                    if isinstance(live, dict) and live.get("updated_at"):
+                        try:
+                            raw = str(live["updated_at"]).replace("Z", "+00:00")
+                            updated = datetime.fromisoformat(raw)
+                            if updated.tzinfo is None:
+                                updated = updated.replace(tzinfo=UTC)
+                            # Treat >15min silence as not live for canary sampling.
+                            live_active = datetime.now(UTC) - updated < timedelta(minutes=15)
+                        except ValueError:
+                            live_active = None
+        strategy = resolve_effective_generation_strategy(
+            settings, goal_id=str(goal_id), live_active=live_active
+        )
         meta = plan_metadata_for_settings(settings, goal_id=str(goal_id))
         generator_ref = meta["generator_ref"]
         prompt_version = meta["prompt_version"]
@@ -1500,6 +1550,8 @@ class ExecutionOrchestrator:
                     correlation_id=correlation_id,
                 )
             )
+            generation_run_id = run.id
+            generation_plan_id = run.plan_id
             # Certified hive: durable PM→Dev→QA AgentTasks for this generation run.
             try:
                 from regent.application.hive_runtime import maybe_offer_generation_hive_chain
@@ -1566,9 +1618,23 @@ class ExecutionOrchestrator:
                     stage="GENERATING",
                     event_type="GENERATION_RUN_REQUESTED",
                 )
+                # Persist attempt pointer for delivery-review + learning continuity.
+                await self._remember_generation_attempt(
+                    goal_id,
+                    generation_run_id=run.id,
+                    plan_id=run.plan_id,
+                )
+                base_workspace = await self._resolve_last_good_draft_workspace(goal_id)
                 snapshot = await gen_service.execute(
                     run.id,
+                    base_workspace=base_workspace,
                     on_progress=_on_generation_progress,
+                )
+                await self._remember_generation_attempt(
+                    goal_id,
+                    generation_run_id=run.id,
+                    plan_id=run.plan_id,
+                    completed=True,
                 )
             # Phase 2.3: Record generation token costs in BudgetLedger
             await self._record_generation_costs(goal_id, run.id)
@@ -1576,6 +1642,13 @@ class ExecutionOrchestrator:
             if exc.code == ErrorCode.LEASE_CONFLICT:
                 # In-flight generate under a prior lease — retry outbox later.
                 raise
+            await self._record_generation_failure_memory(
+                goal_id=goal_id,
+                project_id=project_id,
+                generation_run_id=generation_run_id,
+                plan_id=generation_plan_id,
+                exc=exc,
+            )
             if isinstance(exc, DeliveryRejection):
                 # CD-7.5 / N-6: transcript DB jitter must not burn the capability ladder;
                 # sidecar is already on disk for audit.
@@ -1609,6 +1682,7 @@ class ExecutionOrchestrator:
                         )
                     return
                 reasons = reasons_from_exception(exc)
+                draft_uri = getattr(exc, "draft_uri", None)
                 recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                     goal_id=goal_id,
                     project_id=project_id,
@@ -1620,6 +1694,7 @@ class ExecutionOrchestrator:
                         "stage": "DELIVERY_REVIEW_REJECTED",
                         "last_error": str(exc)[:400],
                         "message": str(exc.message)[:400],
+                        "draft_uri": draft_uri,
                     },
                 )
                 if await self._apply_delivery_verdict(
@@ -1642,8 +1717,8 @@ class ExecutionOrchestrator:
                     extra={"goal_id": str(goal_id), "message": recovery.message},
                 )
                 return
-            if exc.code == ErrorCode.INVALID_STATE:
-                # Business INVALID_STATE: learn + replan into a new event.
+            if exc.code == ErrorCode.INVALID_STATE or exc.code == ErrorCode.POLICY_DENIED:
+                # Business INVALID_STATE / POLICY_DENIED: learn + replan into a new event.
                 # Do not blind-retry the same GenerationRunRequested payload.
                 recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                     goal_id=goal_id,
@@ -1651,9 +1726,13 @@ class ExecutionOrchestrator:
                     requirement_revision_id=requirement_id,
                     capability_resolution_plan_id=resolution_plan_id,
                     actor=actor,
-                    gap_reasons=[f"invalid-state: {exc.message[:200]}"],
+                    gap_reasons=[f"{exc.code.value.lower()}: {exc.message[:200]}"],
                     halt_context={
-                        "stage": "GENERATION_INVALID_STATE",
+                        "stage": (
+                            "GENERATION_POLICY_DENIED"
+                            if exc.code == ErrorCode.POLICY_DENIED
+                            else "GENERATION_INVALID_STATE"
+                        ),
                         "last_error": str(exc)[:400],
                         "message": exc.message[:400],
                         "error_code": exc.code.value,
@@ -1664,8 +1743,16 @@ class ExecutionOrchestrator:
                     goal_id=goal_id,
                     project_id=project_id,
                     actor=actor,
-                    recovered_log="invalid-state recovery replanned",
-                    stage_exhausted="GENERATION_INVALID_STATE_NEEDS_HUMAN",
+                    recovered_log=(
+                        "policy-denied recovery replanned"
+                        if exc.code == ErrorCode.POLICY_DENIED
+                        else "invalid-state recovery replanned"
+                    ),
+                    stage_exhausted=(
+                        "GENERATION_POLICY_DENIED_NEEDS_HUMAN"
+                        if exc.code == ErrorCode.POLICY_DENIED
+                        else "GENERATION_INVALID_STATE_NEEDS_HUMAN"
+                    ),
                     extra_exhausted={
                         "gap_kind": recovery.gap_kind,
                         "attempts": recovery.attempts,
@@ -1675,7 +1762,7 @@ class ExecutionOrchestrator:
                 ):
                     return
                 logger.warning(
-                    "invalid-state could not replan; refusing blind outbox retry",
+                    "generation contract error could not replan; refusing blind outbox retry",
                     extra={"goal_id": str(goal_id), "error": exc.message[:200]},
                 )
                 raise
@@ -1685,10 +1772,18 @@ class ExecutionOrchestrator:
             # Legacy fallback: DeliveryRejection producers now raise a typed
             # DomainError subclass (caught above); this branch only remains
             # for any stray bare ValueError still carrying the legacy string.
+            await self._record_generation_failure_memory(
+                goal_id=goal_id,
+                project_id=project_id,
+                generation_run_id=generation_run_id,
+                plan_id=generation_plan_id,
+                exc=exc,
+            )
             if "delivery-review-v1" not in str(exc):
                 logger.exception("generation failed", extra={"goal_id": str(goal_id)})
                 raise
             reasons = reasons_from_exception(exc)
+            draft_uri = getattr(exc, "draft_uri", None)
             recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                 goal_id=goal_id,
                 project_id=project_id,
@@ -1700,6 +1795,7 @@ class ExecutionOrchestrator:
                     "stage": "DELIVERY_REVIEW_REJECTED",
                     "last_error": str(exc)[:400],
                     "message": str(exc)[:400],
+                    "draft_uri": draft_uri,
                 },
             )
             if await self._apply_delivery_verdict(
@@ -1722,7 +1818,14 @@ class ExecutionOrchestrator:
                 extra={"goal_id": str(goal_id), "message": recovery.message},
             )
             return
-        except Exception:
+        except Exception as exc:
+            await self._record_generation_failure_memory(
+                goal_id=goal_id,
+                project_id=project_id,
+                generation_run_id=generation_run_id,
+                plan_id=generation_plan_id,
+                exc=exc,
+            )
             logger.exception("generation failed", extra={"goal_id": str(goal_id)})
             raise
 
@@ -2230,7 +2333,11 @@ class ExecutionOrchestrator:
     # ---------------------------------------------------------------------------
 
     async def handle_preview_deployment_requested(self, payload: dict[str, Any]) -> None:
-        """Create release candidate + human approval task; await RELEASE_APPROVAL."""
+        """Create release candidate + human approval task; await RELEASE_APPROVAL.
+
+        SMALL goals auto-approve low-risk RELEASE_APPROVAL (audit retained) unless
+        ``require_release_human_approval`` is forced on.
+        """
         goal_id = uuid.UUID(str(payload["goal_id"]))
         project_id = uuid.UUID(str(payload["app_project_id"]))
         build_id = uuid.UUID(str(payload["app_build_id"]))
@@ -2243,9 +2350,18 @@ class ExecutionOrchestrator:
 
         release_service = ReleaseService(self._sessions, self._deployment_provider)
         correlation_id = ""
+        goal_scale = ""
+        force_human = False
         async with self._sessions() as session:
             goal = await session.get(GoalModel, goal_id)
             correlation_id = str(goal.correlation_id) if goal else ""
+            if goal is not None:
+                meta = dict(goal.metadata_json or {})
+                goal_scale = str(meta.get("goal_scale") or "").upper()
+                force_human = bool(meta.get("force_release_human"))
+
+        # SMALL preview is low-risk: auto-approve unless operator forces human gate.
+        auto_approve_small = goal_scale == "SMALL" and not force_human
 
         work_id, run_id = await self._ensure_work_and_run_for_goal(
             goal_id, purpose="preview-deployment", actor=actor
@@ -2259,8 +2375,10 @@ class ExecutionOrchestrator:
             prompt=(
                 f"Approve preview release candidate for build {build_id}. "
                 "Respond with decision=APPROVE or decision=REJECT."
+                if not auto_approve_small
+                else f"Auto-approved SMALL preview release for build {build_id}."
             ),
-            requested_by=actor,
+            requested_by=actor if not auto_approve_small else "regent-core:auto-release",
             due_at=datetime.now(UTC) + timedelta(hours=24),
         )
         try:
@@ -2299,8 +2417,51 @@ class ExecutionOrchestrator:
                     "app_project_id": str(project_id),
                     "idempotency_key": idempotency_key,
                     "correlation_id": correlation_id,
+                    "auto_approved_small": auto_approve_small,
                 }
                 goal.metadata_json = metadata
+                if auto_approve_small:
+                    from regent.infrastructure.models import AuditRecordModel
+
+                    session.add(
+                        AuditRecordModel(
+                            id=uuid.uuid4(),
+                            aggregate_type="goal",
+                            aggregate_id=goal_id,
+                            aggregate_version=goal.version,
+                            action="AUTO_RELEASE_APPROVAL",
+                            actor="regent-core:auto-release",
+                            payload={
+                                "goal_scale": goal_scale,
+                                "release_candidate_id": str(candidate.id),
+                                "human_task_id": str(task_id),
+                                "app_build_id": str(build_id),
+                                "reason": "SMALL preview auto-approve",
+                            },
+                            correlation_id=goal.correlation_id,
+                        )
+                    )
+
+        if auto_approve_small:
+            # Complete the human task so RELEASE_APPROVAL_COMPLETED resumes deploy.
+            await human_tasks.complete(
+                task_id,
+                assigned_to="regent-core:auto-release",
+                response={
+                    "decision": "APPROVE",
+                    "approved": True,
+                    "feedback": "auto-approved SMALL preview release",
+                },
+            )
+            logger.info(
+                "SMALL release auto-approved",
+                extra={
+                    "goal_id": str(goal_id),
+                    "release_candidate_id": str(candidate.id),
+                    "task_id": str(task_id),
+                },
+            )
+            return
 
         release_prompt = (
             f"Approve preview release candidate for build {build_id}. "
@@ -3319,11 +3480,30 @@ class ExecutionOrchestrator:
                 )
                 return True
 
-            # Final milestone or SMALL → require verification PASS before ACHIEVE (P0-4).
+            # Final milestone or SMALL → require verification PASS (or soft-pass) before ACHIEVE.
+            from regent.application.delivery_success_policy import (
+                verification_allows_achieve,
+            )
+            from regent.application.delivery_state import DeliveryState
+
             metadata = dict(goal.metadata_json or {})
             verification = dict(metadata.get("delivery_verification") or {})
             verdict = str(verification.get("verdict") or "").upper()
-            if verdict != "PASS":
+            goal_scale = str(
+                (plan.goal_scale if plan else None)
+                or metadata.get("goal_scale")
+                or ""
+            )
+            has_preview = bool(
+                metadata.get("last_preview_endpoint")
+                or metadata.get("preview_url")
+            )
+            allow_achieve, achieve_reason = verification_allows_achieve(
+                verification,
+                goal_scale=goal_scale,
+                has_preview=has_preview,
+            )
+            if not allow_achieve:
                 metadata["execution_stage"] = "WAITING_HUMAN_VERIFICATION"
                 metadata["awaiting_verification"] = True
                 goal.metadata_json = metadata
@@ -3346,6 +3526,9 @@ class ExecutionOrchestrator:
                 metadata["execution_stage"] = "ACHIEVING"
                 if plan is not None:
                     metadata["milestones_completed"] = True
+                if achieve_reason == "soft_pass_preview":
+                    metadata["delivery_state"] = DeliveryState.DELIVERED_FOR_REVIEW.value
+                    metadata["delivery_soft_pass"] = True
                 goal.metadata_json = metadata
                 version = goal.version
                 corr = goal.correlation_id
@@ -3354,17 +3537,22 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "QUALITY_SELF_VERIFIED",
-                    "对抗式交付验证通过，正在完成目标。",
+                    (
+                        "预览已就绪且无阻断缺口，按软通过完成目标。"
+                        if achieve_reason == "soft_pass_preview"
+                        else "对抗式交付验证通过，正在完成目标。"
+                    ),
                     {
                         "goal_id": str(goal_id),
                         "deployment_id": str(deployment_id),
                         "goal_scale": (plan.goal_scale if plan else "UNKNOWN"),
                         "delivery_verification": verification,
+                        "achieve_reason": achieve_reason,
                         "gac": "P0-4",
                     },
                 )
 
-        if verdict != "PASS":
+        if not allow_achieve:
             await transitions.transition_goal(
                 TransitionContext(goal_id, version, actor, corr),
                 GoalCommand.WAIT_FOR_HUMAN,
@@ -3379,7 +3567,7 @@ class ExecutionOrchestrator:
             )
             return False
 
-        # Accepting Agent ACHIEVEs only with Verification PASS evidence.
+        # Accepting Agent ACHIEVEs with Verification PASS or SMALL soft-pass evidence.
         await transitions.transition_goal(
             TransitionContext(goal_id, version, actor, corr),
             GoalCommand.ACHIEVE,
@@ -3405,11 +3593,16 @@ class ExecutionOrchestrator:
                     "goal_id": str(goal_id),
                     "deployment_id": str(deployment_id),
                     "delivery_verification": verification,
+                    "achieve_reason": achieve_reason,
                 },
             )
         logger.info(
-            "goal achieved with verification PASS",
-            extra={"goal_id": str(goal_id), "actor": actor},
+            "goal achieved with verification",
+            extra={
+                "goal_id": str(goal_id),
+                "actor": actor,
+                "achieve_reason": achieve_reason,
+            },
         )
         return False
 
@@ -3904,6 +4097,152 @@ class ExecutionOrchestrator:
     # ---------------------------------------------------------------------------
 
     @staticmethod
+    def _local_path_from_uri(uri: str | None) -> Path | None:
+        from urllib.parse import unquote, urlparse
+
+        raw = str(uri or "").strip()
+        if not raw:
+            return None
+        if not raw.startswith("file:"):
+            path = Path(raw)
+            return path if path.exists() else None
+        parsed = urlparse(raw)
+        raw_path = unquote(parsed.path)
+        if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+            raw_path = raw_path[1:]
+        path = Path(raw_path)
+        return path if path.exists() else None
+
+    async def _resolve_last_good_draft_workspace(
+        self, goal_id: uuid.UUID
+    ) -> Path | None:
+        """Reuse prior failed draft so the next attempt learns from existing files."""
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                return None
+            meta = dict(goal.metadata_json or {})
+            draft = self._local_path_from_uri(str(meta.get("last_good_draft_uri") or ""))
+            if draft is not None and draft.is_dir():
+                return draft
+            return None
+
+    async def _remember_generation_attempt(
+        self,
+        goal_id: uuid.UUID,
+        *,
+        generation_run_id: uuid.UUID,
+        plan_id: uuid.UUID | None,
+        completed: bool = False,
+    ) -> None:
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id)
+            if goal is None:
+                return
+            meta = dict(goal.metadata_json or {})
+            meta["last_generation_run_id"] = str(generation_run_id)
+            if plan_id is not None:
+                meta["last_generation_plan_id"] = str(plan_id)
+            history = list(meta.get("generation_attempt_history") or [])
+            history.append(
+                {
+                    "generation_run_id": str(generation_run_id),
+                    "plan_id": str(plan_id) if plan_id else None,
+                    "completed": completed,
+                    "at": datetime.now(UTC).isoformat(),
+                }
+            )
+            meta["generation_attempt_history"] = history[-12:]
+            goal.metadata_json = meta
+            flag_modified(goal, "metadata_json")
+
+    async def _record_generation_failure_memory(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        generation_run_id: uuid.UUID | None,
+        plan_id: uuid.UUID | None,
+        exc: BaseException,
+    ) -> None:
+        """Persist FailureEnvelope + visible attempt message so errors can be learned."""
+        from regent.application.failure_envelope import (
+            FailureEnvelopeService,
+            RecordFailureCommand,
+        )
+
+        reasons = reasons_from_exception(exc)
+        error_code = (
+            exc.code.value
+            if isinstance(exc, DomainError)
+            else type(exc).__name__
+        )
+        draft_uri = getattr(exc, "draft_uri", None)
+        summary = "; ".join(reasons[:6]) if reasons else str(exc)[:400]
+        if generation_run_id is not None:
+            await self._remember_generation_attempt(
+                goal_id,
+                generation_run_id=generation_run_id,
+                plan_id=plan_id,
+                completed=False,
+            )
+        try:
+            await FailureEnvelopeService(self._sessions).record_failure(
+                RecordFailureCommand(
+                    goal_id=goal_id,
+                    stage="generation",
+                    error_summary=summary,
+                    error_code=error_code,
+                    generation_plan_id=plan_id,
+                    generation_run_id=generation_run_id,
+                    evidence_artifact_uri=str(draft_uri) if draft_uri else None,
+                    evidence_payload={
+                        "reasons": reasons[:12],
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+            )
+        except Exception:
+            logger.warning(
+                "generation FailureEnvelope record skipped",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+        try:
+            async with self._sessions() as session, session.begin():
+                await self._append_conversation_message(
+                    session,
+                    project_id,
+                    role="ASSISTANT",
+                    message_type="GENERATION_ATTEMPT_FAILED",
+                    content=(
+                        "本轮生成未通过，已记录失败原因并将带着约束重试："
+                        f"{summary[:240]}"
+                    ),
+                    metadata={
+                        "goal_id": str(goal_id),
+                        "generation_run_id": str(generation_run_id) if generation_run_id else None,
+                        "plan_id": str(plan_id) if plan_id else None,
+                        "error_code": error_code,
+                        "gap_reasons": reasons[:12],
+                        "draft_uri": str(draft_uri) if draft_uri else None,
+                        "learning": True,
+                    },
+                )
+                goal = await session.get(GoalModel, goal_id)
+                if goal is not None and draft_uri:
+                    meta = dict(goal.metadata_json or {})
+                    meta["last_good_draft_uri"] = str(draft_uri)
+                    goal.metadata_json = meta
+                    flag_modified(goal, "metadata_json")
+        except Exception:
+            logger.warning(
+                "generation attempt conversation skipped",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+
+    @staticmethod
     async def _append_conversation_message(
         session: AsyncSession,
         project_id: uuid.UUID,
@@ -4095,6 +4434,11 @@ class ExecutionOrchestrator:
 # ---------------------------------------------------------------------------
 
 
+async def _ack_delivery_state_changed(payload: dict[str, object]) -> None:
+    """Ack DeliveryStateChanged — metadata already written; no side effects."""
+    return None
+
+
 def get_p1_event_handlers(
     orchestrator: ExecutionOrchestrator,
 ) -> dict[str, Any]:
@@ -4118,6 +4462,8 @@ def get_p1_event_handlers(
         QUALITY_APPROVAL_COMPLETED: orchestrator.handle_quality_approval_completed,
         RELEASE_APPROVAL_COMPLETED: orchestrator.handle_release_approval_completed,
         DELIVERY_GAP_HUMAN_APPROVED: orchestrator.handle_delivery_gap_human_approved,
+        # Observability-only; state already persisted on goal.metadata.
+        DELIVERY_STATE_CHANGED: _ack_delivery_state_changed,
         "TimerFired": orchestrator.handle_timer_fired,
         # P1-C: V3 domain event handlers
         "ReorganizationTriggered": orchestrator.handle_reorganization_triggered,

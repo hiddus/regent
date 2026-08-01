@@ -1,18 +1,21 @@
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from regent.application.external_operation_service import ExternalOperationService
 from regent.application.p1_contracts import canonical_hash
 from regent.application.p1_ports import DeploymentProvider, DeploymentRequest
-from regent.application.permit_service import PermitService
+from regent.application.permit_service import PermitBinding, PermitService
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
     AppBuildModel,
     DeploymentModel,
+    ExecutionPermitModel,
     GenerationPlanModel,
     GenerationRunModel,
     GoalSpecModel,
@@ -217,8 +220,13 @@ class ReleaseService:
 
         deployment, artifact_uri = await self._claim(deployment_id)
         delivery_ctx = await self._load_delivery_review_context(deployment.release_candidate_id)
-        operation_key = f"preview-deploy:{deployment.idempotency_key}"
+        base_key = f"preview-deploy:{deployment.idempotency_key}"
+        evidence = dict(deployment.evidence or {})
+        operation_key = str(evidence.get("active_operation_key") or base_key)
         eo = await self._external_ops.get_by_operation_key(operation_key)
+        if eo is None and operation_key != base_key:
+            eo = await self._external_ops.get_by_operation_key(base_key)
+            operation_key = base_key
 
         if eo is None:
             permit = await self._permits.claim(
@@ -249,6 +257,14 @@ class ReleaseService:
             eo_id = prepared.id
         elif eo.status in {"DISPATCHING", "UNKNOWN", "RECONCILING"}:
             eo_id = eo.id
+        elif eo.status == "PREPARED":
+            # Crash between prepare and begin_dispatch: resume instead of hanging.
+            await self._external_ops.begin_dispatch(
+                eo.id,
+                worker_lease_token=f"preview-deployment-provider:{deployment.permit_id}",
+                expected_fencing_token=eo.local_fencing_token,
+            )
+            eo_id = eo.id
         elif eo.status == "SUCCEEDED" and eo.external_id:
             result = await self._provider.query(eo.external_id)
             if result.status == "SUCCEEDED":
@@ -256,9 +272,14 @@ class ReleaseService:
                     deployment_id, result, expected="DEPLOYING", external_operation_id=eo.id
                 )
             eo_id = eo.id
+        elif eo.status in {"FAILED_TERMINAL", "MANUAL_REVIEW"}:
+            eo_id = await self._remint_preview_dispatch(
+                deployment, artifact_uri=artifact_uri, dead_eo_id=eo.id
+            )
         else:
             raise DomainError(
-                ErrorCode.INVALID_STATE, f"external operation not dispatchable: {eo.status}"
+                ErrorCode.INVALID_STATE,
+                f"external operation not dispatchable: {eo.status}",
             )
 
         try:
@@ -374,6 +395,82 @@ class ReleaseService:
                 "external_operation_id": str(prepared.id),
             }
             return model
+
+    async def _remint_preview_dispatch(
+        self,
+        deployment: DeploymentModel,
+        *,
+        artifact_uri: str,
+        dead_eo_id: uuid.UUID,
+    ) -> uuid.UUID:
+        """Mint a new EO+permit after FAILED_TERMINAL so preview deploy can retry."""
+        async with self._sessions() as session:
+            old_permit = await session.get(ExecutionPermitModel, deployment.permit_id)
+            if old_permit is None:
+                raise DomainError(ErrorCode.INVALID_STATE, "deployment permit missing for remint")
+            goal_id = old_permit.goal_id
+            work_id = old_permit.work_id
+            run_id = old_permit.run_id
+            target = old_permit.target
+            data_scope = dict(old_permit.data_scope or {})
+            network_scope = dict(old_permit.network_scope or {})
+            resource_limit = dict(old_permit.resource_limit or {})
+            risk_level = old_permit.risk_level
+
+        retry_token = uuid.uuid4().hex[:8]
+        new_permit_id = await self._permits.request(
+            PermitBinding(
+                goal_id=goal_id,
+                work_id=work_id,
+                run_id=run_id,
+                actor_id="preview-deployment-provider",
+                action="preview-deploy",
+                target=target,
+                parameters={"retry_of_eo": str(dead_eo_id)},
+                data_scope=data_scope,
+                network_scope=network_scope,
+                resource_limit=resource_limit,
+                risk_level=risk_level or "LOW",
+                valid_until=datetime.now(UTC) + timedelta(hours=1),
+                idempotency_key=f"deploy-permit-retry-{deployment.idempotency_key}-{retry_token}",
+            )
+        )
+        permit = await self._permits.claim(
+            new_permit_id, actor_id="preview-deployment-provider"
+        )
+        if permit.binding.action != "preview-deploy":
+            raise DomainError(ErrorCode.POLICY_DENIED, "permit action mismatch")
+        operation_key = f"preview-deploy:{deployment.idempotency_key}:retry:{retry_token}"
+        prepared = await self._external_ops.prepare(
+            operation_key=operation_key,
+            provider=self._PREVIEW_PROVIDER,
+            action="preview-deploy",
+            permit_id=permit.id,
+            local_fencing_token=permit.nonce,
+            payload={
+                "deployment_id": str(deployment.id),
+                "artifact_uri": artifact_uri,
+                "environment": "preview",
+                "idempotency_key": deployment.idempotency_key,
+                "retry_of_eo": str(dead_eo_id),
+            },
+            correlation_id=deployment.correlation_id,
+        )
+        await self._external_ops.begin_dispatch(
+            prepared.id,
+            worker_lease_token=f"preview-deployment-provider:{permit.id}",
+            expected_fencing_token=permit.nonce,
+        )
+        async with self._sessions() as session, session.begin():
+            row = await session.get(DeploymentModel, deployment.id)
+            if row is not None:
+                row.permit_id = new_permit_id
+                evidence = dict(row.evidence or {})
+                evidence["active_operation_key"] = operation_key
+                evidence["reminted_from_eo"] = str(dead_eo_id)
+                row.evidence = evidence
+                flag_modified(row, "evidence")
+        return prepared.id
 
     async def _load_delivery_review_context(
         self, release_candidate_id: uuid.UUID

@@ -166,3 +166,107 @@ async def test_prepare_rejects_unclaimed_permit() -> None:
             local_fencing_token=fencing,
             payload={"x": 1},
         )
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_terminal_is_idempotent_when_already_failed() -> None:
+    eo_id = uuid.uuid4()
+    eo = ExternalOperationModel(
+        id=eo_id,
+        operation_key="op-failed",
+        provider="static-preview-deploy-v1",
+        action="deploy",
+        status="FAILED_TERMINAL",
+        request_digest="abc",
+        permit_id=uuid.uuid4(),
+        local_fencing_token=uuid.uuid4(),
+        dispatch_generation=1,
+        result_summary={},
+    )
+    session = AsyncMock()
+    result = MagicMock()
+    result.rowcount = 0
+    session.execute = AsyncMock(return_value=result)
+    session.get = AsyncMock(return_value=eo)
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+    tx = AsyncMock()
+    tx.__aenter__.return_value = None
+    tx.__aexit__.return_value = None
+    session.begin = MagicMock(return_value=tx)
+    factory = MagicMock(return_value=session_context)
+
+    await ExternalOperationService(factory).mark_failed_terminal(
+        eo_id, failure_code="ALL_CANDIDATES_FAILED"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_terminal_from_prepared() -> None:
+    eo_id = uuid.uuid4()
+    eo = ExternalOperationModel(
+        id=eo_id,
+        operation_key="op-prepared",
+        provider="static-preview-deploy-v1",
+        action="deploy",
+        status="PREPARED",
+        request_digest="abc",
+        permit_id=uuid.uuid4(),
+        local_fencing_token=uuid.uuid4(),
+        dispatch_generation=0,
+        result_summary={},
+    )
+    session = AsyncMock()
+    result = MagicMock()
+    result.rowcount = 1
+    session.execute = AsyncMock(return_value=result)
+    session.get = AsyncMock(return_value=eo)
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+    tx = AsyncMock()
+    tx.__aenter__.return_value = None
+    tx.__aexit__.return_value = None
+    session.begin = MagicMock(return_value=tx)
+    factory = MagicMock(return_value=session_context)
+
+    await ExternalOperationService(factory).mark_failed_terminal(
+        eo_id, failure_code="NEVER_DISPATCHED"
+    )
+    session.execute.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_terminal_rejects_wrong_status() -> None:
+    eo_id = uuid.uuid4()
+    eo = ExternalOperationModel(
+        id=eo_id,
+        operation_key="op-succeeded",
+        provider="static-preview-deploy-v1",
+        action="deploy",
+        status="SUCCEEDED",
+        request_digest="abc",
+        permit_id=uuid.uuid4(),
+        local_fencing_token=uuid.uuid4(),
+        dispatch_generation=1,
+        result_summary={},
+    )
+    session = AsyncMock()
+    result = MagicMock()
+    result.rowcount = 0
+    session.execute = AsyncMock(return_value=result)
+    session.get = AsyncMock(return_value=eo)
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+    tx = AsyncMock()
+    tx.__aenter__.return_value = None
+    tx.__aexit__.return_value = None
+    session.begin = MagicMock(return_value=tx)
+    factory = MagicMock(return_value=session_context)
+
+    with pytest.raises(DomainError):
+        await ExternalOperationService(factory).mark_failed_terminal(
+            eo_id, failure_code="X"
+        )

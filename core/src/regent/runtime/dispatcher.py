@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ _NON_RETRYABLE_DOMAIN_CODES = frozenset(
         ErrorCode.INVALID_STATE,
         ErrorCode.NOT_FOUND,
         ErrorCode.POLICY_DENIED,
+        ErrorCode.DELIVERY_REJECTED,
         ErrorCode.GOAL_TERMINAL,
         ErrorCode.PERMIT_REQUIRED,
         ErrorCode.PERMIT_INVALID,
@@ -107,12 +109,14 @@ class OutboxDispatcher:
         lease_seconds: int = 30,
         retry_seconds: int = 5,
         max_attempts: int = 8,
+        dispatch_concurrency: int = 1,
     ) -> None:
         self._sessions = sessions
         self._handlers = handlers
         self._lease_seconds = lease_seconds
         self._retry_seconds = retry_seconds
         self._max_attempts = max_attempts
+        self._dispatch_concurrency = max(1, int(dispatch_concurrency))
 
     async def claim(self, worker_id: str, *, limit: int = 10) -> list[ClaimedEvent]:
         async with self._sessions() as session, session.begin():
@@ -137,28 +141,53 @@ class OutboxDispatcher:
                 )
             return claimed
 
-    async def dispatch_once(self, worker_id: str, *, limit: int = 10) -> int:
-        claimed = await self.claim(worker_id, limit=limit)
-        for event in claimed:
-            handler = self._handlers.get(event.event_type)
-            if handler is None:
-                await self.fail(
-                    event.id,
-                    worker_id,
-                    f"no handler registered for {event.event_type}",
-                )
-                continue
-            try:
-                await handler(event.payload)
-            except Exception as exc:
-                await self.fail(
-                    event.id,
-                    worker_id,
-                    f"{type(exc).__name__}: {exc}",
-                    retryable=is_retryable_handler_error(exc),
-                )
-            else:
-                await self.ack(event.id, worker_id)
+    async def _dispatch_one(self, worker_id: str, event: ClaimedEvent) -> None:
+        handler = self._handlers.get(event.event_type)
+        if handler is None:
+            # Missing handler is a permanent wiring bug — do not burn retries
+            # and poison the outbox (e.g. historical DeliveryStateChanged).
+            await self.fail(
+                event.id,
+                worker_id,
+                f"no handler registered for {event.event_type}",
+                retryable=False,
+            )
+            return
+        try:
+            await handler(event.payload)
+        except Exception as exc:
+            await self.fail(
+                event.id,
+                worker_id,
+                f"{type(exc).__name__}: {exc}",
+                retryable=is_retryable_handler_error(exc),
+            )
+        else:
+            await self.ack(event.id, worker_id)
+
+    async def dispatch_once(self, worker_id: str, *, limit: int | None = None) -> int:
+        """Claim due events and run handlers (optionally in parallel).
+
+        Claim size defaults to ``dispatch_concurrency`` so a worker does not
+        pin many long LLM events while only running a few at a time. Multi-worker
+        fleets rely on ``SKIP LOCKED`` for horizontal parallelism.
+        """
+        claim_limit = self._dispatch_concurrency if limit is None else max(1, int(limit))
+        claimed = await self.claim(worker_id, limit=claim_limit)
+        if not claimed:
+            return 0
+        if self._dispatch_concurrency <= 1 or len(claimed) == 1:
+            for event in claimed:
+                await self._dispatch_one(worker_id, event)
+            return len(claimed)
+
+        sem = asyncio.Semaphore(self._dispatch_concurrency)
+
+        async def _guarded(event: ClaimedEvent) -> None:
+            async with sem:
+                await self._dispatch_one(worker_id, event)
+
+        await asyncio.gather(*[_guarded(event) for event in claimed])
         return len(claimed)
 
     async def ack(self, event_id: uuid.UUID, worker_id: str) -> None:
@@ -224,6 +253,13 @@ class OutboxDispatcher:
                 self._retry_seconds * 2 ** max(event.attempt - 1, 0),
                 300,
             )
+            # Gateway / concurrency pressure: back off harder so we don't storm.
+            err_l = error.lower()
+            exp = 2 ** max(event.attempt - 1, 0)
+            if "lease_conflict" in err_l or "concurrency cap" in err_l:
+                delay = max(delay, min(45 * exp, 300))
+            elif "504" in err_l or "gateway time" in err_l or "timeout" in err_l:
+                delay = max(delay, min(60 * exp, 300))
             tagged_error = error if retryable else f"[non-retryable] {error}"
             result = cast(
                 CursorResult[Any],

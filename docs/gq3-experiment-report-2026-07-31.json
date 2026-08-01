@@ -28,20 +28,20 @@
     "not_p24_org_dimensions": true,
     "summaries": {
       "artifact_backed": {
-        "n": 4,
+        "n": 7,
         "pass_rate": 0.0,
         "ci95": {
           "low": 0.0,
-          "high": 0.4899
+          "high": 0.3543
         },
         "mean_cost": 0.0,
         "cost_per_verified_success": null,
-        "p95_latency_ms": 245636.573,
+        "p95_latency_ms": 17806999.719,
         "user_quality": {
-          "n": 4,
+          "n": 7,
           "first_runnable_rate": 0.0,
-          "mean_repair_rounds": 2.25,
-          "human_intervention_rate": 0.75,
+          "mean_repair_rounds": 7.857142857142857,
+          "human_intervention_rate": 0.7142857142857143,
           "mean_wall_time_to_usable_ms": null,
           "status": "OK",
           "contract_version": "gq-user-quality/v1"
@@ -58,11 +58,11 @@
         },
         "mean_cost": 0.0,
         "cost_per_verified_success": null,
-        "p95_latency_ms": 1207181.799,
+        "p95_latency_ms": 18952107.876,
         "user_quality": {
           "n": 1,
           "first_runnable_rate": 0.0,
-          "mean_repair_rounds": 5.0,
+          "mean_repair_rounds": 6.0,
           "human_intervention_rate": 1.0,
           "mean_wall_time_to_usable_ms": null,
           "status": "OK",
@@ -73,12 +73,12 @@
       }
     },
     "decision": "INSUFFICIENT_EVIDENCE",
-    "rationale": "need ≥30 samples/arm (got artifact=4, agentic=1)",
+    "rationale": "need ≥30 samples/arm (got artifact=7, agentic=1)",
     "guardrail_trips": [],
     "actor": "gq3-production-report",
-    "created_at": "2026-07-31T10:48:29.826049+00:00",
-    "experiment_id": "77a6e1e5-c8fe-4026-92ac-8b2d4db3bcef",
-    "content_hash": "55f3aa2c2848877f4551140d30758cd6f0fa155143cee713d36c5464ba3200c2",
+    "created_at": "2026-07-31T15:45:19.929562+00:00",
+    "experiment_id": "73c6053b-2a84-4825-a947-435ea9c378b3",
+    "content_hash": "6b8bc358598d323b885e10371dba3773d836101af53cab8894435c13cd759acb",
     "production_window": {
       "opened_at": "2026-07-31T10:00:00+00:00",
       "max_days": 21,
@@ -87,9 +87,9 @@
       "unit_of_analysis": "independent_goal",
       "assignment": "intent_to_treat_first_plan_in_window",
       "success_definition": "goal.status == ACHIEVED",
-      "n_goals": 5,
+      "n_goals": 8,
       "n_by_variant": {
-        "artifact_backed": 4,
+        "artifact_backed": 7,
         "agentic": 1
       }
     },
@@ -110,5 +110,5 @@
     "in_flight_run_semantics": "new Runs use fallback; in-flight complete frozen plan or cancel",
     "decision_record_ref": "pending-gq4-decision-note"
   },
-  "observations_n": 5
+  "observations_n": 8
 }

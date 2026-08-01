@@ -36,6 +36,14 @@ const STAGE_LABELS: Record<string, string> = {
   FAILED: '遇到问题，正在处理',
 }
 
+const GENERATION_PROGRESS_LABELS: Record<string, string> = {
+  queued: '排队等待生成...',
+  calling_model: '正在调用模型生成...',
+  stalled: '生成停滞，可点继续',
+  needs_continue: '已失败，可点继续',
+  waiting_human: '需要你确认',
+}
+
 /** Product-friendly status labels (shown in badge) */
 const GOAL_STATUS_LABELS: Record<string, string> = {
   DRAFT: '草稿',
@@ -88,6 +96,14 @@ function statusDot(status: string) {
 }
 
 export function Sidebar({ projects, currentProject, onSelect, onNew, isOpen }: SidebarProps) {
+  const [showTerminal, setShowTerminal] = useState(false)
+  const visible = projects.filter(p => {
+    const s = String(p.status || '').toUpperCase()
+    if (s === 'FAILED' || s === 'CANCELLED') return showTerminal
+    return true
+  })
+  const hiddenCount = projects.length - visible.length
+
   return (
     <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
       <div className="brand">
@@ -96,7 +112,7 @@ export function Sidebar({ projects, currentProject, onSelect, onNew, isOpen }: S
       </div>
       <button className="new-btn" onClick={onNew}>+ 新建 App</button>
       <div className="threads">
-        {projects.map(p => (
+        {visible.map(p => (
           <button
             key={p.id}
             className={`thread ${currentProject?.id === p.id ? 'active' : ''}`}
@@ -107,6 +123,15 @@ export function Sidebar({ projects, currentProject, onSelect, onNew, isOpen }: S
           </button>
         ))}
       </div>
+      {hiddenCount > 0 || showTerminal ? (
+        <button
+          type="button"
+          className="sidebar-toggle-terminal"
+          onClick={() => setShowTerminal(v => !v)}
+        >
+          {showTerminal ? '隐藏已结束僵尸' : `显示已结束（${hiddenCount}）`}
+        </button>
+      ) : null}
       <div className="sidefoot">所有对话、执行与决策均持久保存</div>
     </aside>
   )
@@ -115,6 +140,7 @@ export function Sidebar({ projects, currentProject, onSelect, onNew, isOpen }: S
 interface StageBarProps {
   status: {
     goal: { status: string; metadata: Record<string, unknown>; execution_stage?: { stage: string } } | null
+    generation_progress?: string
   } | null
   progressNodes?: { key: NodeKey; status: NodeStatus }[]
   liveActivity?: LiveActivity
@@ -139,7 +165,12 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
   const goal = status.goal
   const meta = goal.metadata || {}
   const stage = (meta.execution_stage as string) || goal.execution_stage?.stage || goal.status
-  const label = STAGE_LABELS[stage] || GOAL_STATUS_LABELS[goal.status] || stage
+  const genProgress = String(status.generation_progress || meta.generation_progress || '')
+  const label =
+    GENERATION_PROGRESS_LABELS[genProgress] ||
+    STAGE_LABELS[stage] ||
+    GOAL_STATUS_LABELS[goal.status] ||
+    stage
   const goalStatusLabel = GOAL_STATUS_LABELS[goal.status] || goal.status
   const live = deriveLiveLabel(
     liveActivity ?? { connection: 'idle', lastProgressAt: null, lastHeartbeatAt: null, liveAction: null },
@@ -162,8 +193,12 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
   const stripSummary =
     waitingLive && goal.status === 'ACTIVE'
       ? '已批准，正在继续执行'
-      : liveSummary
-  const showElapsed = !(waitingLive && goal.status === 'ACTIVE')
+      : genProgress === 'queued'
+        ? '排队等待生成槽位'
+        : genProgress === 'calling_model'
+          ? (liveSummary || '正在调用模型生成代码')
+          : liveSummary
+  const showElapsed = !(waitingLive && goal.status === 'ACTIVE') && genProgress !== 'queued'
 
   // Compute progress from nodes
   const completedCount = progressNodes
@@ -171,6 +206,12 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
     : 0
   const totalStages = PROGRESS_STAGES.length
   const isActive = goal.status === 'ACTIVE' || goal.status === 'WAITING_HUMAN' || goal.status === 'PAUSED'
+  const canContinue =
+    goal.status === 'EXHAUSTED' ||
+    goal.status === 'BLOCKED' ||
+    goal.status === 'FAILED' ||
+    genProgress === 'stalled' ||
+    genProgress === 'needs_continue'
 
   return (
     <div className="stage-bar-wrap">
@@ -212,7 +253,7 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
       </div>
 
       <div className="quick-actions">
-        {goal.status === 'ACTIVE' && (
+        {goal.status === 'ACTIVE' && genProgress !== 'stalled' && (
           <button className="qa-btn" onClick={() => onQuickAction('暂停执行')}>暂停</button>
         )}
         {goal.status === 'PAUSED' && (
@@ -224,9 +265,9 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
             <button className="qa-btn danger" onClick={() => onQuickAction('拒绝，需要修改')}>拒绝</button>
           </>
         )}
-        {(goal.status === 'EXHAUSTED' || goal.status === 'BLOCKED') && (
+        {canContinue && (
           <button className="qa-btn" onClick={() => onQuickAction('继续尝试，请根据上次失败重新规划')}>
-            继续尝试
+            继续此目标
           </button>
         )}
       </div>

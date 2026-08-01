@@ -1,0 +1,9 @@
+{
+  "skill_id": "runtime-contract",
+  "version": "1.0.0",
+  "title": "Runtime Contract",
+  "description": "Align generated apps with Runtime Profile entry/start/smoke/test contracts.",
+  "applies_when": ["flask", "fastapi", "runtime", "health", "smoke", "profile", "web app"],
+  "anti_examples": ["pure static marketing page with no backend contract"],
+  "gap_codes": ["START_FAILED", "SMOKE_FAILED", "smoke-http", "smoke-start", "no app.py"]
+}

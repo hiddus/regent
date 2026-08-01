@@ -1,0 +1,10 @@
+{
+  "id": "provider-http-503",
+  "description": "Upstream 5xx sample for retry classification fixtures",
+  "http_status": 503,
+  "response_text": "{\"error\":{\"message\":\"unavailable\"}}",
+  "expect": {
+    "retryable": true,
+    "status": 503
+  }
+}

@@ -6,11 +6,13 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from regent.application.p1_contracts import FileChangeSet, GenerationPlanContract, canonical_hash
 from regent.application.p1_ports import FileChangeSetGenerator
 from regent.application.generator_metadata import assert_generator_consistency
 from regent.application.generation_strategy_policy import resolve_effective_generation_strategy
+from regent.application.planned_path_policy import expand_planned_paths
 from regent.config import get_settings
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
@@ -69,7 +71,8 @@ class GenerationService:
                 if existing.status in {"COMPLETED", "FAILED"}:
                     existing.status = "FROZEN"
                     existing.version += 1
-                    await session.flush()
+                self._expand_plan_contract(existing)
+                await session.flush()
                 return existing
             requirement = await session.get(
                 RequirementRevisionModel, command.requirement_revision_id
@@ -117,8 +120,27 @@ class GenerationService:
         if plan.status in reopenable:
             plan.status = "FROZEN"
             plan.version += 1
+            GenerationService._expand_plan_contract(plan)
         elif plan.status != "FROZEN":
             raise DomainError(ErrorCode.INVALID_STATE, "frozen generation plan is required")
+        else:
+            GenerationService._expand_plan_contract(plan)
+
+    @staticmethod
+    def _expand_plan_contract(plan: GenerationPlanModel) -> None:
+        """Persist scaffold allowlist into frozen plan so LLM + validators share one set."""
+        contract = dict(plan.contract_json or {})
+        acceptance = contract.get("acceptance_contract") or {}
+        scale = ""
+        if isinstance(acceptance, dict):
+            scale = str(acceptance.get("goal_scale") or "")
+        expanded = expand_planned_paths(contract.get("planned_paths") or [], goal_scale=scale)
+        if list(contract.get("planned_paths") or []) == expanded:
+            return
+        contract["planned_paths"] = expanded
+        plan.contract_json = contract
+        flag_modified(plan, "contract_json")
+        plan.version += 1
 
     async def request_run(self, command: RequestGenerationRun) -> GenerationRunModel:
         async with self._sessions() as session, session.begin():
@@ -199,6 +221,9 @@ class GenerationService:
         on_progress: Any = None,
     ) -> WorkspaceSnapshotModel:
         plan_payload = await self._claim(run_id)
+        if base_workspace is not None:
+            # Agentic generator reads base_workspace from the plan dict.
+            plan_payload["base_workspace"] = str(base_workspace)
         try:
             # GQ-1/GQ-3: select the concrete generator for this goal before any
             # consistency check or generation call. A GeneratorSelector resolves
@@ -227,11 +252,27 @@ class GenerationService:
                 # Older generators without on_progress kwarg.
                 generated = await generate(plan_payload)
             changes = generated.output
-            planned_paths = set(plan_payload.get("planned_paths", []))
+            from regent.application.planned_path_policy import is_path_within_frozen_plan
+
+            # planned_paths already expanded + persisted in _claim; re-expand is idempotent.
+            planned_paths = set(
+                expand_planned_paths(
+                    plan_payload.get("planned_paths") or [],
+                    goal_scale=str(
+                        (plan_payload.get("acceptance_contract") or {}).get("goal_scale") or ""
+                    ),
+                )
+            )
             if planned_paths and any(
-                change.relative_path not in planned_paths for change in changes.changes
+                not is_path_within_frozen_plan(change.relative_path, planned_paths)
+                for change in changes.changes
             ):
                 raise DomainError(ErrorCode.POLICY_DENIED, "generated path is outside frozen plan")
+            if not changes.changes:
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED,
+                    "generated changeset empty after planned-path filter",
+                )
             commit = self._writer.apply(str(run_id), changes, base_workspace=base_workspace)
             return await self._complete(
                 run_id,
@@ -242,8 +283,14 @@ class GenerationService:
                 generated.output_tokens,
                 str(plan_payload["runtime_profile_hash"]),
             )
-        except Exception:
-            await self._fail(run_id)
+        except DomainError as exc:
+            await self._fail(run_id, failure_code=exc.code.value)
+            raise
+        except Exception as exc:
+            await self._fail(
+                run_id,
+                failure_code=type(exc).__name__[:64] or "GENERATION_EXECUTION_FAILED",
+            )
             raise
 
     async def _claim(self, run_id: uuid.UUID) -> dict[str, Any]:
@@ -260,7 +307,12 @@ class GenerationService:
             run.version += 2
             plan.status = "EXECUTING"
             plan.version += 1
-            return dict(plan.contract_json)
+            self._expand_plan_contract(plan)
+            payload = dict(plan.contract_json)
+            # Bind attempt so agent transcript / review can attach to this run.
+            payload["generation_run_id"] = str(run.id)
+            payload["plan_id"] = str(plan.id)
+            return payload
 
     async def _complete(
         self,
@@ -317,12 +369,12 @@ class GenerationService:
             await session.flush()
             return snapshot
 
-    async def _fail(self, run_id: uuid.UUID) -> None:
+    async def _fail(self, run_id: uuid.UUID, *, failure_code: str | None = None) -> None:
         async with self._sessions() as session, session.begin():
             run = await session.get(GenerationRunModel, run_id)
             if run is not None and run.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
                 run.status = "FAILED"
-                run.failure_code = "GENERATION_EXECUTION_FAILED"
+                run.failure_code = (failure_code or "GENERATION_EXECUTION_FAILED")[:128]
                 run.version += 1
                 plan = await session.get(GenerationPlanModel, run.plan_id)
                 if plan is not None and plan.status == "EXECUTING":

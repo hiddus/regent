@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
+import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+import pytest
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -21,6 +23,16 @@ def _compile_jsonb_sqlite(type_: JSONB, compiler: object, **kw: object) -> str:
 @compiles(PGUUID, "sqlite")
 def _compile_uuid_sqlite(type_: PGUUID, compiler: object, **kw: object) -> str:
     return "CHAR(36)"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """QA gate: isolate xdist workers under .pytest_tmp/<worker>."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if not worker:
+        return
+    basetemp = Path(".pytest_tmp") / worker
+    basetemp.mkdir(parents=True, exist_ok=True)
+    config.option.basetemp = str(basetemp)
 
 
 @pytest.fixture

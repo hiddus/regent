@@ -98,6 +98,33 @@ def test_deliverable_product_page_passes() -> None:
     )
 
 
+def test_small_preview_minimal_relaxes_observation_hook() -> None:
+    """SMALL / first milestone: observation hook not required for preview-minimal pass."""
+    html = """
+    <html><head><title>Todo List</title>
+    <style>
+    body { font-family: Georgia, serif; background:#f5f2ea; color:#1a1a1a; margin:0; }
+    main { max-width:640px; margin:0 auto; padding:2rem; }
+    h1 { font-size:1.6rem; }
+    .item { padding:0.75rem; border-bottom:1px solid #ddd; }
+    </style></head>
+    <body><main>
+      <h1>今日待办</h1>
+      <p>记录并勾选你今天要完成的几件小事，保持简单可用。</p>
+      <div class="item">写周报草稿</div>
+      <div class="item">回复客户邮件</div>
+      <div class="item">整理桌面文件</div>
+    </main></body></html>
+    """
+    result = review_html_for_delivery(
+        html,
+        acceptance_contract={"goal_scale": "SMALL", "forbid_full_goal_claim": True},
+    )
+    names = {c.name: c.passed for c in result.checks}
+    # Soft contract: no observation-hook requirement for SMALL preview-minimal.
+    assert "observation-hook" not in names or names.get("observation-hook") is True
+
+
 def test_observed_entries_must_render() -> None:
     html = _styled_digest_html()
     result = review_html_for_delivery(

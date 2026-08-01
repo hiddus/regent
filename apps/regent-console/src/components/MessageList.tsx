@@ -26,7 +26,17 @@ function goalAlreadyMoving(items: Message[], goalId?: string) {
   })
 }
 
-function taskAlreadyResolved(items: Message[], taskId?: string) {
+function taskAlreadyResolved(items: Message[], taskId?: string, taskMeta?: Record<string, unknown>) {
+  if (taskMeta) {
+    const status = String(taskMeta.status || '').toUpperCase()
+    if (status === 'COMPLETED' || status === 'TIMED_OUT' || status === 'CANCELLED') {
+      return true
+    }
+    const dueAt = typeof taskMeta.due_at === 'string' ? Date.parse(taskMeta.due_at) : NaN
+    if (Number.isFinite(dueAt) && dueAt <= Date.now()) {
+      return true
+    }
+  }
   if (!taskId) return false
   return items.some(m => {
     if (m.message_type !== 'APPROVE_RESULT' && m.message_type !== 'REJECT_RESULT') return false
@@ -34,8 +44,13 @@ function taskAlreadyResolved(items: Message[], taskId?: string) {
   })
 }
 
-function approveAlreadyDone(items: Message[], goalId?: string, taskId?: string) {
-  if (taskAlreadyResolved(items, taskId)) return true
+function approveAlreadyDone(
+  items: Message[],
+  goalId?: string,
+  taskId?: string,
+  taskMeta?: Record<string, unknown>,
+) {
+  if (taskAlreadyResolved(items, taskId, taskMeta)) return true
   if (!goalId && !taskId) {
     return items.some(m => m.message_type === 'APPROVE_RESULT')
   }
@@ -105,6 +120,7 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
         messages,
         (taskMeta.goal_id as string | undefined) || (m.metadata?.goal_id as string | undefined),
         taskId || undefined,
+        taskMeta,
       )
     : false
 

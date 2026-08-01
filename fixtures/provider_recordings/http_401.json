@@ -1,0 +1,10 @@
+{
+  "id": "provider-http-401",
+  "description": "Auth failure must not be retried as transient model error",
+  "http_status": 401,
+  "response_text": "{\"error\":{\"message\":\"invalid api key\"}}",
+  "expect": {
+    "retryable": false,
+    "status": 401
+  }
+}

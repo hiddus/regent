@@ -1,0 +1,31 @@
+{
+  "id": "provider-length-truncation",
+  "description": "finish_reason=length must become MODEL_TRUNCATED (never soft-stop success)",
+  "http_status": 200,
+  "response": {
+    "model": "replay-model",
+    "choices": [
+      {
+        "finish_reason": "length",
+        "message": {
+          "role": "assistant",
+          "content": "{\"path\": \"src/app.py\", \"content\": \"from flask",
+          "tool_calls": [
+            {
+              "id": "call_trunc",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{\"path\": \"src/app.py\", \"content\": \"from flask"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {"prompt_tokens": 120, "completion_tokens": 80}
+  },
+  "expect": {
+    "primary_failure_code": "MODEL_TRUNCATED"
+  }
+}

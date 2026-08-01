@@ -29,6 +29,8 @@ from regent.domain.transitions import (
             GoalState.BLOCKED,
         ),
         (GoalState.BLOCKED, GoalCommand.REPLAN, GoalState.ACTIVE),
+        (GoalState.EXHAUSTED, GoalCommand.REPLAN, GoalState.ACTIVE),
+        (GoalState.FAILED, GoalCommand.REPLAN, GoalState.ACTIVE),
         (GoalState.ACTIVE, GoalCommand.ACHIEVE, GoalState.ACHIEVED),
     ],
 )

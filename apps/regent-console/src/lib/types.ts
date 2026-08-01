@@ -60,6 +60,8 @@ export interface GoalStatus {
     failure_summary?: string
   } | null
   agents?: WorkspaceAgent[]
+  /** queued | calling_model | stalled | needs_continue | waiting_human | idle */
+  generation_progress?: string
 }
 
 export interface HealthStatus {

@@ -1,0 +1,127 @@
+{
+  "version": "agent-core-m0-v1",
+  "frozen_at": "2026-08-01T00:00:00Z",
+  "archetype": "light-backend-web-app",
+  "archetype_description": "轻后端 Web App：持久化 + 一个外部证据输入 + 可执行 Journey（addendum 校正）",
+  "runtime_profile_ref": "runtime-profile/flask-web-v1",
+  "debug_holdout": ["m0-11", "m0-12"],
+  "tasks": [
+    {
+      "id": "m0-01",
+      "difficulty": "easy",
+      "category": "crud_persist",
+      "description": "Flask 待办列表：创建/列表/完成，SQLite 持久化，首页 Journey",
+      "success_criteria": {"min_routes": 3, "requires_persistence": true, "journey": "create_then_list"},
+      "timeout_seconds": 900,
+      "budget_tokens": 80000
+    },
+    {
+      "id": "m0-02",
+      "difficulty": "easy",
+      "category": "crud_persist",
+      "description": "Flask 笔记应用：新建笔记、按 id 查看，SQLite，证据输入为一条种子笔记",
+      "success_criteria": {"min_routes": 3, "requires_persistence": true, "journey": "seed_then_read"},
+      "timeout_seconds": 900,
+      "budget_tokens": 80000
+    },
+    {
+      "id": "m0-03",
+      "difficulty": "medium",
+      "category": "crud_persist",
+      "description": "Flask 联系人簿：增删改查 + 搜索，SQLite",
+      "success_criteria": {"min_routes": 5, "requires_persistence": true, "journey": "create_search_delete"},
+      "timeout_seconds": 1200,
+      "budget_tokens": 120000
+    },
+    {
+      "id": "m0-04",
+      "difficulty": "medium",
+      "category": "evidence_input",
+      "description": "Flask 资讯摘要页：读取外部 http-snapshot 证据条目并渲染列表（禁止伪造记录）",
+      "success_criteria": {"min_list_items": 3, "must_render_observed_entries": true, "journey": "open_list"},
+      "timeout_seconds": 1200,
+      "budget_tokens": 120000
+    },
+    {
+      "id": "m0-05",
+      "difficulty": "medium",
+      "category": "evidence_input",
+      "description": "Flask 反馈收集：表单 POST 入库，列表展示，含 CSRF-safe 简单表单",
+      "success_criteria": {"requires_persistence": true, "journey": "submit_then_list"},
+      "timeout_seconds": 1200,
+      "budget_tokens": 100000
+    },
+    {
+      "id": "m0-06",
+      "difficulty": "medium",
+      "category": "api_json",
+      "description": "Flask JSON API：/api/items CRUD，返回 JSON，含 pytest",
+      "success_criteria": {"min_routes": 4, "requires_tests": true, "journey": "api_create_get"},
+      "timeout_seconds": 1200,
+      "budget_tokens": 120000
+    },
+    {
+      "id": "m0-07",
+      "difficulty": "hard",
+      "category": "api_json",
+      "description": "Flask 分页列表 API + 过滤查询参数 + 空状态诚实返回",
+      "success_criteria": {"requires_tests": true, "journey": "api_filter_empty"},
+      "timeout_seconds": 1500,
+      "budget_tokens": 140000
+    },
+    {
+      "id": "m0-08",
+      "difficulty": "hard",
+      "category": "repair",
+      "description": "给定残缺 Flask App（缺 requirements/路由错误），修复至可启动并通过 Journey",
+      "success_criteria": {"journey": "open_home", "is_repair_task": true},
+      "timeout_seconds": 1500,
+      "budget_tokens": 140000
+    },
+    {
+      "id": "m0-09",
+      "difficulty": "hard",
+      "category": "repair",
+      "description": "给定测试失败的 Flask CRUD，修复测试与实现至 pytest 绿",
+      "success_criteria": {"requires_tests": true, "is_repair_task": true, "journey": "pytest_pass"},
+      "timeout_seconds": 1500,
+      "budget_tokens": 140000
+    },
+    {
+      "id": "m0-10",
+      "difficulty": "hard",
+      "category": "multi_file",
+      "description": "多文件 Flask 应用：templates + static + models + routes 分层，含 smoke Journey",
+      "success_criteria": {"min_files": 6, "requires_persistence": true, "journey": "create_then_list"},
+      "timeout_seconds": 1800,
+      "budget_tokens": 160000
+    },
+    {
+      "id": "m0-11",
+      "difficulty": "easy",
+      "category": "holdout",
+      "description": "[holdout] Flask 简单计数器：点击递增，会话或 SQLite 持久化",
+      "success_criteria": {"journey": "increment_persist"},
+      "timeout_seconds": 900,
+      "budget_tokens": 80000
+    },
+    {
+      "id": "m0-12",
+      "difficulty": "medium",
+      "category": "holdout",
+      "description": "[holdout] Flask 标签笔记：多对多标签过滤列表",
+      "success_criteria": {"requires_persistence": true, "journey": "tag_filter"},
+      "timeout_seconds": 1200,
+      "budget_tokens": 120000
+    }
+  ],
+  "metadata": {
+    "seed": "agent-core-m0-2026-08-01",
+    "baseline": "strong_single_agent",
+    "engineering_gate_only": true,
+    "no_significance_claims": true,
+    "min_pass_rate": null,
+    "content_hash_file": "agent_core_m0_task_set_v1.sha256",
+    "content_hash_note": "sha256 companion file covers full JSON bytes of this freeze"
+  }
+}

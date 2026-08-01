@@ -113,7 +113,10 @@ class GoalExecutionService:
             current_stage = str(metadata.get("execution_stage", "NOT_STARTED"))
             if current_key == idempotency_key and goal.status == "ACTIVE":
                 return GoalExecutionReceipt(goal.id, project.id, goal.status, current_stage, None)
-            retryable = goal.status == "ACTIVE" and current_stage == "FAILED"
+            retryable = goal.status == "ACTIVE" and (
+                current_stage == "FAILED"
+                or str(idempotency_key).startswith("guidance-continue:")
+            )
             if (
                 (goal.status != "READY" and not retryable)
                 or spec.status != "FROZEN"

@@ -143,7 +143,7 @@ async def test_timeout_due_applies_default_deny_and_emits(db_sessions) -> None:
     async with db_sessions() as session:
         task = await session.get(HumanTaskModel, task_id)
         assert task is not None
-        assert task.status == "COMPLETED"
+        assert task.status == "TIMED_OUT"
         assert task.response.get("decision") == "REJECT"
         assert task.response.get("reason") == "timeout_default"
         events = (
@@ -155,3 +155,47 @@ async def test_timeout_due_applies_default_deny_and_emits(db_sessions) -> None:
         ).scalars().all()
         assert len(events) == 1
         assert events[0].payload.get("approved") is False
+
+
+@pytest.mark.asyncio
+async def test_timeout_due_extends_delivery_gap_instead_of_reject(db_sessions) -> None:
+    """Delivery-gap handoffs must not auto-REJECT after a short due window."""
+    goal_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+    async with db_sessions() as session, session.begin():
+        session.add(
+            GoalModel(
+                id=goal_id,
+                original_input="delivery gap fixture",
+                created_by="tester",
+                correlation_id=uuid.uuid4(),
+                status=GoalState.WAITING_HUMAN.value,
+                metadata_json={},
+            )
+        )
+        session.add(
+            HumanTaskModel(
+                id=task_id,
+                goal_id=goal_id,
+                work_id=None,
+                run_id=None,
+                task_type="DELIVERY_GAP_INTERVENE",
+                prompt="Need direction",
+                requested_by="regent-core",
+                due_at=datetime.now(UTC) - timedelta(minutes=1),
+                status="OPEN",
+            )
+        )
+
+    n = await HumanTaskService(db_sessions).timeout_due()
+    assert n == 1
+
+    async with db_sessions() as session:
+        task = await session.get(HumanTaskModel, task_id)
+        assert task is not None
+        assert task.status == "OPEN"
+        due = task.due_at
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=UTC)
+        assert due > datetime.now(UTC) + timedelta(days=6)
+        assert task.response is None or task.response.get("decision") != "REJECT"

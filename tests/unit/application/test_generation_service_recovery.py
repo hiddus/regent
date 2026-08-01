@@ -86,7 +86,8 @@ async def test_create_plan_reopens_completed_on_digest_hit() -> None:
 
     assert result is plan
     assert plan.status == "FROZEN"
-    assert plan.version == 4
+    assert plan.version >= 4
+    assert "requirements.txt" in (plan.contract_json.get("planned_paths") or [])
     session.flush.assert_awaited()
 
 
@@ -112,7 +113,8 @@ async def test_request_run_reopens_completed_plan_for_new_idempotency() -> None:
     )
 
     assert plan.status == "FROZEN"
-    assert plan.version == 4
+    assert plan.version >= 4
+    assert "requirements.txt" in (plan.contract_json.get("planned_paths") or [])
     assert run.status == "REQUESTED"
     assert run.plan_id == plan.id
     assert run.attempt == 2

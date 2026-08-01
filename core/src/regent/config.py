@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_name: str | None = None
     model_api_key: SecretStr | None = None
+    # GLM / long codegen often exceeds 180s; 504s still retry via outbox backoff.
+    model_timeout_seconds: float = Field(default=300.0, ge=30.0, le=1800.0)
+    # M1-1: configurable chat completion output cap (None disables max_tokens).
+    model_max_output_tokens: int | None = Field(default=8192, ge=256, le=128_000)
     generation_strategy: Literal["artifact-backed", "agentic"] = "artifact-backed"
     generation_strategy_kill_switch: bool = False
     generation_strategy_fallback: Literal["artifact-backed", "agentic"] = "artifact-backed"
@@ -68,6 +72,10 @@ class Settings(BaseSettings):
     decision_deny_actions: str = ""
     confirmation_timeout_seconds: int = Field(default=300, ge=0)
     reconciliation_interval_seconds: float = Field(default=300.0, ge=30.0)
+    # 0 = derive from worker_replicas × worker_dispatch_concurrency × 2
+    max_concurrent_generating: int = Field(default=0, ge=0, le=64)
+    worker_dispatch_concurrency: int = Field(default=2, ge=1, le=32)
+    worker_replicas: int = Field(default=1, ge=1, le=32)
     privacy_consent_enforced: bool = True
     privacy_retention_days: int = Field(default=90, ge=1, le=3650)
     privacy_retention_interval_seconds: float = Field(default=3600.0, ge=60.0)

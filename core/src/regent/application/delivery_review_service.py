@@ -70,18 +70,18 @@ def _first_match_text(pattern: re.Pattern[str], html: str) -> str:
     return _strip_tags(match.group(1)).strip()
 
 
-def _rules(goal_scale: str | None = None) -> dict[str, Any]:
+def _rules(goal_scale: str | None = None, *, first_milestone: bool = False) -> dict[str, Any]:
     package = load_delivery_review_capability_package()
     verification = dict(package.verification or {})
     rules = dict(verification.get("rules") or {})
-    # SMALL goals get relaxed thresholds — they are single-milestone, simpler products.
-    if goal_scale == "SMALL":
-        rules.setdefault("min_structure_signals", 1)
-        rules["min_structure_signals"] = min(int(rules.get("min_structure_signals") or 2), 1)
-        rules.setdefault("min_style_signals", 2)
-        rules["min_style_signals"] = min(int(rules.get("min_style_signals") or 4), 2)
-        rules.setdefault("min_visible_text_chars", 120)
-        rules["min_visible_text_chars"] = min(int(rules.get("min_visible_text_chars") or 280), 120)
+    # SMALL / first milestone: preview-minimal contract (still fail-closed on danger).
+    if goal_scale == "SMALL" or first_milestone:
+        rules["min_structure_signals"] = 1
+        rules["min_style_signals"] = 1
+        rules["min_style_chars"] = 40
+        rules["min_visible_text_chars"] = 80
+        # Observation hooks are product telemetry, not required for a usable preview.
+        rules["require_observation_hook"] = False
     return rules
 
 
@@ -105,8 +105,11 @@ def review_html_for_delivery(
 ) -> DeliveryReviewResult:
     """Review generated HTML as a deliverable product page, not a demo stub."""
     contract = dict(acceptance_contract or {})
-    goal_scale = str(contract.get("goal_scale") or "")
-    rules = _rules(goal_scale=goal_scale or None)
+    goal_scale = str(contract.get("goal_scale") or "").upper()
+    first_milestone = bool(contract.get("forbid_full_goal_claim")) or int(
+        contract.get("milestone_ordinal") or 0
+    ) in {0, 1}
+    rules = _rules(goal_scale=goal_scale or None, first_milestone=first_milestone)
     criteria = dict(success_criteria or {})
     checks: list[DeliveryReviewCheck] = []
     lower = html.lower()

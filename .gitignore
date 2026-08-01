@@ -107,6 +107,15 @@ ops/compare_*.py
 ops/_*.py
 ops/archive/
 
+# Keep durable delivery unstick scripts in-repo (override broad ops/* ignores above).
+!ops/reclaim_generation_outbox.py
+!ops/fix_delivery_stuck.py
+!ops/apply_p1_runtime_knobs.py
+!ops/scale_workers.py
+!ops/probe_delivery_stuck.py
+!ops/probe_p1_runtime.py
+!ops/restart_api_verify_p1.py
+
 # archive directory at root (tarballs, reports, artifacts)
 /archive/
 

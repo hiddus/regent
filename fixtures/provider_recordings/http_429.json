@@ -1,0 +1,10 @@
+{
+  "id": "provider-http-429",
+  "description": "Rate limit sample for retry classification fixtures",
+  "http_status": 429,
+  "response_text": "{\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_error\"}}",
+  "expect": {
+    "retryable": true,
+    "status": 429
+  }
+}

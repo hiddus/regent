@@ -336,21 +336,32 @@ def gq4_default_switch_gate(
     kill_switch: bool,
 ) -> dict[str, Any]:
     """GQ-4 hook: only PROMOTE_AGENTIC_CANDIDATE + no kill switch may switch default."""
-    allowed = (
-        not kill_switch
-        and experiment_report.get("decision") == "PROMOTE_AGENTIC_CANDIDATE"
-    )
+    if kill_switch:
+        return {
+            "activation_allowed": False,
+            "proposed_default": "artifact-backed",
+            "reason": "kill_switch",
+            "in_flight_run_semantics": (
+                "new Runs use fallback; in-flight complete frozen plan or cancel"
+            ),
+        }
+    if experiment_report.get("funnel_degraded") or (
+        (experiment_report.get("funnel_health") or {}).get("degraded")
+    ):
+        return {
+            "activation_allowed": False,
+            "proposed_default": "artifact-backed",
+            "reason": "funnel_degraded",
+            "in_flight_run_semantics": (
+                "new Runs use fallback; in-flight complete frozen plan or cancel"
+            ),
+        }
+    allowed = experiment_report.get("decision") == "PROMOTE_AGENTIC_CANDIDATE"
     return {
         "activation_allowed": allowed,
         "proposed_default": "agentic" if allowed else "artifact-backed",
         "reason": (
-            "ok"
-            if allowed
-            else (
-                "kill_switch"
-                if kill_switch
-                else f"decision={experiment_report.get('decision')}"
-            )
+            "ok" if allowed else f"decision={experiment_report.get('decision')}"
         ),
         "in_flight_run_semantics": (
             "new Runs use fallback; in-flight complete frozen plan or cancel"

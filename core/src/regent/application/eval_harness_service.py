@@ -168,17 +168,22 @@ class EvalHarnessService:
     async def load_frozen_task_set(
         self, artifact_ref: str, *, actor: str = "regent-core",
     ) -> dict[str, Any]:
-        if os.path.isfile(artifact_ref):
-            with open(artifact_ref, encoding="utf-8") as f:
-                return json.load(f)
-        return {
-            "version": "v1",
-            "tasks": [
-                {"id": "task-1", "description": "default task", "expected": "ok"},
-            ],
-            "artifact_ref": artifact_ref,
-            "loaded_by": actor,
-        }
+        # QA gate: missing fixture must fail-closed (no silent default task set).
+        if not os.path.isfile(artifact_ref):
+            raise DomainError(
+                ErrorCode.NOT_FOUND,
+                f"frozen task set not found: {artifact_ref}",
+            )
+        with open(artifact_ref, encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict) or not list(payload.get("tasks") or []):
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                f"frozen task set empty or invalid: {artifact_ref}",
+            )
+        payload.setdefault("artifact_ref", artifact_ref)
+        payload.setdefault("loaded_by", actor)
+        return payload
 
     async def run_blind_evaluation(
         self, eval_run_id: uuid.UUID, *, actor: str = "regent-core",

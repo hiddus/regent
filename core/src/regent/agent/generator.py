@@ -17,6 +17,7 @@ from regent.agent.tools import WorkspaceToolkit
 from regent.agent.transcript_store import AgentTranscriptStore
 from regent.agent.types import (
     AgentBudget,
+    ArtifactIncompleteError,
     BudgetExhaustedError,
     VerificationGap,
 )
@@ -26,7 +27,9 @@ from regent.application.p1_ports import GeneratedFileChangeSet
 from regent.domain.errors import ErrorCode
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.sandbox import build_agent_sandbox
-from regent.model import ModelProvider
+from regent.model import ModelProvider, ModelTruncatedError, ToolCallInvalidError
+from regent.agent.accepted_workspace import write_accepted_workspace_snapshot
+from regent.agent.runtime_profile_v1 import parse_runtime_profile_v1
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +122,8 @@ class AgenticCodeGenerator:
             goal_id=goal_uuid,
             run_id=runtime_run_uuid,
             producer_ref=GENERATOR_REF,
+            runtime_profile=plan.get("runtime_profile"),
+            skills_enabled=bool(plan.get("skills_enabled", True)),
         )
 
         async def _on_turn(turn: int, summary: str) -> None:
@@ -147,9 +152,44 @@ class AgenticCodeGenerator:
                 on_event=_on_event if on_progress else None,
             )
         except BudgetExhaustedError as exc:
+            # M1-4: diagnostics already on disk; never promote / never count as success.
+            if not (sandbox / ".regent_budget_exhausted.json").exists():
+                (sandbox / ".regent_budget_exhausted.json").write_text(
+                    json.dumps(
+                        exc.diagnostic_manifest
+                        or {
+                            "primary_failure_code": "BUDGET_EXHAUSTED",
+                            "reason": exc.reason,
+                            "promote_allowed": False,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
             raise DeliveryRejection(
-                reasons=[f"EXHAUSTED_BUDGET: {exc.reason}"],
+                reasons=[f"BUDGET_EXHAUSTED: {exc.reason}"],
+                draft_uri=sandbox.resolve().as_uri(),
                 producer_ref=GENERATOR_REF,
+                gap_kind="BUDGET_EXHAUSTED",
+                message="agent budget exhausted; diagnostics retained, promote forbidden",
+            ) from exc
+        except (ModelTruncatedError, ToolCallInvalidError) as exc:
+            code = getattr(exc, "failure_code", "UNKNOWN")
+            raise DeliveryRejection(
+                reasons=[f"{code}: {exc}"],
+                draft_uri=sandbox.resolve().as_uri(),
+                producer_ref=GENERATOR_REF,
+                gap_kind=str(code),
+                message=f"agent model failure ({code})",
+            ) from exc
+        except ArtifactIncompleteError as exc:
+            raise DeliveryRejection(
+                reasons=[f"ARTIFACT_INCOMPLETE: {exc.reason}"],
+                draft_uri=sandbox.resolve().as_uri(),
+                producer_ref=GENERATOR_REF,
+                gap_kind="ARTIFACT_INCOMPLETE",
+                message="agent did not submit a complete artifact",
             ) from exc
 
         # Always persist transcript for audit (even on verification failure).
@@ -242,11 +282,53 @@ class AgenticCodeGenerator:
             reject_reasons.append(
                 f"draft_files={len(result.files)} draft_artifacts={draft_changes}"
             )
+            # Prefer canonical primary failure code when present.
+            primary = str(
+                (result.verification.smoke or {})
+                .get("stages", {})
+                .get("primary_failure_code")
+                or (result.verification.gaps[0].code if result.verification.gaps else "VERIFICATION_FAILED")
+            )
             raise DeliveryRejection(
                 reasons=reject_reasons,
                 draft_uri=draft_note or None,
                 producer_ref=GENERATOR_REF,
+                gap_kind=primary,
             )
+
+        # M2/M4-2: atomic accepted_workspace_snapshot after successful verification.
+        accepted_meta: dict[str, Any] | None = None
+        if result.verification is not None and result.verification.passed:
+            try:
+                profile = parse_runtime_profile_v1(
+                    dict(plan.get("runtime_profile") or {})
+                )
+                profile_hash = profile.content_hash if profile else "none"
+                verification_hash = str(
+                    (result.verification.smoke or {})
+                    .get("stages", {})
+                    .get("verification_hash")
+                    or ""
+                )
+                snap = write_accepted_workspace_snapshot(
+                    sandbox,
+                    self._workspace_root,
+                    profile_hash=profile_hash,
+                    verification_hash=verification_hash or "unhashed",
+                )
+                accepted_meta = snap.as_dict()
+                (sandbox / ".regent_accepted_workspace.json").write_text(
+                    json.dumps(accepted_meta, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:  # noqa: BLE001 — snapshot failure must not invent success
+                logger.exception("accepted workspace snapshot failed")
+                raise DeliveryRejection(
+                    reasons=["accepted_workspace_snapshot_failed"],
+                    draft_uri=sandbox.resolve().as_uri(),
+                    producer_ref=GENERATOR_REF,
+                    gap_kind="ARTIFACT_INCOMPLETE",
+                )
 
         changes = _materialize_incremental_changes(
             base_files=base_files,
@@ -256,7 +338,11 @@ class AgenticCodeGenerator:
             scope=scope,
         )
         if not changes:
-            raise ValueError("agentic generator produced no materializable files")
+            raise DeliveryRejection(
+                reasons=["empty-changeset: no materializable files after planned-path filter"],
+                gap_kind="empty-changeset",
+                producer_ref=GENERATOR_REF,
+            )
 
         return GeneratedFileChangeSet(
             output=FileChangeSet(
@@ -413,14 +499,9 @@ def _materialize_incremental_changes(
 
 
 def _allowed_extra(relative: str) -> bool:
-    name = relative.replace("\\", "/").lower()
-    return (
-        name in {"requirements.txt", "readme.md", "pyproject.toml"}
-        or name.startswith("tests/")
-        or name.startswith("static/")
-        or name.startswith("templates/")
-        or name.endswith((".html", ".css", ".js", ".py", ".md", ".txt", ".json"))
-    )
+    from regent.application.planned_path_policy import is_allowed_extra_path
+
+    return is_allowed_extra_path(relative)
 
 
 def _media_type(relative: str) -> str:

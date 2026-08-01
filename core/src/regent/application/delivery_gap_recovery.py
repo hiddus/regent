@@ -308,11 +308,62 @@ class DeliveryGapRecoveryService:
             # Merge halt already on the goal with caller-supplied context.
             prior_halt = dict(metadata.get("halt") or {})
             merged_halt = {**prior_halt, **dict(halt_context or {})}
+            # Persist last-good draft for human handoff / preview surfacing.
+            draft_uri = str(
+                merged_halt.get("draft_uri")
+                or metadata.get("last_good_draft_uri")
+                or ""
+            ).strip()
+            if draft_uri:
+                metadata["last_good_draft_uri"] = draft_uri
             attempts = int(metadata.get("delivery_gap_recovery_attempts") or 0)
             # 「总是允许」→ decision_allow_actions；仅在阶梯耗尽交人时跳过询问。
             gap_preauthorized = action_preauthorized(
                 metadata, "delivery_gap_intervene"
             )
+
+            # Same gap_kind hard cap: stop infinite escalate loops before ladder exhaust.
+            from regent.application.delivery_success_policy import SAME_GAP_KIND_HARD_CAP
+
+            prior_kind = str(metadata.get("delivery_gap_kind") or "")
+            streak = int(metadata.get("delivery_gap_kind_streak") or 0)
+            if prior_kind == gap_kind:
+                streak += 1
+            else:
+                streak = 1
+            metadata["delivery_gap_kind"] = gap_kind
+            metadata["delivery_gap_kind_streak"] = streak
+            if streak >= SAME_GAP_KIND_HARD_CAP and not gap_preauthorized:
+                draft_note = (
+                    f" 当前草稿：{draft_uri}" if draft_uri else ""
+                )
+                message = (
+                    f"同一类交付缺口（{gap_kind}）已连续自动修复 {streak} 次仍未过关。"
+                    "为避免空转，已暂停自动升级；请补充方向或批准后继续。"
+                    f"{draft_note}"
+                )
+                return await self._handoff_to_human(
+                    session,
+                    goal=goal,
+                    project_id=project_id,
+                    actor=actor,
+                    metadata=metadata,
+                    gap_kind=gap_kind,
+                    reasons=reasons,
+                    attempts=attempts,
+                    message=message,
+                    task_summary=f"同类缺口已达硬顶（{gap_kind}×{streak}），需要你的方向",
+                    task_rationale=(
+                        "同一 gap_kind 自动修复已达硬顶；"
+                        "补充方向或允许继续后将重置 streak 并重新规划。"
+                    ),
+                    extra_rules=["stage:DELIVERY_GAP_KIND_CAP", "gac:GAC-D1"],
+                    extra_termination={
+                        "same_gap_kind_cap": True,
+                        "gap_kind_streak": streak,
+                        "draft_uri": draft_uri or None,
+                    },
+                )
 
             # goal_intent / presentation / evidence 都是正常交付修复，不是危险动作：
             # 一律走能力阶梯自动重试。只有阶梯耗尽才需要人给新方向（见下方 handoff）。
@@ -709,6 +760,14 @@ class DeliveryGapRecoveryService:
         metadata["awaiting_human_intervention"] = True
         metadata["delivery_gap_kind"] = gap_kind
         metadata["delivery_state"] = DeliveryState.DELIVERED_FOR_REVIEW.value
+        draft_uri = str(
+            (extra_termination or {}).get("draft_uri")
+            or metadata.get("last_good_draft_uri")
+            or ""
+        ).strip()
+        if draft_uri:
+            metadata["last_good_draft_uri"] = draft_uri
+        preview_endpoint = str(metadata.get("last_preview_endpoint") or "").strip()
         metadata["termination"] = {
             "reason": "goal_attainment_needs_human",
             "definition": "REGENT-DEFINITION-1.0 ATTRIBUTE_7",
@@ -717,14 +776,21 @@ class DeliveryGapRecoveryService:
             "attempts_tried": attempts,
             "gac": "GAC-D1",
             "handoff": "WAITING_HUMAN",
+            "draft_uri": draft_uri or None,
+            "preview_endpoint": preview_endpoint or None,
             **(extra_termination or {}),
         }
         task_id = uuid.uuid4()
+        detail_parts = ["; ".join(reasons) if reasons else message[:500]]
+        if preview_endpoint:
+            detail_parts.append(f"可打开预览: {preview_endpoint}")
+        if draft_uri:
+            detail_parts.append(f"保留草稿: {draft_uri}")
         confirmation = confirmation_for_human_task(
             task_type="DELIVERY_GAP_INTERVENE",
             summary=task_summary,
             rationale=task_rationale,
-            detail="; ".join(reasons) if reasons else message[:500],
+            detail=" | ".join(detail_parts),
             prompt=message,
             extra_rules=extra_rules,
         )
@@ -749,6 +815,8 @@ class DeliveryGapRecoveryService:
             "gap_kind": gap_kind,
             "gap_reasons": reasons,
             "attempts_tried": attempts,
+            "draft_uri": draft_uri or None,
+            "preview_endpoint": preview_endpoint or None,
         }
         goal.metadata_json = merge_live_action_into_metadata(
             metadata,
@@ -827,6 +895,7 @@ class DeliveryGapRecoveryService:
                 ]
 
             metadata["delivery_gap_recovery_attempts"] = 0
+            metadata["delivery_gap_kind_streak"] = 0
             metadata["awaiting_human_intervention"] = False
             metadata.pop("termination", None)
             metadata.pop("pending_delivery_gap_human", None)

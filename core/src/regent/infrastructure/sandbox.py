@@ -153,11 +153,13 @@ class DockerSandboxDriver:
             "--cpus",
             "1",
             "--user",
-            "65532:65532",
+            self._run_as_user,
             "--mount",
-            f"type=bind,src={operation / 'input'},dst=/input,readonly",
+            f"type=bind,src={apply_host_path_map(operation / 'input', self._host_path_map)},"
+            f"dst=/input,readonly",
             "--mount",
-            f"type=bind,src={operation / 'output'},dst=/output",
+            f"type=bind,src={apply_host_path_map(operation / 'output', self._host_path_map)},"
+            f"dst=/output",
             self._image,
         ]
 
@@ -621,6 +623,8 @@ class DockerDependencyMaterializer:
         egress_proxy: str | None,
         permit_validator: PermitValidator,
         runner: CommandRunner = subprocess_runner,
+        host_path_map: dict[str, str] | None = None,
+        run_as_user: str | None = None,
     ) -> None:
         self._root = root.resolve()
         self._root.mkdir(parents=True, exist_ok=True)
@@ -628,6 +632,8 @@ class DockerDependencyMaterializer:
         self._proxy = egress_proxy
         self._permit_validator = permit_validator
         self._runner = runner
+        self._host_path_map = dict(host_path_map or {})
+        self._run_as_user = run_as_user or "65532:65532"
 
     async def materialize(
         self, request: DependencyMaterializationRequest
@@ -682,15 +688,16 @@ class DockerDependencyMaterializer:
             "--cpus",
             "1",
             "--user",
-            "65532:65532",
+            self._run_as_user,
             "--env",
             f"HTTPS_PROXY={self._proxy}",
             "--env",
             f"HTTP_PROXY={self._proxy}",
             "--mount",
-            f"type=bind,src={operation / 'request.json'},dst=/input/request.json,readonly",
+            f"type=bind,src={apply_host_path_map(operation / 'request.json', self._host_path_map)},"
+            f"dst=/input/request.json,readonly",
             "--mount",
-            f"type=bind,src={output},dst=/output",
+            f"type=bind,src={apply_host_path_map(output, self._host_path_map)},dst=/output",
             self._image,
         ]
         exit_code = await self._runner(command)

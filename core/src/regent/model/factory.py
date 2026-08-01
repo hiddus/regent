@@ -15,4 +15,6 @@ def build_model_provider(settings: Settings) -> OpenAICompatibleProvider:
         base_url=settings.model_base_url,
         api_key=settings.model_api_key.get_secret_value(),
         model=settings.model_name,
+        timeout_seconds=float(settings.model_timeout_seconds),
+        max_output_tokens=settings.model_max_output_tokens,
     )

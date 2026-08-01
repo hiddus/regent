@@ -115,7 +115,14 @@ SELECT
   COALESCE(ra.input_tokens, 0) AS input_tokens,
   COALESCE(ra.output_tokens, 0) AS output_tokens,
   COALESCE(ra.latency_ms, 0) AS latency_ms,
-  COALESCE(ra.safety_incident, false) AS safety_incident
+  COALESCE(ra.safety_incident, false) AS safety_incident,
+  (
+    COALESCE(g."metadata"->>'last_preview_endpoint', '') <> ''
+    OR COALESCE(g."metadata"->>'execution_stage', '') IN (
+      'PREVIEW_SUCCEEDED', 'DEPLOYED', 'ACHIEVED', 'GATE_PASSED'
+    )
+    OR g.status = 'ACHIEVED'
+  ) AS preview_ready
 FROM first_plan fp
 JOIN goals g ON g.id = fp.goal_id
 LEFT JOIN run_agg ra ON ra.goal_id = fp.goal_id
@@ -143,6 +150,7 @@ with eng.connect() as c:
             first_plan_at=plan_at.isoformat() if plan_at is not None else None,
             generator_ref=str(row["generator_ref"]),
             safety_incident=bool(row["safety_incident"]),
+            preview_ready=bool(row["preview_ready"]),
         ))
 
 exp = build_production_experiment(observations)

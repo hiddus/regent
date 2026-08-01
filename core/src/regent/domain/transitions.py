@@ -74,6 +74,9 @@ _GOAL_TRANSITIONS: dict[tuple[GoalState, GoalCommand], GoalState] = {
         GoalCommand.HUMAN_TIMEOUT_EXHAUSTED,
     ): GoalState.EXHAUSTED,
     (GoalState.BLOCKED, GoalCommand.REPLAN): GoalState.ACTIVE,
+    # ZeroPass o7: allow one-click continue after timeout-exhaust / soft fail.
+    (GoalState.EXHAUSTED, GoalCommand.REPLAN): GoalState.ACTIVE,
+    (GoalState.FAILED, GoalCommand.REPLAN): GoalState.ACTIVE,
     (GoalState.ACTIVE, GoalCommand.ACHIEVE): GoalState.ACHIEVED,
     (GoalState.ACTIVE, GoalCommand.EXHAUST): GoalState.EXHAUSTED,
     (GoalState.BLOCKED, GoalCommand.EXHAUST): GoalState.EXHAUSTED,
@@ -149,6 +152,19 @@ def transition_goal(
     version: int,
     expected_version: int,
 ) -> Transitioned[GoalState]:
+    if version != expected_version:
+        raise DomainError(
+            ErrorCode.VERSION_CONFLICT,
+            f"expected version {expected_version}, current version {version}",
+        )
+    # Explicit revive edges (REPLAN from EXHAUSTED/FAILED) bypass terminal guard.
+    target = _GOAL_TRANSITIONS.get((state, command))
+    if target is not None and command is GoalCommand.REPLAN and state in {
+        GoalState.EXHAUSTED,
+        GoalState.FAILED,
+        GoalState.BLOCKED,
+    }:
+        return Transitioned(state=target, version=version + 1)
     return _transition(
         state=state,
         command=command,

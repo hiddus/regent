@@ -302,57 +302,56 @@ class CapabilityAcquireService:
             "SUCCEEDED",
         }:
             # Idempotent retry path: reuse dispatch rights when still open / succeeded.
-            if existing.status == "SUCCEEDED":
-                # Allow re-fetch registration; EO already recorded success.
-                return existing.id
             return existing.id
 
-        if existing is None:
-            permit_id = await self._permits.request(
-                PermitBinding(
-                    goal_id=request.goal_id,
-                    work_id=work_id,
-                    run_id=run_id,
-                    actor_id=request.actor_id,
-                    action=_ACQUIRE_ACTION,
-                    target=request.capability_name,
-                    parameters={
-                        "requirement_key": request.requirement_key,
-                        "candidate_count": len(candidate_urls),
-                    },
-                    data_scope={"goal_id": str(request.goal_id)},
-                    network_scope={"egress": "controlled", "proxy": True},
-                    resource_limit={"max_bytes": _MAX_PACKAGE_BYTES},
-                    risk_level="LOW",
-                    valid_until=datetime.now(UTC) + timedelta(hours=1),
-                    idempotency_key=f"permit:{operation_key}",
-                )
-            )
-            claimed = await self._permits.claim(permit_id, actor_id=request.actor_id)
-            if claimed.binding.action != _ACQUIRE_ACTION:
-                raise DomainError(ErrorCode.POLICY_DENIED, "permit action mismatch")
-            prepared = await self._external_ops.prepare(
-                operation_key=operation_key,
-                provider=_ACQUIRE_PROVIDER,
-                action=_ACQUIRE_ACTION,
-                permit_id=claimed.id,
-                local_fencing_token=claimed.nonce,
-                payload={
-                    "goal_id": str(request.goal_id),
-                    "capability_name": request.capability_name,
-                    "requirement_key": request.requirement_key,
-                    "candidate_urls": candidate_urls[:8],
-                },
-                goal_id=request.goal_id,
-            )
-            await self._external_ops.begin_dispatch(
-                prepared.id,
-                worker_lease_token=f"{request.actor_id}:{claimed.id}",
-                expected_fencing_token=claimed.nonce,
-            )
-            return prepared.id
+        # Dead terminal or stuck PREPARED: mint a new key so we never re-terminal
+        # the same EO (which raised cannot mark FAILED_TERMINAL).
+        if existing is not None:
+            operation_key = f"{operation_key}:retry:{uuid.uuid4().hex[:8]}"
 
-        return existing.id
+        permit_id = await self._permits.request(
+            PermitBinding(
+                goal_id=request.goal_id,
+                work_id=work_id,
+                run_id=run_id,
+                actor_id=request.actor_id,
+                action=_ACQUIRE_ACTION,
+                target=request.capability_name,
+                parameters={
+                    "requirement_key": request.requirement_key,
+                    "candidate_count": len(candidate_urls),
+                },
+                data_scope={"goal_id": str(request.goal_id)},
+                network_scope={"egress": "controlled", "proxy": True},
+                resource_limit={"max_bytes": _MAX_PACKAGE_BYTES},
+                risk_level="LOW",
+                valid_until=datetime.now(UTC) + timedelta(hours=1),
+                idempotency_key=f"permit:{operation_key}",
+            )
+        )
+        claimed = await self._permits.claim(permit_id, actor_id=request.actor_id)
+        if claimed.binding.action != _ACQUIRE_ACTION:
+            raise DomainError(ErrorCode.POLICY_DENIED, "permit action mismatch")
+        prepared = await self._external_ops.prepare(
+            operation_key=operation_key,
+            provider=_ACQUIRE_PROVIDER,
+            action=_ACQUIRE_ACTION,
+            permit_id=claimed.id,
+            local_fencing_token=claimed.nonce,
+            payload={
+                "goal_id": str(request.goal_id),
+                "capability_name": request.capability_name,
+                "requirement_key": request.requirement_key,
+                "candidate_urls": candidate_urls[:8],
+            },
+            goal_id=request.goal_id,
+        )
+        await self._external_ops.begin_dispatch(
+            prepared.id,
+            worker_lease_token=f"{request.actor_id}:{claimed.id}",
+            expected_fencing_token=claimed.nonce,
+        )
+        return prepared.id
 
     async def _ensure_work_and_run(
         self, request: AcquireRequest

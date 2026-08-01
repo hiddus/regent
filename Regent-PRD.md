@@ -464,7 +464,16 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 - 支付系统和完整商业化后台（除非作为独立 App Goal）。
 - **Tauri 桌面端**：仓库中若保留骨架，视为探索性非目标；产品交付面仍为 Core + Web Console，桌面端不计入 P0/P1/P2 验收。
 - **自适应自由拓扑 Hive**：始终 `ROLLOUT_NOT_ALLOWED`，不得作为默认多 Agent。固定模板的代码配置默认值为关闭；生产当前通过 `REGENT_AAR1_CERTIFIED_HIVE=true` 在既有范围内 opt-in，并受 §10.3 / MA-2 整体认证摘要及 TaskFeatures 裁剪约束。GQ-5 前不得扩大该生产范围；这不等于自适应自由拓扑，也不改变「单 Agent champion」的产品默认叙事。
-- 下列能力**已登记但未实现**（不得宣称验收）：P2-3 Impact Graph（衰减/批量撤销/循环检测）、P2-5 AgentEnvelope HMAC、G0 ExternalOperation 完整 EO 闭环。
+- 下列能力**已登记但未实现**（不得宣称验收）：
+
+  - P2-4 最小 Eval Harness（仍实验骨架，非统计 Gate 就绪）；
+  - P2-5 自适应组织（`ROLLOUT_NOT_ALLOWED`，须 P2-4 正净收益）；
+  - GQ-4 默认切换（PENDING：DecisionRecord 未 ACCEPTED）；
+  - G0 ExternalOperation **跨 provider 真实网络 query→resolve 全路径**（核心闭环已落地，仅此切片待合入）；
+  - SelfImprovementRun 产品门禁（候选，`ROLLOUT_NOT_ALLOWED`）；
+  - MAST 失败码生产接入（已定义 9 码，尚未接入生产分类路径）。
+
+> **更正（2026-08-01 代码核查）**：原列于此的 **P2-3 Impact Graph、P2-5 AgentEnvelope HMAC、G0 ExternalOperation 核心闭环** 经代码核查**均已实质实现并有单测**（见 `docs/registered-unimplemented-2026-07-30.md` 与 `core/src/regent/application/impact_graph_service.py` / `envelope_v1.py` / `external_operation_service.py`），已从本"未实现"清单移除。本节此前滞后于实现，以本次核查为准。
 
 ---
 

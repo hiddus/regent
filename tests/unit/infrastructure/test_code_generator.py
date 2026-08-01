@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from regent.domain.errors import DomainError
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.code_generator import (
     ArtifactBackedCodeGenerator,
@@ -98,24 +99,111 @@ async def test_generator_default_skips_semantic_alignment_llm(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_generator_rejects_unplanned_or_duplicate_paths(tmp_path: Path) -> None:
+async def test_generator_skips_disallowed_paths_accepts_scaffold_extra(
+    tmp_path: Path,
+) -> None:
     bundle = GeneratedSourceBundle(
         files=[
             GeneratedSourceFile(
-                relative_path="outside.py",
+                relative_path=".regent/secret.txt",
                 operation=SourceFileOperation.CREATE,
                 content="bad",
                 rationale="bad",
-            )
+            ),
+            GeneratedSourceFile(
+                relative_path="templates/index.html",
+                operation=SourceFileOperation.CREATE,
+                content="<html></html>",
+                rationale="scaffold",
+            ),
+            GeneratedSourceFile(
+                relative_path="src/app.py",
+                operation=SourceFileOperation.CREATE,
+                content="print(1)\n",
+                rationale="planned",
+            ),
         ]
     )
     generator = ArtifactBackedCodeGenerator(
         FakeProvider(bundle),
         FileArtifactStore(tmp_path / "artifacts"),  # type: ignore[arg-type]
+        enforce_delivery_verification=False,
     )
-    with pytest.raises(ValueError):
+    result = await generator.generate(
+        {
+            "planned_paths": ["src/app.py"],
+            "hypothesis_decision_id": str(uuid.uuid4()),
+        }
+    )
+    paths = {c.relative_path for c in result.output.changes}
+    assert "src/app.py" in paths
+    assert "templates/index.html" in paths
+    assert ".regent/secret.txt" not in paths
+
+
+@pytest.mark.asyncio
+async def test_generator_rejects_empty_changeset_after_filter(tmp_path: Path) -> None:
+    from regent.application.delivery_rejection import DeliveryRejection
+
+    bundle = GeneratedSourceBundle(
+        files=[
+            GeneratedSourceFile(
+                relative_path=".regent/secret.txt",
+                operation=SourceFileOperation.CREATE,
+                content="bad",
+                rationale="bad",
+            ),
+            GeneratedSourceFile(
+                relative_path="vendor/x.py",
+                operation=SourceFileOperation.CREATE,
+                content="print(1)\n",
+                rationale="outside",
+            ),
+        ]
+    )
+    generator = ArtifactBackedCodeGenerator(
+        FakeProvider(bundle),
+        FileArtifactStore(tmp_path / "artifacts"),  # type: ignore[arg-type]
+        enforce_delivery_verification=False,
+    )
+    with pytest.raises(DeliveryRejection, match="empty-changeset"):
         await generator.generate(
-            {"planned_paths": ["inside.py"], "hypothesis_decision_id": str(uuid.uuid4())}
+            {
+                "planned_paths": ["src/app.py"],
+                "hypothesis_decision_id": str(uuid.uuid4()),
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_generator_rejects_duplicate_paths(tmp_path: Path) -> None:
+    bundle = GeneratedSourceBundle(
+        files=[
+            GeneratedSourceFile(
+                relative_path="src/app.py",
+                operation=SourceFileOperation.CREATE,
+                content="a",
+                rationale="a",
+            ),
+            GeneratedSourceFile(
+                relative_path="src/app.py",
+                operation=SourceFileOperation.CREATE,
+                content="b",
+                rationale="b",
+            ),
+        ]
+    )
+    generator = ArtifactBackedCodeGenerator(
+        FakeProvider(bundle),
+        FileArtifactStore(tmp_path / "artifacts"),  # type: ignore[arg-type]
+        enforce_delivery_verification=False,
+    )
+    with pytest.raises(DomainError, match="duplicate"):
+        await generator.generate(
+            {
+                "planned_paths": ["src/app.py"],
+                "hypothesis_decision_id": str(uuid.uuid4()),
+            }
         )
 
 
