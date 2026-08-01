@@ -272,7 +272,11 @@ async def test_recover_stops_after_ladder_exhausted() -> None:
         version=1,
         created_by="test",
         correlation_id=uuid.uuid4(),
-        metadata_json={"delivery_gap_recovery_attempts": 10},
+        metadata_json={
+            "delivery_gap_recovery_attempts": 10,
+            # Auto-continue budget already spent → soft-pause (no TaskCard).
+            "delivery_gap_auto_continue_cycles": 2,
+        },
     )
     factory = _goal_session(goal, None)
 
@@ -303,12 +307,12 @@ async def test_recover_stops_after_ladder_exhausted() -> None:
 
     assert result.recovered is False
     assert result.terminal_exhaust is True
-    assert result.method == "STOP"
-    assert "WAITING_HUMAN" in result.message or "需要你" in result.message
-    assert goal.metadata_json.get("execution_stage") == "WAITING_HUMAN"
-    assert goal.metadata_json.get("awaiting_human_intervention") is True
-    assert goal.metadata_json.get("termination", {}).get("handoff") == "WAITING_HUMAN"
-    assert goal.metadata_json.get("pending_delivery_gap_human", {}).get("human_task_id")
+    assert result.method == "SOFT_PAUSE"
+    assert "对话" in result.message or "补充方向" in result.message
+    assert goal.metadata_json.get("execution_stage") == "DELIVERY_SOFT_PAUSE"
+    assert goal.metadata_json.get("awaiting_human_intervention") is False
+    assert goal.metadata_json.get("termination", {}).get("handoff") == "SOFT_PAUSE"
+    assert not goal.metadata_json.get("pending_delivery_gap_human")
 
 
 @pytest.mark.asyncio
@@ -441,6 +445,49 @@ async def test_resume_after_goal_intent_does_not_rehandoff() -> None:
     assert result.recovered is True
     assert result.terminal_exhaust is False
     assert result.method in {"REUSE", "CONFIGURE", "COMPOSE", "BUILD", "ACQUIRE"}
+    assert goal.metadata_json.get("awaiting_human_intervention") is False
+
+
+@pytest.mark.asyncio
+async def test_resume_missing_lineage_clears_always_allow_and_restarts_discovery() -> None:
+    """Approve without requirement/plan must not stack intervene + always-allow loops."""
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=2,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        app_project_id=project_id,
+        metadata_json={
+            "decision_allow_actions": ["delivery_gap_intervene", "quality_approval"],
+            "awaiting_human_intervention": True,
+            "delivery_gap_kind": "product_surface",
+        },
+    )
+    factory = _goal_session(goal, None)
+
+    with patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()):
+        svc = DeliveryGapRecoveryService(factory)
+        with patch.object(
+            DeliveryGapRecoveryService,
+            "_resolve_generation_ids",
+            AsyncMock(return_value=(None, None)),
+        ):
+            result = await svc.resume_after_human(
+                goal_id=goal_id,
+                project_id=project_id,
+                actor="user",
+                human_message="总是允许",
+            )
+
+    assert result.recovered is False
+    assert result.method == "RESTART_DISCOVERY"
+    assert "missing generation lineage" in result.message
+    assert goal.metadata_json.get("decision_allow_actions") == ["quality_approval"]
+    assert goal.metadata_json.get("execution_stage") == "DISCOVERING"
     assert goal.metadata_json.get("awaiting_human_intervention") is False
 
 

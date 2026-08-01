@@ -304,9 +304,15 @@ class AgentRunner:
             usage = getattr(response, "usage", None)
             turn_in = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
             turn_out = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+            turn_cached = getattr(usage, "cached_tokens", None) if usage else None
+            turn_cached_i = int(turn_cached or 0) if turn_cached is not None else 0
             input_tokens += turn_in
             output_tokens += turn_out
-            ledger.add_usage(input_tokens=turn_in, output_tokens=turn_out)
+            ledger.add_usage(
+                input_tokens=turn_in,
+                output_tokens=turn_out,
+                cached_tokens=turn_cached_i,
+            )
             ledger.add_turn(1)
 
             assistant: ChatMessage = response.message

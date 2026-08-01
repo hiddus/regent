@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     model_timeout_seconds: float = Field(default=300.0, ge=30.0, le=1800.0)
     # M1-1: configurable chat completion output cap (None disables max_tokens).
     model_max_output_tokens: int | None = Field(default=8192, ge=256, le=128_000)
+    # DeepSeek V4 enables thinking by default; CoT shares max_tokens with content/tools.
+    # Agent tool loops default to disabled to avoid empty finish_reason=length.
+    model_thinking_mode: Literal["disabled", "enabled", "default"] = "disabled"
     generation_strategy: Literal["artifact-backed", "agentic"] = "artifact-backed"
     generation_strategy_kill_switch: bool = False
     generation_strategy_fallback: Literal["artifact-backed", "agentic"] = "artifact-backed"

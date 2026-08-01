@@ -27,12 +27,18 @@ class ChatMessage:
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
     name: str | None = None
+    # DeepSeek V4 thinking: must round-trip on tool-call turns when thinking enabled.
+    reasoning_content: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ChatUsage:
     input_tokens: int = 0
     output_tokens: int = 0
+    reasoning_tokens: int = 0
+    # Prompt-cache hits reported by the provider (OpenAI-style prompt_tokens_details
+    # or vendor equivalents). None = field absent; 0 = explicitly none cached.
+    cached_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

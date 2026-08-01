@@ -1,0 +1,62 @@
+{
+  "record_type": "M6CanaryProbe",
+  "probed_at": "2026-08-01T14:38:45.312719+00:00",
+  "window_hours": 24,
+  "since": "2026-07-31T14:38:45.312637+00:00",
+  "settings": {
+    "generation_strategy": "artifact-backed",
+    "canary_percent": 5,
+    "canary_gate": true,
+    "canary_variant": "agentic",
+    "kill_switch": false,
+    "fallback": "artifact-backed",
+    "model": "deepseek-v4-flash"
+  },
+  "strategy_split": {
+    "artifact_backed": 1179,
+    "agentic": 6396,
+    "total": 7575,
+    "agentic_share": 0.8443564356435643
+  },
+  "goals_by_first_plan_arm": {
+    "agentic-generation-v1": 6,
+    "artifact-backed-code-generator-v1": 36
+  },
+  "agentic_run_status": {
+    "FAILED": 388
+  },
+  "agentic_failure_codes_top": [
+    {
+      "code": "HTTPStatusError",
+      "count": 238
+    },
+    {
+      "code": "GENERATION_EXECUTION_FAILED",
+      "count": 139
+    },
+    {
+      "code": "ZOMBIE_STALE_GENERATING",
+      "count": 9
+    },
+    {
+      "code": "OVER_CAP_RECLAIM",
+      "count": 2
+    }
+  ],
+  "agentic_artifacts": {
+    "runs": 388,
+    "with_changeset": 0
+  },
+  "guardrails": {
+    "open_delivery_gap_tasks": 0,
+    "open_human_tasks": 0,
+    "outbox": {
+      "DEAD_LETTER": 83,
+      "FAILED": 2
+    },
+    "new_goals_in_window": 7,
+    "kill_switch": false
+  },
+  "canary_armed": true,
+  "local_probed_at": "2026-08-01T14:38:51.247483+00:00"
+}

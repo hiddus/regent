@@ -38,6 +38,46 @@ def test_micro_compact_clears_old_tool_results() -> None:
     assert all(m.content != "[cleared]" for m in tool_msgs[-8:])
 
 
+def test_micro_compact_strips_old_write_file_bodies() -> None:
+    messages: list[ChatMessage] = []
+    for i in range(10):
+        body = ("line\n" * 40) + f"file-{i}"
+        messages.append(
+            ChatMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id=f"c{i}",
+                        name="write_file",
+                        arguments={"path": f"src/f{i}.py", "content": body},
+                    )
+                ],
+            )
+        )
+        messages.append(
+            ChatMessage(
+                role="tool",
+                content="ok",
+                tool_call_id=f"c{i}",
+                name="write_file",
+            )
+        )
+    compacted = micro_compact(messages, keep_recent=3)
+    write_assistants = [
+        m
+        for m in compacted
+        if m.role == "assistant" and m.tool_calls and m.tool_calls[0].name == "write_file"
+    ]
+    # Older writes stripped; recent 3 keep full content.
+    for msg in write_assistants[:-3]:
+        content = msg.tool_calls[0].arguments.get("content", "")
+        assert "[cleared" in content
+        assert "file-" not in content or "re-read" in content
+    for msg in write_assistants[-3:]:
+        assert "file-" in msg.tool_calls[0].arguments["content"]
+
+
 @pytest.mark.asyncio
 async def test_auto_compact_rehydrates(tmp_path: Path) -> None:
     toolkit = WorkspaceToolkit(tmp_path)

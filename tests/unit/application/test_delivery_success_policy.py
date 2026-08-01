@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from regent.application.delivery_success_policy import (
+    DELIVERY_GAP_AUTO_CONTINUE_MAX,
     SAME_GAP_KIND_HARD_CAP,
     effective_max_concurrent_generating,
     verification_allows_achieve,
@@ -61,3 +62,4 @@ def test_blocking_gap_still_blocks() -> None:
 
 def test_same_gap_kind_cap_constant() -> None:
     assert SAME_GAP_KIND_HARD_CAP == 3
+    assert DELIVERY_GAP_AUTO_CONTINUE_MAX == 2

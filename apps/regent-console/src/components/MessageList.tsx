@@ -86,14 +86,26 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
 
   const taskMeta = { ...(m.metadata || {}) } as Record<string, unknown>
   const taskId = String(taskMeta.id || taskMeta.human_task_id || '')
+  const taskTypeUpper = String(taskMeta.task_type || '').toUpperCase()
+  const confirmationAction = String(
+    ((taskMeta.confirmation as Record<string, unknown> | undefined)?.action as string) || '',
+  ).toLowerCase()
+  // Delivery-gap continue/replan is not a permission gate — never show「总是允许」.
+  const isDeliveryGapIntervene =
+    taskTypeUpper === 'DELIVERY_GAP_INTERVENE' ||
+    confirmationAction === 'delivery_gap_intervene' ||
+    m.message_type === 'DELIVERY_SOFT_PAUSE' ||
+    m.message_type === 'STALE_PROGRESS_NOTE'
+
   const isExhaustedHandoff =
-    m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
-    m.message_type === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
-    m.message_type === 'RESEARCH_MORE_ADAPT_EXHAUSTED' ||
-    (m.message_type === 'HUMAN_TASK_REQUIRED' &&
-      (Boolean(taskMeta.confirmation) ||
-        String(taskMeta.stage || '').includes('DELIVERY_GAP') ||
-        String(taskMeta.stage || '').includes('NEEDS_HUMAN')))
+    !isDeliveryGapIntervene &&
+    (m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
+      m.message_type === 'BUILD_DELIVERY_GAP_EXHAUSTED' ||
+      m.message_type === 'RESEARCH_MORE_ADAPT_EXHAUSTED' ||
+      (m.message_type === 'HUMAN_TASK_REQUIRED' &&
+        (Boolean(taskMeta.confirmation) ||
+          String(taskMeta.stage || '').includes('DELIVERY_GAP') ||
+          String(taskMeta.stage || '').includes('NEEDS_HUMAN'))))
 
   if (isExhaustedHandoff && !taskMeta.confirmation) {
     taskMeta.confirmation = {
@@ -114,7 +126,8 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   }
 
   const showTaskCard =
-    m.message_type === 'HUMAN_TASK_REQUIRED' || isExhaustedHandoff
+    !isDeliveryGapIntervene &&
+    (m.message_type === 'HUMAN_TASK_REQUIRED' || isExhaustedHandoff)
   const resolved = showTaskCard
     ? approveAlreadyDone(
         messages,

@@ -1543,10 +1543,18 @@ class ExecutionOrchestrator:
                     correlation_id=correlation_id,
                 )
             )
+            # Bind run idempotency to plan_id so metadata drift (lessons/envelopes)
+            # that yields a new plan on outbox retry cannot collide with the prior
+            # run under the outbox event key (scope-mismatch → replan storm).
+            run_idempotency_key = make_idempotency_key(
+                "generation-run",
+                goal_id,
+                f"{idempotency_key}:{plan.id}",
+            )
             run = await gen_service.request_run(
                 RequestGenerationRun(
                     plan_id=plan.id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=run_idempotency_key,
                     correlation_id=correlation_id,
                 )
             )
@@ -1718,6 +1726,22 @@ class ExecutionOrchestrator:
                 )
                 return
             if exc.code == ErrorCode.INVALID_STATE or exc.code == ErrorCode.POLICY_DENIED:
+                # Dispatch/concurrency collisions are not product-surface gaps.
+                # Feeding DeliveryGapRecovery caused invalid_state → replan storms.
+                msg_l = (exc.message or "").lower()
+                if (
+                    "idempotency key scope mismatch" in msg_l
+                    or "frozen generation plan is required" in msg_l
+                    or "generation plan already executing" in msg_l
+                ):
+                    logger.warning(
+                        "generation dispatch conflict; defer to outbox retry",
+                        extra={"goal_id": str(goal_id), "error": exc.message[:200]},
+                    )
+                    raise DomainError(
+                        ErrorCode.LEASE_CONFLICT,
+                        exc.message,
+                    ) from exc
                 # Business INVALID_STATE / POLICY_DENIED: learn + replan into a new event.
                 # Do not blind-retry the same GenerationRunRequested payload.
                 recovery = await DeliveryGapRecoveryService(self._sessions).recover(
@@ -2585,6 +2609,13 @@ class ExecutionOrchestrator:
                 },
             )
             return
+        if recovery.method == "RESTART_DISCOVERY":
+            await self._restart_discovery_for_lineage_gap(
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+            )
+            return
         # resume → recover already created a HumanTask + conversation card when
         # terminal_exhaust (goal_intent / ladder handoff). Do not stack a second
         # HUMAN_TASK_REQUIRED without task id (Console「总是允许」死循环观感).
@@ -2598,6 +2629,20 @@ class ExecutionOrchestrator:
                 },
             )
             return
+        # Never re-open DELIVERY_GAP_INTERVENE for lineage-missing — that is the
+        # approve→block→approve loop. Fall back to a non-intervening halt note.
+        if "missing generation lineage" in (recovery.message or "").lower():
+            await self._halt_goal_stage(
+                goal_id,
+                project_id,
+                stage="PIPELINE_LINEAGE_MISSING",
+                message=recovery.message or "人工批准后仍缺少生成谱系。",
+                terminal=None,
+                actor=actor,
+                event_type="GOAL_EXECUTION_STAGE_HALTED",
+                extra={"gap_kind": recovery.gap_kind, "gac": "GAC-D1"},
+            )
+            return
         await self._halt_goal_stage(
             goal_id,
             project_id,
@@ -2607,6 +2652,72 @@ class ExecutionOrchestrator:
             actor=actor,
             event_type="HUMAN_TASK_REQUIRED",
             extra={"gap_kind": recovery.gap_kind, "gac": "GAC-D1"},
+        )
+
+    async def _restart_discovery_for_lineage_gap(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        actor: str,
+    ) -> None:
+        """Re-kick GoalExecution→Discovery when approve hit a goal with no gen lineage."""
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                return
+            metadata = dict(goal.metadata_json or {})
+            allow_actions = [
+                a
+                for a in list(metadata.get("decision_allow_actions") or [])
+                if str(a) != "delivery_gap_intervene"
+            ]
+            if allow_actions:
+                metadata["decision_allow_actions"] = allow_actions
+            else:
+                metadata.pop("decision_allow_actions", None)
+            metadata["awaiting_human_intervention"] = False
+            metadata.pop("pending_delivery_gap_human", None)
+            metadata.pop("stale_progress_handoff_at", None)
+            metadata["execution_stage"] = "DISCOVERING"
+            goal.metadata_json = metadata
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(goal, "metadata_json")
+            resume_key = make_idempotency_key(
+                "lineage-restart-discovery",
+                goal.id,
+                f"{datetime.now(UTC).isoformat()}:{uuid.uuid4().hex[:8]}",
+            )
+            session.add(
+                make_outbox_event(
+                    EventEnvelope(
+                        event_type=GOAL_EXECUTION_REQUESTED,
+                        aggregate_type="goal",
+                        aggregate_id=goal.id,
+                        aggregate_version=goal.version,
+                        payload={
+                            "goal_id": str(goal.id),
+                            "app_project_id": str(project_id),
+                            "actor": actor,
+                            "idempotency_key": resume_key,
+                            "reason": "missing_generation_lineage_after_human_approve",
+                        },
+                        idempotency_key=resume_key,
+                        correlation_id=goal.correlation_id,
+                    )
+                )
+            )
+            await self._append_conversation_event(
+                session,
+                project_id,
+                "DISCOVERY_RESTARTED",
+                "交付谱系未就绪，已重新发起发现/规划（已取消「总是允许·交付缺口」以免空转）。",
+                {"goal_id": str(goal_id), "idempotency_key": resume_key},
+            )
+        logger.info(
+            "restarted discovery after missing lineage on human approve",
+            extra={"goal_id": str(goal_id)},
         )
 
     async def _execute_approved_preview_deployment(self, payload: dict[str, Any]) -> None:
@@ -3921,51 +4032,64 @@ class ExecutionOrchestrator:
                 )
                 # HUMAN_TASK_REQUIRED without a real HumanTask id leaves Console
                 # TaskCard stuck on「缺少 task id」— allow/always-allow cannot complete.
+                # Delivery-gap intervene is not a permission gate: never mint that card.
                 if event_type == "HUMAN_TASK_REQUIRED" and not (
                     event_meta.get("id") or event_meta.get("human_task_id")
                 ):
-                    task_id = uuid.uuid4()
                     task_type = str(
                         event_meta.get("task_type") or "DELIVERY_GAP_INTERVENE"
                     )
-                    confirmation = event_meta.get("confirmation")
-                    if not isinstance(confirmation, dict):
-                        confirmation = confirmation_for_human_task(
-                            task_type=task_type,
-                            summary=message[:200],
-                            rationale=f"阶段 {stage} 需要人工确认",
-                            detail=message[:500],
-                            prompt=message,
-                            extra_rules=[f"stage:{stage}"],
+                    if task_type.upper() == "DELIVERY_GAP_INTERVENE" or str(
+                        stage
+                    ).upper().startswith("DELIVERY_GAP"):
+                        event_type = "DELIVERY_SOFT_PAUSE"
+                        event_meta.pop("confirmation", None)
+                        event_meta.pop("task_type", None)
+                        metadata["awaiting_human_intervention"] = False
+                        metadata.pop("pending_delivery_gap_human", None)
+                        metadata["execution_stage"] = "DELIVERY_SOFT_PAUSE"
+                        goal.metadata_json = metadata
+                        flag_modified(goal, "metadata_json")
+                    else:
+                        task_id = uuid.uuid4()
+                        confirmation = event_meta.get("confirmation")
+                        if not isinstance(confirmation, dict):
+                            confirmation = confirmation_for_human_task(
+                                task_type=task_type,
+                                summary=message[:200],
+                                rationale=f"阶段 {stage} 需要人工确认",
+                                detail=message[:500],
+                                prompt=message,
+                                extra_rules=[f"stage:{stage}"],
+                            )
+                            event_meta["confirmation"] = confirmation
+                        timeout_sec = int(
+                            (confirmation or {}).get("timeout_seconds") or 300
                         )
-                        event_meta["confirmation"] = confirmation
-                    timeout_sec = int(
-                        (confirmation or {}).get("timeout_seconds") or 300
-                    )
-                    session.add(
-                        HumanTaskModel(
-                            id=task_id,
-                            goal_id=goal_id,
-                            work_id=None,
-                            run_id=None,
-                            task_type=task_type,
-                            prompt=message[:2000],
-                            requested_by=actor,
-                            due_at=datetime.now(UTC)
-                            + timedelta(seconds=max(timeout_sec, 60)),
-                            status="OPEN",
+                        session.add(
+                            HumanTaskModel(
+                                id=task_id,
+                                goal_id=goal_id,
+                                work_id=None,
+                                run_id=None,
+                                task_type=task_type,
+                                prompt=message[:2000],
+                                requested_by=actor,
+                                due_at=datetime.now(UTC)
+                                + timedelta(seconds=max(timeout_sec, 60)),
+                                status="OPEN",
+                            )
                         )
-                    )
-                    event_meta["id"] = str(task_id)
-                    event_meta["human_task_id"] = str(task_id)
-                    event_meta["task_type"] = task_type
-                    metadata["pending_delivery_gap_human"] = {
-                        "human_task_id": str(task_id),
-                        "gap_kind": str((extra or {}).get("gap_kind") or ""),
-                        "stage": stage,
-                    }
-                    goal.metadata_json = metadata
-                    flag_modified(goal, "metadata_json")
+                        event_meta["id"] = str(task_id)
+                        event_meta["human_task_id"] = str(task_id)
+                        event_meta["task_type"] = task_type
+                        metadata["pending_delivery_gap_human"] = {
+                            "human_task_id": str(task_id),
+                            "gap_kind": str((extra or {}).get("gap_kind") or ""),
+                            "stage": stage,
+                        }
+                        goal.metadata_json = metadata
+                        flag_modified(goal, "metadata_json")
                 await self._append_conversation_event(
                     session,
                     project_id,
@@ -4041,6 +4165,18 @@ class ExecutionOrchestrator:
             )
             return True
         if recovery.terminal_exhaust:
+            # Soft-pause is not a permission gate: do not WAIT_FOR_HUMAN /
+            # HUMAN_TASK_REQUIRED (that mints Console「总是允许」cards).
+            if recovery.method == "SOFT_PAUSE":
+                logger.info(
+                    "delivery gap soft-paused without human task",
+                    extra={
+                        "goal_id": str(goal_id),
+                        "gap_kind": recovery.gap_kind,
+                        "attempts": recovery.attempts,
+                    },
+                )
+                return True
             await self._halt_goal_stage(
                 goal_id,
                 project_id,

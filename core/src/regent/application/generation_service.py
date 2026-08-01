@@ -142,6 +142,21 @@ class GenerationService:
         flag_modified(plan, "contract_json")
         plan.version += 1
 
+    async def _next_attempt_for_plan(
+        self, session: AsyncSession, plan_id: uuid.UUID
+    ) -> int:
+        return (
+            int(
+                await session.scalar(
+                    select(func.coalesce(func.max(GenerationRunModel.attempt), 0)).where(
+                        GenerationRunModel.plan_id == plan_id
+                    )
+                )
+                or 0
+            )
+            + 1
+        )
+
     async def request_run(self, command: RequestGenerationRun) -> GenerationRunModel:
         async with self._sessions() as session, session.begin():
             existing = await session.scalar(
@@ -151,7 +166,31 @@ class GenerationService:
             )
             if existing is not None:
                 if existing.plan_id != command.plan_id:
-                    raise DomainError(ErrorCode.INVALID_STATE, "idempotency key scope mismatch")
+                    # Same outbox/dispatch key, evolved plan digest (e.g. failure
+                    # lessons / envelopes appended between retries). Rebind instead
+                    # of INVALID_STATE — that used to feed DeliveryGapRecovery and
+                    # create an infinite invalid_state → replan storm.
+                    if existing.status == "GENERATING":
+                        touched = existing.updated_at or existing.created_at
+                        if touched.tzinfo is None:
+                            touched = touched.replace(tzinfo=UTC)
+                        if datetime.now(UTC) - touched < _STALE_GENERATING:
+                            raise DomainError(
+                                ErrorCode.LEASE_CONFLICT,
+                                "generation run already in progress",
+                            )
+                    plan = await session.get(GenerationPlanModel, command.plan_id)
+                    if plan is None:
+                        raise DomainError(
+                            ErrorCode.INVALID_STATE, "frozen generation plan is required"
+                        )
+                    self._reopen_plan_for_run(plan, allow_executing=False)
+                    existing.plan_id = plan.id
+                    existing.attempt = await self._next_attempt_for_plan(session, plan.id)
+                    existing.status = "REQUESTED"
+                    existing.version += 1
+                    await session.flush()
+                    return existing
                 if existing.status == "COMPLETED":
                     return existing
                 if existing.status == "GENERATING":
@@ -179,20 +218,18 @@ class GenerationService:
             plan = await session.get(GenerationPlanModel, command.plan_id)
             if plan is None:
                 raise DomainError(ErrorCode.INVALID_STATE, "frozen generation plan is required")
+            # Parallel GenerationRunRequested (recovery storm / concurrency) can
+            # digest-hit a plan still EXECUTING under another run. Treat as lease
+            # conflict so outbox retries — do not INVALID_STATE → DeliveryGapRecovery.
+            if plan.status == "EXECUTING":
+                raise DomainError(
+                    ErrorCode.LEASE_CONFLICT,
+                    "generation plan already executing",
+                )
             # New idempotency key (e.g. delivery-gap recovery): reopen COMPLETED
             # plans that create_plan reused via input_digest hit.
             self._reopen_plan_for_run(plan, allow_executing=False)
-            attempt = (
-                int(
-                    await session.scalar(
-                        select(func.coalesce(func.max(GenerationRunModel.attempt), 0)).where(
-                            GenerationRunModel.plan_id == plan.id
-                        )
-                    )
-                    or 0
-                )
-                + 1
-            )
+            attempt = await self._next_attempt_for_plan(session, plan.id)
             run = GenerationRunModel(
                 id=uuid.uuid4(),
                 plan_id=plan.id,

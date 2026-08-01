@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from regent.agent.tools import WorkspaceToolkit
-from regent.agent.types import ChatMessage, BudgetExhaustedError
+from regent.agent.types import BudgetExhaustedError, ChatMessage, ToolCall
 
 
 # Soft char estimate (~4 chars/token). Window default 128k tokens → leave 15k buffer.
@@ -42,29 +42,91 @@ def estimate_tokens(messages: list[ChatMessage]) -> int:
     return total
 
 
+# Tool calls whose arguments often embed full file bodies (D6 / prompt-cache).
+_FILE_BODY_TOOLS = frozenset({"write_file", "edit_file", "create_file", "apply_patch"})
+_CONTENT_ARG_KEYS = frozenset({"content", "new_content", "old_content", "patch", "diff", "body"})
+
+
+def _strip_file_body_args(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep path/metadata; replace large file bodies with a reload hint."""
+    out: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key in _CONTENT_ARG_KEYS and isinstance(value, str) and len(value) > 80:
+            path = arguments.get("path") or arguments.get("file") or arguments.get("file_path")
+            hint = f"[cleared — re-read via read_file{f' path={path}' if path else ''}]"
+            out[key] = hint
+        else:
+            out[key] = value
+    return out
+
+
 def micro_compact(
     messages: list[ChatMessage],
     *,
     keep_recent: int = MICRO_KEEP_RECENT_TOOLS,
 ) -> list[ChatMessage]:
-    """Replace old tool results with [cleared], keep recent N intact."""
+    """Clear old tool results and strip stale write/edit file bodies from history.
+
+    File contents remain on disk; the model should call ``read_file`` when needed.
+    Keeping recent N tool results (and their paired assistant write args) intact.
+    """
     tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
-    if len(tool_indices) <= keep_recent:
-        return messages
-    clear_set = set(tool_indices[:-keep_recent])
+    clear_tool_set = (
+        set(tool_indices[:-keep_recent]) if len(tool_indices) > keep_recent else set()
+    )
+
+    # Assistant turns that issued file-body tools — strip args on older ones.
+    file_write_assistant_indices = [
+        i
+        for i, m in enumerate(messages)
+        if m.role == "assistant"
+        and any(c.name in _FILE_BODY_TOOLS for c in (m.tool_calls or []))
+    ]
+    clear_write_set = (
+        set(file_write_assistant_indices[:-keep_recent])
+        if len(file_write_assistant_indices) > keep_recent
+        else set()
+    )
+
     compacted: list[ChatMessage] = []
     for i, msg in enumerate(messages):
-        if i in clear_set and msg.content and msg.content != "[cleared]":
+        if i in clear_tool_set and msg.content and msg.content != "[cleared]":
             compacted.append(
                 ChatMessage(
                     role="tool",
                     content="[cleared]",
                     tool_call_id=msg.tool_call_id,
                     name=msg.name,
+                    reasoning_content=getattr(msg, "reasoning_content", None),
                 )
             )
-        else:
-            compacted.append(msg)
+            continue
+        if i in clear_write_set and msg.tool_calls:
+            new_calls: list[ToolCall] = []
+            changed = False
+            for call in msg.tool_calls:
+                if call.name in _FILE_BODY_TOOLS:
+                    stripped = _strip_file_body_args(dict(call.arguments or {}))
+                    if stripped != call.arguments:
+                        changed = True
+                        new_calls.append(
+                            ToolCall(id=call.id, name=call.name, arguments=stripped)
+                        )
+                        continue
+                new_calls.append(call)
+            if changed:
+                compacted.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=msg.content,
+                        tool_calls=new_calls,
+                        tool_call_id=msg.tool_call_id,
+                        name=msg.name,
+                        reasoning_content=getattr(msg, "reasoning_content", None),
+                    )
+                )
+                continue
+        compacted.append(msg)
     return compacted
 
 

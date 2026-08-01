@@ -42,13 +42,13 @@ KNOWN_ACTIONS: frozenset[str] = frozenset(
 )
 
 # Default risk when building confirmations for known actions.
-# delivery_gap_intervene = continue/replan inside the goal — not a dangerous side effect.
-# Ask only when the auto-recovery ladder is exhausted (needs new direction), not on every gap.
+# delivery_gap_intervene = continue/replan inside the goal — not a permission/danger gate.
+# Humans only for release / quality / external_effect; delivery gaps auto-pass (LOW).
 ACTION_RISK: dict[str, RiskLevel] = {
     "goal_confirm": RiskLevel.LOW,
     "release_approval": RiskLevel.MEDIUM,
     "quality_approval": RiskLevel.MEDIUM,
-    "delivery_gap_intervene": RiskLevel.MEDIUM,
+    "delivery_gap_intervene": RiskLevel.LOW,
     "external_effect": RiskLevel.HIGH,
 }
 

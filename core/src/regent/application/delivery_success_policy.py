@@ -17,8 +17,12 @@ BLOCKING_DELIVERY_GAP_CODES: frozenset[str] = frozenset(
     }
 )
 
-# Same gap_kind may only auto-escalate this many times before human handoff.
+# Same gap_kind may only auto-escalate this many times before a soft reset / pause.
 SAME_GAP_KIND_HARD_CAP = 3
+
+# After hard-cap / ladder exhaust: auto-reset and continue this many times, then
+# soft-pause (conversation note only — never a permission TaskCard).
+DELIVERY_GAP_AUTO_CONTINUE_MAX = 2
 
 
 def effective_max_concurrent_generating(settings: Any) -> int:

@@ -32,14 +32,11 @@ def _goal(*, age_minutes: int, app_project_id: uuid.UUID | None = None) -> GoalM
     return goal
 
 
-@pytest.mark.asyncio
-async def test_watchdog_warns_between_5_and_15_minutes() -> None:
-    goal = _goal(age_minutes=8)
+def _session_factory(goal: GoalModel, *, execute_side_effect) -> MagicMock:
     session = AsyncMock()
-    session.scalar = AsyncMock(side_effect=[True, None])  # lock, then unused
-    result = MagicMock()
-    result.scalars.return_value.all.return_value = [goal]
-    session.execute = AsyncMock(return_value=result)
+    session.scalar = AsyncMock(return_value=True)
+    session.add = MagicMock()
+    session.execute = AsyncMock(side_effect=execute_side_effect)
     begin = AsyncMock()
     begin.__aenter__.return_value = None
     begin.__aexit__.return_value = None
@@ -48,35 +45,39 @@ async def test_watchdog_warns_between_5_and_15_minutes() -> None:
     session_cm.__aenter__.return_value = session
     session_cm.__aexit__.return_value = None
     factory = MagicMock(return_value=session_cm)
+    factory._session = session
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_watchdog_warns_between_5_and_15_minutes() -> None:
+    goal = _goal(age_minutes=8)
+    goals_result = MagicMock()
+    goals_result.scalars.return_value.all.return_value = [goal]
+    factory = _session_factory(goal, execute_side_effect=[goals_result])
 
     stats = await tick_stale_delivery_progress(factory)
     assert stats["warned"] == 1
     assert stats["handed_off"] == 0
+    assert stats["auto_continued"] == 0
     assert goal.metadata_json.get("stale_progress_warned_at")
 
 
 @pytest.mark.asyncio
-async def test_watchdog_handoff_opens_task_with_confirmation_message() -> None:
+async def test_watchdog_auto_continues_without_human_task() -> None:
     project_id = uuid.uuid4()
     goal = _goal(age_minutes=20, app_project_id=project_id)
-    session = AsyncMock()
-    # lock ok, no open task, no conversation (append no-ops)
-    session.scalar = AsyncMock(side_effect=[True, None, None])
-    session.add = MagicMock()
-    result = MagicMock()
-    result.scalars.return_value.all.return_value = [goal]
-    session.execute = AsyncMock(return_value=result)
-    begin = AsyncMock()
-    begin.__aenter__.return_value = None
-    begin.__aexit__.return_value = None
-    session.begin = MagicMock(return_value=begin)
-    session_cm = AsyncMock()
-    session_cm.__aenter__.return_value = session
-    session_cm.__aexit__.return_value = None
-    factory = MagicMock(return_value=session_cm)
+    goals_result = MagicMock()
+    goals_result.scalars.return_value.all.return_value = [goal]
+    empty_tasks = MagicMock()
+    empty_tasks.scalars.return_value.all.return_value = []
+    factory = _session_factory(
+        goal, execute_side_effect=[goals_result, empty_tasks]
+    )
 
     stats = await tick_stale_delivery_progress(factory)
-    assert stats["handed_off"] == 1
-    assert goal.metadata_json.get("awaiting_human_intervention") is True
-    assert goal.metadata_json.get("stale_progress_handoff_at")
-    assert session.add.call_count >= 1
+    assert stats["auto_continued"] == 1
+    assert stats["handed_off"] == 0
+    assert goal.metadata_json.get("awaiting_human_intervention") is False
+    assert goal.metadata_json.get("stale_progress_nudge_count") == 1
+    assert factory._session.add.call_count >= 1

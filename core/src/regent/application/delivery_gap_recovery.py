@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +52,6 @@ from regent.application.capability_resolution_service import (
     CapabilityResolutionService,
     ResolutionMethod,
 )
-from regent.application.confirmation_present import confirmation_for_human_task
-from regent.application.decision_policy import action_preauthorized
 from regent.application.execution_events import (
     GENERATION_RUN_REQUESTED,
     EventEnvelope,
@@ -85,7 +83,6 @@ from regent.infrastructure.models import (
     GenerationPlanModel,
     GoalModel,
     GoalSpecModel,
-    HumanTaskModel,
     ProductHypothesisModel,
     RequirementRevisionModel,
 )
@@ -317,13 +314,13 @@ class DeliveryGapRecoveryService:
             if draft_uri:
                 metadata["last_good_draft_uri"] = draft_uri
             attempts = int(metadata.get("delivery_gap_recovery_attempts") or 0)
-            # 「总是允许」→ decision_allow_actions；仅在阶梯耗尽交人时跳过询问。
-            gap_preauthorized = action_preauthorized(
-                metadata, "delivery_gap_intervene"
-            )
 
-            # Same gap_kind hard cap: stop infinite escalate loops before ladder exhaust.
-            from regent.application.delivery_success_policy import SAME_GAP_KIND_HARD_CAP
+            # Same gap_kind hard cap: auto-reset a few times, then soft-pause (no TaskCard).
+            # Delivery gaps are not permission/danger — never mint「总是允许」卡。
+            from regent.application.delivery_success_policy import (
+                DELIVERY_GAP_AUTO_CONTINUE_MAX,
+                SAME_GAP_KIND_HARD_CAP,
+            )
 
             prior_kind = str(metadata.get("delivery_gap_kind") or "")
             streak = int(metadata.get("delivery_gap_kind_streak") or 0)
@@ -333,41 +330,48 @@ class DeliveryGapRecoveryService:
                 streak = 1
             metadata["delivery_gap_kind"] = gap_kind
             metadata["delivery_gap_kind_streak"] = streak
-            if streak >= SAME_GAP_KIND_HARD_CAP and not gap_preauthorized:
-                draft_note = (
-                    f" 当前草稿：{draft_uri}" if draft_uri else ""
-                )
-                message = (
-                    f"同一类交付缺口（{gap_kind}）已连续自动修复 {streak} 次仍未过关。"
-                    "为避免空转，已暂停自动升级；请补充方向或批准后继续。"
-                    f"{draft_note}"
-                )
-                return await self._handoff_to_human(
-                    session,
-                    goal=goal,
-                    project_id=project_id,
-                    actor=actor,
-                    metadata=metadata,
-                    gap_kind=gap_kind,
-                    reasons=reasons,
-                    attempts=attempts,
-                    message=message,
-                    task_summary=f"同类缺口已达硬顶（{gap_kind}×{streak}），需要你的方向",
-                    task_rationale=(
-                        "同一 gap_kind 自动修复已达硬顶；"
-                        "补充方向或允许继续后将重置 streak 并重新规划。"
-                    ),
-                    extra_rules=["stage:DELIVERY_GAP_KIND_CAP", "gac:GAC-D1"],
-                    extra_termination={
-                        "same_gap_kind_cap": True,
-                        "gap_kind_streak": streak,
-                        "draft_uri": draft_uri or None,
-                    },
-                )
+            if streak >= SAME_GAP_KIND_HARD_CAP:
+                auto_cycles = int(metadata.get("delivery_gap_auto_continue_cycles") or 0)
+                if auto_cycles < DELIVERY_GAP_AUTO_CONTINUE_MAX:
+                    metadata["delivery_gap_auto_continue_cycles"] = auto_cycles + 1
+                    metadata["delivery_gap_kind_streak"] = 0
+                    streak = 0
+                    attempts = 0
+                    metadata["delivery_gap_recovery_attempts"] = 0
+                    logger.info(
+                        "delivery gap hard-cap auto-continue",
+                        extra={
+                            "goal_id": str(goal.id),
+                            "gap_kind": gap_kind,
+                            "auto_cycle": auto_cycles + 1,
+                        },
+                    )
+                else:
+                    draft_note = f" 当前草稿：{draft_uri}" if draft_uri else ""
+                    message = (
+                        f"同一类交付缺口（{gap_kind}）已连续自动修复仍未过关。"
+                        "已暂停自动升级；可在对话补充方向继续，无需点「总是允许」。"
+                        f"{draft_note}"
+                    )
+                    return await self._soft_pause_delivery(
+                        session,
+                        goal=goal,
+                        project_id=project_id,
+                        metadata=metadata,
+                        gap_kind=gap_kind,
+                        reasons=reasons,
+                        attempts=attempts,
+                        message=message,
+                        summary=f"同类缺口已达自动修复上限（{gap_kind}）",
+                        extra_termination={
+                            "same_gap_kind_cap": True,
+                            "gap_kind_streak": streak,
+                            "draft_uri": draft_uri or None,
+                        },
+                    )
 
             # goal_intent / presentation / evidence 都是正常交付修复，不是危险动作：
-            # 一律走能力阶梯自动重试。只有阶梯耗尽才需要人给新方向（见下方 handoff）。
-            # （曾有 CD-1.3 对 goal_intent 早交人，导致「继续生成」也被当成高风险授权。）
+            # 一律走能力阶梯自动重试；耗尽后自动再开几轮，再不行才软暂停（无确认卡）。
 
             # AC5: persona scales the auto-recovery ladder. balanced -> unchanged.
             # CD-7.3: delivery_profile is the authority for recovery budgets.
@@ -379,35 +383,38 @@ class DeliveryGapRecoveryService:
             plan = plan_escalation(attempts, max_attempts=_effective_max)
 
             if plan.exhausted or plan.step is EscalationStep.STOP:
-                # Always-allow: open one fresh ladder cycle instead of re-prompting.
-                if gap_preauthorized and attempts > 0:
+                auto_cycles = int(metadata.get("delivery_gap_auto_continue_cycles") or 0)
+                if auto_cycles < DELIVERY_GAP_AUTO_CONTINUE_MAX:
                     attempts = 0
                     metadata["delivery_gap_recovery_attempts"] = 0
+                    metadata["delivery_gap_kind_streak"] = 0
+                    metadata["delivery_gap_auto_continue_cycles"] = auto_cycles + 1
                     plan = plan_escalation(0, max_attempts=_effective_max)
+                    logger.info(
+                        "delivery gap ladder-exhaust auto-continue",
+                        extra={
+                            "goal_id": str(goal.id),
+                            "gap_kind": gap_kind,
+                            "auto_cycle": auto_cycles + 1,
+                        },
+                    )
                 if plan.exhausted or plan.step is EscalationStep.STOP:
-                    # Ladder spent: need human *direction*, not a "dangerous action" grant.
                     message = (
                         "交付仍未达成 Goal。已穷举 ATTRIBUTE_3 能力阶梯 "
                         f"（REUSE→CONFIGURE→COMPOSE→BUILD→ACQUIRE ×{ATTAINMENT_LADDER_CYCLES} 轮，"
-                        f"共 {_effective_max} 次）。"
-                        "拒绝发布不可靠表面；需要你补充方向或授权后继续，不会标记为已完成。"
+                        f"共 {_effective_max} 次）并已自动续跑。"
+                        "拒绝发布不可靠表面；可在对话补充方向继续，无需点「总是允许」。"
                     )
-                    return await self._handoff_to_human(
+                    return await self._soft_pause_delivery(
                         session,
                         goal=goal,
                         project_id=project_id,
-                        actor=actor,
                         metadata=metadata,
                         gap_kind=gap_kind,
                         reasons=reasons,
                         attempts=attempts,
                         message=message,
-                        task_summary="自动修复已用尽，需要你补充方向",
-                        task_rationale=(
-                            "自动修复轮次已用尽；"
-                            "补充方向或允许继续后将重置计数并重新规划，否则保持等待。"
-                        ),
-                        extra_rules=["stage:DELIVERY_GAP_EXHAUSTED", "gac:GAC-D1"],
+                        summary="自动修复已用尽，可在对话补充方向",
                         extra_termination={"ladder_exhausted": True},
                     )
 
@@ -733,31 +740,28 @@ class DeliveryGapRecoveryService:
         )
 
     @staticmethod
-    async def _handoff_to_human(
+    async def _soft_pause_delivery(
         session: AsyncSession,
         *,
         goal: GoalModel,
         project_id: uuid.UUID,
-        actor: str,
         metadata: dict[str, Any],
         gap_kind: str,
         reasons: list[str],
         attempts: int,
         message: str,
-        task_summary: str,
-        task_rationale: str,
-        extra_rules: list[str],
+        summary: str,
         extra_termination: dict[str, Any] | None = None,
     ) -> DeliveryGapRecoveryResult:
-        """Shared human-handoff path (ladder exhaustion + goal_intent short-circuit).
+        """Soft-pause after auto-continue budget is spent — no permission TaskCard.
 
-        CD-1.2/CD-1.3: current best output is never discarded (AC4) and
-        ``delivery_state`` is written explicitly so DELIVERED_FOR_REVIEW is
-        observable even before ``_apply_delivery_verdict`` re-confirms it.
+        Product rule: humans only for permission/danger. Delivery gaps stay on
+        conversation notes; chat can supply new direction without「总是允许」.
         """
-        metadata["execution_stage"] = "WAITING_HUMAN"
+        metadata["execution_stage"] = "DELIVERY_SOFT_PAUSE"
         metadata["awaiting_authorized_sources"] = False
-        metadata["awaiting_human_intervention"] = True
+        metadata["awaiting_human_intervention"] = False
+        metadata.pop("pending_delivery_gap_human", None)
         metadata["delivery_gap_kind"] = gap_kind
         metadata["delivery_state"] = DeliveryState.DELIVERED_FOR_REVIEW.value
         draft_uri = str(
@@ -769,84 +773,44 @@ class DeliveryGapRecoveryService:
             metadata["last_good_draft_uri"] = draft_uri
         preview_endpoint = str(metadata.get("last_preview_endpoint") or "").strip()
         metadata["termination"] = {
-            "reason": "goal_attainment_needs_human",
+            "reason": "goal_attainment_soft_pause",
             "definition": "REGENT-DEFINITION-1.0 ATTRIBUTE_7",
             "gap_reasons": reasons,
             "gap_kind": gap_kind,
             "attempts_tried": attempts,
             "gac": "GAC-D1",
-            "handoff": "WAITING_HUMAN",
+            "handoff": "SOFT_PAUSE",
             "draft_uri": draft_uri or None,
             "preview_endpoint": preview_endpoint or None,
             **(extra_termination or {}),
         }
-        task_id = uuid.uuid4()
-        detail_parts = ["; ".join(reasons) if reasons else message[:500]]
-        if preview_endpoint:
-            detail_parts.append(f"可打开预览: {preview_endpoint}")
-        if draft_uri:
-            detail_parts.append(f"保留草稿: {draft_uri}")
-        confirmation = confirmation_for_human_task(
-            task_type="DELIVERY_GAP_INTERVENE",
-            summary=task_summary,
-            rationale=task_rationale,
-            detail=" | ".join(detail_parts),
-            prompt=message,
-            extra_rules=extra_rules,
-        )
-        timeout_sec = int(confirmation.get("timeout_seconds") or 300)
-        if confirmation.get("safety_invariant"):
-            timeout_sec = max(timeout_sec, 24 * 3600)
-        session.add(
-            HumanTaskModel(
-                id=task_id,
-                goal_id=goal.id,
-                work_id=None,
-                run_id=None,
-                task_type="DELIVERY_GAP_INTERVENE",
-                prompt=message,
-                requested_by=actor,
-                due_at=datetime.now(UTC) + timedelta(seconds=max(timeout_sec, 60)),
-                status="OPEN",
-            )
-        )
-        metadata["pending_delivery_gap_human"] = {
-            "human_task_id": str(task_id),
-            "gap_kind": gap_kind,
-            "gap_reasons": reasons,
-            "attempts_tried": attempts,
-            "draft_uri": draft_uri or None,
-            "preview_endpoint": preview_endpoint or None,
-        }
         goal.metadata_json = merge_live_action_into_metadata(
             metadata,
-            "等待你确认以继续",
-            stage="WAITING_HUMAN",
-            event_type="DELIVERY_GAP_EXHAUSTED",
+            "自动修复已暂停；可在对话补充方向继续（无需确认）",
+            stage="DELIVERY_SOFT_PAUSE",
+            event_type="DELIVERY_SOFT_PAUSE",
         )
         flag_modified(goal, "metadata_json")
         await DeliveryGapRecoveryService._append(
             session,
             project_id,
             role="ASSISTANT",
-            message_type="DELIVERY_GAP_EXHAUSTED",
-            content=task_summary,
+            message_type="DELIVERY_SOFT_PAUSE",
+            content=summary,
             metadata={
                 "goal_id": str(goal.id),
-                "id": str(task_id),
-                "human_task_id": str(task_id),
-                "task_type": "DELIVERY_GAP_INTERVENE",
                 "attempts": attempts,
                 "gap_reasons": reasons,
                 "gap_kind": gap_kind,
-                "handoff": "WAITING_HUMAN",
-                "prompt": message,
-                "confirmation": confirmation,
+                "handoff": "SOFT_PAUSE",
+                "detail": message[:800],
+                "draft_uri": draft_uri or None,
+                "preview_endpoint": preview_endpoint or None,
             },
         )
         return DeliveryGapRecoveryResult(
             False,
-            "STOP",
+            "SOFT_PAUSE",
             message,
             attempts,
             gap_kind,
@@ -896,6 +860,7 @@ class DeliveryGapRecoveryService:
 
             metadata["delivery_gap_recovery_attempts"] = 0
             metadata["delivery_gap_kind_streak"] = 0
+            metadata["delivery_gap_auto_continue_cycles"] = 0
             metadata["awaiting_human_intervention"] = False
             metadata.pop("termination", None)
             metadata.pop("pending_delivery_gap_human", None)
@@ -913,23 +878,50 @@ class DeliveryGapRecoveryService:
 
             req_id, plan_id = await self._resolve_generation_ids(session, goal_id)
             if req_id is None or plan_id is None:
+                # Early-pipeline goals (discovery not finished) must not keep minting
+                # DELIVERY_GAP_INTERVENE cards: approve → missing lineage → halt →
+                # new intervene →「总是允许」死循环.
+                allow_actions = [
+                    a
+                    for a in list(metadata.get("decision_allow_actions") or [])
+                    if str(a) != "delivery_gap_intervene"
+                ]
+                if allow_actions:
+                    metadata["decision_allow_actions"] = allow_actions
+                else:
+                    metadata.pop("decision_allow_actions", None)
+                metadata["awaiting_human_intervention"] = False
+                metadata["execution_stage"] = "DISCOVERING"
+                metadata["lineage_missing_resume_at"] = datetime.now(UTC).isoformat()
+                goal.metadata_json = merge_live_action_into_metadata(
+                    metadata,
+                    "已批准，但交付谱系未就绪；正在重新发起发现/规划，不再弹出同类「总是允许」卡",
+                    stage="DISCOVERING",
+                    event_type="LINEAGE_MISSING_RESTART_DISCOVERY",
+                )
+                flag_modified(goal, "metadata_json")
                 await self._append(
                     session,
                     project_id,
                     role="ASSISTANT",
                     message_type="ATTAINMENT_RECOVERY_STARTED",
                     content=(
-                        "已批准，但缺少生成谱系（requirement/plan），无法自动重开交付恢复；"
-                        "请补充方向或重新确认目标。"
+                        "已批准，但缺少生成谱系（requirement/plan）。"
+                        "已清除「总是允许·交付缺口」以免空转；将重新发起发现，而不是再弹同一张批准卡。"
                     ),
-                    metadata={"goal_id": str(goal_id), "human_resume": True},
+                    metadata={
+                        "goal_id": str(goal_id),
+                        "human_resume": True,
+                        "restart_discovery": True,
+                    },
                 )
                 return DeliveryGapRecoveryResult(
                     False,
-                    "BLOCK",
+                    "RESTART_DISCOVERY",
                     "missing generation lineage after human approve",
                     0,
                     str(metadata.get("delivery_gap_kind") or "product_surface"),
+                    terminal_exhaust=False,
                 )
 
         return await self.recover(

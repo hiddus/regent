@@ -218,6 +218,97 @@ async def test_create_plan_then_request_run_recovery_path() -> None:
     session.add.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_request_run_rebinds_when_plan_changes_under_same_key() -> None:
+    """Outbox retry with drifted plan digest must not raise scope mismatch."""
+    old_plan_id = uuid.uuid4()
+    new_plan = _completed_plan()
+    new_plan.status = "FROZEN"
+    existing = GenerationRunModel(
+        id=uuid.uuid4(),
+        plan_id=old_plan_id,
+        attempt=1,
+        status="FAILED",
+        version=2,
+        idempotency_key="generation-delivery-recovery:same-dispatch",
+        correlation_id="corr",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session = AsyncMock()
+    # 1) lookup by idempotency → existing; 2) max attempt on new plan
+    session.scalar = AsyncMock(side_effect=[existing, 0])
+    session.get = AsyncMock(return_value=new_plan)
+    session.flush = AsyncMock()
+    svc = GenerationService(_session_factory(session), MagicMock(), MagicMock())
+
+    run = await svc.request_run(
+        RequestGenerationRun(
+            plan_id=new_plan.id,
+            idempotency_key="generation-delivery-recovery:same-dispatch",
+            correlation_id="corr",
+        )
+    )
+
+    assert run is existing
+    assert run.plan_id == new_plan.id
+    assert run.status == "REQUESTED"
+    assert run.attempt == 1
+    assert new_plan.status == "FROZEN"
+    session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_request_run_scope_mismatch_inflight_is_lease_conflict() -> None:
+    old_plan_id = uuid.uuid4()
+    new_plan_id = uuid.uuid4()
+    existing = GenerationRunModel(
+        id=uuid.uuid4(),
+        plan_id=old_plan_id,
+        attempt=1,
+        status="GENERATING",
+        version=1,
+        idempotency_key="same-key",
+        correlation_id="corr",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session = AsyncMock()
+    session.scalar = AsyncMock(return_value=existing)
+    svc = GenerationService(_session_factory(session), MagicMock(), MagicMock())
+
+    with pytest.raises(DomainError) as exc:
+        await svc.request_run(
+            RequestGenerationRun(
+                plan_id=new_plan_id,
+                idempotency_key="same-key",
+                correlation_id="corr",
+            )
+        )
+    assert exc.value.code == ErrorCode.LEASE_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_request_run_executing_plan_is_lease_conflict() -> None:
+    plan = _completed_plan()
+    plan.status = "EXECUTING"
+    session = AsyncMock()
+    session.scalar = AsyncMock(return_value=None)
+    session.get = AsyncMock(return_value=plan)
+    svc = GenerationService(_session_factory(session), MagicMock(), MagicMock())
+
+    with pytest.raises(DomainError) as exc:
+        await svc.request_run(
+            RequestGenerationRun(
+                plan_id=plan.id,
+                idempotency_key="parallel-recovery-key",
+                correlation_id="corr",
+            )
+        )
+    assert exc.value.code == ErrorCode.LEASE_CONFLICT
+    assert "already executing" in str(exc.value)
+
+
 def test_reopen_helper_completed_and_failed() -> None:
     plan = _completed_plan()
     GenerationService._reopen_plan_for_run(plan, allow_executing=False)

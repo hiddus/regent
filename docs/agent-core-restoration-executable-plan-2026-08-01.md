@@ -1,6 +1,6 @@
 # Agent 内核可执行修复计划（复审收敛版，2026-08-01）
 
-> 状态：ACTIVE（M0–M5 工程接线已落地；M6 canary/真实用户闭环未开始）。
+> 状态：ACTIVE（M0–M5 工程接线已落地；**M6 5% agentic canary 已开窗** 2026-08-01，默认仍 artifact-backed；出口 Gate / 真实用户闭环仍待观察）。
 > 输入：`agent-core-restoration-plan-2026-08-01.md`、其 review patch、当前源码、PRD、Technical Spec 与 GQ-3 生产报告。
 > 目标：先恢复一条可运行、可修复、可预览、可增量迭代的强单 Agent 交付闭环，再决定是否恢复 Skills 扩展、GQ-4 和多 Agent 投资。
 >
@@ -12,6 +12,7 @@
 > - M4 RuntimePreview 路由、晋级 hash 门、TaskCard primary_failure/recovery
 > - M5 三 Skill + 路由 + 消融报告骨架
 > - 默认 generation_strategy 仍为 artifact-backed；GQ-4 关闭
+> - M6：5% agentic canary 已开窗（见 `docs/m6-canary-window-2026-08-01.json`）；出口 Gate 未宣称达标
 
 ## 1. 复审结论
 

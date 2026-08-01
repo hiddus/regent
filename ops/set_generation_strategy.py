@@ -98,13 +98,23 @@ def recreate(name, *, add_docker_group: bool):
             env[k] = v
     env.update(file_env)
     binds = list(host.get("Binds") or [])
-    if name == "regent-worker":
+    if name == "regent-worker" or "worker" in name:
         for need in (
             "/var/run/docker.sock:/var/run/docker.sock",
             "/usr/bin/docker:/usr/bin/docker:ro",
         ):
             if not any(need.split(":")[0] in b for b in binds):
                 binds.append(need)
+    if name == "regent-api":
+        host_console = "/opt/regent/console-dist"
+        api_console = "/app/apps/regent-console/dist"
+        from pathlib import Path as _P
+        if _P(host_console, "index.html").is_file():
+            binds = [
+                b for b in binds
+                if not (len(b.split(":")) > 1 and b.split(":")[1].rstrip("/") == api_console.rstrip("/"))
+            ]
+            binds.append(f"{host_console}:{api_console}:ro")
     subprocess.check_call(["docker", "rm", "-f", name])
     cmd = ["docker", "run", "-d", "--name", name, "--network", host.get("NetworkMode") or "regent-net", "--restart", "unless-stopped"]
     for b in binds:

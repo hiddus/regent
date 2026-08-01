@@ -1,0 +1,26 @@
+{
+  "version": "agent-core-m5-skill-labels-v1",
+  "frozen_at": "2026-08-01T00:00:00Z",
+  "task_set_ref": "fixtures/agent_core_m0_task_set_v1.json",
+  "notes": "Expected Skill routes for M5-4 router accuracy. Macro-F1 over skill_id labels.",
+  "labels": {
+    "m0-01": ["web-app-scaffold", "runtime-contract"],
+    "m0-02": ["web-app-scaffold", "runtime-contract"],
+    "m0-03": ["web-app-scaffold", "runtime-contract"],
+    "m0-04": ["runtime-contract", "web-app-scaffold"],
+    "m0-05": ["web-app-scaffold", "runtime-contract"],
+    "m0-06": ["test-harness", "runtime-contract", "web-app-scaffold"],
+    "m0-07": ["runtime-contract", "web-app-scaffold"],
+    "m0-08": ["runtime-contract", "web-app-scaffold"],
+    "m0-09": ["test-harness", "web-app-scaffold", "runtime-contract"],
+    "m0-10": ["web-app-scaffold", "runtime-contract"],
+    "m0-11": ["web-app-scaffold", "runtime-contract"],
+    "m0-12": ["web-app-scaffold", "runtime-contract"]
+  },
+  "preregistered": {
+    "min_router_accuracy": 0.9,
+    "min_ablation_delta": 0.0,
+    "engineering_gate_only": true,
+    "no_significance_claims_until_n40": true
+  }
+}

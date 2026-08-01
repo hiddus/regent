@@ -1,0 +1,354 @@
+{
+  "record_type": "M6PreflightReport",
+  "generated_at": "2026-08-01T15:07:25.629997+00:00",
+  "plan_ref": "docs/agent-core-restoration-executable-plan-2026-08-01.md",
+  "phases": {
+    "task_set": {
+      "ok": true,
+      "task_count": 12,
+      "content_hash": "7f804d295490115577d6432c4ec71bffa6ab32e3a169095f17188a544b138b26",
+      "hash_match": true,
+      "debug_holdout": [
+        "m0-11",
+        "m0-12"
+      ],
+      "tune_ids": [
+        "m0-01",
+        "m0-02",
+        "m0-03",
+        "m0-04",
+        "m0-05",
+        "m0-06",
+        "m0-07",
+        "m0-08",
+        "m0-09",
+        "m0-10"
+      ]
+    },
+    "provider_replay": {
+      "ok": true,
+      "n": 7,
+      "passed": 7,
+      "rows": [
+        {
+          "id": "provider-http-401",
+          "file": "http_401.json",
+          "outcome": "error",
+          "status": 401,
+          "retryable": false,
+          "error": "HTTPStatusError:401",
+          "pass": true
+        },
+        {
+          "id": "provider-http-429",
+          "file": "http_429.json",
+          "outcome": "error",
+          "status": 429,
+          "retryable": true,
+          "error": "HTTPStatusError:429",
+          "pass": true
+        },
+        {
+          "id": "provider-http-503",
+          "file": "http_503.json",
+          "outcome": "error",
+          "status": 503,
+          "retryable": true,
+          "error": "HTTPStatusError:503",
+          "pass": true
+        },
+        {
+          "id": "provider-length-truncation",
+          "file": "length_truncation.json",
+          "outcome": "error",
+          "primary_failure_code": "MODEL_TRUNCATED",
+          "pass": true
+        },
+        {
+          "id": "provider-malformed-tool-args",
+          "file": "malformed_tool_args.json",
+          "outcome": "error",
+          "primary_failure_code": "TOOL_CALL_INVALID",
+          "pass": true
+        },
+        {
+          "id": "provider-normal-tool-call",
+          "file": "normal_tool_call.json",
+          "outcome": "ok",
+          "finish_reason": "tool_calls",
+          "tool_name": "write_file",
+          "primary_failure_code": null,
+          "retryable": null,
+          "pass": true
+        },
+        {
+          "id": "provider-timeout",
+          "file": "timeout.json",
+          "outcome": "error",
+          "error": "timeout",
+          "retryable": true,
+          "pass": true
+        }
+      ]
+    },
+    "skills": {
+      "ok": true,
+      "builtin_skills": [
+        "runtime-contract",
+        "test-harness",
+        "web-app-scaffold"
+      ],
+      "n_tasks": 12,
+      "exact_match_accuracy": 1.0,
+      "micro_precision": 1.0,
+      "micro_recall": 1.0,
+      "micro_f1": 1.0,
+      "min_router_accuracy": 0.9,
+      "ablation": {
+        "on_pass_rate": 1.0,
+        "off_pass_rate": 0.0,
+        "delta": 1.0,
+        "on_n": 12,
+        "off_n": 12,
+        "engineering_gate_only": true,
+        "no_significance_claims": true,
+        "on_ci95": {
+          "low": 0.7575,
+          "high": 1.0
+        },
+        "delta_ci_crosses_zero": false
+      },
+      "per_task": [
+        {
+          "task_id": "m0-01",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-02",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-03",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-04",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-05",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-06",
+          "expected": [
+            "runtime-contract",
+            "test-harness",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "test-harness",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-07",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-08",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-09",
+          "expected": [
+            "runtime-contract",
+            "test-harness",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "test-harness",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-10",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-11",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        },
+        {
+          "task_id": "m0-12",
+          "expected": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "got_on": [
+            "runtime-contract",
+            "web-app-scaffold"
+          ],
+          "exact": true,
+          "on_hit": true
+        }
+      ],
+      "note": "Ablation here is router hit-rate on/off (engineering gate). Full Skill on/off generation pass-rate still needs live agentic runs."
+    },
+    "contracts": {
+      "ok": true,
+      "skipped": true
+    },
+    "live_subset": {
+      "ok": true,
+      "skipped": false,
+      "where": "s0-regent-api",
+      "model": "deepseek-v4-flash",
+      "base_url": "https://api.deepseek.com",
+      "tasks": [
+        "m0-01"
+      ],
+      "rows": [
+        {
+          "task_id": "m0-01",
+          "skills_enabled": true,
+          "submitted": true,
+          "file_count": 4,
+          "turns": 6,
+          "tokens": 22010,
+          "pass": true
+        },
+        {
+          "task_id": "m0-01",
+          "skills_enabled": false,
+          "submitted": true,
+          "file_count": 5,
+          "turns": 7,
+          "tokens": 33958,
+          "pass": true
+        }
+      ],
+      "ablation_live": {
+        "on_pass_rate": 1.0,
+        "off_pass_rate": 1.0,
+        "delta": 0.0,
+        "on_n": 1,
+        "off_n": 1,
+        "engineering_gate_only": true,
+        "no_significance_claims": true
+      },
+      "note": "Soft verify inside S0; not full sandbox Journey.",
+      "exit_code": 0
+    },
+    "s0": {
+      "ok": false,
+      "exit_code": 0,
+      "freeze_ok": false,
+      "poison": {
+        "cancelled_poison": 51,
+        "remaining_failed": 0,
+        "remaining_dl": 136,
+        "open_gap_tasks": 0,
+        "already_dead_letter_matching": 134
+      },
+      "tail": "=== freeze ===\nREGENT_GENERATION_STRATEGY=artifact-backed\nREGENT_GENERATION_STRATEGY_CANARY_GATE=true\nREGENT_GENERATION_STRATEGY_CANARY_PERCENT=5\nREGENT_GENERATION_STRATEGY_CANARY_VARIANT=agentic\nREGENT_GENERATION_STRATEGY_FALLBACK=artifact-backed\nREGENT_GENERATION_STRATEGY_KILL_SWITCH=false\n=== outbox poison clear ===\n{\"cancelled_poison\": 51, \"remaining_failed\": 0, \"remaining_dl\": 136, \"open_gap_tasks\": 0, \"already_dead_letter_matching\": 134}\n=== health ===\n{\"detail\":\"Not Found\"}"
+    }
+  },
+  "verdict": {
+    "m6_canary_allowed": false,
+    "decision": "NO_GO",
+    "engineering_preflight": "FAIL",
+    "live_soft_pass": "FAIL",
+    "blockers": [
+      "s0_baseline_freeze_or_poison"
+    ],
+    "next": "Fix engineering blockers first; then re-run with --live; Owner must still approve 5% canary separately."
+  }
+}

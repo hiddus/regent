@@ -37,6 +37,30 @@ class ToolCallInvalidError(ModelOutputError):
     failure_code = "TOOL_CALL_INVALID"
 
 
+def extract_cached_tokens(usage: dict[str, Any]) -> int | None:
+    """Best-effort prompt-cache hit count from OpenAI-compatible usage blobs.
+
+    Returns None when the provider omits cache fields (unknown), otherwise an int.
+    """
+    if not isinstance(usage, dict):
+        return None
+    for key in ("cached_tokens", "prompt_cache_hit_tokens", "cache_read_input_tokens"):
+        if key in usage and usage.get(key) is not None:
+            try:
+                return max(0, int(usage[key]))
+            except (TypeError, ValueError):
+                pass
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        for key in ("cached_tokens", "cache_read_input_tokens", "cached"):
+            if key in details and details.get(key) is not None:
+                try:
+                    return max(0, int(details[key]))
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ModelUsage:
     input_tokens: int
@@ -80,6 +104,7 @@ class OpenAICompatibleProvider:
         max_output_tokens: int | None = 8192,
         max_http_retries: int = 3,
         retry_deadline_seconds: float | None = None,
+        thinking_mode: str = "disabled",
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not base_url or not api_key or not model:
@@ -90,6 +115,11 @@ class OpenAICompatibleProvider:
             raise ModelConfigurationError("max_output_tokens must be positive when set")
         if max_http_retries < 0:
             raise ModelConfigurationError("max_http_retries must be >= 0")
+        mode = str(thinking_mode or "disabled").strip().lower()
+        if mode not in {"disabled", "enabled", "default"}:
+            raise ModelConfigurationError(
+                "thinking_mode must be disabled|enabled|default"
+            )
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
@@ -97,13 +127,18 @@ class OpenAICompatibleProvider:
         self._max_structured_attempts = max_structured_attempts
         self._max_output_tokens = max_output_tokens
         self._max_http_retries = max_http_retries
+        self._thinking_mode = mode
+        # Budget must cover multiple slow 504/timeouts — not just one request.
+        # Old default (== timeout) made provider retries unreachable once a
+        # single gateway wait burned the whole deadline.
         self._retry_deadline_seconds = (
             float(retry_deadline_seconds)
             if retry_deadline_seconds is not None
-            else float(timeout_seconds)
+            else float(timeout_seconds) * (max_http_retries + 1) + 30.0
         )
         self._client = client
         self.last_http_attempts: list[dict[str, Any]] = []
+        self.last_chat_diagnostics: dict[str, Any] = {}
 
     async def generate_structured(
         self,
@@ -128,6 +163,7 @@ class OpenAICompatibleProvider:
         total_output = 0
         last_error: ModelOutputError | None = None
         model_name = self._model
+        self.last_http_attempts = []
         try:
             for attempt in range(self._max_structured_attempts):
                 payload: dict[str, Any] = {
@@ -136,12 +172,10 @@ class OpenAICompatibleProvider:
                     "response_format": {"type": "json_object"},
                     "temperature": 0,
                 }
-                response = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    json=payload,
-                )
-                response.raise_for_status()
+                self._apply_thinking_mode(payload)
+                # Same M1-2 HTTP retry as chat(): production artifact-backed
+                # generation uses this path; previously 504 raised immediately.
+                response = await self._post_chat_completions(client, payload)
                 try:
                     body = response.json()
                     content = body["choices"][0]["message"]["content"]
@@ -192,6 +226,14 @@ class OpenAICompatibleProvider:
             if owns_client:
                 await client.aclose()
 
+    def _apply_thinking_mode(self, payload: dict[str, Any]) -> None:
+        """DeepSeek V4: thinking defaults on and shares max_tokens with content/tools."""
+        if self._thinking_mode == "disabled":
+            payload["thinking"] = {"type": "disabled"}
+        elif self._thinking_mode == "enabled":
+            payload["thinking"] = {"type": "enabled"}
+        # "default" → omit; provider/model default applies.
+
     async def chat(
         self,
         *,
@@ -203,6 +245,7 @@ class OpenAICompatibleProvider:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
         self.last_http_attempts = []
+        self.last_chat_diagnostics = {}
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": [self._serialize_message(m) for m in messages],
@@ -210,6 +253,7 @@ class OpenAICompatibleProvider:
         }
         if self._max_output_tokens is not None:
             payload["max_tokens"] = int(self._max_output_tokens)
+        self._apply_thinking_mode(payload)
         if tools:
             payload["tools"] = [
                 {
@@ -223,84 +267,126 @@ class OpenAICompatibleProvider:
                 for t in tools
             ]
             payload["tool_choice"] = "auto"
-        started = time.monotonic()
-        attempt = 0
         try:
-            while True:
-                attempt += 1
+            response = await self._post_chat_completions(client, payload)
+            try:
+                body = response.json()
+                choice = body["choices"][0]
+                raw_message = choice["message"]
+                model_name = str(body.get("model", self._model))
+                finish_reason = str(choice.get("finish_reason") or "stop")
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise ModelOutputError("model chat response envelope is invalid") from exc
+            usage = body.get("usage", {}) if isinstance(body.get("usage"), dict) else {}
+            content = raw_message.get("content")
+            if content is not None and not isinstance(content, str):
+                content = str(content)
+            reasoning = raw_message.get("reasoning_content")
+            if reasoning is not None and not isinstance(reasoning, str):
+                reasoning = str(reasoning)
+            reasoning_tokens = 0
+            details = usage.get("completion_tokens_details")
+            if isinstance(details, dict):
                 try:
-                    response = await client.post(
-                        f"{self._base_url}/chat/completions",
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                        json=payload,
-                    )
-                except (httpx.TimeoutException, httpx.TransportError) as exc:
-                    self.last_http_attempts.append(
-                        {
-                            "attempt": attempt,
-                            "error": type(exc).__name__,
-                            "retryable": True,
-                        }
-                    )
-                    if not self._should_retry_transport(attempt=attempt, started=started):
-                        raise ModelOutputError(
-                            f"model transport failed after {attempt} attempt(s): {exc}"
-                        ) from exc
-                    await self._sleep_backoff(attempt=attempt, retry_after=None)
-                    continue
-
-                status = int(response.status_code)
-                self.last_http_attempts.append(
-                    {
-                        "attempt": attempt,
-                        "status": status,
-                        "retryable": status in _RETRYABLE_STATUS,
-                    }
+                    reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+                except (TypeError, ValueError):
+                    reasoning_tokens = 0
+            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            cached_tokens = extract_cached_tokens(usage)
+            raw_tools = raw_message.get("tool_calls")
+            self.last_chat_diagnostics = {
+                "finish_reason": finish_reason,
+                "content_chars": len(content or ""),
+                "reasoning_chars": len(reasoning or ""),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "cached_tokens": cached_tokens,
+                "max_tokens": self._max_output_tokens,
+                "thinking_mode": self._thinking_mode,
+                "has_tool_calls": bool(raw_tools),
+            }
+            reason_l = finish_reason.lower()
+            if reason_l == "length":
+                raise ModelTruncatedError(
+                    "model output truncated (finish_reason=length); "
+                    f"content_chars={len(content or '')}; "
+                    f"reasoning_chars={len(reasoning or '')}; "
+                    f"completion_tokens={completion_tokens}; "
+                    f"reasoning_tokens={reasoning_tokens}; "
+                    f"max_tokens={self._max_output_tokens}; "
+                    f"thinking_mode={self._thinking_mode}; "
+                    f"has_tool_calls={bool(raw_tools)}"
                 )
-                if status in _NO_RETRY_STATUS:
-                    response.raise_for_status()
-                if status in _RETRYABLE_STATUS:
-                    if not self._should_retry_transport(attempt=attempt, started=started):
-                        response.raise_for_status()
-                    retry_after = response.headers.get("Retry-After")
-                    await self._sleep_backoff(attempt=attempt, retry_after=retry_after)
-                    continue
-                response.raise_for_status()
-                try:
-                    body = response.json()
-                    choice = body["choices"][0]
-                    raw_message = choice["message"]
-                    model_name = str(body.get("model", self._model))
-                    finish_reason = str(choice.get("finish_reason") or "stop")
-                except (KeyError, IndexError, TypeError, ValueError) as exc:
-                    raise ModelOutputError("model chat response envelope is invalid") from exc
-                usage = body.get("usage", {})
-                content = raw_message.get("content")
-                if content is not None and not isinstance(content, str):
-                    content = str(content)
-                reason_l = finish_reason.lower()
-                if reason_l == "length":
-                    raise ModelTruncatedError(
-                        "model output truncated (finish_reason=length); "
-                        f"content_chars={len(content or '')}"
-                    )
-                tool_calls = self._parse_tool_calls(raw_message.get("tool_calls"))
-                return ChatResponse(
-                    message=ChatMessage(
-                        role="assistant",
-                        content=content,
-                        tool_calls=tool_calls,
-                    ),
-                    usage=ChatUsage(
-                        input_tokens=int(usage.get("prompt_tokens", 0)),
-                        output_tokens=int(usage.get("completion_tokens", 0)),
-                    ),
-                    model=model_name,
-                    finish_reason=finish_reason,
-                )
+            tool_calls = self._parse_tool_calls(raw_tools)
+            return ChatResponse(
+                message=ChatMessage(
+                    role="assistant",
+                    content=content,
+                    tool_calls=tool_calls,
+                    reasoning_content=reasoning,
+                ),
+                usage=ChatUsage(
+                    input_tokens=prompt_tokens,
+                    output_tokens=completion_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    cached_tokens=cached_tokens,
+                ),
+                model=model_name,
+                finish_reason=finish_reason,
+            )
         finally:
             if owns_client:
                 await client.aclose()
+
+    async def _post_chat_completions(
+        self, client: httpx.AsyncClient, payload: dict[str, Any]
+    ) -> httpx.Response:
+        """POST /chat/completions with M1-2 retry for 408/429/5xx and transport errors."""
+        started = time.monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = await client.post(
+                    f"{self._base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=payload,
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                self.last_http_attempts.append(
+                    {
+                        "attempt": attempt,
+                        "error": type(exc).__name__,
+                        "retryable": True,
+                    }
+                )
+                if not self._should_retry_transport(attempt=attempt, started=started):
+                    raise ModelOutputError(
+                        f"model transport failed after {attempt} attempt(s): {exc}"
+                    ) from exc
+                await self._sleep_backoff(attempt=attempt, retry_after=None)
+                continue
+
+            status = int(response.status_code)
+            self.last_http_attempts.append(
+                {
+                    "attempt": attempt,
+                    "status": status,
+                    "retryable": status in _RETRYABLE_STATUS,
+                }
+            )
+            if status in _NO_RETRY_STATUS:
+                response.raise_for_status()
+            if status in _RETRYABLE_STATUS:
+                if not self._should_retry_transport(attempt=attempt, started=started):
+                    response.raise_for_status()
+                retry_after = response.headers.get("Retry-After")
+                await self._sleep_backoff(attempt=attempt, retry_after=retry_after)
+                continue
+            response.raise_for_status()
+            return response
 
     def _should_retry_transport(self, *, attempt: int, started: float) -> bool:
         if attempt > self._max_http_retries + 1:
@@ -342,6 +428,9 @@ class OpenAICompatibleProvider:
                 }
                 for call in message.tool_calls
             ]
+        # DeepSeek V4 tool chains: omit → 400 when thinking enabled.
+        if message.reasoning_content:
+            payload["reasoning_content"] = message.reasoning_content
         return payload
 
     @staticmethod

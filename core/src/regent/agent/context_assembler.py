@@ -1,4 +1,11 @@
-"""Layered context assembler for agentic generation (budgeted segments)."""
+"""Layered context assembler for agentic generation (budgeted segments).
+
+Prompt-cache layout (P0 / D9 fix):
+  system → static user (stable within a Run) → conversation → volatile user
+
+Volatile workspace/todos/failures must NOT precede conversation, or every write
+invalidates the entire prefix cache.
+"""
 
 from __future__ import annotations
 
@@ -11,12 +18,12 @@ from regent.agent.types import ChatMessage, VerificationGap
 # Soft character budgets (~4 chars/token heuristic).
 _BUDGETS = {
     "goal_anchor": 8_000,
+    "skill_guidance": 6_000,
     "project_memory": 24_000,
-    "workspace_state": 32_000,
+    # Tree-only; no file fulltext (use read_file tool).
+    "workspace_state": 8_000,
     "todo_state": 4_000,
     "recent_failures": 16_000,
-    # CD-4.3: conversation/evidence retrieval segments — small budgets since these
-    # are retrieved snippets, not the primary context.
     "conversation_context": 6_000,
     "evidence_context": 8_000,
 }
@@ -26,6 +33,10 @@ def _clip(text: str, budget: int) -> str:
     if len(text) <= budget:
         return text
     return text[: budget - 20] + "\n...[truncated]"
+
+
+def _join_segments(segments: list[str]) -> str:
+    return "\n\n".join(s for s in segments if s)
 
 
 class ContextAssembler:
@@ -59,7 +70,40 @@ class ContextAssembler:
             "- Stay within planned_paths when possible; create supporting files as needed.\n"
             "- When done, ensure requirements.txt, README.md, and a working entrypoint exist.\n"
             "- Do not claim success until you have verified the app can start.\n"
+            "- Workspace context only lists paths; call read_file before editing unknown content.\n"
         )
+
+    def static_prefix_text(self) -> str:
+        """Within-run stable blob (must not include workspace/todos/gaps)."""
+        return _join_segments(
+            [
+                self._goal_anchor_segment(),
+                self._skill_guidance_segment(),
+                self._project_memory_segment(),
+                self._conversation_segment(),
+                self._evidence_segment(),
+            ]
+        )
+
+    def volatile_suffix_text(
+        self,
+        *,
+        turn: int,
+        force_goal_reinject: bool = False,
+    ) -> str:
+        """Per-turn delta placed AFTER conversation for prompt-cache friendliness."""
+        segments = [
+            self._workspace_segment(),
+            self._todo_segment(),
+            self._failures_segment(),
+        ]
+        reinject = force_goal_reinject or (turn > 0 and turn % 10 == 0)
+        if reinject:
+            segments.append(
+                "══════ GOAL REMINDER (re-injected) ══════\n"
+                + self._goal_anchor_segment()
+            )
+        return _join_segments(segments)
 
     def assemble(
         self,
@@ -68,27 +112,18 @@ class ContextAssembler:
         conversation: list[ChatMessage],
         force_goal_reinject: bool = False,
     ) -> list[ChatMessage]:
-        segments = [
-            self._goal_anchor_segment(),
-            self._project_memory_segment(),
-            self._conversation_segment(),
-            self._evidence_segment(),
-            self._workspace_segment(),
-            self._todo_segment(),
-            self._failures_segment(),
-        ]
-        reinject = force_goal_reinject or turn == 0 or (turn > 0 and turn % 10 == 0)
-        if reinject and turn > 0:
-            segments.insert(
-                0,
-                "══════ GOAL REMINDER (re-injected) ══════\n" + self._goal_anchor_segment(),
-            )
-        user_blob = "\n\n".join(s for s in segments if s)
         messages: list[ChatMessage] = [
             ChatMessage(role="system", content=self.system_prompt()),
-            ChatMessage(role="user", content=user_blob),
-            *conversation,
         ]
+        static_blob = self.static_prefix_text()
+        if static_blob:
+            messages.append(ChatMessage(role="user", content=static_blob))
+        messages.extend(conversation)
+        volatile = self.volatile_suffix_text(
+            turn=turn, force_goal_reinject=force_goal_reinject
+        )
+        if volatile:
+            messages.append(ChatMessage(role="user", content=volatile))
         return messages
 
     def _goal_anchor_segment(self) -> str:
@@ -109,6 +144,23 @@ class ContextAssembler:
         if self._planned_paths:
             lines.append("Planned paths: " + ", ".join(self._planned_paths[:40]))
         return _clip("\n".join(lines), _BUDGETS["goal_anchor"])
+
+    def _skill_guidance_segment(self) -> str:
+        """M5: inject selected Skill guidance into the user turn (not just metadata)."""
+        guidance = str(self._plan.get("skill_guidance") or "").strip()
+        if not guidance:
+            return ""
+        refs = self._plan.get("skill_refs") or []
+        header = "══════ SKILL GUIDANCE ══════"
+        if isinstance(refs, list) and refs:
+            ids = [
+                str(r.get("skill_id") or "")
+                for r in refs
+                if isinstance(r, dict) and r.get("skill_id")
+            ]
+            if ids:
+                header += "\nSelected: " + ", ".join(ids)
+        return _clip(header + "\n" + guidance, _BUDGETS["skill_guidance"])
 
     def _project_memory_segment(self) -> str:
         if not self._regent_md.strip():
@@ -172,17 +224,17 @@ class ContextAssembler:
         return _clip("\n".join(lines), _BUDGETS["evidence_context"])
 
     def _workspace_segment(self) -> str:
+        """Tree-only workspace view — no file fulltext (prompt-cache + cost)."""
         tree = self._toolkit.list_tree(".", limit=120)
-        lines = ["══════ WORKSPACE ══════", "File tree:"]
+        lines = [
+            "══════ WORKSPACE ══════",
+            "File tree (paths only — use read_file for contents):",
+        ]
         lines.extend(f"  {p}" for p in tree[:80])
-        recent = self._toolkit.recent_writes[-5:]
-        for rel in recent:
-            try:
-                content = self._toolkit.read_text(rel, max_chars=4_000)
-            except OSError:
-                continue
-            lines.append(f"\n--- recent file: {rel} ---")
-            lines.append(content)
+        recent = list(self._toolkit.recent_writes[-8:] or [])
+        if recent:
+            lines.append("Recent writes:")
+            lines.extend(f"  - {rel}" for rel in recent)
         return _clip("\n".join(lines), _BUDGETS["workspace_state"])
 
     def _todo_segment(self) -> str:

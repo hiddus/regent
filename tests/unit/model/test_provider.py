@@ -125,3 +125,202 @@ async def test_openai_compatible_provider_chat_sends_max_tokens() -> None:
         result = await provider.chat(messages=[ChatMessage(role="user", content="x")])
     assert seen["max_tokens"] == 1024
     assert result.message.content == "hi"
+
+
+async def test_generate_structured_retries_http_504() -> None:
+    """Production artifact-backed path must retry gateway timeouts like chat()."""
+    hits = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        if hits["n"] < 3:
+            return httpx.Response(504, text="gateway timeout")
+        return httpx.Response(
+            200,
+            json={
+                "model": "test-model",
+                "choices": [{"message": {"content": '{"answer":"ok"}'}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="test-model",
+            max_http_retries=3,
+            client=client,
+        )
+        result = await provider.generate_structured(
+            system_prompt="Return JSON", user_prompt="answer", response_model=Answer
+        )
+
+    assert result.output.answer == "ok"
+    assert hits["n"] == 3
+    assert [a.get("status") for a in provider.last_http_attempts] == [504, 504, 200]
+
+
+async def test_default_retry_deadline_covers_multiple_timeouts() -> None:
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.example/v1",
+        api_key="secret",
+        model="test-model",
+        timeout_seconds=100,
+        max_http_retries=3,
+    )
+    assert provider._retry_deadline_seconds == 100 * 4 + 30
+
+
+async def test_chat_sends_thinking_disabled_by_default() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "write_file",
+                                        "arguments": '{"path":"a.py","content":"x"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://api.deepseek.com",
+            api_key="secret",
+            model="deepseek-v4-flash",
+            client=client,
+        )
+        from regent.model.chat import ChatMessage, ToolSpec
+
+        result = await provider.chat(
+            messages=[ChatMessage(role="user", content="build")],
+            tools=[ToolSpec(name="write_file", description="w", parameters={})],
+        )
+    assert seen.get("thinking") == {"type": "disabled"}
+    assert result.message.tool_calls[0].name == "write_file"
+
+
+async def test_chat_length_error_includes_reasoning_diagnostics() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "x" * 100,
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": 8192,
+                    "completion_tokens_details": {"reasoning_tokens": 8000},
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://api.deepseek.com",
+            api_key="secret",
+            model="deepseek-v4-flash",
+            thinking_mode="default",
+            max_output_tokens=8192,
+            client=client,
+        )
+        from regent.model import ModelTruncatedError
+        from regent.model.chat import ChatMessage
+
+        with pytest.raises(ModelTruncatedError) as exc:
+            await provider.chat(messages=[ChatMessage(role="user", content="x")])
+    msg = str(exc.value)
+    assert "reasoning_chars=100" in msg
+    assert "reasoning_tokens=8000" in msg
+    assert "thinking_mode=default" in msg
+    assert provider.last_chat_diagnostics["reasoning_chars"] == 100
+
+
+async def test_serialize_message_round_trips_reasoning_content() -> None:
+    from regent.model.chat import ChatMessage
+
+    payload = OpenAICompatibleProvider._serialize_message(
+        ChatMessage(
+            role="assistant",
+            content=None,
+            reasoning_content="think hard",
+            tool_calls=[],
+        )
+    )
+    assert payload["reasoning_content"] == "think hard"
+
+
+def test_extract_cached_tokens_variants() -> None:
+    from regent.model.provider import extract_cached_tokens
+
+    assert extract_cached_tokens({}) is None
+    assert extract_cached_tokens({"prompt_tokens": 10}) is None
+    assert extract_cached_tokens({"cached_tokens": 7}) == 7
+    assert (
+        extract_cached_tokens({"prompt_tokens_details": {"cached_tokens": 12}}) == 12
+    )
+    assert extract_cached_tokens({"prompt_cache_hit_tokens": 3}) == 3
+
+
+async def test_chat_parses_cached_tokens() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "test-model",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": {"cached_tokens": 80},
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="test-model",
+            client=client,
+        )
+        from regent.model.chat import ChatMessage
+
+        result = await provider.chat(messages=[ChatMessage(role="user", content="x")])
+    assert result.usage.cached_tokens == 80
+    assert provider.last_chat_diagnostics["cached_tokens"] == 80

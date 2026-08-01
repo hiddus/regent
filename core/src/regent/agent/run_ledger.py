@@ -14,6 +14,7 @@ from typing import Any
 class AgentRunLedger:
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0
     tool_invocations: int = 0
     wall_seconds: float = 0.0
     turns: int = 0
@@ -25,9 +26,16 @@ class AgentRunLedger:
     transcript_turns: int = 0
     notes: list[str] = field(default_factory=list)
 
-    def add_usage(self, *, input_tokens: int = 0, output_tokens: int = 0) -> None:
+    def add_usage(
+        self,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+    ) -> None:
         self.input_tokens += max(0, int(input_tokens))
         self.output_tokens += max(0, int(output_tokens))
+        self.cached_tokens += max(0, int(cached_tokens))
 
     def add_tool_invocation(self, n: int = 1) -> None:
         self.tool_invocations += max(0, int(n))
@@ -38,6 +46,7 @@ class AgentRunLedger:
     def merge(self, other: AgentRunLedger) -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
+        self.cached_tokens += other.cached_tokens
         self.tool_invocations += other.tool_invocations
         self.wall_seconds += other.wall_seconds
         self.turns += other.turns
@@ -56,3 +65,9 @@ class AgentRunLedger:
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        if self.input_tokens <= 0:
+            return None
+        return min(1.0, self.cached_tokens / self.input_tokens)
