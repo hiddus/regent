@@ -144,6 +144,7 @@ class DeliveryBatchPipeline:
             workspace_root=self._workspace_root / "batches" / str(generation_run_id),
             budget=self._budget,
             regent_md=regent_md,
+            goal_id=str(plan_payload.get("goal_id") or "") or None,
         )
 
         merged_path = prior_workspace

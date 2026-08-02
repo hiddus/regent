@@ -181,8 +181,7 @@ async def test_evidence_chain_persists_goal_to_decision(db_sessions) -> None:
 
 @pytest.mark.governance
 def test_p1_event_catalog_covers_lifecycle() -> None:
-    assert len(P1_MAIN_CHAIN_EVENTS) == 16
-    for name in (
+    required = {
         "GoalExecutionRequested",
         "DiscoveryRoundRequested",
         "DiscoveryCompleted",
@@ -191,5 +190,7 @@ def test_p1_event_catalog_covers_lifecycle() -> None:
         "PreviewDeploymentSucceeded",
         "QualityApprovalRequested",
         "QualityApprovalCompleted",
-    ):
-        assert name in P1_MAIN_CHAIN_EVENTS
+    }
+    catalog = set(P1_MAIN_CHAIN_EVENTS)
+    assert required <= catalog
+    # Catalog may grow (e.g. ReleaseApprovalCompleted); do not hard-pin length.

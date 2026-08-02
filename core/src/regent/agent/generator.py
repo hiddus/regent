@@ -69,7 +69,7 @@ class AgenticCodeGenerator:
         self,
         plan: dict[str, Any],
         *,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[[Any], Awaitable[None]] | None = None,
     ) -> GeneratedFileChangeSet:
         run_id = str(plan.get("generation_run_id") or uuid.uuid4())
         sandbox = self._workspace_root / "agentic" / run_id
@@ -136,23 +136,61 @@ class AgenticCodeGenerator:
             skills_enabled=bool(plan.get("skills_enabled", True)),
         )
 
+        from regent.agent.progress_event import ProgressEvent
+
         async def _on_turn(turn: int, summary: str) -> None:
             if on_progress is not None:
-                await on_progress(summary)
+                await on_progress(
+                    ProgressEvent(
+                        summary=summary,
+                        type="turn_start",
+                        turn=turn if turn >= 0 else None,
+                    )
+                )
 
         async def _on_event(event: dict[str, Any]) -> None:
-            # CD-3.3: bridge AgentRunner tool-call events into the same
-            # live_action channel on_progress already feeds, so long-running
-            # turns show real tool activity instead of only a turn counter.
+            # Bridge AgentRunner structured events without Chinese-string round-trip.
             if on_progress is None:
                 return
-            tool = str(event.get("tool") or "")
-            preview = str(event.get("args_preview") or "")
-            await on_progress(f"执行工具 {tool}：{preview}"[:200])
+            etype = str(event.get("type") or "status")
+            tool = str(event.get("tool") or "") or None
+            summary = str(event.get("summary") or "")
+            if not summary:
+                if tool:
+                    preview = str(event.get("args_preview") or "")
+                    summary = f"执行工具 {tool}" + (f"：{preview}" if preview else "")
+                else:
+                    summary = etype
+            await on_progress(
+                ProgressEvent(
+                    summary=summary[:240],
+                    type=etype,
+                    turn=int(event["turn"]) if event.get("turn") is not None else None,
+                    tool=tool,
+                    args_preview=str(event["args_preview"]) if event.get("args_preview") else None,
+                    result_preview=(
+                        str(event["result_preview"]) if event.get("result_preview") else None
+                    ),
+                    detail=str(event["detail"]) if event.get("detail") else None,
+                    input_tokens=(
+                        int(event["input_tokens"]) if event.get("input_tokens") is not None else None
+                    ),
+                    output_tokens=(
+                        int(event["output_tokens"])
+                        if event.get("output_tokens") is not None
+                        else None
+                    ),
+                    cached_tokens=(
+                        int(event["cached_tokens"])
+                        if event.get("cached_tokens") is not None
+                        else None
+                    ),
+                )
+            )
 
         try:
             if on_progress is not None:
-                await on_progress("正在启动多轮生成…")
+                await on_progress(ProgressEvent(summary="正在启动多轮生成…", type="status"))
             result = await runner.run(
                 plan,
                 prior_gaps=prior_gaps,

@@ -43,6 +43,15 @@ def _preview(value: Any, limit: int = 240) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+async def _emit(
+    on_event: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    payload: dict[str, Any],
+) -> None:
+    if on_event is None:
+        return
+    await on_event(payload)
+
+
 class ChatProvider(Protocol):
     async def chat(
         self,
@@ -260,6 +269,17 @@ class AgentRunner:
                     turn,
                     f"正在生成应用（第 {turn + 1}/{max_turns} 轮）…",
                 )
+            await _emit(
+                on_event,
+                {
+                    "type": "turn_start",
+                    "turn": turn,
+                    "summary": f"第 {turn + 1}/{max_turns} 轮",
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_tokens": ledger.cached_tokens if hasattr(ledger, "cached_tokens") else None,
+                },
+            )
 
             if (
                 self._context_artifacts is not None
@@ -282,6 +302,15 @@ class AgentRunner:
                 ledger.compact_events += 1
                 compact_events.append(
                     {"turn": turn, "kind": "autoCompact", "summary_chars": len(auto.summary)}
+                )
+                await _emit(
+                    on_event,
+                    {
+                        "type": "compaction",
+                        "turn": turn,
+                        "summary": "上下文已压缩",
+                        "detail": f"autoCompact chars={len(auto.summary)}",
+                    },
                 )
             elif auto.failed:
                 compact_events.append(
@@ -332,6 +361,17 @@ class AgentRunner:
                     self._compactor.observe_provider_prompt_tokens(
                         estimated=est, actual_prompt_tokens=turn_in
                     )
+            await _emit(
+                on_event,
+                {
+                    "type": "budget_tick",
+                    "turn": turn,
+                    "summary": f"本轮 tokens in={turn_in} out={turn_out}",
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_tokens": turn_cached_i,
+                },
+            )
 
             assistant: ChatMessage = response.message
             conversation.append(assistant)
@@ -344,6 +384,16 @@ class AgentRunner:
                     output_tokens=turn_out,
                 )
             )
+            if assistant.content:
+                await _emit(
+                    on_event,
+                    {
+                        "type": "assistant_text",
+                        "turn": turn,
+                        "summary": _preview(assistant.content, 160),
+                        "detail": _preview(assistant.content, 400),
+                    },
+                )
 
             finish_reason = str(getattr(response, "finish_reason", "stop") or "stop")
             classified = classify_finish_reason(
@@ -362,6 +412,10 @@ class AgentRunner:
 
             if not assistant.tool_calls:
                 # Soft stop without submit → incomplete (M1-3).
+                await _emit(
+                    on_event,
+                    {"type": "turn_end", "turn": turn, "summary": "本轮结束（无工具调用）"},
+                )
                 break
 
             submitted_this_turn = False
@@ -371,15 +425,40 @@ class AgentRunner:
                 message_result = result_text
                 if call.name == "submit":
                     submitted_this_turn = True
-                if on_event is not None:
-                    await on_event(
+                    await _emit(
+                        on_event,
                         {
-                            "type": "tool_call",
+                            "type": "submit",
                             "turn": turn,
-                            "tool": call.name,
+                            "tool": "submit",
+                            "summary": "已提交产物",
                             "args_preview": _preview(call.arguments),
                             "result_preview": _preview(result_text),
-                        }
+                        },
+                    )
+                await _emit(
+                    on_event,
+                    {
+                        "type": "tool_call",
+                        "turn": turn,
+                        "tool": call.name,
+                        "summary": f"执行工具 {call.name}",
+                        "args_preview": _preview(call.arguments),
+                        "result_preview": _preview(result_text),
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    },
+                )
+                if call.name == "todo_write":
+                    await _emit(
+                        on_event,
+                        {
+                            "type": "plan_updated",
+                            "turn": turn,
+                            "tool": "todo_write",
+                            "summary": f"计划已更新（{len(self._toolkit.todos)} 项）",
+                            "detail": _preview(self._toolkit.todos, 400),
+                        },
                     )
                 if self._context_artifacts is not None and self._goal_id is not None:
                     ref = await self._context_artifacts.offload_tool_result(
@@ -523,6 +602,15 @@ class AgentRunner:
             chat_temperature = float(repair.temperature)
             if on_turn is not None:
                 await on_turn(-1, f"验证失败，同轨迹修正（{repair.strategy}）…")
+            await _emit(
+                on_event,
+                {
+                    "type": "repair_phase_start",
+                    "turn": turn,
+                    "summary": f"进入修正（{repair.strategy}）",
+                    "detail": ",".join(g.code for g in verification.gaps[:8]),
+                },
+            )
             # Append structured gaps as a new user turn — no recursive self.run().
             gap_blob = json.dumps(
                 [

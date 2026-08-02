@@ -7,6 +7,10 @@ import type {
   ProjectStatus,
   HealthStatus,
   DeliveryReview,
+  PlanItem,
+  ActivityEvent,
+  RuntimeAgent,
+  WorkspaceTreeNode,
 } from './types'
 
 const ACTOR = 'trial-user'
@@ -96,9 +100,41 @@ export const api = {
     }),
 
   // CD-3.2: read-only delivery review (plan/transcript/verification/budget).
-  // Backend endpoint may not exist yet — callers should handle rejection gracefully.
   getDeliveryReview: (projectId: string) =>
     request<DeliveryReview>(`/v1/app-projects/${projectId}/delivery-review`),
+
+  getPlanItems: (goalId: string) =>
+    request<PlanItem[]>(`/v1/goals/${goalId}/plan-items`),
+
+  getGoalActivity: (goalId: string) =>
+    request<{
+      events: ActivityEvent[]
+      tool_events: Record<string, unknown>[]
+      live_action?: Record<string, unknown> | null
+    }>(`/v1/goals/${goalId}/activity`),
+
+  getGoalAgents: (goalId: string) =>
+    request<RuntimeAgent[]>(`/v1/goals/${goalId}/agents`),
+
+  getWorkspaceTree: (projectId: string) =>
+    request<{ root: string; entries: WorkspaceTreeNode[] }>(
+      `/v1/app-projects/${projectId}/workspace/tree`,
+    ),
+
+  getWorkspaceFile: (projectId: string, path: string) =>
+    request<{ path: string; content: string; truncated?: boolean }>(
+      `/v1/app-projects/${projectId}/workspace/file?path=${encodeURIComponent(path)}`,
+    ),
+
+  getWorkspaceDiff: (projectId: string, from?: string, to?: string) => {
+    const q = new URLSearchParams()
+    if (from) q.set('from', from)
+    if (to) q.set('to', to)
+    const qs = q.toString()
+    return request<{ from: string; to: string; patch: string }>(
+      `/v1/app-projects/${projectId}/workspace/diff${qs ? `?${qs}` : ''}`,
+    )
+  },
 
   uploadFile: async (file: File, projectId?: string) => {
     const form = new FormData()

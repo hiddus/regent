@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Message } from '../lib/types'
@@ -14,67 +15,68 @@ interface MessageListProps {
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
 }
 
-function goalAlreadyMoving(items: Message[], goalId?: string) {
-  if (!goalId) return false
-  return items.some(m => {
-    const mid = m.metadata?.goal_id as string | undefined
-    if (mid && mid !== goalId) return false
+function buildMovingGoals(items: Message[]): Set<string> {
+  const set = new Set<string>()
+  for (const m of items) {
     const t = m.message_type || ''
-    return t === 'GOAL_CONFIRMED' || t === 'GOAL_EXECUTION_QUEUED' ||
+    if (
+      t === 'GOAL_CONFIRMED' || t === 'GOAL_EXECUTION_QUEUED' ||
       t.startsWith('GOAL_EXECUTION_') || t === 'PREVIEW_READY' ||
       t === 'PREVIEW_DEPLOYMENT_SUCCEEDED'
-  })
-}
-
-function taskAlreadyResolved(items: Message[], taskId?: string, taskMeta?: Record<string, unknown>) {
-  if (taskMeta) {
-    const status = String(taskMeta.status || '').toUpperCase()
-    if (status === 'COMPLETED' || status === 'TIMED_OUT' || status === 'CANCELLED') {
-      return true
-    }
-    const dueAt = typeof taskMeta.due_at === 'string' ? Date.parse(taskMeta.due_at) : NaN
-    if (Number.isFinite(dueAt) && dueAt <= Date.now()) {
-      return true
+    ) {
+      const mid = m.metadata?.goal_id as string | undefined
+      if (mid) set.add(mid)
+      else set.add('*')
     }
   }
-  if (!taskId) return false
-  return items.some(m => {
-    if (m.message_type !== 'APPROVE_RESULT' && m.message_type !== 'REJECT_RESULT') return false
-    return String(m.metadata?.task_id || '') === taskId
-  })
+  return set
 }
 
-function approveAlreadyDone(
-  items: Message[],
-  goalId?: string,
-  taskId?: string,
-  taskMeta?: Record<string, unknown>,
-) {
-  if (taskAlreadyResolved(items, taskId, taskMeta)) return true
-  if (!goalId && !taskId) {
-    return items.some(m => m.message_type === 'APPROVE_RESULT')
-  }
-  return items.some(m => {
-    if (m.message_type !== 'APPROVE_RESULT') return false
-    const mid = m.metadata?.goal_id as string | undefined
+function buildResolvedTasks(items: Message[]): {
+  byTaskId: Set<string>
+  byGoalId: Set<string>
+  anyApprove: boolean
+} {
+  const byTaskId = new Set<string>()
+  const byGoalId = new Set<string>()
+  let anyApprove = false
+  for (const m of items) {
+    if (m.message_type !== 'APPROVE_RESULT' && m.message_type !== 'REJECT_RESULT') continue
     const tid = String(m.metadata?.task_id || '')
-    if (taskId && tid && tid === taskId) return true
-    if (goalId && mid && mid === goalId) return true
-    if (!goalId && !tid) return true
-    return Boolean(taskId) && tid === taskId
-  })
+    const gid = m.metadata?.goal_id as string | undefined
+    if (tid) byTaskId.add(tid)
+    if (gid) byGoalId.add(gid)
+    if (m.message_type === 'APPROVE_RESULT') anyApprove = true
+  }
+  return { byTaskId, byGoalId, anyApprove }
 }
 
-function MessageItem({ m, messages, onConfirm, onTaskAction }: {
+function taskMetaResolved(taskMeta?: Record<string, unknown>) {
+  if (!taskMeta) return false
+  const status = String(taskMeta.status || '').toUpperCase()
+  if (status === 'COMPLETED' || status === 'TIMED_OUT' || status === 'CANCELLED') return true
+  const dueAt = typeof taskMeta.due_at === 'string' ? Date.parse(taskMeta.due_at) : NaN
+  return Number.isFinite(dueAt) && dueAt <= Date.now()
+}
+
+function MessageItem({
+  m,
+  movingGoals,
+  resolved,
+  onConfirm,
+  onTaskAction,
+}: {
   m: Message
-  messages: Message[]
+  movingGoals: Set<string>
+  resolved: boolean
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
 }) {
   const isConfirmation = m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
     m.message_type === 'GOAL_UNDERSTANDING_READY'
+  const goalId = m.metadata?.goal_id as string | undefined
   const isAwaiting = m.message_type === 'APP_CONFIRMATION_REQUIRED' &&
-    !goalAlreadyMoving(messages, m.metadata?.goal_id as string)
+    !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))
   const isCorrection = m.message_type === 'CORRECTION_APPLIED'
   const roleClass = m.role.toLowerCase()
   const avatarLabel = m.role === 'USER' ? '你' : 'R'
@@ -90,7 +92,6 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   const confirmationAction = String(
     ((taskMeta.confirmation as Record<string, unknown> | undefined)?.action as string) || '',
   ).toLowerCase()
-  // Delivery-gap continue/replan is not a permission gate — never show「总是允许」.
   const isDeliveryGapIntervene =
     taskTypeUpper === 'DELIVERY_GAP_INTERVENE' ||
     confirmationAction === 'delivery_gap_intervene' ||
@@ -128,21 +129,12 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
   const showTaskCard =
     !isDeliveryGapIntervene &&
     (m.message_type === 'HUMAN_TASK_REQUIRED' || isExhaustedHandoff)
-  const resolved = showTaskCard
-    ? approveAlreadyDone(
-        messages,
-        (taskMeta.goal_id as string | undefined) || (m.metadata?.goal_id as string | undefined),
-        taskId || undefined,
-        taskMeta,
-      )
-    : false
 
   return (
     <article className={`message ${roleClass}${showTaskCard ? ' message-task' : ''}`}>
       <div className="avatar">{avatarLabel}</div>
       <div className="body">
         <div className="meta">{metaLabel}</div>
-        {/* Task card already states the ask — do not also dump the long assistant essay. */}
         {!showTaskCard && (
           <div className="content">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
@@ -185,6 +177,9 @@ function MessageItem({ m, messages, onConfirm, onTaskAction }: {
 }
 
 export function MessageList({ messages, goalStatus, onConfirm, onTaskAction }: MessageListProps) {
+  const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
+  const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
+
   if (messages.length === 0) {
     return (
       <section className="messages">
@@ -214,11 +209,22 @@ export function MessageList({ messages, goalStatus, onConfirm, onTaskAction }: M
               />
             )
           }
+          const m = item.message
+          const taskMeta = (m.metadata || {}) as Record<string, unknown>
+          const taskId = String(taskMeta.id || taskMeta.human_task_id || '')
+          const goalId = (taskMeta.goal_id as string | undefined) || (m.metadata?.goal_id as string | undefined)
+          const resolved =
+            taskMetaResolved(taskMeta) ||
+            (taskId ? resolvedIndex.byTaskId.has(taskId) : false) ||
+            (goalId ? resolvedIndex.byGoalId.has(goalId) : false) ||
+            (!goalId && !taskId && resolvedIndex.anyApprove)
+
           return (
             <MessageItem
               key={item.message.id}
               m={item.message}
-              messages={messages}
+              movingGoals={movingGoals}
+              resolved={resolved}
               onConfirm={onConfirm}
               onTaskAction={onTaskAction}
             />

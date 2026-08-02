@@ -250,6 +250,7 @@ async def test_recover_or_wait_after_deploy_gap_schedules_recovery() -> None:
     plan_id = uuid.uuid4()
     orchestrator = ExecutionOrchestrator(sessions=MagicMock())
     orchestrator._halt_goal_stage = AsyncMock()
+    orchestrator._record_delivery_state = AsyncMock()
     orchestrator._resolve_generation_ids = AsyncMock(return_value=(req_id, plan_id))
 
     recovery = DeliveryGapRecoveryResult(
@@ -274,6 +275,7 @@ async def test_recover_or_wait_after_deploy_gap_schedules_recovery() -> None:
     assert halt_kwargs["terminal"] is None
     assert halt_kwargs["event_type"] == "ATTAINMENT_RECOVERY_STARTED"
     svc_cls.return_value.recover.assert_awaited_once()
+    orchestrator._record_delivery_state.assert_awaited()
     # Must not transition to ACHIEVE / FAIL / EXHAUST on recoverable path.
     assert halt_kwargs["terminal"] not in {
         GoalCommand.ACHIEVE,
@@ -294,6 +296,7 @@ async def test_recover_or_wait_after_deploy_gap_waits_human_when_exhausted() -> 
     project_id = uuid.uuid4()
     orchestrator = ExecutionOrchestrator(sessions=MagicMock())
     orchestrator._halt_goal_stage = AsyncMock()
+    orchestrator._record_delivery_state = AsyncMock()
     orchestrator._resolve_generation_ids = AsyncMock(
         return_value=(uuid.uuid4(), uuid.uuid4())
     )
@@ -324,6 +327,7 @@ async def test_recover_or_wait_after_deploy_gap_waits_human_when_exhausted() -> 
     assert final_kwargs["event_type"] == "HUMAN_TASK_REQUIRED"
     assert final_kwargs["terminal"] != GoalCommand.ACHIEVE
     assert "NEEDS_HUMAN" in final_kwargs["stage"]
+    orchestrator._record_delivery_state.assert_awaited()
 
 
 def test_progress_nodes_do_not_title_failed_outcome_as_complete() -> None:

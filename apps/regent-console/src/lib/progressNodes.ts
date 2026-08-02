@@ -256,9 +256,8 @@ function extractHighlights(m: Message): Record<string, string> {
 }
 
 /**
- * CD-3.3: most-recent-tool trace, sourced from either `metadata.tool_events`
- * (explicit array of tool names) or `metadata.live_action.tool` (single latest
- * tool). Both are optional / backend-may-not-populate-yet — return [] if absent.
+ * CD-3.3: tool traces live on goal.metadata (not Message.metadata).
+ * Optional per-message fallback kept for older backends.
  */
 function extractToolTrace(m: Message): string[] {
   const meta = m.metadata || {}
@@ -278,11 +277,19 @@ function extractToolTrace(m: Message): string[] {
   return trace
 }
 
+export interface ProgressNodeExtras {
+  toolEvents?: Record<string, unknown>[]
+  liveTool?: string | null
+}
+
 /**
  * Collapse EVENT stream into ordered progress nodes.
  * Only nodes that have received at least one event are returned.
  */
-export function buildProgressNodes(messages: Message[]): ProgressNode[] {
+export function buildProgressNodes(
+  messages: Message[],
+  extras: ProgressNodeExtras = {},
+): ProgressNode[] {
   const byKey = new Map<NodeKey, ProgressNode>()
   const order: NodeKey[] = []
   /** Stages that may legitimately reopen after done (retry / recovery). */
@@ -398,6 +405,29 @@ export function buildProgressNodes(messages: Message[]): ProgressNode[] {
       } else if (node.status === 'failed') {
         node.title = '未达成'
       }
+    }
+  }
+
+  // Prefer goal.metadata.tool_events (extras) over empty message.metadata traces.
+  const fromGoal: string[] = []
+  if (Array.isArray(extras.toolEvents)) {
+    for (const item of extras.toolEvents) {
+      if (!item || typeof item !== 'object') continue
+      const tool = (item as Record<string, unknown>).tool
+      if (typeof tool === 'string' && tool.trim()) fromGoal.push(tool.trim())
+    }
+  }
+  if (typeof extras.liveTool === 'string' && extras.liveTool.trim()) {
+    fromGoal.push(extras.liveTool.trim())
+  }
+  if (fromGoal.length > 0) {
+    const target =
+      byKey.get('generate') ||
+      byKey.get('build') ||
+      [...byKey.values()].find(n => n.status === 'running') ||
+      [...byKey.values()].at(-1)
+    if (target) {
+      target.toolTrace = [...(target.toolTrace || []), ...fromGoal].slice(-8)
     }
   }
 

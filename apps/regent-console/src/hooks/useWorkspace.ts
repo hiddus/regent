@@ -1,5 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { Project, Conversation, Message, ProjectStatus } from '../lib/types'
+import type {
+  ActivityEvent,
+  PlanItem,
+  Project,
+  Conversation,
+  Message,
+  ProjectStatus,
+  RuntimeAgent,
+} from '../lib/types'
 import { api } from '../lib/api'
 import { useSSE } from './useSSE'
 import {
@@ -10,6 +18,38 @@ import {
   type LiveConnectionState,
 } from '../lib/liveActivity'
 
+function messagesEqual(a: Message[], b: Message[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].id !== b[i].id || a[i].ordinal !== b[i].ordinal) return false
+    if (a[i].content !== b[i].content || a[i].message_type !== b[i].message_type) return false
+  }
+  return true
+}
+
+function mergeMessagesByOrdinal(prev: Message[], next: Message[]): Message[] {
+  if (messagesEqual(prev, next)) return prev
+  if (prev.length === 0) return next
+  const byId = new Map(prev.map(m => [m.id, m]))
+  let changed = prev.length !== next.length
+  const merged = next.map(m => {
+    const old = byId.get(m.id)
+    if (
+      old
+      && old.content === m.content
+      && old.message_type === m.message_type
+      && old.ordinal === m.ordinal
+      && JSON.stringify(old.metadata || {}) === JSON.stringify(m.metadata || {})
+    ) {
+      return old
+    }
+    changed = true
+    return m
+  })
+  return changed ? merged : prev
+}
+
 export function useWorkspace() {
   const [projects, setProjects] = useState<Project[]>([])
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -17,8 +57,16 @@ export function useWorkspace() {
   const [currentConv, setCurrentConv] = useState<Conversation | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [status, setStatus] = useState<ProjectStatus | null>(null)
-  const [hint, setHint] = useState('')
-  const [hintError, setHintError] = useState(false)
+  /** User-action / command feedback — not overwritten by Core live status. */
+  const [userHint, setUserHint] = useState('')
+  const [userHintError, setUserHintError] = useState(false)
+  /** Core live status (stage / live_action). */
+  const [coreHint, setCoreHint] = useState('')
+  const [coreHintError, setCoreHintError] = useState(false)
+  const [toolEvents, setToolEvents] = useState<Record<string, unknown>[]>([])
+  const [planItems, setPlanItems] = useState<PlanItem[]>([])
+  const [activity, setActivity] = useState<ActivityEvent[]>([])
+  const [runtimeAgents, setRuntimeAgents] = useState<RuntimeAgent[]>([])
   const [liveActivity, setLiveActivity] = useState<LiveActivity>({
     connection: 'idle',
     lastProgressAt: null,
@@ -29,13 +77,36 @@ export function useWorkspace() {
   const currentProjectRef = useRef<Project | null>(null)
   const currentConvRef = useRef<Conversation | null>(null)
   const statusRef = useRef<ProjectStatus | null>(null)
+  const sseConnectedRef = useRef(false)
   currentProjectRef.current = currentProject
   currentConvRef.current = currentConv
   statusRef.current = status
 
+  const loadGoalExtras = useCallback(async (goalId: string | null | undefined) => {
+    if (!goalId) return
+    try {
+      const [plan, act, agents] = await Promise.all([
+        api.getPlanItems(goalId).catch(() => [] as PlanItem[]),
+        api.getGoalActivity(goalId).catch(() => ({ events: [] as ActivityEvent[], tool_events: [] as Record<string, unknown>[] })),
+        api.getGoalAgents(goalId).catch(() => [] as RuntimeAgent[]),
+      ])
+      setPlanItems(plan)
+      if (Array.isArray(act.events)) setActivity(act.events)
+      if (Array.isArray(act.tool_events) && act.tool_events.length > 0) {
+        setToolEvents(act.tool_events.filter(e => e && typeof e === 'object') as Record<string, unknown>[])
+      }
+      setRuntimeAgents(agents)
+    } catch { /* ignore */ }
+  }, [])
+
   const showHint = useCallback((text: string, isError = false) => {
-    setHint(text)
-    setHintError(isError)
+    setUserHint(text)
+    setUserHintError(isError)
+  }, [])
+
+  const showCoreHint = useCallback((text: string, isError = false) => {
+    setCoreHint(text)
+    setCoreHintError(isError)
   }, [])
 
   const markHeartbeat = useCallback(() => {
@@ -52,6 +123,7 @@ export function useWorkspace() {
   }, [])
 
   const setConnection = useCallback((connection: LiveConnectionState) => {
+    sseConnectedRef.current = connection === 'connected'
     setLiveActivity(prev => ({ ...prev, connection }))
   }, [])
 
@@ -66,10 +138,47 @@ export function useWorkspace() {
     }))
   }, [])
 
+  const applyGoalMetaHints = useCallback((goal: NonNullable<ProjectStatus['goal']>, s?: ProjectStatus | null) => {
+    const meta = goal.metadata || {}
+    const events = meta.tool_events
+    if (Array.isArray(events)) {
+      setToolEvents(events.filter(e => e && typeof e === 'object') as Record<string, unknown>[])
+    }
+    const live = parseLiveAction(meta.live_action)
+    if (live) {
+      setLiveAction(live)
+      const toolBit = live.tool ? ` · ${live.tool}` : ''
+      showCoreHint(`Core：${live.summary}${toolBit}`)
+      return
+    }
+    const stage = (meta.execution_stage as string) || goal.execution_stage?.stage || goal.status
+    if (goal.status === 'PAUSED') showCoreHint('已暂停 - 发送"恢复"继续')
+    else if (goal.status === 'WAITING_HUMAN') showCoreHint('等待你的确认或补充后继续')
+    else if (goal.status === 'EXHAUSTED' || goal.status === 'BLOCKED') {
+      showCoreHint('自动路径已用尽，需要你介入后继续 — 不是已完成')
+    }
+    else if (String(stage).includes('NEEDS_HUMAN') || stage === 'DELIVERY_GAP_EXHAUSTED') {
+      showCoreHint('需要你介入后继续')
+    }
+    else if (stage === 'GENERATING') showCoreHint('正在生成应用（可能需要几分钟）...')
+    else if (String(stage).startsWith('DEPLOY_') && !String(stage).includes('NEEDS_HUMAN')) {
+      showCoreHint('部署未成功，正在自动重试...')
+    }
+    else if (stage === 'RESEARCH_MORE' || stage === 'DISCOVERY_NO_SELECT') {
+      showCoreHint('正在继续调研 / 取证...')
+    }
+    else if (s?.preview?.status === 'PREVIEW_READY' || meta.last_preview_endpoint) {
+      showCoreHint('预览已就绪')
+    }
+    else if (s?.preview?.status === 'FAILED') {
+      showCoreHint(s.preview.failure_summary || '生成失败', true)
+    }
+  }, [setLiveAction, showCoreHint])
+
   const loadMessages = useCallback(async (convId: string) => {
     try {
       const msgs = await api.getMessages(convId)
-      setMessages(msgs)
+      setMessages(prev => mergeMessagesByOrdinal(prev, msgs))
       if (msgs.length > 0) {
         lastOrdinalRef.current = Math.max(...msgs.map(m => m.ordinal))
         const latest = latestMessageTimestamp(msgs)
@@ -90,8 +199,10 @@ export function useWorkspace() {
     try {
       const s = await api.getProjectStatus(projectId)
       setStatus(s)
-      const action = parseLiveAction(s?.goal?.metadata?.live_action)
-      if (action) setLiveAction(action)
+      if (s?.goal) {
+        applyGoalMetaHints(s.goal, s)
+        void loadGoalExtras(s.goal.id)
+      }
       if (s?.goal?.status) {
         setCurrentProject(prev => (
           prev && prev.id === projectId && prev.status !== s.goal!.status
@@ -106,7 +217,7 @@ export function useWorkspace() {
       }
       return s
     } catch { return null }
-  }, [setLiveAction])
+  }, [applyGoalMetaHints, loadGoalExtras])
 
   const syncProjectView = useCallback(async () => {
     const project = currentProjectRef.current
@@ -143,6 +254,11 @@ export function useWorkspace() {
       lastHeartbeatAt: null,
       liveAction: null,
     })
+    setToolEvents([])
+    setPlanItems([])
+    setActivity([])
+    setRuntimeAgents([])
+    setCoreHint('')
     const conv = convs.find(c => c.app_project_id === projectId)
     setCurrentConv(conv || null)
     if (conv) await loadMessages(conv.id)
@@ -153,7 +269,6 @@ export function useWorkspace() {
     await syncProjectView()
   }, [syncProjectView])
 
-  // SSE connection URL
   const sseUrl = currentProject
     ? `/events/stream?project_id=${currentProject.id}&poll_interval=1.0`
     : null
@@ -163,7 +278,11 @@ export function useWorkspace() {
       if (type === 'connected' || type === 'heartbeat') {
         markHeartbeat()
         const action = parseLiveAction(data.live_action)
-        if (action) setLiveAction(action)
+        if (action) {
+          setLiveAction(action)
+          const toolBit = action.tool ? ` · ${action.tool}` : ''
+          showCoreHint(`Core：${action.summary}${toolBit}`)
+        }
         if (type === 'heartbeat' && data.has_changes === true) {
           const conv = currentConvRef.current
           if (conv) void loadMessages(conv.id)
@@ -189,7 +308,16 @@ export function useWorkspace() {
           ? data.metadata as Record<string, unknown>
           : null
         const action = parseLiveAction(data.live_action ?? nextMeta?.live_action)
-        if (action) setLiveAction(action)
+        if (action) {
+          setLiveAction(action)
+          const toolBit = action.tool ? ` · ${action.tool}` : ''
+          showCoreHint(`Core：${action.summary}${toolBit}`)
+        }
+        if (nextMeta && Array.isArray(nextMeta.tool_events)) {
+          setToolEvents(
+            nextMeta.tool_events.filter(e => e && typeof e === 'object') as Record<string, unknown>[],
+          )
+        }
         setStatus(prev => {
           if (!prev?.goal) return prev
           return {
@@ -213,20 +341,23 @@ export function useWorkspace() {
         }
         const updated = typeof data.updated_at === 'string' ? Date.parse(data.updated_at) : NaN
         markProgress(Number.isNaN(updated) ? Date.now() : updated)
-        void syncProjectView()
+        // Light refresh: status already applied; only reload messages (not full sync storm).
+        const conv = currentConvRef.current
+        if (conv) void loadMessages(conv.id)
       }
     },
     onError: () => {
-      // Fallback polling below covers missed frames while reconnecting
+      sseConnectedRef.current = false
     },
     onConnectionChange: setConnection,
     reconnectDelay: 2000,
   })
 
-  // ACTIVE: sync every 1s so Core actions never look frozen on the console.
+  // Fallback poll only when SSE is down (SSE is primary). Interval ≥10s.
   useEffect(() => {
     if (!currentProject) return
     const tick = async () => {
+      if (sseConnectedRef.current) return
       const s = await loadStatus(currentProject.id)
       const conv = currentConvRef.current
       if (conv) await loadMessages(conv.id)
@@ -234,33 +365,8 @@ export function useWorkspace() {
         const projs = await api.listProjects()
         setProjects(projs)
       } catch { /* ignore */ }
-
       const goal = s?.goal ?? statusRef.current?.goal
-      if (!goal) return
-      const meta = goal.metadata || {}
-      const live = parseLiveAction(meta.live_action)
-      if (live) {
-        showHint(`Core：${live.summary}`)
-        return
-      }
-      const stage = (meta.execution_stage as string) || goal.execution_stage?.stage || goal.status
-      if (goal.status === 'PAUSED') showHint('已暂停 - 发送"恢复"继续')
-      else if (goal.status === 'WAITING_HUMAN') showHint('等待你的确认或补充后继续')
-      else if (goal.status === 'EXHAUSTED' || goal.status === 'BLOCKED') {
-        showHint('自动路径已用尽，需要你介入后继续 — 不是已完成')
-      }
-      else if (String(stage).includes('NEEDS_HUMAN') || stage === 'DELIVERY_GAP_EXHAUSTED') {
-        showHint('需要你介入后继续')
-      }
-      else if (stage === 'GENERATING') showHint('正在生成应用（可能需要几分钟）...')
-      else if (String(stage).startsWith('DEPLOY_') && !String(stage).includes('NEEDS_HUMAN')) {
-        showHint('部署未成功，正在自动重试...')
-      }
-      else if (stage === 'RESEARCH_MORE' || stage === 'DISCOVERY_NO_SELECT') {
-        showHint('正在继续调研 / 取证...')
-      }
-      else if (s?.preview?.status === 'PREVIEW_READY' || meta.last_preview_endpoint) showHint('预览已就绪')
-      else if (s?.preview?.status === 'FAILED') showHint(s.preview.failure_summary || '生成失败', true)
+      if (goal) applyGoalMetaHints(goal, s)
     }
 
     void tick()
@@ -269,17 +375,15 @@ export function useWorkspace() {
     }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)
-
-    const active = ['ACTIVE', 'WAITING_HUMAN', 'PAUSED', 'READY'].includes(
-      statusRef.current?.goal?.status || currentProject.status,
-    )
-    const interval = setInterval(tick, active ? 1000 : 10000)
+    // Semantic: degraded poll when SSE disconnected (was historically 3000ms).
+    const FALLBACK_POLL_MS = 10_000
+    const interval = setInterval(tick, FALLBACK_POLL_MS)
     return () => {
       clearInterval(interval)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', onVisible)
     }
-  }, [currentProject?.id, status?.goal?.status, loadStatus, loadMessages, showHint])
+  }, [currentProject?.id, loadStatus, loadMessages, applyGoalMetaHints])
 
   useEffect(() => {
     loadWorkspace().then(({ projs }) => {
@@ -287,10 +391,17 @@ export function useWorkspace() {
     })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Combined hint: user action takes priority over core status for the composer strip.
+  const hint = userHint || coreHint
+  const hintError = userHint ? userHintError : coreHintError
+
   return {
-    projects, conversations, currentProject, currentConv, messages, status, hint, hintError,
+    projects, conversations, currentProject, currentConv, messages, status,
+    hint, hintError, userHint, userHintError, coreHint, coreHintError, toolEvents,
+    planItems, activity, runtimeAgents,
     liveActivity,
-    setCurrentProject, setCurrentConv, setMessages, setStatus, setHint, setHintError,
-    showHint, loadMessages, loadStatus, loadWorkspace, openProject, refresh,
+    setCurrentProject, setCurrentConv, setMessages, setStatus,
+    setHint: setUserHint, setHintError: setUserHintError,
+    showHint, showCoreHint, loadMessages, loadStatus, loadWorkspace, openProject, refresh,
   }
 }

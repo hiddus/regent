@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { LiveAction } from '../lib/liveActivity'
-import type { DeliveryReview, Message, Project, ProjectStatus } from '../lib/types'
+import type {
+  ActivityEvent,
+  DeliveryReview,
+  Message,
+  PlanItem,
+  Project,
+  ProjectStatus,
+  RuntimeAgent,
+  WorkspaceTreeNode,
+} from '../lib/types'
 import {
   ACTIVITY_LABEL,
   agentInitials,
@@ -14,6 +23,10 @@ interface ArtifactPanelProps {
   status: ProjectStatus | null
   messages: Message[]
   liveAction?: LiveAction | null
+  toolEvents?: Record<string, unknown>[]
+  planItems?: PlanItem[]
+  activity?: ActivityEvent[]
+  runtimeAgents?: RuntimeAgent[]
   isOpen: boolean
   onToggle: () => void
 }
@@ -84,19 +97,44 @@ export function ArtifactPanel({
   status,
   messages,
   liveAction = null,
+  toolEvents = [],
+  planItems = [],
+  activity = [],
+  runtimeAgents = [],
   isOpen,
   onToggle,
 }: ArtifactPanelProps) {
   const [previewExpanded, setPreviewExpanded] = useState(false)
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [sourceOpen, setSourceOpen] = useState(false)
+  const [planOpen, setPlanOpen] = useState(true)
+  const [activityOpen, setActivityOpen] = useState(true)
   const [review, setReview] = useState<DeliveryReview | null>(null)
   const [reviewLoading, setReviewLoading] = useState(false)
   const [reviewError, setReviewError] = useState<string | null>(null)
-  const agents = useMemo(
-    () => deriveAgents(status, liveAction, messages),
-    [status, liveAction, messages],
-  )
+  const [tree, setTree] = useState<WorkspaceTreeNode[]>([])
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [fileContent, setFileContent] = useState<string>('')
+  const [fileError, setFileError] = useState<string | null>(null)
+  const agents = useMemo(() => {
+    const base = deriveAgents(status, liveAction, messages)
+    if (!runtimeAgents.length) return base
+    const byId = new Map(base.map(a => [a.id, a]))
+    for (const ra of runtimeAgents) {
+      byId.set(ra.id, {
+        id: ra.id,
+        name: ra.name,
+        role: ra.role || 'executor',
+        role_label: ra.role_label || ra.name,
+        kind: (ra.kind as 'core' | 'hive' | 'spec' | 'derived') || 'derived',
+        activity: ra.activity,
+        detail: ra.detail || (ra.tool ? `工具 ${ra.tool}` : null),
+        is_main: !!ra.is_main,
+      })
+    }
+    return [...byId.values()]
+  }, [status, liveAction, messages, runtimeAgents])
   const activeCount = countActiveAgents(agents)
   const deliverable = useMemo(
     () => resolveDeliverable(status, messages),
@@ -141,7 +179,51 @@ export function ArtifactPanel({
     })
   }, [review, reviewLoading, loadReview])
 
+  const loadTree = useCallback(async () => {
+    if (!project) return
+    try {
+      const data = await api.getWorkspaceTree(project.id)
+      setTree((data.entries || []).filter(e => e.kind === 'file').slice(0, 200))
+      setFileError(null)
+    } catch (e) {
+      setFileError((e as Error).message || '暂无源码树')
+      setTree([])
+    }
+  }, [project])
+
+  const openFile = useCallback(async (path: string) => {
+    if (!project) return
+    setSelectedFile(path)
+    try {
+      const data = await api.getWorkspaceFile(project.id, path)
+      setFileContent(data.content)
+      setFileError(null)
+    } catch (e) {
+      setFileContent('')
+      setFileError((e as Error).message || '无法读取文件')
+    }
+  }, [project])
+
+  const toggleSource = useCallback(() => {
+    setSourceOpen(open => {
+      const next = !open
+      if (next && tree.length === 0) void loadTree()
+      return next
+    })
+  }, [tree.length, loadTree])
+
   const budget = review?.budget
+  const activityFeed = activity.length > 0
+    ? activity.slice(-12).reverse()
+    : toolEvents.slice(-12).reverse().map(e => ({
+        type: String(e.type || 'tool_call'),
+        tool: typeof e.tool === 'string' ? e.tool : null,
+        summary: typeof e.summary === 'string' ? e.summary : undefined,
+        turn: typeof e.turn === 'number' ? e.turn : null,
+        input_tokens: typeof e.input_tokens === 'number' ? e.input_tokens : null,
+        output_tokens: typeof e.output_tokens === 'number' ? e.output_tokens : null,
+        cached_tokens: typeof e.cached_tokens === 'number' ? e.cached_tokens : null,
+      }))
   const budgetTurnsText = budget?.turns != null
     ? `${budget.turns}${budget.max_turns != null ? ` / ${budget.max_turns}` : ''} 轮`
     : null
@@ -207,6 +289,108 @@ export function ArtifactPanel({
               </ul>
             )}
           </div>
+
+          {planItems.length > 0 && (
+            <div className="artifact-fold-section">
+              <button
+                type="button"
+                className={`artifact-fold-toggle ${planOpen ? 'open' : ''}`}
+                onClick={() => setPlanOpen(!planOpen)}
+              >
+                <span>执行计划</span>
+                <span className="artifact-fold-arrow" aria-hidden>›</span>
+              </button>
+              {planOpen && (
+                <div className="artifact-fold-body">
+                  <ul className="plan-checklist">
+                    {planItems.map(item => (
+                      <li key={item.id || item.item_key} className={`plan-item status-${item.status}`}>
+                        <span className="plan-status">{item.status}</span>
+                        <span className="plan-content">{item.content || item.item_key}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activityFeed.length > 0 && (
+            <div className="artifact-fold-section">
+              <button
+                type="button"
+                className={`artifact-fold-toggle ${activityOpen ? 'open' : ''}`}
+                onClick={() => setActivityOpen(!activityOpen)}
+              >
+                <span>活动流</span>
+                <span className="artifact-fold-arrow" aria-hidden>›</span>
+              </button>
+              {activityOpen && (
+                <div className="artifact-fold-body">
+                  <ul className="activity-feed">
+                    {activityFeed.map((ev, idx) => {
+                      const tokens = [
+                        ev.turn != null ? `第 ${Number(ev.turn) + 1} 轮` : null,
+                        ev.tool ? `调用 ${ev.tool}` : null,
+                        (ev.input_tokens != null || ev.output_tokens != null)
+                          ? `累计 ${(Number(ev.input_tokens || 0) + Number(ev.output_tokens || 0)).toLocaleString()} tokens`
+                          : null,
+                        ev.cached_tokens != null && Number(ev.input_tokens || 0) > 0
+                          ? `cache ${Math.round((Number(ev.cached_tokens) / Number(ev.input_tokens)) * 100)}%`
+                          : null,
+                      ].filter(Boolean)
+                      return (
+                        <li key={idx}>
+                          <div className="activity-summary">{ev.summary || ev.type || 'event'}</div>
+                          {tokens.length > 0 && (
+                            <div className="activity-meta">{tokens.join(' · ')}</div>
+                          )}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {project && (
+            <div className="artifact-fold-section">
+              <button
+                type="button"
+                className={`artifact-fold-toggle ${sourceOpen ? 'open' : ''}`}
+                onClick={toggleSource}
+              >
+                <span>源码</span>
+                <span className="artifact-fold-arrow" aria-hidden>›</span>
+              </button>
+              {sourceOpen && (
+                <div className="artifact-fold-body source-browser">
+                  {fileError && tree.length === 0 && (
+                    <div className="artifact-empty compact"><p>{fileError}</p></div>
+                  )}
+                  {tree.length > 0 && (
+                    <div className="source-layout">
+                      <ul className="source-tree">
+                        {tree.map(node => (
+                          <li key={node.path}>
+                            <button
+                              type="button"
+                              className={selectedFile === node.path ? 'active' : ''}
+                              onClick={() => void openFile(node.path)}
+                            >
+                              {node.path}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                      <pre className="source-code">{fileContent || (selectedFile ? '加载中…' : '选择文件查看内容')}</pre>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {(hasPreview || (project && status?.goal)) && (
             <div className="artifact-fold-section">
@@ -311,12 +495,30 @@ export function ArtifactPanel({
                       {review.plan != null && (
                         <div className="review-block">
                           <div className="artifact-section-title"><span>执行计划</span></div>
-                          <pre className="review-pre">{JSON.stringify(review.plan, null, 2)}</pre>
+                          {Array.isArray((review.plan as { items?: unknown }).items) ? (
+                            <ul className="plan-checklist">
+                              {((review.plan as { items: Record<string, unknown>[] }).items).map((item, idx) => (
+                                <li key={idx} className={`plan-item status-${String(item.status || 'pending')}`}>
+                                  <span className="plan-status">{String(item.status || 'pending')}</span>
+                                  <span className="plan-content">{String(item.content || item.title || item.item_key || '')}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <pre className="review-pre">{JSON.stringify(review.plan, null, 2)}</pre>
+                          )}
                         </div>
                       )}
                       {review.verification != null && (
                         <div className="review-block">
                           <div className="artifact-section-title"><span>验证结论</span></div>
+                          <p className="review-budget">
+                            {String(
+                              (review.verification as Record<string, unknown>).verdict
+                              || (review.verification as Record<string, unknown>).summary
+                              || '见详情',
+                            )}
+                          </p>
                           <pre className="review-pre">{JSON.stringify(review.verification, null, 2)}</pre>
                         </div>
                       )}

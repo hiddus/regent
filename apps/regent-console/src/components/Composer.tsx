@@ -4,12 +4,25 @@ interface ComposerProps {
   onSend: (text: string) => void
   onUpload: (file: File) => void
   disabled: boolean
-  hint: string
-  hintError: boolean
+  /** User-action feedback — not overwritten by Core status. */
+  userHint: string
+  userHintError: boolean
+  /** Core live status (stage / live_action). */
+  coreHint: string
+  coreHintError: boolean
   goalStatus?: string | null
 }
 
-export function Composer({ onSend, onUpload, disabled, hint, hintError, goalStatus }: ComposerProps) {
+export function Composer({
+  onSend,
+  onUpload,
+  disabled,
+  userHint,
+  userHintError,
+  coreHint,
+  coreHintError,
+  goalStatus,
+}: ComposerProps) {
   const [text, setText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -70,7 +83,14 @@ export function Composer({ onSend, onUpload, disabled, hint, hintError, goalStat
                 e.target.value = ''
               }}
             />
-            <span className={`hint ${hintError ? 'error' : ''}`}>{hint}</span>
+            <div className="hint-stack">
+              {userHint && (
+                <span className={`hint user-hint ${userHintError ? 'error' : ''}`}>{userHint}</span>
+              )}
+              {coreHint && (
+                <span className={`hint core-hint ${coreHintError ? 'error' : ''}`}>{coreHint}</span>
+              )}
+            </div>
           </div>
           <button className="send" onClick={handleSend} disabled={disabled || !text.trim()}>
             ↑

@@ -116,3 +116,44 @@ export interface DeliveryReview {
   verification?: Record<string, unknown> | null
   budget?: DeliveryReviewBudget | null
 }
+
+export interface PlanItem {
+  id: string
+  item_key: string
+  content: string
+  status: string
+  updated_at?: string | null
+}
+
+export interface ActivityEvent {
+  type?: string
+  turn?: number | null
+  tool?: string | null
+  summary?: string
+  args_preview?: string | null
+  result_preview?: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  cached_tokens?: number | null
+  updated_at?: string | null
+}
+
+export interface RuntimeAgent {
+  id: string
+  name: string
+  role?: string
+  role_label?: string
+  activity: AgentActivity
+  detail?: string | null
+  milestone_key?: string | null
+  tool?: string | null
+  is_main?: boolean
+  kind?: string
+}
+
+export interface WorkspaceTreeNode {
+  path: string
+  name: string
+  kind: 'file' | 'dir'
+  size?: number
+}

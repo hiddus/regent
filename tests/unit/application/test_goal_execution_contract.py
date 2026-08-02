@@ -25,13 +25,26 @@ def test_worker_registers_discovery_round_handler() -> None:
 
 
 def test_worker_registers_all_p1_main_chain_events() -> None:
-    """Event catalog has a handler for every P1 main chain event type."""
+    """Handler map registers every P1 main-chain event via constant symbols."""
+    import regent.application.execution_events as ee
+
     orchestrator_source = Path(
         "core/src/regent/application/execution_orchestrator.py"
     ).read_text(encoding="utf-8")
     assert "get_p1_event_handlers" in orchestrator_source
+    handler_block = orchestrator_source[
+        orchestrator_source.index("def get_p1_event_handlers") :
+    ]
     for event_type in P1_MAIN_CHAIN_EVENTS:
-        assert event_type in orchestrator_source, f"missing handler for {event_type}"
+        const_names = [
+            name
+            for name, value in vars(ee).items()
+            if name.isupper() and value == event_type
+        ]
+        assert const_names, f"no constant for {event_type}"
+        assert any(name in handler_block for name in const_names), (
+            f"missing handler mapping for {event_type} ({const_names})"
+        )
 
 
 def test_event_catalog_contains_all_p1_events() -> None:
@@ -124,4 +137,8 @@ def test_console_starts_goal_and_polls_persistent_progress() -> None:
     assert "/v1/goals/${goalId}/start" in api_src
     assert "execution_stage" in hooks_src
     assert "refresh" in hooks_src
-    assert "3000" in hooks_src
+    # SSE is primary; degraded REST poll only when SSE disconnected (≥10s).
+    assert "useSSE" in hooks_src
+    assert "sseConnectedRef" in hooks_src
+    assert "FALLBACK_POLL_MS" in hooks_src
+    assert "10_000" in hooks_src or "10000" in hooks_src

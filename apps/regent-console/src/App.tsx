@@ -13,14 +13,36 @@ export default function App() {
   const [sending, setSending] = useState(false)
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const streamRef = useRef<HTMLElement | null>(null)
+  const stickToBottomRef = useRef(true)
+  const lastMessageId = ws.messages.length > 0 ? ws.messages[ws.messages.length - 1].id : null
 
-  // Compute progress nodes for StageBar progress visualization
-  const progressNodes = useMemo(() => buildProgressNodes(ws.messages), [ws.messages])
+  // Compute progress nodes; feed goal.metadata.tool_events (not message.metadata).
+  const progressNodes = useMemo(
+    () => buildProgressNodes(ws.messages, {
+      toolEvents: ws.toolEvents,
+      liveTool: ws.liveActivity.liveAction?.tool,
+    }),
+    [ws.messages, ws.toolEvents, ws.liveActivity.liveAction?.tool],
+  )
 
-  // Auto-scroll to bottom
+  // Sticky scroll: only follow when user is near bottom.
   useEffect(() => {
+    const el = document.querySelector('.messages') as HTMLElement | null
+    streamRef.current = el
+    if (!el) return
+    const onScroll = () => {
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+      stickToBottomRef.current = gap < 80
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [ws.currentProject?.id])
+
+  useEffect(() => {
+    if (!stickToBottomRef.current) return
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [ws.messages])
+  }, [ws.messages.length, lastMessageId])
 
   const handleNew = useCallback(() => {
     ws.setCurrentProject(null)
@@ -168,8 +190,10 @@ export default function App() {
           onSend={handleSend}
           onUpload={handleUpload}
           disabled={sending}
-          hint={ws.hint}
-          hintError={ws.hintError}
+          userHint={ws.userHint}
+          userHintError={ws.userHintError}
+          coreHint={ws.coreHint}
+          coreHintError={ws.coreHintError}
           goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
         />
       </main>
@@ -180,6 +204,10 @@ export default function App() {
         status={ws.status}
         messages={ws.messages}
         liveAction={ws.liveActivity.liveAction}
+        toolEvents={ws.toolEvents}
+        planItems={ws.planItems}
+        activity={ws.activity}
+        runtimeAgents={ws.runtimeAgents}
       />
     </div>
   )

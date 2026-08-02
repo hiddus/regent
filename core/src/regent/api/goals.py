@@ -270,3 +270,62 @@ async def delete_goal_request(
         goal_id, requester=payload.actor
     )
     return receipt.as_dict()
+
+
+@router.get("/{goal_id}/plan-items")
+async def list_plan_items(goal_id: uuid.UUID, request: Request) -> list[dict[str, Any]]:
+    """Durable execution plan items for console task checklist."""
+    from regent.application.execution_plan import ExecutionPlanService
+
+    items = await ExecutionPlanService(request.app.state.sessions).list_items(goal_id)
+    out: list[dict[str, Any]] = []
+    for item in items:
+        payload = item.as_dict()
+        out.append(
+            {
+                "id": payload["id"],
+                "item_key": payload["item_key"],
+                "content": payload["content"],
+                "status": payload["status"],
+                "updated_at": None,
+            }
+        )
+    return out
+
+
+@router.get("/{goal_id}/activity")
+async def get_goal_activity(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """Structured activity stream from goal.metadata (tool + turn events)."""
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return {"events": [], "tool_events": [], "live_action": None}
+        meta = goal.metadata_json if isinstance(goal.metadata_json, dict) else {}
+        activity = meta.get("activity_log")
+        tools = meta.get("tool_events")
+        return {
+            "events": list(activity) if isinstance(activity, list) else [],
+            "tool_events": list(tools) if isinstance(tools, list) else [],
+            "live_action": meta.get("live_action"),
+        }
+
+
+@router.get("/{goal_id}/agents")
+async def get_goal_agents(goal_id: uuid.UUID, request: Request) -> list[dict[str, Any]]:
+    """Merge SubagentRunner runtime roster with any persisted console agents."""
+    from regent.application.subagent_runtime import list_subagent_runtime
+    from regent.infrastructure.models import GoalModel
+
+    runtime = list_subagent_runtime(str(goal_id))
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        meta = goal.metadata_json if goal and isinstance(goal.metadata_json, dict) else {}
+    persisted = meta.get("subagent_runtime")
+    if isinstance(persisted, list):
+        by_id = {str(r.get("id")): r for r in persisted if isinstance(r, dict)}
+        for row in runtime:
+            by_id[str(row["id"])] = row
+        return list(by_id.values())
+    return runtime

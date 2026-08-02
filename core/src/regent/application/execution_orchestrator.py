@@ -1601,22 +1601,36 @@ class ExecutionOrchestrator:
             else:
                 from regent.application.live_action import set_goal_live_action
 
-                async def _on_generation_progress(summary: str) -> None:
-                    tool: str | None = None
-                    if summary.startswith("执行工具 "):
-                        rest = summary[len("执行工具 ") :]
-                        if "：" in rest:
-                            tool = rest.split("：", 1)[0].strip()
-                        elif ":" in rest:
-                            tool = rest.split(":", 1)[0].strip()
+                async def _on_generation_progress(progress: object) -> None:
+                    from regent.agent.progress_event import ProgressEvent, coerce_progress
+
+                    event = (
+                        progress
+                        if isinstance(progress, ProgressEvent)
+                        else coerce_progress(str(progress))
+                    )
+                    tool = event.tool
+                    tool_event = {
+                        "type": event.type,
+                        "tool": tool,
+                        "summary": event.summary,
+                        "turn": event.turn,
+                        "args_preview": event.args_preview,
+                        "result_preview": event.result_preview,
+                        "input_tokens": event.input_tokens,
+                        "output_tokens": event.output_tokens,
+                        "cached_tokens": event.cached_tokens,
+                    }
                     await set_goal_live_action(
                         self._sessions,
                         goal_id,
-                        summary,
+                        event.summary,
                         stage="GENERATING",
-                        event_type="GENERATION_RUN_REQUESTED",
+                        event_type=event.event_type or "GENERATION_RUN_REQUESTED",
+                        turn=event.turn,
                         tool=tool,
-                        tool_event={"tool": tool, "summary": summary} if tool else None,
+                        tool_event=tool_event,
+                        activity_event=tool_event,
                     )
 
                 await set_goal_live_action(

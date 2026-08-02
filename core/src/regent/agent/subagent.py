@@ -46,11 +46,13 @@ class SubagentRunner:
         workspace_root: Path,
         budget: AgentBudget | None = None,
         regent_md: str = "",
+        goal_id: str | None = None,
     ) -> None:
         self._provider = provider
         self._workspace_root = workspace_root.resolve()
         self._budget = budget or AgentBudget(max_turns=30, max_tokens=120_000)
         self._regent_md = regent_md
+        self._goal_id = goal_id
 
     async def run_milestone(
         self,
@@ -61,6 +63,8 @@ class SubagentRunner:
         prior_gaps: list[VerificationGap] | None = None,
         verify: bool = True,
     ) -> SubagentResult:
+        from regent.application.subagent_runtime import upsert_subagent_runtime
+
         sandbox = (
             self._workspace_root
             / "subagents"
@@ -88,17 +92,53 @@ class SubagentRunner:
 
             plan["hypothesis_decision_id"] = str(uuid.uuid4())
 
+        agent_id = f"subagent-{brief.milestone_ordinal}-{brief.milestone_key}"
+        upsert_subagent_runtime(
+            self._goal_id,
+            agent_id=agent_id,
+            name=brief.milestone_title or brief.milestone_key,
+            activity="active",
+            detail=f"里程碑 {brief.milestone_ordinal}",
+            milestone_key=brief.milestone_key,
+        )
         runner = AgentRunner(
             self._provider,
             toolkit,
             budget=self._budget,
             regent_md=self._regent_md,
         )
-        result: AgentRunResult = await runner.run(
-            plan,
-            prior_gaps=prior_gaps,
-            verify=verify,
-        )
+
+        async def _on_event(event: dict[str, Any]) -> None:
+            if event.get("type") != "tool_call":
+                return
+            upsert_subagent_runtime(
+                self._goal_id,
+                agent_id=agent_id,
+                name=brief.milestone_title or brief.milestone_key,
+                activity="active",
+                detail=str(event.get("summary") or event.get("tool") or ""),
+                tool=str(event.get("tool") or "") or None,
+                milestone_key=brief.milestone_key,
+            )
+
+        try:
+            result: AgentRunResult = await runner.run(
+                plan,
+                prior_gaps=prior_gaps,
+                verify=verify,
+                on_event=_on_event,
+            )
+        except Exception:
+            upsert_subagent_runtime(
+                self._goal_id,
+                agent_id=agent_id,
+                name=brief.milestone_title or brief.milestone_key,
+                activity="failed",
+                detail="子代理执行失败",
+                milestone_key=brief.milestone_key,
+            )
+            raise
+
         summary = {
             "milestone_key": brief.milestone_key,
             "milestone_ordinal": brief.milestone_ordinal,
@@ -124,6 +164,14 @@ class SubagentRunner:
             # Explicitly omit conversation / transcript from parent context.
             "sidechain_omitted": True,
         }
+        upsert_subagent_runtime(
+            self._goal_id,
+            agent_id=agent_id,
+            name=brief.milestone_title or brief.milestone_key,
+            activity="done",
+            detail=f"完成 {result.turns} 轮",
+            milestone_key=brief.milestone_key,
+        )
         return SubagentResult(
             brief=brief,
             summary=summary,

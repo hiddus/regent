@@ -41,6 +41,7 @@ EVENT_LIVE_SUMMARY: dict[str, str] = {
 }
 
 _MAX_TOOL_EVENTS = 20
+_MAX_ACTIVITY_EVENTS = 80
 
 
 def build_live_action(
@@ -79,8 +80,24 @@ def _append_tool_event(meta: dict[str, Any], tool_event: dict[str, Any], tool: s
     events = meta.get("tool_events")
     if not isinstance(events, list):
         events = []
-    events.append(dict(tool_event))
+    entry = dict(tool_event)
+    if tool and not entry.get("tool"):
+        entry["tool"] = tool
+    if "updated_at" not in entry:
+        entry["updated_at"] = datetime.now(UTC).isoformat()
+    events.append(entry)
     meta["tool_events"] = events[-_MAX_TOOL_EVENTS:]
+
+
+def _append_activity_event(meta: dict[str, Any], activity_event: dict[str, Any]) -> None:
+    events = meta.get("activity_log")
+    if not isinstance(events, list):
+        events = []
+    entry = dict(activity_event)
+    if "updated_at" not in entry:
+        entry["updated_at"] = datetime.now(UTC).isoformat()
+    events.append(entry)
+    meta["activity_log"] = events[-_MAX_ACTIVITY_EVENTS:]
 
 
 def merge_live_action_into_metadata(
@@ -93,11 +110,17 @@ def merge_live_action_into_metadata(
     event_type: str | None = None,
     tool: str | None = None,
     tool_event: dict[str, Any] | None = None,
+    activity_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     meta = dict(metadata or {})
     resolved_tool = tool or (str(tool_event.get("tool")) if tool_event and tool_event.get("tool") else None)
-    if tool_event is not None:
+    # tool_events = tool activity only; activity_log keeps the full structured stream.
+    if tool_event is not None and (resolved_tool or tool_event.get("type") == "tool_call"):
         _append_tool_event(meta, tool_event, resolved_tool)
+    if activity_event is not None:
+        _append_activity_event(meta, activity_event)
+    elif tool_event is not None:
+        _append_activity_event(meta, tool_event)
     meta["live_action"] = build_live_action(
         summary,
         stage=stage or (str(meta.get("execution_stage")) if meta.get("execution_stage") else None),
@@ -120,6 +143,7 @@ async def set_goal_live_action(
     event_type: str | None = None,
     tool: str | None = None,
     tool_event: dict[str, Any] | None = None,
+    activity_event: dict[str, Any] | None = None,
 ) -> None:
     """Short transaction: update only live_action for console SSE/status."""
     async with sessions() as session, session.begin():
@@ -135,6 +159,7 @@ async def set_goal_live_action(
             event_type=event_type,
             tool=tool,
             tool_event=tool_event,
+            activity_event=activity_event,
         )
         flag_modified(goal, "metadata_json")
 
@@ -149,6 +174,7 @@ def apply_live_action_on_goal(
     event_type: str | None = None,
     tool: str | None = None,
     tool_event: dict[str, Any] | None = None,
+    activity_event: dict[str, Any] | None = None,
 ) -> None:
     """In-session update (caller owns the transaction)."""
     goal.metadata_json = merge_live_action_into_metadata(
@@ -160,5 +186,6 @@ def apply_live_action_on_goal(
         event_type=event_type,
         tool=tool,
         tool_event=tool_event,
+        activity_event=activity_event,
     )
     flag_modified(goal, "metadata_json")

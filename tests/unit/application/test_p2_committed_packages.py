@@ -9,7 +9,14 @@ from regent.application.runtime_profile_service import BOOTSTRAP_PROFILES
 
 def test_bootstrap_profiles_include_certified_pair() -> None:
     certified = {p["name"] for p in BOOTSTRAP_PROFILES if p["status"] == "CERTIFIED"}
-    assert certified == {"python-web-v1", "static-web-v1"}
+    assert {"python-web-v1", "static-web-v1"} <= certified
+    # Extended certified shapes (flask / fastapi) are allowed.
+    assert certified <= {
+        "python-web-v1",
+        "static-web-v1",
+        "flask-web-v1",
+        "fastapi-web-v1",
+    }
     draft = {p["name"] for p in BOOTSTRAP_PROFILES if p["status"] == "DRAFT"}
     assert "node-web-v1" in draft
     assert "python-data-v1" in draft

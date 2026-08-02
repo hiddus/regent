@@ -7,6 +7,8 @@ export interface LiveAction {
   stage?: string | null
   detail?: string | null
   turn?: number | null
+  tool?: string | null
+  event_type?: string | null
   updated_at?: string | null
 }
 
@@ -53,6 +55,8 @@ export function parseLiveAction(raw: unknown): LiveAction | null {
     stage: typeof obj.stage === 'string' ? obj.stage : null,
     detail: typeof obj.detail === 'string' ? obj.detail : null,
     turn: typeof obj.turn === 'number' ? obj.turn : null,
+    tool: typeof obj.tool === 'string' ? obj.tool : null,
+    event_type: typeof obj.event_type === 'string' ? obj.event_type : null,
     updated_at: typeof obj.updated_at === 'string' ? obj.updated_at : null,
   }
 }
