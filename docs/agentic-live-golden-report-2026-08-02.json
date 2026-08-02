@@ -1,11 +1,11 @@
 {
   "record_type": "AgenticLiveGoldenReport",
   "schema_version": "live-golden/v1",
-  "created_at": "2026-08-02T01:58:55.816426+00:00",
+  "created_at": "2026-08-02T02:01:07.833790+00:00",
   "mode": "live",
   "gate": {
-    "allows_state": "OFFLINE_QUALIFICATION",
-    "live_model_v2_green": false,
+    "allows_state": "INTERNAL_DOGFOOD",
+    "live_model_v2_green": true,
     "structural_revise_v2_green": true,
     "does_not_auto_promote": true
   },
@@ -14,15 +14,31 @@
       "id": "revise_v2_structural",
       "ok": true,
       "errors": [],
-      "v1_uri": "file:///C:/Users/showmac2025/AppData/Local/Temp/regent_live_golden_whlmkefj/store/accepted_workspace_snapshots/7e2bdd23-110d-4cb9-9c36-37a7175096ca",
-      "v2_uri": "file:///C:/Users/showmac2025/AppData/Local/Temp/regent_live_golden_whlmkefj/store2/accepted_workspace_snapshots/ab62ba83-d8dd-4a38-b42f-91515afbf184",
+      "v1_uri": "file:///tmp/regent_live_golden_dg3wlpqj/store/accepted_workspace_snapshots/e5c5f2b0-03b3-4e11-9c1e-742d76c78f7a",
+      "v2_uri": "file:///tmp/regent_live_golden_dg3wlpqj/store2/accepted_workspace_snapshots/b4c16744-22ac-4c42-bb9c-bc836d4aec45",
       "note": "structural REVISE/V2 continuity; not live-model evidence"
     },
     {
       "id": "live_model_revise_v2",
-      "ok": false,
-      "skipped": true,
-      "error": "provider unavailable: model provider is not configured"
+      "ok": true,
+      "skipped": false,
+      "files": [
+        "README.md",
+        "requirements.txt",
+        "src/app.py"
+      ],
+      "turns": 5,
+      "input_tokens": 11005,
+      "output_tokens": 722,
+      "cache_hit_rate": 0.7327578373466606,
+      "structural": {
+        "id": "revise_v2_structural",
+        "ok": true,
+        "errors": [],
+        "v1_uri": "file:///tmp/regent_live_golden_6kqx998r/store/accepted_workspace_snapshots/bd82d961-cd48-46b8-8ff1-def75ed27c93",
+        "v2_uri": "file:///tmp/regent_live_golden_6kqx998r/store2/accepted_workspace_snapshots/1ecc1bea-7d93-4946-8fc6-a1e477f72733",
+        "note": "structural REVISE/V2 continuity; not live-model evidence"
+      }
     }
   ]
 }
