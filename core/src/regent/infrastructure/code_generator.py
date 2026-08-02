@@ -122,6 +122,15 @@ Product fidelity is mandatory:
   Goal-not-attained surfaces and unstyled browser-default dumps before preview publish.
 - Every HTML page MUST wrap primary content in a single <main> landmark (not only
   <body>/<div>).
+- Visible copy MUST be substantial: at least 120 Chinese characters (or 80 Latin) of
+  real product text inside <main> — title, short help, timezone/context, and how to use.
+  Sparse clock-only / one-liner pages fail min-visible-text.
+- Include product structure signals: use semantic tags such as <section>, <article>,
+  <ul>/<ol>, or <nav> inside <main> (product-structure check).
+- Prefer Flask (or FastAPI) with at least one domain JSON route (for example
+  GET /api/now returning {"beijing_time": "..."} or todo CRUD). Pure
+  send_from_directory / StaticFiles-only backends fail forbid-pure-static-backend.
+  Never use http.server / SimpleHTTPRequestHandler.
 - Visual product quality is mandatory: include a real stylesheet (<style> and/or
   styles.css) with intentional layout (max-width, spacing, typography, color, list/card
   treatment). Bare default-browser black text + blue underlined links is a failed
@@ -135,6 +144,11 @@ Forbidden patterns (will be rejected by delivery review):
   StaticFiles-only apps with no domain routes/models are rejected)
 - Single-file projects without requirements.txt
 - Placeholder-only content (lorem ipsum, fake users, hard-coded demo cards, "sample")
+- Unrendered template markers in any HTML/static file: literal "{{", "{%", or "{#".
+  Emit fully rendered HTML only. If the server uses Jinja/Mustache, templates must be
+  rendered to concrete HTML before write, or use plain HTML files with no template syntax.
+  Leaving raw Jinja in templates/index.html (or any .html) is an automatic fail
+  (forbid-unrendered-templates / SMOKE_FAILED).
 
 Activation instrumentation (additional, not a substitute for the product):
 - If an HTML page is generated, also include a user-visible control with data-regent-event
@@ -253,6 +267,15 @@ class ArtifactBackedCodeGenerator:
                 if entries:
                     text = inject_observed_entries(text, list(entries))
                 text = ensure_semantic_main(text)
+                # Fail closed early: unrendered Jinja/Mustache never reach smoke/deploy.
+                if "{{" in text or "{%" in text or "{#" in text:
+                    raise DeliveryRejection(
+                        reasons=[
+                            "forbid-unrendered-templates: unrendered template markers "
+                            "({{, {%, or {#) in HTML — emit fully rendered HTML only"
+                        ],
+                        producer_ref=self.generator_ref,
+                    )
                 content_bytes = text.encode("utf-8")
                 generated_htmls.append(text)
             content = content_bytes

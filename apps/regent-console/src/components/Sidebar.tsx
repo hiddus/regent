@@ -33,6 +33,8 @@ const STAGE_LABELS: Record<string, string> = {
   WAITING_HUMAN_VERIFICATION: '需要你确认交付',
   BLOCKED: '已受阻，需要介入',
   REORGANIZING: '正在重组能力...',
+  DELIVERY_SOFT_PAUSE: '自动修复已暂停',
+  DELIVERED_FOR_REVIEW: '成果已交付审阅',
   FAILED: '遇到问题，正在处理',
 }
 
@@ -211,7 +213,14 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
     goal.status === 'BLOCKED' ||
     goal.status === 'FAILED' ||
     genProgress === 'stalled' ||
-    genProgress === 'needs_continue'
+    genProgress === 'needs_continue' ||
+    stage === 'DELIVERY_SOFT_PAUSE'
+
+  const hideRunningStrip =
+    genProgress === 'needs_continue' ||
+    genProgress === 'stalled' ||
+    stage === 'DELIVERY_SOFT_PAUSE' ||
+    !!meta.diagnostic_delivery
 
   return (
     <div className="stage-bar-wrap">
@@ -272,7 +281,7 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
         )}
       </div>
     </div>
-    {isActive && (
+    {isActive && !hideRunningStrip && (
       <div className={`core-live-strip tone-${live.tone}`}>
         <span className="live-pulse-dot" aria-hidden />
         <span className="core-live-text">
@@ -285,6 +294,15 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
         {showElapsed && actionElapsed != null && (
           <span className="core-live-elapsed">{actionElapsed}s</span>
         )}
+      </div>
+    )}
+    {hideRunningStrip && (
+      <div className="core-live-strip tone-idle">
+        <span className="core-live-text">
+          {genProgress === 'stalled'
+            ? '生成已停滞，可点「继续此目标」或补充方向'
+            : '自动修复已暂停；当前成果已保存，可查看源码或继续'}
+        </span>
       </div>
     )}
     </div>

@@ -364,25 +364,35 @@ export function ArtifactPanel({
                 <span>源码</span>
                 <span className="artifact-fold-arrow" aria-hidden>›</span>
               </button>
-              {sourceOpen && (
+                  {sourceOpen && (
                 <div className="artifact-fold-body source-browser">
                   {fileError && tree.length === 0 && (
                     <div className="artifact-empty compact"><p>{fileError}</p></div>
                   )}
+                  {!fileError && tree.length === 0 && (
+                    <div className="artifact-empty compact">
+                      <p>本轮未产生可浏览的源码文件（或快照尚未就绪）。</p>
+                    </div>
+                  )}
                   {tree.length > 0 && (
                     <div className="source-layout">
                       <ul className="source-tree">
-                        {tree.map(node => (
-                          <li key={node.path}>
-                            <button
-                              type="button"
-                              className={selectedFile === node.path ? 'active' : ''}
-                              onClick={() => void openFile(node.path)}
-                            >
-                              {node.path}
-                            </button>
-                          </li>
-                        ))}
+                        {tree
+                          .filter(node => !!(node.path || node.name))
+                          .map(node => {
+                            const path = String(node.path || node.name || '')
+                            return (
+                              <li key={path}>
+                                <button
+                                  type="button"
+                                  className={selectedFile === path ? 'active' : ''}
+                                  onClick={() => void openFile(path)}
+                                >
+                                  {path}
+                                </button>
+                              </li>
+                            )
+                          })}
                       </ul>
                       <pre className="source-code">{fileContent || (selectedFile ? '加载中…' : '选择文件查看内容')}</pre>
                     </div>
@@ -456,7 +466,31 @@ export function ArtifactPanel({
 
                   {!hasPreview && status?.goal?.status !== 'ACHIEVED' && (
                     <div className="artifact-empty compact">
-                      <p>预览就绪后会显示在这里。</p>
+                      <p>
+                        {(() => {
+                          const diag = status?.goal?.metadata?.diagnostic_delivery as
+                            | { preview?: { state?: string; reason?: string } }
+                            | undefined
+                          const stage = String(status?.goal?.metadata?.execution_stage || '')
+                          if (diag?.preview?.reason) return diag.preview.reason
+                          if (stage === 'DELIVERY_SOFT_PAUSE') {
+                            return '本轮未生成可运行 Preview；可查看已保存的未验证草稿源码。'
+                          }
+                          if (status?.preview?.failure_summary) {
+                            return `预览不可用：${status.preview.failure_summary}`
+                          }
+                          return '尚无预览。失败或暂停时不会在此承诺「稍后出现」。'
+                        })()}
+                      </p>
+                      {project && (
+                        <button
+                          type="button"
+                          className="artifact-btn"
+                          onClick={() => api.downloadArtifact(project.id)}
+                        >
+                          尝试下载当前产出
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

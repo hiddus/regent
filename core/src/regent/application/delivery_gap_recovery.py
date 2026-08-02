@@ -162,6 +162,8 @@ def classify_delivery_gap_kind(gap_reasons: list[str]) -> str:
     joined = " ".join(str(r).lower() for r in gap_reasons if str(r).strip())
     if not joined:
         return "product_surface"
+    if "budget_exhausted" in joined:
+        return "BUDGET_EXHAUSTED"
     if any(m in joined for m in _PRESENTATION_MARKERS):
         return "presentation"
     if any(m in joined for m in _EVIDENCE_MARKERS):
@@ -320,6 +322,19 @@ class DeliveryGapRecoveryService:
                 .limit(1)
             )
             metadata = dict(goal.metadata_json or {})
+            # Respect an existing soft-pause (ops or runtime). Do not let in-flight
+            # DeliveryStateChanged / gap recovery overwrite DELIVERY_SOFT_PAUSE with
+            # another GENERATING replan — that is the high-burn escape hatch.
+            stage_now = str(metadata.get("execution_stage") or "")
+            if stage_now == "DELIVERY_SOFT_PAUSE" or metadata.get("ops_soft_pause"):
+                return DeliveryGapRecoveryResult(
+                    False,
+                    "SOFT_PAUSE",
+                    "goal already soft-paused; refusing further auto gap recovery",
+                    int(metadata.get("delivery_gap_recovery_attempts") or 0),
+                    gap_kind,
+                    terminal_exhaust=True,
+                )
             # Merge halt already on the goal with caller-supplied context.
             prior_halt = dict(metadata.get("halt") or {})
             merged_halt = {**prior_halt, **dict(halt_context or {})}
@@ -337,8 +352,35 @@ class DeliveryGapRecoveryService:
             # Delivery gaps are not permission/danger — never mint「总是允许」卡。
             from regent.application.delivery_success_policy import (
                 DELIVERY_GAP_AUTO_CONTINUE_MAX,
+                DELIVERY_GAP_TOTAL_ATTEMPTS_HARD_CAP,
                 SAME_GAP_KIND_HARD_CAP,
             )
+
+            # Sticky total across gap_kind flips / auto-continue resets.
+            total_attempts = int(metadata.get("delivery_gap_total_attempts") or 0) + 1
+            metadata["delivery_gap_total_attempts"] = total_attempts
+            if total_attempts >= DELIVERY_GAP_TOTAL_ATTEMPTS_HARD_CAP:
+                draft_note = f" 当前草稿：{draft_uri}" if draft_uri else ""
+                message = (
+                    f"交付缺口已累计自动修复 {total_attempts} 次仍未过关"
+                    f"（当前 gap={gap_kind}）。"
+                    "已暂停自动升级；可在对话补充方向继续，无需点「总是允许」。"
+                    f"{draft_note}"
+                )
+                return await self._soft_pause_delivery(
+                    session,
+                    goal=goal,
+                    project_id=project_id,
+                    metadata=metadata,
+                    gap_kind=gap_kind,
+                    reasons=reasons,
+                    attempts=total_attempts,
+                    message=message,
+                    summary=(
+                        "同一目标交付缺口多次自动修复仍未过关，已暂停自动升级。"
+                        "可在对话补充方向后继续。"
+                    ),
+                )
 
             prior_kind = str(metadata.get("delivery_gap_kind") or "")
             streak = int(metadata.get("delivery_gap_kind_streak") or 0)
@@ -354,14 +396,15 @@ class DeliveryGapRecoveryService:
                     metadata["delivery_gap_auto_continue_cycles"] = auto_cycles + 1
                     metadata["delivery_gap_kind_streak"] = 0
                     streak = 0
-                    attempts = 0
-                    metadata["delivery_gap_recovery_attempts"] = 0
+                    # Keep delivery_gap_recovery_attempts / total_attempts —
+                    # resetting attempts enabled infinite burn across kind flips.
                     logger.info(
                         "delivery gap hard-cap auto-continue",
                         extra={
                             "goal_id": str(goal.id),
                             "gap_kind": gap_kind,
                             "auto_cycle": auto_cycles + 1,
+                            "total_attempts": total_attempts,
                         },
                     )
                 else:
@@ -782,6 +825,13 @@ class DeliveryGapRecoveryService:
         metadata.pop("pending_delivery_gap_human", None)
         metadata["delivery_gap_kind"] = gap_kind
         metadata["delivery_state"] = DeliveryState.DELIVERED_FOR_REVIEW.value
+        # Sticky marker so in-flight workers / outbox cannot silently resume burn.
+        metadata["ops_soft_pause"] = {
+            "at": datetime.now(UTC).isoformat(),
+            "reason": "goal_attainment_soft_pause",
+            "gap_kind": gap_kind,
+            "attempts": attempts,
+        }
         draft_uri = str(
             (extra_termination or {}).get("draft_uri")
             or metadata.get("last_good_draft_uri")
@@ -802,19 +852,88 @@ class DeliveryGapRecoveryService:
             "preview_endpoint": preview_endpoint or None,
             **(extra_termination or {}),
         }
-        goal.metadata_json = merge_live_action_into_metadata(
-            metadata,
-            "自动修复已暂停；可在对话补充方向继续（无需确认）",
-            stage="DELIVERY_SOFT_PAUSE",
-            event_type="DELIVERY_SOFT_PAUSE",
+        # Promote sandbox leftovers into a Console-safe DiagnosticDelivery.
+        from regent.application.diagnostic_delivery import (
+            build_diagnostic_delivery,
+            public_diagnostic_delivery,
         )
+        from regent.config import get_settings
+
+        diagnostic = build_diagnostic_delivery(
+            goal_id=goal.id,
+            terminal_reason=(
+                "BUDGET_EXHAUSTED"
+                if gap_kind == "BUDGET_EXHAUSTED"
+                or any("BUDGET_EXHAUSTED" in str(r).upper() for r in reasons)
+                else "DELIVERY_SOFT_PAUSE"
+            ),
+            gap_kind=gap_kind,
+            reasons=reasons,
+            draft_uri=draft_uri or None,
+            preview_endpoint=preview_endpoint or None,
+            workspace_root=get_settings().workspace_root,
+            summary=summary,
+            attempts=attempts,
+        )
+        public = public_diagnostic_delivery(diagnostic)
+        metadata["diagnostic_delivery"] = public
+        metadata["delivery_state"] = DeliveryState.DELIVERED_FOR_REVIEW.value
+        snap_id = (public.get("resume") or {}).get("base_snapshot_id")
+        if snap_id:
+            metadata["last_recoverable_workspace"] = {
+                "snapshot_id": snap_id,
+                "reason": gap_kind,
+                "at": datetime.now(UTC).isoformat(),
+            }
+            metadata["last_recoverable_workspace_uri"] = diagnostic.get("_snapshot_uri")
+        # Stop all "still running" UI: do not leave live_action behind.
+        metadata.pop("live_action", None)
+        metadata["execution_stage"] = "DELIVERY_SOFT_PAUSE"
+        goal.metadata_json = metadata
         flag_modified(goal, "metadata_json")
+
+        # Fail any in-flight GENERATING runs so console cannot show calling_model.
+        from regent.infrastructure.models import (
+            GenerationPlanModel,
+            GenerationRunModel,
+            RequirementRevisionModel,
+        )
+
+        run_ids = list(
+            await session.scalars(
+                select(GenerationRunModel.id)
+                .join(
+                    GenerationPlanModel,
+                    GenerationRunModel.plan_id == GenerationPlanModel.id,
+                )
+                .join(
+                    RequirementRevisionModel,
+                    GenerationPlanModel.requirement_revision_id
+                    == RequirementRevisionModel.id,
+                )
+                .where(
+                    RequirementRevisionModel.goal_id == goal.id,
+                    GenerationRunModel.status == "GENERATING",
+                )
+            )
+        )
+        for rid in run_ids:
+            run = await session.get(GenerationRunModel, rid)
+            if run is None:
+                continue
+            run.status = "FAILED"
+            run.failure_code = (
+                "BUDGET_EXHAUSTED"
+                if public.get("terminal_reason") == "BUDGET_EXHAUSTED"
+                else "OPS_SOFT_PAUSE_DIAGNOSTIC"
+            )
+
         await DeliveryGapRecoveryService._append(
             session,
             project_id,
             role="ASSISTANT",
-            message_type="DELIVERY_SOFT_PAUSE",
-            content=summary,
+            message_type="DIAGNOSTIC_DELIVERY_READY",
+            content=public.get("summary") or summary,
             metadata={
                 "goal_id": str(goal.id),
                 "attempts": attempts,
@@ -822,8 +941,10 @@ class DeliveryGapRecoveryService:
                 "gap_kind": gap_kind,
                 "handoff": "SOFT_PAUSE",
                 "detail": message[:800],
-                "draft_uri": draft_uri or None,
+                "draft_uri": None,  # never file:// to console
                 "preview_endpoint": preview_endpoint or None,
+                "diagnostic_delivery": public,
+                "message_type": "DIAGNOSTIC_DELIVERY_READY",
             },
         )
         return DeliveryGapRecoveryResult(
@@ -879,9 +1000,11 @@ class DeliveryGapRecoveryService:
             metadata["delivery_gap_recovery_attempts"] = 0
             metadata["delivery_gap_kind_streak"] = 0
             metadata["delivery_gap_auto_continue_cycles"] = 0
+            metadata["delivery_gap_total_attempts"] = 0
             metadata["awaiting_human_intervention"] = False
             metadata.pop("termination", None)
             metadata.pop("pending_delivery_gap_human", None)
+            metadata.pop("ops_soft_pause", None)
             metadata["execution_stage"] = "GENERATING"
             metadata["human_resume_nonce"] = (
                 f"human:{datetime.now(UTC).isoformat()}:{uuid.uuid4().hex[:8]}"

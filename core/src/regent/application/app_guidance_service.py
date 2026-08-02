@@ -643,6 +643,9 @@ class AppGuidanceService:
             .limit(1)
         )
         if has_run is not None:
+            # Soft-pause / diagnostic handoff must never look like "calling_model".
+            if stage_name == "DELIVERY_SOFT_PAUSE" or metadata.get("diagnostic_delivery"):
+                return "needs_continue"
             return "calling_model"
 
         has_queue = await session.scalar(
@@ -653,8 +656,12 @@ class AppGuidanceService:
             ).limit(1)
         )
         if has_queue is not None:
+            if stage_name == "DELIVERY_SOFT_PAUSE" or metadata.get("diagnostic_delivery"):
+                return "needs_continue"
             return "queued"
 
+        if stage_name == "DELIVERY_SOFT_PAUSE" or metadata.get("diagnostic_delivery"):
+            return "needs_continue"
         if stage_name == "GENERATING" and goal_status == "ACTIVE":
             return "stalled"
         return "idle"
@@ -689,6 +696,11 @@ class AppGuidanceService:
             core_activity = "done" if goal_status == "ACHIEVED" else "failed"
         elif goal_status == "WAITING_HUMAN":
             core_activity = "waiting"
+        elif str(metadata.get("execution_stage") or "") == "DELIVERY_SOFT_PAUSE" or metadata.get(
+            "diagnostic_delivery"
+        ):
+            core_activity = "idle"
+            live_summary = None
         elif goal_active and live_summary:
             core_activity = "active"
         elif goal_active:
@@ -1153,6 +1165,40 @@ class AppGuidanceService:
         )
         if soft_or_gap_continue:
             from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
+
+            msg_l = (message or "").lower()
+            # RecoveryCard INSPECT / STOP must not blindly re-enter generation.
+            if any(
+                key in msg_l
+                for key in (
+                    "inspect_current_result",
+                    "option:inspect",
+                    "查看并下载",
+                    "查看现有",
+                    "先给我看",
+                )
+            ):
+                return await self._persist_simple(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    model,
+                    "当前未验证草稿已保存在右侧「源码 / 产物」面板，可展开查看或下载。"
+                    "需要继续生成时，请选择「继续修复当前版本」或直接说明修改方向。",
+                )
+            if any(
+                key in msg_l
+                for key in ("option:stop", "action:stop", "停止目标", "停止 goal")
+            ) or msg_l.strip() in {"停止", "stop"}:
+                return await self._persist_simple(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    model,
+                    "已记录停止请求。目标保持暂停；如需恢复请再发继续指令。",
+                )
 
             if goal_status == "WAITING_HUMAN":
                 goal_version = int(context["goal"].get("version", 0))

@@ -313,6 +313,172 @@ async def test_recover_stops_after_ladder_exhausted() -> None:
     assert goal.metadata_json.get("awaiting_human_intervention") is False
     assert goal.metadata_json.get("termination", {}).get("handoff") == "SOFT_PAUSE"
     assert not goal.metadata_json.get("pending_delivery_gap_human")
+    assert goal.metadata_json.get("ops_soft_pause", {}).get("reason") == (
+        "goal_attainment_soft_pause"
+    )
+    assert goal.metadata_json.get("diagnostic_delivery")
+    assert goal.metadata_json.get("diagnostic_delivery", {}).get("promote_allowed") is False
+    assert "live_action" not in (goal.metadata_json or {})
+
+
+@pytest.mark.asyncio
+async def test_recover_soft_pauses_on_total_attempts_hard_cap() -> None:
+    goal_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=1,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        metadata_json={
+            # Kind flips would reset streak; total must still soft-pause.
+            "delivery_gap_total_attempts": 5,
+            "delivery_gap_kind": "product_surface",
+            "delivery_gap_kind_streak": 1,
+            "delivery_gap_recovery_attempts": 2,
+        },
+    )
+    factory = _goal_session(goal, None)
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
+    ):
+        result = await DeliveryGapRecoveryService(factory).recover(
+            goal_id=goal_id,
+            project_id=uuid.uuid4(),
+            requirement_revision_id=uuid.uuid4(),
+            capability_resolution_plan_id=uuid.uuid4(),
+            actor="test",
+            gap_reasons=["min-visible-text: 41 chars < 80"],
+        )
+
+    assert result.recovered is False
+    assert result.method == "SOFT_PAUSE"
+    assert result.terminal_exhaust is True
+    assert goal.metadata_json.get("execution_stage") == "DELIVERY_SOFT_PAUSE"
+    assert int(goal.metadata_json.get("delivery_gap_total_attempts") or 0) >= 6
+
+
+@pytest.mark.asyncio
+async def test_recover_refuses_when_already_soft_paused() -> None:
+    goal_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=1,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        metadata_json={
+            "execution_stage": "DELIVERY_SOFT_PAUSE",
+            "ops_soft_pause": {"reason": "high_burn_same_gap", "attempts": "3"},
+            "delivery_gap_recovery_attempts": 3,
+        },
+    )
+    factory = _goal_session(goal, None)
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+    ):
+        result = await DeliveryGapRecoveryService(factory).recover(
+            goal_id=goal_id,
+            project_id=uuid.uuid4(),
+            requirement_revision_id=uuid.uuid4(),
+            capability_resolution_plan_id=uuid.uuid4(),
+            actor="test",
+            gap_reasons=["forbid-unrendered-templates: raw jinja"],
+        )
+
+    assert result.recovered is False
+    assert result.method == "SOFT_PAUSE"
+    assert result.terminal_exhaust is True
+    assert goal.metadata_json.get("execution_stage") == "DELIVERY_SOFT_PAUSE"
+    # Must not flip back to GENERATING or bump attempts.
+    assert goal.metadata_json.get("delivery_gap_recovery_attempts") == 3
+
+
+@pytest.mark.asyncio
+async def test_resume_after_human_clears_ops_soft_pause() -> None:
+    goal_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    goal = GoalModel(
+        id=goal_id,
+        original_input="app",
+        status="ACTIVE",
+        version=2,
+        created_by="test",
+        correlation_id=uuid.uuid4(),
+        app_project_id=project_id,
+        metadata_json={
+            "execution_stage": "DELIVERY_SOFT_PAUSE",
+            "ops_soft_pause": {"reason": "high_burn_same_gap"},
+            "delivery_gap_recovery_attempts": 10,
+            "delivery_gap_kind": "product_surface",
+            "requirement_revision_id": str(req_id),
+            "capability_resolution_plan_id": str(plan_id),
+            "termination": {
+                "handoff": "SOFT_PAUSE",
+                "gap_reasons": ["forbid-unrendered-templates: raw jinja"],
+            },
+        },
+    )
+    factory = _goal_session(goal, None)
+    reorg = _fake_reorg(goal_id)
+
+    with (
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_product_surface_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_delivery_review_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch(
+            "regent.application.delivery_gap_recovery.ensure_allowlisted_http_capability",
+            AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(DeliveryGapRecoveryService, "_append", AsyncMock()),
+        patch.object(DeliveryGapRecoveryService, "_admit_failure_memories", AsyncMock()),
+    ):
+        svc = DeliveryGapRecoveryService(factory)
+        svc._orgs = MagicMock(reorganize_for_gap=AsyncMock(return_value=reorg))
+        result = await svc.resume_after_human(
+            goal_id=goal_id,
+            project_id=project_id,
+            actor="user",
+            human_message="改成纯静态 HTML，不要 Jinja",
+        )
+
+    assert "ops_soft_pause" not in (goal.metadata_json or {})
+    assert result.recovered is True or result.method in {
+        "REPLAN",
+        "REUSE",
+        "COMPOSE",
+        "BUILD",
+        "CONFIGURE",
+        "ACQUIRE",
+    }
 
 
 @pytest.mark.asyncio

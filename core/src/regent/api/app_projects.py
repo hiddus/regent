@@ -133,7 +133,7 @@ async def workspace_tree(project_id: uuid.UUID, request: Request) -> dict[str, A
     root = await resolve_project_workspace(request.app.state.sessions, project_id)
     if root is None:
         raise HTTPException(status_code=404, detail="No workspace found for this project")
-    return {"root": str(root), "entries": list_tree(root)}
+    return {"root": None, "snapshot_id": None, "entries": list_tree(root)}
 
 
 @router.get("/{project_id}/workspace/file")

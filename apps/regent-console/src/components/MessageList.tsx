@@ -1,9 +1,10 @@
 import { useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Message } from '../lib/types'
+import type { DiagnosticDelivery, Message } from '../lib/types'
 import { buildTimeline } from '../lib/progressNodes'
 import { ConfirmationCard } from './ConfirmationCard'
+import { RecoveryCard } from './RecoveryCard'
 import { TaskCard, type TaskActionOptions } from './TaskCard'
 import { ProgressNodeCard } from './ProgressNodeCard'
 
@@ -14,6 +15,7 @@ interface MessageListProps {
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
+  onInspectSource?: () => void
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -67,6 +69,7 @@ function MessageItem({
   onConfirm,
   onSelectOption,
   onTaskAction,
+  onInspectSource,
 }: {
   m: Message
   movingGoals: Set<string>
@@ -74,6 +77,7 @@ function MessageItem({
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
+  onInspectSource?: () => void
 }) {
   const isConfirmation =
     m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
@@ -108,7 +112,18 @@ function MessageItem({
     taskTypeUpper === 'DELIVERY_GAP_INTERVENE' ||
     confirmationAction === 'delivery_gap_intervene' ||
     m.message_type === 'DELIVERY_SOFT_PAUSE' ||
+    m.message_type === 'DIAGNOSTIC_DELIVERY_READY' ||
     m.message_type === 'STALE_PROGRESS_NOTE'
+
+  const diagnosticDelivery = (
+    (taskMeta.diagnostic_delivery as DiagnosticDelivery | undefined)
+    || (m.message_type === 'DIAGNOSTIC_DELIVERY_READY' ? (taskMeta as unknown as DiagnosticDelivery) : undefined)
+  )
+  const showRecoveryCard =
+    !!diagnosticDelivery
+    && (m.message_type === 'DIAGNOSTIC_DELIVERY_READY'
+      || m.message_type === 'DELIVERY_SOFT_PAUSE'
+      || !!diagnosticDelivery.terminal_reason)
 
   const isExhaustedHandoff =
     !isDeliveryGapIntervene &&
@@ -147,10 +162,23 @@ function MessageItem({
       <div className="avatar">{avatarLabel}</div>
       <div className="body">
         <div className="meta">{metaLabel}</div>
-        {!showTaskCard && (
+        {!showTaskCard && !showRecoveryCard && (
           <div className="content">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
           </div>
+        )}
+
+        {showRecoveryCard && diagnosticDelivery && (
+          <RecoveryCard
+            delivery={diagnosticDelivery}
+            summary={m.content}
+            projectId={String(m.metadata?.app_project_id || '')}
+            onInspect={onInspectSource}
+            onAction={(action, label) => {
+              const pid = m.metadata?.app_project_id as string
+              if (pid) onSelectOption?.(pid, action, label)
+            }}
+          />
         )}
 
         {isConfirmation && (
@@ -199,6 +227,7 @@ export function MessageList({
   onConfirm,
   onSelectOption,
   onTaskAction,
+  onInspectSource,
 }: MessageListProps) {
   const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
   const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
@@ -253,6 +282,7 @@ export function MessageList({
               onConfirm={onConfirm}
               onSelectOption={onSelectOption}
               onTaskAction={onTaskAction}
+              onInspectSource={onInspectSource}
             />
           )
         })}

@@ -215,9 +215,25 @@ class AgenticCodeGenerator:
                     ),
                     encoding="utf-8",
                 )
+            # Promote sandbox → recoverable snapshot before sandbox can be reaped.
+            draft_uri = sandbox.resolve().as_uri()
+            try:
+                from regent.agent.accepted_workspace import (
+                    write_recoverable_workspace_snapshot,
+                )
+                from regent.config import get_settings
+
+                draft_uri = write_recoverable_workspace_snapshot(
+                    sandbox,
+                    Path(get_settings().workspace_root),
+                    reason="budget_exhausted",
+                    include_diagnostics=True,
+                )
+            except Exception:
+                pass
             raise DeliveryRejection(
                 reasons=[f"BUDGET_EXHAUSTED: {exc.reason}"],
-                draft_uri=sandbox.resolve().as_uri(),
+                draft_uri=draft_uri,
                 producer_ref=GENERATOR_REF,
                 gap_kind="BUDGET_EXHAUSTED",
                 message="agent budget exhausted; diagnostics retained, promote forbidden",

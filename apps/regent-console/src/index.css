@@ -1577,3 +1577,62 @@ body {
     box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
   }
 }
+
+/* DiagnosticDelivery RecoveryCard */
+.recovery-card {
+  margin-top: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  background: var(--panel-elevated, #1a1a1a);
+}
+.recovery-card-badge {
+  display: inline-block;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #c9a227;
+  margin-bottom: 8px;
+}
+.recovery-card-summary {
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
+.recovery-card-facts {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 13px;
+  opacity: 0.9;
+}
+.recovery-card-findings {
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.recovery-card-section-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.recovery-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.recovery-card-btn {
+  border: 1px solid var(--border, #444);
+  background: #2a2a2a;
+  color: inherit;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.recovery-card-btn:hover {
+  border-color: #888;
+}
+.recovery-card-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  opacity: 0.65;
+}
+.core-live-strip.tone-idle {
+  opacity: 0.85;
+}

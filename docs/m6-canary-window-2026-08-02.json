@@ -1,0 +1,29 @@
+{
+  "record_type": "M6CanaryWindow",
+  "schema_version": "m6-canary-window/v2",
+  "opened_at": "2026-08-02T06:50:00+00:00",
+  "opened_by": "ops/set_agentic_qualification.py CANARY_5",
+  "authorization": "user directive 2026-08-02: 继续直到Canary",
+  "promotion_report": "docs/agentic-canary5-promotion-report-2026-08-02.json",
+  "settings": {
+    "agentic_qualification_state": "CANARY_5",
+    "generation_strategy": "artifact-backed",
+    "generation_strategy_canary_percent": 5,
+    "generation_strategy_canary_gate": true,
+    "generation_strategy_canary_variant": "agentic"
+  },
+  "sample_gates": {
+    "dogfood_independent_tasks": 27,
+    "infra_false_fail_count": 0
+  },
+  "constraints": [
+    "Default strategy remains artifact-backed (FALLBACK_ONLY)",
+    "GQ-4 / DEFAULT flip remains closed",
+    "Rollback: python -B ops/clamp_generation_strategy_freeze.py",
+    "Do not expand beyond 5% without new sample_gates + DecisionRecord"
+  ],
+  "watch": {
+    "probe": "python -B ops/probe_m6_canary.py --hours 24",
+    "note": "Open-window samples are for CANARY_5 observation only; not GQ-4 evidence"
+  }
+}

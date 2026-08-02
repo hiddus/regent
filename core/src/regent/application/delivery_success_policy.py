@@ -24,6 +24,10 @@ SAME_GAP_KIND_HARD_CAP = 3
 # soft-pause (conversation note only — never a permission TaskCard).
 DELIVERY_GAP_AUTO_CONTINUE_MAX = 2
 
+# Absolute ceiling across gap_kind flips. Auto-continue must NOT reset this —
+# otherwise alternating presentation/product_surface burns forever.
+DELIVERY_GAP_TOTAL_ATTEMPTS_HARD_CAP = 6
+
 
 def effective_max_concurrent_generating(settings: Any) -> int:
     """Fleet-aware generation cap.

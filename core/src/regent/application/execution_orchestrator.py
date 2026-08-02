@@ -1237,11 +1237,22 @@ class ExecutionOrchestrator:
         async with self._sessions() as session:
             revision = await session.get(RequirementRevisionModel, requirement_id)
             goal = await session.get(GoalModel, goal_id)
-            if goal is not None and dict(goal.metadata_json or {}).get("needs_user_fork"):
-                raise DomainError(
-                    ErrorCode.INVALID_STATE,
-                    "goal awaits user fork selection; refusing generation",
-                )
+            if goal is not None:
+                _meta = dict(goal.metadata_json or {})
+                if _meta.get("needs_user_fork"):
+                    raise DomainError(
+                        ErrorCode.INVALID_STATE,
+                        "goal awaits user fork selection; refusing generation",
+                    )
+                # Soft-pause is sticky until chat resumes (clears ops_soft_pause).
+                if (
+                    str(_meta.get("execution_stage") or "") == "DELIVERY_SOFT_PAUSE"
+                    or _meta.get("ops_soft_pause")
+                ):
+                    raise DomainError(
+                        ErrorCode.INVALID_STATE,
+                        "goal is soft-paused; refusing generation until new direction",
+                    )
             spec = await session.scalar(
                 select(GoalSpecModel)
                 .where(GoalSpecModel.goal_id == goal_id)
@@ -1718,6 +1729,7 @@ class ExecutionOrchestrator:
                     return
                 reasons = reasons_from_exception(exc)
                 draft_uri = getattr(exc, "draft_uri", None)
+                gap_kind = getattr(exc, "gap_kind", None)
                 recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                     goal_id=goal_id,
                     project_id=project_id,
@@ -1730,6 +1742,8 @@ class ExecutionOrchestrator:
                         "last_error": str(exc)[:400],
                         "message": str(exc.message)[:400],
                         "draft_uri": draft_uri,
+                        "gap_kind": gap_kind,
+                        "primary_failure_code": gap_kind,
                     },
                 )
                 if await self._apply_delivery_verdict(

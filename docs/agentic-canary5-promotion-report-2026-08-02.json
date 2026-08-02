@@ -1,0 +1,50 @@
+{
+  "record_type": "AgenticCanary5PromotionReport",
+  "schema_version": "canary5-promotion/v1",
+  "created_at": "2026-08-02T06:45:00+00:00",
+  "mode": "production-dogfood-evidence",
+  "based_on": [
+    "docs/agentic-live-golden-report-2026-08-02.json",
+    "docs/agentic-offline-qual-report-2026-08-02.json",
+    "S0 sample_gates inventory 2026-08-02"
+  ],
+  "gate": {
+    "allows_state": "CANARY_5",
+    "live_model_v2_green": true,
+    "structural_revise_v2_green": true,
+    "does_not_auto_promote": true,
+    "does_not_open_gq4": true
+  },
+  "checks": [
+    {
+      "id": "live_model_revise_v2",
+      "ok": true,
+      "source": "docs/agentic-live-golden-report-2026-08-02.json"
+    },
+    {
+      "id": "dogfood_sample_inventory",
+      "ok": true,
+      "achieved_goals": 27,
+      "goals_with_preview": 41,
+      "soft_pause_goals": 37,
+      "goals_with_failure_lessons": 53
+    }
+  ],
+  "sample_gates": {
+    "dogfood_independent_tasks": 27,
+    "infra_false_fail_count": 0,
+    "methodology": {
+      "dogfood_independent_tasks": "count of goals with status=ACHIEVED on S0 (each is an independent Goal attainment sample)",
+      "infra_false_fail_count": "false ACHIEVED / false product-pass attributed to infra=0; LEASE_CONFLICT deferrals and intentional OPS_SOFT_PAUSE are excluded (not false product verdicts)",
+      "l5_note": "2026-08-02 L5 minimal dogfood hit delivery-review min-visible-text / forbid-pure-static; soft-pause + total-attempt hard-cap shipped; generator prompt tightened for Flask domain route + ≥120 CJK chars"
+    }
+  },
+  "traffic_intent": {
+    "qualification_state": "CANARY_5",
+    "canary_percent": 5,
+    "canary_gate": true,
+    "default_strategy_remains": "artifact-backed",
+    "gq4": "closed"
+  },
+  "owner_authorization": "user directive 2026-08-02: 继续直到Canary"
+}

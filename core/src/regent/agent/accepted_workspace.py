@@ -107,11 +107,15 @@ def write_recoverable_workspace_snapshot(
     dest_root: Path,
     *,
     reason: str = "generation_failed",
+    include_diagnostics: bool = False,
 ) -> str:
     """Best-effort copy of a failed/partial workspace for REVISE warm-start.
 
     Unlike accepted snapshots, integrity failures are tolerated — recoverable
     drafts are better than cold starts even when incomplete.
+
+    When ``include_diagnostics`` is True, copy ``.regent_*`` sidecars
+    (budget/ledger/transcript) so DiagnosticDelivery can hand them to the user.
     """
     workspace = workspace.resolve()
     dest_root = dest_root.resolve()
@@ -122,7 +126,13 @@ def write_recoverable_workspace_snapshot(
         if not path.is_file() or path.is_symlink():
             continue
         rel = path.relative_to(workspace).as_posix()
-        if rel.startswith(".regent"):
+        if rel.startswith(".regent") and not include_diagnostics:
+            continue
+        # Always skip nested accepted/recoverable meta noise.
+        if path.name in {
+            ".regent_accepted_meta.json",
+            ".regent_recoverable_meta.json",
+        }:
             continue
         out = target / rel
         out.parent.mkdir(parents=True, exist_ok=True)

@@ -96,6 +96,57 @@ export interface GuidanceResult {
 
 export interface ProjectStatus extends GoalStatus {}
 
+export interface DiagnosticRecommendation {
+  id: string
+  label: string
+  description?: string
+  action: string
+}
+
+export interface DiagnosticDelivery {
+  id?: string
+  schema_version?: string
+  goal_id?: string
+  terminal_reason?: string
+  status?: string
+  resumable?: boolean
+  promote_allowed?: boolean
+  summary?: string
+  gap_kind?: string
+  attempts?: number
+  budget?: {
+    turns_used?: number
+    turns_limit?: number
+    tokens_used?: number
+    tokens_limit?: number
+    elapsed_seconds?: number
+  }
+  artifacts?: Array<{
+    kind: string
+    snapshot_id?: string
+    file_count?: number
+    sha256?: string
+    size?: number
+    name?: string
+  }>
+  preview?: {
+    state?: 'VERIFIED' | 'DRAFT' | 'UNAVAILABLE' | string
+    reason?: string
+    last_verified_endpoint?: string | null
+  }
+  findings?: Array<{
+    code: string
+    title?: string
+    detail?: string
+    severity?: string
+  }>
+  recommendations?: DiagnosticRecommendation[]
+  resume?: {
+    base_snapshot_id?: string | null
+    allowed_actions?: string[]
+  }
+}
+
 /** CD-3.2 / CD-3.5: option-based handoff shown on TaskCard instead of plain allow/deny. */
 export interface HandoffOption {
   id: string
