@@ -1,7 +1,7 @@
 {
   "record_type": "AgenticLiveGoldenReport",
   "schema_version": "live-golden/v1",
-  "created_at": "2026-08-02T02:01:07.833790+00:00",
+  "created_at": "2026-08-02T02:03:57.300802+00:00",
   "mode": "live",
   "gate": {
     "allows_state": "INTERNAL_DOGFOOD",
@@ -14,8 +14,8 @@
       "id": "revise_v2_structural",
       "ok": true,
       "errors": [],
-      "v1_uri": "file:///tmp/regent_live_golden_dg3wlpqj/store/accepted_workspace_snapshots/e5c5f2b0-03b3-4e11-9c1e-742d76c78f7a",
-      "v2_uri": "file:///tmp/regent_live_golden_dg3wlpqj/store2/accepted_workspace_snapshots/b4c16744-22ac-4c42-bb9c-bc836d4aec45",
+      "v1_uri": "file:///tmp/regent_live_golden_0w0ez16e/store/accepted_workspace_snapshots/83ca19d9-bfed-47e3-add6-f52d53b6d0ea",
+      "v2_uri": "file:///tmp/regent_live_golden_0w0ez16e/store2/accepted_workspace_snapshots/15e7d493-e5fa-4ea8-8268-f993103f83c4",
       "note": "structural REVISE/V2 continuity; not live-model evidence"
     },
     {
@@ -28,15 +28,15 @@
         "src/app.py"
       ],
       "turns": 5,
-      "input_tokens": 11005,
-      "output_tokens": 722,
-      "cache_hit_rate": 0.7327578373466606,
+      "input_tokens": 10995,
+      "output_tokens": 747,
+      "cache_hit_rate": 0.8964074579354252,
       "structural": {
         "id": "revise_v2_structural",
         "ok": true,
         "errors": [],
-        "v1_uri": "file:///tmp/regent_live_golden_6kqx998r/store/accepted_workspace_snapshots/bd82d961-cd48-46b8-8ff1-def75ed27c93",
-        "v2_uri": "file:///tmp/regent_live_golden_6kqx998r/store2/accepted_workspace_snapshots/1ecc1bea-7d93-4946-8fc6-a1e477f72733",
+        "v1_uri": "file:///tmp/regent_live_golden_vjzfate0/store/accepted_workspace_snapshots/17b1daa3-046a-4cbe-8a5d-3a35fe573c46",
+        "v2_uri": "file:///tmp/regent_live_golden_vjzfate0/store2/accepted_workspace_snapshots/68febf0a-3f8c-4073-8cd5-2fafbaeae215",
         "note": "structural REVISE/V2 continuity; not live-model evidence"
       }
     }

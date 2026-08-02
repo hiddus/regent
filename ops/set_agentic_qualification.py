@@ -112,14 +112,8 @@ for ENVF in /opt/regent/.deploy.env /opt/regent/.runtime.env /opt/regent/.env; d
   ensure_kv "$ENVF" REGENT_AGENTIC_QUALIFICATION_STATE {state}{extras}
 done
 grep -E 'AGENTIC_QUALIFICATION|CANARY_PERCENT|CANARY_GATE' /opt/regent/.deploy.env | sort
-# Hot-reload Settings: restart api+workers (env baked at process start).
-for c in regent-api $(docker ps --format '{{{{.Names}}}}' | grep -E '^regent-worker' || true); do
-  docker restart "$c" >/dev/null
-  echo restarted "$c"
-done
-sleep 8
-docker exec regent-api python -c "from regent.config import get_settings; s=get_settings(); print(s.agentic_qualification_state, s.generation_strategy_canary_percent, s.generation_strategy_canary_gate)"
-curl -s --max-time 8 http://127.0.0.1:8000/health/ready; echo
+echo 'NOTE: container env is baked at create-time; caller should run ops/recreate_from_deploy_env.py then sync_local_to_server.py'
+docker exec regent-api python -c "from regent.config import get_settings; s=get_settings(); print('running_container', s.agentic_qualification_state, s.generation_strategy_canary_percent, s.generation_strategy_canary_gate)" || true
 """
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -233,7 +227,25 @@ def main() -> int:
     if do_local:
         _local(args.state, percent=args.also_canary_percent, gate=args.also_gate)
     if args.remote:
-        return _remote(args.state, percent=args.also_canary_percent, gate=args.also_gate)
+        code = _remote(args.state, percent=args.also_canary_percent, gate=args.also_gate)
+        if code != 0:
+            return code
+        # Restart cannot reload baked env — recreate from host .deploy.env.
+        print("recreate_from_deploy_env…", file=sys.stderr)
+        from recreate_from_deploy_env import main as recreate_main
+
+        try:
+            recreate_main()
+        except SystemExit as exc:
+            code = int(exc.code or 0)
+        if code != 0:
+            return code
+        print(
+            "NOTE: run python -B ops/sync_local_to_server.py after recreate "
+            "(docker-cp'd code is replaced by image layers)",
+            file=sys.stderr,
+        )
+        return 0
     print("OK", args.state)
     return 0
 
