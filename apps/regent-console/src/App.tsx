@@ -6,6 +6,7 @@ import { ArtifactPanel } from './components/ArtifactPanel'
 import { useWorkspace } from './hooks/useWorkspace'
 import { api } from './lib/api'
 import { buildProgressNodes } from './lib/progressNodes'
+import type { DiagnosticDelivery } from './lib/types'
 
 export default function App() {
   const ws = useWorkspace()
@@ -208,6 +209,17 @@ export default function App() {
           messages={ws.messages}
           currentProjectId={ws.currentProject?.id || null}
           goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
+          executionStage={
+            String(
+              (ws.status?.goal?.metadata as Record<string, unknown> | undefined)
+                ?.execution_stage || '',
+            ) || null
+          }
+          goalDiagnostic={
+            ((ws.status?.goal?.metadata as Record<string, unknown> | undefined)
+              ?.diagnostic_delivery as DiagnosticDelivery | undefined)
+            || null
+          }
           onConfirm={handleConfirm}
           onSelectOption={handleSelectOption}
           onTaskAction={handleTaskAction}

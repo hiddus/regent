@@ -12,6 +12,9 @@ interface MessageListProps {
   messages: Message[]
   currentProjectId?: string | null
   goalStatus?: string | null
+  /** Goal-level DiagnosticDelivery fallback when chat messages lack metadata. */
+  goalDiagnostic?: DiagnosticDelivery | null
+  executionStage?: string | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
@@ -67,6 +70,7 @@ function MessageItem({
   movingGoals,
   resolved,
   currentProjectId,
+  goalDiagnostic,
   onConfirm,
   onSelectOption,
   onTaskAction,
@@ -76,6 +80,7 @@ function MessageItem({
   movingGoals: Set<string>
   resolved: boolean
   currentProjectId?: string | null
+  goalDiagnostic?: DiagnosticDelivery | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
@@ -120,6 +125,9 @@ function MessageItem({
   const diagnosticDelivery = (
     (taskMeta.diagnostic_delivery as DiagnosticDelivery | undefined)
     || (m.message_type === 'DIAGNOSTIC_DELIVERY_READY' ? (taskMeta as unknown as DiagnosticDelivery) : undefined)
+    || ((m.message_type === 'DELIVERY_SOFT_PAUSE' || m.message_type === 'DIAGNOSTIC_DELIVERY_READY')
+      ? goalDiagnostic || undefined
+      : undefined)
   )
   const showRecoveryCard =
     !!diagnosticDelivery
@@ -235,6 +243,8 @@ export function MessageList({
   messages,
   currentProjectId,
   goalStatus,
+  goalDiagnostic,
+  executionStage,
   onConfirm,
   onSelectOption,
   onTaskAction,
@@ -243,7 +253,23 @@ export function MessageList({
   const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
   const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
 
-  if (messages.length === 0) {
+  const hasMessageRecovery = useMemo(
+    () =>
+      messages.some(m => {
+        const meta = (m.metadata || {}) as Record<string, unknown>
+        return (
+          m.message_type === 'DIAGNOSTIC_DELIVERY_READY'
+          || !!meta.diagnostic_delivery
+        )
+      }),
+    [messages],
+  )
+  const showPinnedRecovery =
+    !!goalDiagnostic
+    && !hasMessageRecovery
+    && (executionStage === 'DELIVERY_SOFT_PAUSE' || !!goalDiagnostic.terminal_reason)
+
+  if (messages.length === 0 && !showPinnedRecovery) {
     return (
       <section className="messages">
         <div className="stream">
@@ -291,6 +317,7 @@ export function MessageList({
               movingGoals={movingGoals}
               resolved={resolved}
               currentProjectId={currentProjectId}
+              goalDiagnostic={goalDiagnostic}
               onConfirm={onConfirm}
               onSelectOption={onSelectOption}
               onTaskAction={onTaskAction}
@@ -298,6 +325,23 @@ export function MessageList({
             />
           )
         })}
+        {showPinnedRecovery && goalDiagnostic && (
+          <article className="message assistant">
+            <div className="avatar">R</div>
+            <div className="body">
+              <div className="meta">Regent</div>
+              <RecoveryCard
+                delivery={goalDiagnostic}
+                summary={goalDiagnostic.summary}
+                projectId={String(currentProjectId || '')}
+                onInspect={onInspectSource}
+                onAction={(action, label) => {
+                  if (currentProjectId) onSelectOption?.(currentProjectId, action, label)
+                }}
+              />
+            </div>
+          </article>
+        )}
       </div>
     </section>
   )
