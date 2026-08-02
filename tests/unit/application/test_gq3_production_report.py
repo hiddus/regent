@@ -85,3 +85,56 @@ def test_window_expired() -> None:
     assert not window_expired(
         opened, max_days=21, now=opened + timedelta(days=10)
     )
+
+
+def test_enrich_report_invalid_baseline_when_control_zero_and_starved() -> None:
+    obs = [
+        GoalArmObservation(
+            goal_id=f"c-{i}",
+            variant="artifact_backed",
+            goal_status="EXHAUSTED",
+            repair_rounds=1,
+            human_intervened=False,
+            input_tokens=1000,
+            output_tokens=500,
+            latency_ms=1000,
+            first_plan_at="2026-07-31T12:00:00+00:00",
+            generator_ref=ARTIFACT_BACKED_REF,
+        )
+        for i in range(12)
+    ] + [
+        GoalArmObservation(
+            goal_id=f"a-{i}",
+            variant="agentic",
+            goal_status="EXHAUSTED",
+            repair_rounds=2,
+            human_intervened=True,
+            input_tokens=2000,
+            output_tokens=800,
+            latency_ms=5000,
+            first_plan_at="2026-07-31T12:00:00+00:00",
+            generator_ref=AGENTIC_REF,
+        )
+        for i in range(2)
+    ]
+    exp = build_production_experiment(obs)
+    report = exp.report(actor="test")
+    enriched = enrich_report(
+        report,
+        observations=obs,
+        window_opened_at="2026-07-31T10:00:00+00:00",
+        window_max_days=21,
+        since="2026-07-31T10:00:00+00:00",
+        until=None,
+    )
+    assert enriched["decision"] == "INVALID_BASELINE"
+    assert enriched["baseline_invalid"] is True
+    assert enriched["invalid_baseline_reasons"] == [
+        "control_verified_success_rate_zero",
+        "candidate_starved_of_traffic",
+        "funnel_gate_depends_on_failed_control",
+        "cost_and_freeze_metadata_incomplete",
+    ]
+    assert enriched["artifact_backed_role"]["role"] == "FALLBACK_ONLY"
+    assert enriched["artifact_backed_role"]["eligible_as_champion"] is False
+

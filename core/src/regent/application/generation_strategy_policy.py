@@ -1,14 +1,16 @@
 """Generation-strategy canary / kill-switch policy (GQ-0 contract, GQ-3/GQ-4 hooks).
 
 Independent of P2-4 organization A/B/C dimensions. Default remains
-artifact-backed until a GQ-4 DecisionRecord promotes agentic.
+artifact-backed (FALLBACK_ONLY) until the agentic qualification ladder
+reaches DEFAULT via DecisionRecord. Canary traffic requires a
+traffic-eligible qualification state — not merely a recovered control funnel.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
+from typing import Any, Final
 
 from regent.application.generator_metadata import GenerationStrategy
 
@@ -20,6 +22,36 @@ IN_FLIGHT_RUN_SEMANTICS = (
     "or are explicitly cancelled. Mid-run generator swaps without evidence "
     "are forbidden."
 )
+
+# States that may assign agentic via production canary / dogfood rollout.
+QUALIFICATION_TRAFFIC_ELIGIBLE: Final[frozenset[str]] = frozenset(
+    {
+        "INTERNAL_DOGFOOD",
+        "CANARY_5",
+        "CANARY_25",
+        "CANARY_50",
+        "DEFAULT",
+    }
+)
+
+# Explicit generation_strategy=agentic (Offline Qual lane + traffic ladder).
+QUALIFICATION_EXPLICIT_AGENTIC_ELIGIBLE: Final[frozenset[str]] = frozenset(
+    {"OFFLINE_QUALIFICATION", *QUALIFICATION_TRAFFIC_ELIGIBLE}
+)
+
+ARTIFACT_BACKED_ROLE: Final[dict[str, Any]] = {
+    "role": "FALLBACK_ONLY",
+    "eligible_as_champion": False,
+    "verified_delivery_claim": False,
+}
+
+
+def qualification_allows_agentic_traffic(state: str | None) -> bool:
+    return str(state or "DISABLED") in QUALIFICATION_TRAFFIC_ELIGIBLE
+
+
+def qualification_allows_explicit_agentic(state: str | None) -> bool:
+    return str(state or "DISABLED") in QUALIFICATION_EXPLICIT_AGENTIC_ELIGIBLE
 
 
 def stable_canary_bucket(key: str, *, buckets: int = 100) -> int:
@@ -35,16 +67,15 @@ def resolve_effective_generation_strategy(
     gq2_closed: bool | None = None,
     live_active: bool | None = None,
 ) -> GenerationStrategy:
-    """Resolve runtime strategy with kill switch and optional canary.
+    """Resolve runtime strategy with kill switch, qualification, and optional canary.
 
     Order:
     1. Kill switch → fallback (never agentic while switch is on).
-    2. Canary requires BOTH ``canary_percent > 0`` AND the GQ-2 feedback loop
-       closed (``generation_strategy_canary_gate``), enforced via
-       ``canary_rollout_allowed``. This is the diagnosis order: GQ-2 before GQ-3.
-       When active and ``goal_id`` is present, a stable bucket may select the
-       canary variant. Pass ``live_active=False`` to skip canary on zombie goals.
-    3. Otherwise settings.generation_strategy.
+    2. Canary requires traffic-eligible qualification (DOGFOOD / CANARY_* / DEFAULT)
+       plus ``canary_percent > 0`` and GQ-2 gate. Funnel health does not unlock
+       traffic. Pass ``live_active=False`` to skip canary on zombie goals.
+    3. Explicit ``generation_strategy=agentic`` only when qualification allows
+       (Offline Qual or traffic-eligible). Otherwise FALLBACK_ONLY artifact-backed.
     """
     fallback: GenerationStrategy = getattr(
         settings, "generation_strategy_fallback", "artifact-backed"
@@ -54,6 +85,8 @@ def resolve_effective_generation_strategy(
     canary_variant: GenerationStrategy = getattr(
         settings, "generation_strategy_canary_variant", "agentic"
     )
+    qual_state = str(getattr(settings, "agentic_qualification_state", "DISABLED") or "DISABLED")
+    configured = getattr(settings, "generation_strategy", "artifact-backed")
     if canary_variant not in {"artifact-backed", "agentic"}:
         canary_variant = "agentic"
     if gq2_closed is None:
@@ -63,18 +96,27 @@ def resolve_effective_generation_strategy(
     selected: GenerationStrategy
     bucket: int | None = None
 
+    def _default_strategy() -> GenerationStrategy:
+        strategy = configured
+        if strategy not in {"artifact-backed", "agentic"}:
+            return "artifact-backed"
+        if strategy == "agentic" and not qualification_allows_explicit_agentic(qual_state):
+            return "artifact-backed"
+        return strategy  # type: ignore[return-value]
+
     if kill_switch:
         reason = "kill_switch"
-        selected = fallback
+        selected = fallback if fallback in {"artifact-backed", "agentic"} else "artifact-backed"
+        if selected == "agentic" and not qualification_allows_explicit_agentic(qual_state):
+            selected = "artifact-backed"
     elif live_active is False:
-        # Zombie / no-progress goals must not enter canary sample (P1 discipline).
         reason = "canary_skipped_not_live_active"
-        strategy = getattr(settings, "generation_strategy", "artifact-backed")
-        selected = (
-            strategy if strategy in {"artifact-backed", "agentic"} else "artifact-backed"
-        )
+        selected = _default_strategy()
+        if configured == "agentic" and selected == "artifact-backed":
+            reason = "qualification_not_eligible"
     elif (
-        canary_percent > 0
+        qualification_allows_agentic_traffic(qual_state)
+        and canary_percent > 0
         and goal_id
         and canary_rollout_allowed(kill_switch=kill_switch, gq2_closed=gq2_closed)
     ):
@@ -84,17 +126,14 @@ def resolve_effective_generation_strategy(
             selected = canary_variant
         else:
             reason = "canary_miss"
-            strategy = getattr(settings, "generation_strategy", "artifact-backed")
-            selected = (
-                strategy if strategy in {"artifact-backed", "agentic"} else "artifact-backed"
-            )
+            selected = _default_strategy()
     else:
-        strategy = getattr(settings, "generation_strategy", "artifact-backed")
-        if strategy not in {"artifact-backed", "agentic"}:
-            selected = "artifact-backed"
-        else:
-            selected = strategy  # type: ignore[assignment]
-        if canary_percent > 0 and not goal_id:
+        selected = _default_strategy()
+        if configured == "agentic" and selected == "artifact-backed":
+            reason = "qualification_not_eligible"
+        elif canary_percent > 0 and not qualification_allows_agentic_traffic(qual_state):
+            reason = "qualification_not_eligible"
+        elif canary_percent > 0 and not goal_id:
             reason = "canary_skipped_no_goal_id"
         elif canary_percent > 0 and not gq2_closed:
             reason = "canary_gate_closed"
@@ -110,6 +149,7 @@ def resolve_effective_generation_strategy(
             "canary_percent": canary_percent,
             "gate": bool(gq2_closed),
             "kill_switch": kill_switch,
+            "qualification_state": qual_state,
             "selected": selected,
             "reason": reason,
         },
@@ -142,5 +182,10 @@ def kill_switch_contract() -> dict[str, Any]:
 
 
 def canary_rollout_allowed(*, kill_switch: bool, gq2_closed: bool) -> bool:
-    """Diagnosis order: feedback loop (GQ-2) before canary (GQ-3)."""
+    """Ops second door: kill switch off + canary gate on.
+
+    Funnel health does not unlock traffic (self-lock protocol abolished).
+    ``gq2_closed`` here is the ops ``generation_strategy_canary_gate`` flag —
+    extra insurance after qualification_state already qualifies the lane.
+    """
     return (not kill_switch) and bool(gq2_closed)

@@ -169,9 +169,21 @@ async def test_check_budget_limit_blocks_goal_when_over() -> None:
 
 
 def test_all_cost_types_defined() -> None:
-    from regent.application.budget_ledger import _ALL_COST_TYPES
+    from regent.application.budget_ledger import (
+        COST_EXTERNAL_OPERATION,
+        COST_FAILURE_RECOVERY,
+        COST_HUMAN_MINUTES,
+        COST_INFRASTRUCTURE,
+        _ALL_COST_TYPES,
+    )
 
-    assert COST_MODEL_INPUT in _ALL_COST_TYPES
-    assert COST_MODEL_OUTPUT in _ALL_COST_TYPES
-    assert COST_TOOL_INVOCATION in _ALL_COST_TYPES
-    assert len(_ALL_COST_TYPES) == 5
+    required = {
+        COST_MODEL_INPUT,
+        COST_MODEL_OUTPUT,
+        COST_TOOL_INVOCATION,
+        COST_INFRASTRUCTURE,
+        COST_EXTERNAL_OPERATION,
+        COST_HUMAN_MINUTES,
+        COST_FAILURE_RECOVERY,
+    }
+    assert required <= _ALL_COST_TYPES

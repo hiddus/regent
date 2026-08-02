@@ -112,11 +112,21 @@ class AgenticCodeGenerator:
                 self._sessions, artifact_root=self._artifacts.root
             )
             execution_plans = ExecutionPlanService(self._sessions)
+        context_window = 128_000
+        try:
+            from regent.config import get_settings
+
+            context_window = int(get_settings().agent_context_window_tokens)
+        except Exception:
+            context_window = int(plan.get("context_window_tokens") or 128_000)
+        if plan.get("context_window_tokens"):
+            context_window = int(plan["context_window_tokens"])
         runner = AgentRunner(
             self._provider,
             toolkit,
             budget=self._budget,
             regent_md=regent_md,
+            context_window_tokens=context_window,
             context_artifacts=context_artifacts,
             execution_plans=execution_plans,
             goal_id=goal_uuid,
@@ -353,6 +363,7 @@ class AgenticCodeGenerator:
             model_ref=result.model_ref or "agentic",
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
+            accepted_workspace=accepted_meta,
         )
 
 

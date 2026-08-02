@@ -10,7 +10,8 @@ from regent.agent.tools import WorkspaceToolkit
 from regent.agent.types import BudgetExhaustedError, ChatMessage, ToolCall
 
 
-# Soft char estimate (~4 chars/token). Window default 128k tokens → leave 15k buffer.
+# Window default 128k tokens → leave 15k buffer.
+# Token estimate: CJK ≈ 1.0 tok/char; other ≈ 0.25 (≈4 chars/token). W4-P0.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 AUTOCOMPACT_BUFFER_TOKENS = 15_000
 POST_COMPACT_MAX_FILES = 5
@@ -29,15 +30,45 @@ class CompactState:
     last_summary: str = ""
     last_structured_summary: dict[str, Any] = field(default_factory=dict)
     history: list[str] = field(default_factory=list)
+    # EMA scale from provider prompt_tokens / local estimate (W4-P0).
+    token_scale: float = 1.0
+
+
+def _is_cjk(ch: str) -> bool:
+    o = ord(ch)
+    return (
+        0x4E00 <= o <= 0x9FFF
+        or 0x3400 <= o <= 0x4DBF
+        or 0x3040 <= o <= 0x30FF
+        or 0xAC00 <= o <= 0xD7AF
+        or 0xF900 <= o <= 0xFAFF
+        or 0x3000 <= o <= 0x303F
+    )
+
+
+def estimate_text_tokens(text: str) -> int:
+    """CJK-aware char→token estimate (W4-P0)."""
+    if not text:
+        return 0
+    cjk = 0
+    other = 0
+    for ch in text:
+        if _is_cjk(ch):
+            cjk += 1
+        else:
+            other += 1
+    return max(1, int(cjk * 1.0 + other * 0.25 + 0.999))
 
 
 def estimate_tokens(messages: list[ChatMessage]) -> int:
     total = 0
     for msg in messages:
         if msg.content:
-            total += max(1, len(msg.content) // 4)
+            total += estimate_text_tokens(msg.content)
         for call in msg.tool_calls:
-            total += max(1, len(json.dumps(call.arguments, ensure_ascii=False)) // 4)
+            total += estimate_text_tokens(
+                json.dumps(call.arguments, ensure_ascii=False)
+            )
             total += 8
     return total
 
@@ -159,8 +190,25 @@ class ContextCompactor:
     def threshold_tokens(self) -> int:
         return max(100, self._window - self._buffer)
 
+    def calibrated_estimate(self, messages: list[ChatMessage]) -> int:
+        raw = estimate_tokens(messages)
+        scale = float(self.state.token_scale or 1.0)
+        return max(1, int(raw * scale + 0.999))
+
+    def observe_provider_prompt_tokens(
+        self, *, estimated: int, actual_prompt_tokens: int
+    ) -> None:
+        """Close the loop with provider usage (EMA)."""
+        if estimated <= 0 or actual_prompt_tokens <= 0:
+            return
+        ratio = float(actual_prompt_tokens) / float(estimated)
+        # Clamp pathological spikes from tiny estimates.
+        ratio = min(4.0, max(0.5, ratio))
+        prev = float(self.state.token_scale or 1.0)
+        self.state.token_scale = 0.7 * prev + 0.3 * ratio
+
     def needs_auto_compact(self, messages: list[ChatMessage]) -> bool:
-        return estimate_tokens(messages) >= self.threshold_tokens
+        return self.calibrated_estimate(messages) >= self.threshold_tokens
 
     async def maybe_auto_compact(
         self,

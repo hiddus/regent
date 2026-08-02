@@ -1,0 +1,9 @@
+{
+  "skill_id": "ui",
+  "version": "1.0.0",
+  "title": "UI",
+  "description": "Minimal usable UI bound to real backend actions — not a demo poster.",
+  "applies_when": ["ui", "frontend", "template", "form", "page", "dashboard", "website", "页面", "表单", "看板", "地图", "前端"],
+  "anti_examples": ["static marketing page with no wired actions"],
+  "gap_codes": ["STATIC_FAILED", "forbid-pure-static-backend", "SMOKE_FAILED", "presentation"]
+}

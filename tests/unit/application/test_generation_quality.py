@@ -109,6 +109,7 @@ def test_factory_dispatches_both_strategies(tmp_path, monkeypatch) -> None:
 
     settings_a = Settings(
         generation_strategy="agentic",
+        agentic_qualification_state="OFFLINE_QUALIFICATION",
         workspace_root=str(tmp_path / "ws2"),
     )
     gen_a = build_code_generator(settings_a, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
@@ -133,12 +134,26 @@ def test_canary_stable_bucket_and_gate() -> None:
     assert canary_rollout_allowed(kill_switch=False, gq2_closed=True) is True
     assert canary_rollout_allowed(kill_switch=True, gq2_closed=True) is False
 
+    # DISABLED qualification blocks canary even when gate+percent would open.
+    settings_qual_blocked = Settings(
+        generation_strategy="artifact-backed",
+        generation_strategy_canary_percent=100,
+        generation_strategy_canary_variant="agentic",
+        generation_strategy_canary_gate=True,
+        agentic_qualification_state="DISABLED",
+    )
+    assert (
+        resolve_effective_generation_strategy(settings_qual_blocked, goal_id="any")
+        == "artifact-backed"
+    )
+
     # Canary now requires the GQ-2 gate (diagnosis order: feedback loop before canary).
     settings_blocked = Settings(
         generation_strategy="artifact-backed",
         generation_strategy_canary_percent=100,
         generation_strategy_canary_variant="agentic",
         generation_strategy_canary_gate=False,
+        agentic_qualification_state="CANARY_5",
     )
     assert (
         resolve_effective_generation_strategy(settings_blocked, goal_id="any")
@@ -150,6 +165,7 @@ def test_canary_stable_bucket_and_gate() -> None:
         generation_strategy_canary_percent=100,
         generation_strategy_canary_variant="agentic",
         generation_strategy_canary_gate=True,
+        agentic_qualification_state="CANARY_5",
     )
     assert (
         resolve_effective_generation_strategy(settings_open, goal_id="any") == "agentic"
@@ -277,11 +293,15 @@ def test_failure_envelope_policy_and_clip() -> None:
 
 
 def test_resolve_test_command_and_degraded_missing() -> None:
-    assert _resolve_test_command({}, {}) is None
-    cmd = _resolve_test_command({"tests/test_app.py": "def test_ok(): pass"}, {})
+    assert _resolve_test_command({}, {}, None) is None
+    cmd = _resolve_test_command(
+        {"tests/test_app.py": "def test_ok(): pass"}, {}, None
+    )
     assert cmd is not None
     assert "pytest" in cmd
-    explicit = _resolve_test_command({}, {"test_command": "python -m unittest"})
+    explicit = _resolve_test_command(
+        {}, {"test_command": "python -m unittest"}, None
+    )
     assert explicit == "python -m unittest"
 
 
@@ -355,6 +375,7 @@ def test_generator_selector_picks_per_goal_strategy(tmp_path) -> None:
         generation_strategy_canary_percent=100,
         generation_strategy_canary_variant="agentic",
         generation_strategy_canary_gate=True,
+        agentic_qualification_state="CANARY_5",
         workspace_root=str(tmp_path / "ws"),
     )
     selector = build_generator_selector(settings, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
@@ -376,6 +397,7 @@ def test_generator_selector_picks_per_goal_strategy(tmp_path) -> None:
         generation_strategy_canary_percent=100,
         generation_strategy_canary_variant="agentic",
         generation_strategy_canary_gate=False,
+        agentic_qualification_state="CANARY_5",
         workspace_root=str(tmp_path / "ws2"),
     )
     selector_off = build_generator_selector(settings_off, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
@@ -416,6 +438,22 @@ def test_gq4_promotion_gate_enforced() -> None:
     blocked = evaluate_gq4_promotion(report, kill_switch=True, decision_record_ref="DR-1")
     assert blocked["activation_allowed"] is False
     assert blocked["decision_record_ref"] == "DR-1"
+
+    invalid = dict(report)
+    invalid["decision"] = "INVALID_BASELINE"
+    invalid["baseline_invalid"] = True
+    invalid["invalid_baseline_reasons"] = [
+        "control_verified_success_rate_zero",
+        "candidate_starved_of_traffic",
+        "funnel_gate_depends_on_failed_control",
+        "cost_and_freeze_metadata_incomplete",
+    ]
+    gate = gq4_default_switch_gate(invalid, kill_switch=False)
+    assert gate["activation_allowed"] is False
+    assert gate["reason"] == "invalid_baseline"
+    with pytest.raises(DomainError):
+        apply_gq4_promotion(invalid, kill_switch=False, decision_record_ref="DR-invalid")
+
 
 
 def test_drive_experiment_runs_both_arms_and_aggregates_user_quality() -> None:

@@ -1632,7 +1632,7 @@ class ExecutionOrchestrator:
                     generation_run_id=run.id,
                     plan_id=run.plan_id,
                 )
-                base_workspace = await self._resolve_last_good_draft_workspace(goal_id)
+                base_workspace = await self._resolve_revise_base_workspace(goal_id)
                 snapshot = await gen_service.execute(
                     run.id,
                     base_workspace=base_workspace,
@@ -4249,19 +4249,52 @@ class ExecutionOrchestrator:
         path = Path(raw_path)
         return path if path.exists() else None
 
-    async def _resolve_last_good_draft_workspace(
+    async def _resolve_revise_base_workspace(
         self, goal_id: uuid.UUID
     ) -> Path | None:
-        """Reuse prior failed draft so the next attempt learns from existing files."""
+        """P0-5/R1: accepted → recoverable snapshot → last_good_draft."""
+        from regent.agent.accepted_workspace import clone_accepted_snapshot
+        from regent.config import get_settings
+
         async with self._sessions() as session:
             goal = await session.get(GoalModel, goal_id)
             if goal is None:
                 return None
             meta = dict(goal.metadata_json or {})
+            workspace_root = Path(get_settings().workspace_root)
+            accepted_uri = str(meta.get("last_accepted_workspace_uri") or "").strip()
+            if accepted_uri:
+                dest = (
+                    workspace_root
+                    / "revise_from_accepted"
+                    / str(goal_id)
+                    / str(uuid.uuid4())
+                )
+                return clone_accepted_snapshot(accepted_uri, dest)
+            recoverable_uri = str(
+                meta.get("last_recoverable_workspace_uri") or ""
+            ).strip()
+            if recoverable_uri:
+                dest = (
+                    workspace_root
+                    / "revise_from_recoverable"
+                    / str(goal_id)
+                    / str(uuid.uuid4())
+                )
+                try:
+                    return clone_accepted_snapshot(recoverable_uri, dest)
+                except (FileNotFoundError, OSError):
+                    pass
             draft = self._local_path_from_uri(str(meta.get("last_good_draft_uri") or ""))
             if draft is not None and draft.is_dir():
                 return draft
             return None
+
+    async def _resolve_last_good_draft_workspace(
+        self, goal_id: uuid.UUID
+    ) -> Path | None:
+        """Deprecated alias — prefer accepted snapshot via ``_resolve_revise_base_workspace``."""
+        return await self._resolve_revise_base_workspace(goal_id)
 
     async def _remember_generation_attempt(
         self,
@@ -4369,6 +4402,26 @@ class ExecutionOrchestrator:
                 if goal is not None and draft_uri:
                     meta = dict(goal.metadata_json or {})
                     meta["last_good_draft_uri"] = str(draft_uri)
+                    # R1: failure path warm-start — snapshot so REVISE is not cold.
+                    try:
+                        from regent.agent.accepted_workspace import (
+                            write_recoverable_workspace_snapshot,
+                        )
+                        from regent.config import get_settings
+
+                        draft_path = self._local_path_from_uri(str(draft_uri))
+                        if draft_path is not None and draft_path.is_dir():
+                            meta["last_recoverable_workspace_uri"] = (
+                                write_recoverable_workspace_snapshot(
+                                    draft_path,
+                                    Path(get_settings().workspace_root),
+                                    reason=str(error_code or "generation_failed"),
+                                )
+                            )
+                        else:
+                            meta["last_recoverable_workspace_uri"] = str(draft_uri)
+                    except Exception:
+                        meta["last_recoverable_workspace_uri"] = str(draft_uri)
                     goal.metadata_json = meta
                     flag_modified(goal, "metadata_json")
         except Exception:

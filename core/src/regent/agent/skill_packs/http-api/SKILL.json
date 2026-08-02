@@ -1,0 +1,9 @@
+{
+  "skill_id": "http-api",
+  "version": "1.0.0",
+  "title": "HTTP API",
+  "description": "Stable JSON/HTTP routes aligned with Runtime Profile smoke and Journey.",
+  "applies_when": ["api", "rest", "json", "endpoint", "flask", "fastapi", "route", "接口", "服务", "路由"],
+  "anti_examples": ["HTML-only poster with no machine-callable routes"],
+  "gap_codes": ["SMOKE_FAILED", "START_FAILED", "smoke-http", "PREVIEW_FAILED"]
+}

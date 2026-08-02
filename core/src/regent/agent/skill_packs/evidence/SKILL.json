@@ -1,0 +1,9 @@
+{
+  "skill_id": "evidence",
+  "version": "1.0.0",
+  "title": "Evidence",
+  "description": "Capture external or generated evidence inputs required by the Goal Journey.",
+  "applies_when": ["evidence", "upload", "import", "csv", "source", "fetch", "attachment", "上传", "导入", "证据", "附件"],
+  "anti_examples": ["hardcoded answer with no ingest path"],
+  "gap_codes": ["ARTIFACT_INCOMPLETE", "TEST_FAILED", "evidence", "journey"]
+}

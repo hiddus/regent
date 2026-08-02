@@ -102,27 +102,74 @@ def write_accepted_workspace_snapshot(
     )
 
 
+def write_recoverable_workspace_snapshot(
+    workspace: Path,
+    dest_root: Path,
+    *,
+    reason: str = "generation_failed",
+) -> str:
+    """Best-effort copy of a failed/partial workspace for REVISE warm-start.
+
+    Unlike accepted snapshots, integrity failures are tolerated — recoverable
+    drafts are better than cold starts even when incomplete.
+    """
+    workspace = workspace.resolve()
+    dest_root = dest_root.resolve()
+    snapshot_id = str(uuid.uuid4())
+    target = dest_root / "recoverable_workspace_snapshots" / snapshot_id
+    target.mkdir(parents=True, exist_ok=False)
+    for path in sorted(workspace.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(workspace).as_posix()
+        if rel.startswith(".regent"):
+            continue
+        out = target / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, out)
+    meta = {
+        "snapshot_id": snapshot_id,
+        "reason": reason,
+        "created_at": datetime.now(UTC).isoformat(),
+        "source": str(workspace),
+    }
+    (target / ".regent_recoverable_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return target.resolve().as_uri()
+
+
 def clone_accepted_snapshot(snapshot_uri: str, dest: Path) -> Path:
     """Clone an accepted snapshot into dest for REVISE / incremental generation."""
-    src = Path(snapshot_uri)
-    if snapshot_uri.startswith("file:"):
-        from urllib.parse import unquote, urlparse
+    import os
+    from urllib.parse import unquote, urlparse
 
-        parsed = urlparse(snapshot_uri)
-        src = Path(unquote(parsed.path))
-        # Windows file:///C:/... → path may start with /
-        if src.as_posix().startswith("/") and len(src.parts) > 1 and src.parts[0] == "/":
-            # pathlib on Windows handles file URI differently; try alternate.
-            if parsed.path.startswith("/") and len(parsed.path) > 2 and parsed.path[2] == ":":
-                src = Path(parsed.path.lstrip("/"))
-            elif len(parsed.path) >= 3 and parsed.path[0] == "/" and parsed.path[2] == ":":
-                src = Path(parsed.path[1:])
+    raw = str(snapshot_uri).strip()
+    if raw.startswith("file:"):
+        parsed = urlparse(raw)
+        path = unquote(parsed.path)
+        # Windows: file:///C:/... → /C:/... must drop the leading slash.
+        if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
+            path = path[1:]
+        elif os.name == "nt" and parsed.netloc:
+            path = f"//{parsed.netloc}{path}"
+        src = Path(path)
+    else:
+        src = Path(raw)
     if not src.is_dir():
         raise FileNotFoundError(f"accepted snapshot not found: {snapshot_uri}")
     dest = dest.resolve()
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".regent_accepted_meta.json"))
+    shutil.copytree(
+        src,
+        dest,
+        ignore=shutil.ignore_patterns(
+            ".regent_accepted_meta.json",
+            ".regent_recoverable_meta.json",
+        ),
+    )
     return dest
 
 

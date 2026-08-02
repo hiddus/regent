@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "title": "Web App Scaffold",
   "description": "Minimal Flask/FastAPI scaffold with persistence and a first Journey.",
-  "applies_when": ["todo", "crud", "persist", "sqlite", "notes", "scaffold", "flask", "website"],
+  "applies_when": ["todo", "crud", "persist", "sqlite", "notes", "scaffold", "flask", "website", "待办", "笔记", "网站", "应用", "系统"],
   "anti_examples": ["single-file dump without routes or templates"],
   "gap_codes": ["ARTIFACT_INCOMPLETE", "STATIC_FAILED", "forbid-pure-static-backend", "forbid-demo-shell"]
 }

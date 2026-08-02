@@ -4,13 +4,33 @@
   "opened_by": "ops/open_m6_canary.py",
   "preflight_ref": "docs/m6-preflight-report-2026-08-01.json",
   "t0_probe_ref": "docs/m6-canary-t0-2026-08-01.json",
-  "config": {
+  "status": "CLAMPED_PENDING_QUALIFICATION",
+  "clamped_at": "2026-08-01T15:51:00+00:00",
+  "clamped_by": "ops/force_clamp_recreate.py",
+  "qualification_ref": "docs/decision-note-agentic-qualification-ladder-2026-08-01.md",
+  "config_at_open": {
     "REGENT_GENERATION_STRATEGY": "artifact-backed",
     "REGENT_GENERATION_STRATEGY_CANARY_GATE": true,
     "REGENT_GENERATION_STRATEGY_CANARY_PERCENT": 5,
     "REGENT_GENERATION_STRATEGY_CANARY_VARIANT": "agentic",
     "REGENT_GENERATION_STRATEGY_FALLBACK": "artifact-backed",
     "REGENT_GENERATION_STRATEGY_KILL_SWITCH": false
+  },
+  "config": {
+    "REGENT_GENERATION_STRATEGY": "artifact-backed",
+    "REGENT_GENERATION_STRATEGY_CANARY_GATE": false,
+    "REGENT_GENERATION_STRATEGY_CANARY_PERCENT": 0,
+    "REGENT_GENERATION_STRATEGY_CANARY_VARIANT": "agentic",
+    "REGENT_GENERATION_STRATEGY_FALLBACK": "artifact-backed",
+    "REGENT_GENERATION_STRATEGY_KILL_SWITCH": false,
+    "REGENT_AGENTIC_QUALIFICATION_STATE": "DISABLED"
+  },
+  "verify_clamp": {
+    "settings_ok": true,
+    "marker": "M6_CANARY_CLAMPED",
+    "workers": ["regent-worker", "regent-worker-2", "regent-worker-3"],
+    "health_status": "ok",
+    "note": "printenv on api+workers: PERCENT=0 GATE=false QUAL=DISABLED"
   },
   "verify": {
     "settings_ok": true,
@@ -19,13 +39,13 @@
     "health_status": "ok"
   },
   "watch": {
-    "target": "7d or 100 new goals, whichever first",
+    "target": "HALTED — Offline Qual first; no expansion",
     "probe_command": "python -B ops/probe_m6_canary.py --hours 24",
-    "note": "T0 24h window includes pre-open historical agentic plans; prefer goals_by_first_plan_arm and post-open slices for canary share."
+    "note": "Open-window samples are INVALID_BASELINE for promotion; not used for GQ-4."
   },
   "rollback": {
     "command": "python -B ops/clamp_generation_strategy_freeze.py",
-    "effect": "PERCENT=0 GATE=false STRATEGY=artifact-backed",
+    "effect": "PERCENT=0 GATE=false STRATEGY=artifact-backed QUAL=DISABLED",
     "triggers": [
       "severe safety or publish error",
       "agentic arm consecutive hard failures",
@@ -34,14 +54,13 @@
   },
   "explicit_non_goals": [
     "Do not flip default generation_strategy to agentic (GQ-4)",
-    "Do not expand to 10% without window evidence",
-    "Soft-pass is not M6 exit gate"
+    "Do not expand canary without Offline Qual exit",
+    "Soft-pass is not M6 exit gate",
+    "Do not treat this window as promotion evidence"
   ],
   "m6_exit_gate_pending": [
-    "preview_ready_rate >= 60%",
-    "first_runnable_rate >= 50%",
-    "human_intervention_rate <= 0.3",
-    "mean_repair_rounds <= 2.5",
-    "one real closed-loop journey"
+    "Offline Qual green",
+    "INTERNAL_DOGFOOD exit",
+    "then CANARY_5 under qualification ladder"
   ]
 }

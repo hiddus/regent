@@ -41,13 +41,26 @@ class Settings(BaseSettings):
     generation_strategy_canary_percent: int = Field(default=0, ge=0, le=100)
     generation_strategy_canary_variant: Literal["artifact-backed", "agentic"] = "agentic"
     generation_strategy_canary_gate: bool = False
+    # Agentic qualification ladder (Day0): traffic requires DOGFOOD/CANARY_*/DEFAULT.
+    # artifact-backed remains FALLBACK_ONLY — not an eligible champion.
+    agentic_qualification_state: Literal[
+        "DISABLED",
+        "OFFLINE_QUALIFICATION",
+        "INTERNAL_DOGFOOD",
+        "CANARY_5",
+        "CANARY_25",
+        "CANARY_50",
+        "DEFAULT",
+    ] = "DISABLED"
     generation_strategy_shadow_mode: bool = False
     delivery_batch_enabled: bool = False
     delivery_profile: Literal["aggressive", "balanced", "conservative"] = "balanced"
     agent_max_turns: int = Field(default=40, ge=1, le=200)
     agent_max_tokens: int = Field(default=200_000, ge=1_000)
     agent_max_wall_seconds: int = Field(default=900, ge=30)
-    agent_nested_repair_max: int = Field(default=2, ge=0, le=8)
+    agent_nested_repair_max: int = Field(default=4, ge=0, le=8)
+    # W4-P1-4: follow model context window (default matches common 128k).
+    agent_context_window_tokens: int = Field(default=128_000, ge=8_000, le=2_000_000)
     goal_semantic_alignment_enabled: bool = False
     observation_signing_key: SecretStr | None = None
     experiment_signing_key: SecretStr | None = None

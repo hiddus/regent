@@ -135,6 +135,8 @@ class GeneratedFileChangeSet(BaseModel):
     model_ref: str = Field(min_length=1)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    # P0-5: accepted workspace snapshot pointer for REVISE (None until verify passes).
+    accepted_workspace: dict[str, Any] | None = None
 
 
 class FileChangeSetGenerator(Protocol):

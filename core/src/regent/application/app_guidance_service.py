@@ -1104,6 +1104,64 @@ class AppGuidanceService:
             if isinstance(stage_info, dict)
             else goal_status
         )
+        goal_id = uuid.UUID(str(context["goal"]["id"]))
+        needs_gap_resume = await self._goal_needs_delivery_gap_resume(goal_id)
+        # Soft-pause (ACTIVE+DELIVERY_SOFT_PAUSE) or halted gap states: new direction → resume.
+        # Do not intercept a healthy ACTIVE run that still has stale unrelated flags.
+        soft_or_gap_continue = stage == "DELIVERY_SOFT_PAUSE" or (
+            needs_gap_resume
+            and goal_status in {
+                "WAITING_HUMAN",
+                "PAUSED",
+                "EXHAUSTED",
+                "FAILED",
+                "BLOCKED",
+            }
+        )
+        if soft_or_gap_continue:
+            from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
+
+            if goal_status == "WAITING_HUMAN":
+                goal_version = int(context["goal"].get("version", 0))
+                try:
+                    await TransitionService(self._sessions).transition_goal(
+                        TransitionContext(
+                            aggregate_id=goal_id,
+                            expected_version=goal_version,
+                            actor=actor,
+                            correlation_id=uuid.uuid4(),
+                        ),
+                        GoalCommand.HUMAN_RESOLVED,
+                    )
+                except DomainError as exc:
+                    return await self._persist_simple(
+                        project_id,
+                        message,
+                        actor,
+                        interpretation,
+                        model,
+                        f"无法续跑：{exc.message}",
+                    )
+            recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+                human_message=message,
+            )
+            response = (
+                "已收到新方向，正在重新规划并继续生成交付物"
+                f"（恢复方法 {recovery.method}）。"
+                if recovery.recovered
+                else (
+                    f"已尝试按新方向继续：{recovery.message}"
+                    if recovery.message
+                    else "已收到继续请求，正在恢复执行。"
+                )
+            )
+            return await self._persist_simple(
+                project_id, message, actor, interpretation, model, response
+            )
+
         should_start = goal_status in {"DRAFT", "READY"} or (
             goal_status == "ACTIVE" and stage == "FAILED"
         )
@@ -1581,6 +1639,9 @@ class AppGuidanceService:
                 return True
             stage = str(meta.get("execution_stage") or "")
             halt_stage = str(halt.get("stage") or "")
+            handoff = str(termination.get("handoff") or "")
+            if stage == "DELIVERY_SOFT_PAUSE" or handoff == "SOFT_PAUSE":
+                return True
             if "DELIVERY_GAP" in stage or stage.endswith("_NEEDS_HUMAN") or stage.endswith("_EXHAUSTED"):
                 return True
             if "DELIVERY_GAP" in halt_stage or halt_stage.endswith("_EXHAUSTED"):

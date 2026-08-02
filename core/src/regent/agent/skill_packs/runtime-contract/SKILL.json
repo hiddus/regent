@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "title": "Runtime Contract",
   "description": "Align generated apps with Runtime Profile entry/start/smoke/test contracts.",
-  "applies_when": ["flask", "fastapi", "runtime", "health", "smoke", "profile", "web app"],
+  "applies_when": ["flask", "fastapi", "runtime", "health", "smoke", "profile", "web app", "网站", "应用", "后端", "启动"],
   "anti_examples": ["pure static marketing page with no backend contract"],
   "gap_codes": ["START_FAILED", "SMOKE_FAILED", "smoke-http", "smoke-start", "no app.py"]
 }

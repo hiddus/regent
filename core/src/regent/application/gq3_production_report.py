@@ -28,6 +28,14 @@ _COST_PER_1K_TOKENS = 1.0
 # Decision-note stop rule: agentic fail rate − control fail rate ≥ this → stop.
 STOP_FAIL_RATE_DELTA = 0.15
 
+# Qualification ladder (2026-08-01): failed control + starved candidate ≠ INSUFFICIENT.
+INVALID_BASELINE_REASONS = (
+    "control_verified_success_rate_zero",
+    "candidate_starved_of_traffic",
+    "funnel_gate_depends_on_failed_control",
+    "cost_and_freeze_metadata_incomplete",
+)
+
 
 def variant_from_generator_ref(ref: str | None) -> str | None:
     if ref == ARTIFACT_BACKED_REF:
@@ -161,6 +169,43 @@ def build_production_experiment(
     return exp
 
 
+def classify_invalid_baseline(
+    report: dict[str, Any],
+    *,
+    observations: Sequence[GoalArmObservation],
+) -> list[str]:
+    """Return INVALID_BASELINE reasons when control is zero and candidate is starved.
+
+    A failed artifact-backed control must not veto agentic qualification traffic;
+    such windows are marked unusable for GQ-4 / expansion decisions.
+    """
+    summaries = dict(report.get("summaries") or {})
+    control = summaries.get("artifact_backed") or summaries.get("artifact-backed") or {}
+    candidate = summaries.get("agentic") or {}
+    n_control = int(control.get("n") or 0)
+    n_candidate = int(candidate.get("n") or 0)
+    n_total = n_control + n_candidate
+    pass_control = control.get("pass_rate")
+
+    control_zero = (
+        n_control >= 3
+        and pass_control is not None
+        and float(pass_control) <= 0.0
+    )
+    if not control_zero:
+        return []
+
+    starved = False
+    if n_total >= 10 and n_total > 0 and (n_candidate / n_total) < 0.15:
+        starved = True
+    if n_control >= 10 and n_candidate < 5:
+        starved = True
+    if not starved and not report.get("funnel_degraded"):
+        return []
+
+    return list(INVALID_BASELINE_REASONS)
+
+
 def enrich_report(
     report: dict[str, Any],
     *,
@@ -219,13 +264,16 @@ def enrich_report(
     degraded = False
     degraded_reasons: list[str] = []
     if n_goals >= 10:
-        for arm in ("artifact-backed", "agentic"):
-            arm_summary = summaries.get(arm) or {}
+        for arm_key in ("artifact_backed", "artifact-backed", "agentic"):
+            arm_summary = summaries.get(arm_key) or {}
             n_arm = int(arm_summary.get("n") or 0)
             pass_rate = arm_summary.get("pass_rate")
+            label = "artifact-backed" if "artifact" in arm_key else "agentic"
             if n_arm >= 3 and pass_rate is not None and float(pass_rate) <= 0.0:
-                degraded = True
-                degraded_reasons.append(f"{arm}_pass_rate_zero_n={n_arm}")
+                reason = f"{label}_pass_rate_zero_n={n_arm}"
+                if reason not in degraded_reasons:
+                    degraded = True
+                    degraded_reasons.append(reason)
     out["funnel_degraded"] = degraded
     out["funnel_health"] = {
         "degraded": degraded,
@@ -244,7 +292,25 @@ def enrich_report(
         out["rationale"] = (
             f"{out.get('rationale') or ''}; funnel_degraded: "
             + ", ".join(degraded_reasons)
-            + " → pause GQ-4 promotion until delivery pipeline is healthy"
+            + " → blocks expansion / rollback review only; "
+            "does not unlock Offline Qual or Dogfood"
+        ).strip("; ")
+
+    # INVALID_BASELINE: failed control + starved candidate is not usable for promotion.
+    invalid_reasons = classify_invalid_baseline(out, observations=observations)
+    out["invalid_baseline_reasons"] = invalid_reasons
+    out["baseline_invalid"] = bool(invalid_reasons)
+    out["artifact_backed_role"] = {
+        "role": "FALLBACK_ONLY",
+        "eligible_as_champion": False,
+        "verified_delivery_claim": False,
+    }
+    if invalid_reasons:
+        out["decision"] = "INVALID_BASELINE"
+        out["rationale"] = (
+            f"{out.get('rationale') or ''}; INVALID_BASELINE: "
+            + ", ".join(invalid_reasons)
+            + " → samples must not drive GQ-4 / canary expansion"
         ).strip("; ")
 
     # Parallel product metric (does not affect ACHIEVED / promotion contract).

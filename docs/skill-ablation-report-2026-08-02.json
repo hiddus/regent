@@ -1,0 +1,208 @@
+{
+  "record_type": "SkillAblationReport",
+  "schema_version": "skill-ablation/v1",
+  "created_at": "2026-08-02T01:58:41.879125+00:00",
+  "n_goals": 20,
+  "on_nonempty_rate": 1.0,
+  "off_nonempty_rate": 0.0,
+  "target_nonempty_rate": 0.7,
+  "meets_w4_chinese_routing": true,
+  "ablation": {
+    "on_pass_rate": 1.0,
+    "off_pass_rate": 0.0,
+    "delta": 1.0,
+    "on_n": 20,
+    "off_n": 20,
+    "engineering_gate_only": true,
+    "no_significance_claims": true
+  },
+  "details": [
+    {
+      "goal": "自学数据网站",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "中国历史人物全集",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "互联网痕迹人物档案库",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "给 AI 看的文明百科全书",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "全球法律条文检索网",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "古籍数字化阅览室",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "历史地图时间机",
+      "on_skills": [
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "人类知识消亡预警",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "文化遗产 3D 档案库",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "物种百科与观测记录",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "开源项目健康度看板",
+      "on_skills": [
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "城市噪音地图",
+      "on_skills": [
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "全球商品价格指数网",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "实时交通拥堵预测",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "全球极端天气追踪器",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "全网热点谣言粉碎机",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "创业公司情报站",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "碳排放足迹计算器",
+      "on_skills": [
+        "runtime-contract",
+        "web-app-scaffold",
+        "persistence",
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "城市无障碍设施地图",
+      "on_skills": [
+        "ui"
+      ],
+      "off_skills": []
+    },
+    {
+      "goal": "本地生活服务黄页重构",
+      "on_skills": [
+        "http-api"
+      ],
+      "off_skills": []
+    }
+  ],
+  "explicit_non_claims": [
+    "Not M5 exit gate (≥90% accuracy) — routing non-empty proxy only",
+    "Not end-to-end Goal success ablation"
+  ]
+}

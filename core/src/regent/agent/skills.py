@@ -99,6 +99,27 @@ def route_skills_for_gaps(
     return selected
 
 
+# W4-P1-2: Chinese aliases folded into routing (substring match on original text).
+_CJK_WEB_HINTS = (
+    "网站",
+    "网页",
+    "应用",
+    "系统",
+    "平台",
+    "地图",
+    "看板",
+    "档案",
+    "百科",
+    "检索",
+    "上传",
+    "表单",
+    "待办",
+    "笔记",
+    "接口",
+    "服务",
+)
+
+
 def select_skills_for_goal(
     goal_text: str,
     *,
@@ -108,16 +129,27 @@ def select_skills_for_goal(
     """Lightweight keyword router for on/off ablation (M5-4)."""
     if not enabled:
         return []
-    text = (goal_text or "").lower()
+    raw = goal_text or ""
+    text = raw.lower()
     chosen: list[SkillManifest] = []
     for skill_id in list_builtin_skill_ids(root=root):
         manifest = load_skill_manifest(skill_id, root=root)
-        if any(token.lower() in text for token in manifest.applies_when):
+        if any(token.lower() in text or token in raw for token in manifest.applies_when):
             chosen.append(manifest)
-    # Always offer runtime-contract for web shapes when any skill matches or goal mentions app.
+    # English web shapes.
     if not chosen and any(k in text for k in ("app", "web", "flask", "api", "site")):
         if "runtime-contract" in list_builtin_skill_ids(root=root):
             chosen.append(load_skill_manifest("runtime-contract", root=root))
+    # W4: Chinese product goals often miss English tokens — inject defaults.
+    has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in raw)
+    if not chosen and (
+        any(h in raw for h in _CJK_WEB_HINTS)
+        or (has_cjk and len(raw.strip()) >= 4)
+    ):
+        ids = list_builtin_skill_ids(root=root)
+        for sid in ("runtime-contract", "web-app-scaffold", "persistence", "ui"):
+            if sid in ids:
+                chosen.append(load_skill_manifest(sid, root=root))
     return chosen
 
 

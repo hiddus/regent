@@ -197,10 +197,20 @@ class _ScriptedProvider:
                 finish_reason="tool_calls",
             )
         return ChatResponse(
-            message=ChatMessage(role="assistant", content="done"),
+            message=ChatMessage(
+                role="assistant",
+                content="submit",
+                tool_calls=[
+                    ToolCall(
+                        id="2",
+                        name="submit",
+                        arguments={"summary": "milestone backend ready"},
+                    )
+                ],
+            ),
             usage=ChatUsage(1, 1),
             model="fake",
-            finish_reason="stop",
+            finish_reason="tool_calls",
         )
 
 

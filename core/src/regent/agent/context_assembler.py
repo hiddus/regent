@@ -61,11 +61,18 @@ class ContextAssembler:
         self._planned_paths = list(plan.get("planned_paths") or [])
 
     def system_prompt(self) -> str:
+        entry = "src.app:app"
+        acceptance = dict(self._plan.get("acceptance_contract") or {})
+        profile = acceptance.get("runtime_profile") or {}
+        if isinstance(profile, dict):
+            mod = str(profile.get("entry_module") or "src.app").strip() or "src.app"
+            obj = str(profile.get("entry_object") or "app").strip() or "app"
+            entry = f"{mod}:{obj}"
         return (
             "You are Regent's delivery agent. Build a real, runnable product — not a demo poster.\n"
             "Use tools to write files, install deps, run tests, and smoke-check endpoints.\n"
             "Rules:\n"
-            "- src/app.py must be a real WSGI/ASGI app with business logic (no pure static hosting).\n"
+            f"- HTTP app object MUST live at `{entry}` (Profile entry_module:entry_object).\n"
             "- Prefer persistence + empty states over fake placeholder users/cards.\n"
             "- Stay within planned_paths when possible; create supporting files as needed.\n"
             "- When done, ensure requirements.txt, README.md, and a working entrypoint exist.\n"

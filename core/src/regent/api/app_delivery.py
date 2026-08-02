@@ -30,6 +30,7 @@ from regent.config import get_settings
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.code_generator import ArtifactUriResolver
 from regent.infrastructure.deployment import StaticPreviewDeploymentProvider
+from regent.infrastructure.runtime_preview import RuntimePreviewDeploymentProvider
 from regent.infrastructure.sandbox import (
     DockerDependencyMaterializer,
     DockerSandboxDriver,
@@ -313,7 +314,13 @@ class DeploymentResponse(BaseModel):
 def release_service(request: Request) -> ReleaseService:
     settings = get_settings()
     preview_root = Path(settings.workspace_root) / "previews"
-    provider = StaticPreviewDeploymentProvider(preview_root=preview_root, base_url="")
+    public_base = (settings.public_base_url or "").rstrip("/")
+    static = StaticPreviewDeploymentProvider(preview_root=preview_root, base_url=public_base)
+    provider = RuntimePreviewDeploymentProvider(
+        preview_root=preview_root,
+        static_provider=static,
+        base_url=public_base,
+    )
     return ReleaseService(request.app.state.sessions, provider)
 
 

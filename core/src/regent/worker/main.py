@@ -28,6 +28,7 @@ from regent.infrastructure.code_generator import ArtifactUriResolver
 from regent.infrastructure.database import create_engine, create_session_factory
 from regent.infrastructure.delivery_review_capability import ensure_delivery_review_capability
 from regent.infrastructure.deployment import StaticPreviewDeploymentProvider
+from regent.infrastructure.runtime_preview import RuntimePreviewDeploymentProvider
 from regent.infrastructure.evidence_capability import ensure_allowlisted_http_capability
 from regent.infrastructure.evidence_sources import (
     AllowlistedHttpEvidenceConnector,
@@ -253,8 +254,13 @@ def create_worker() -> tuple[Worker, object]:
     )
     preview_root = Path(settings.workspace_root) / "previews"
     public_base = (settings.public_base_url or "http://regent-api:8000").rstrip("/")
-    deployment_provider = StaticPreviewDeploymentProvider(
+    static_preview = StaticPreviewDeploymentProvider(
         preview_root=preview_root,
+        base_url=public_base,
+    )
+    deployment_provider = RuntimePreviewDeploymentProvider(
+        preview_root=preview_root,
+        static_provider=static_preview,
         base_url=public_base,
     )
 

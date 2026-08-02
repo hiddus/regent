@@ -20,6 +20,7 @@ from regent.infrastructure.models import (
     FileChangeSetModel,
     GenerationPlanModel,
     GenerationRunModel,
+    GoalModel,
     RequirementRevisionModel,
     WorkspaceSnapshotModel,
 )
@@ -311,6 +312,12 @@ class GenerationService:
                     "generated changeset empty after planned-path filter",
                 )
             commit = self._writer.apply(str(run_id), changes, base_workspace=base_workspace)
+            accepted = getattr(generated, "accepted_workspace", None)
+            if isinstance(accepted, dict) and accepted.get("uri"):
+                await self._remember_accepted_workspace(
+                    goal_id=str(goal_id) if goal_id else None,
+                    accepted=accepted,
+                )
             return await self._complete(
                 run_id,
                 changes,
@@ -405,6 +412,40 @@ class GenerationService:
             session.add(snapshot)
             await session.flush()
             return snapshot
+
+    async def _remember_accepted_workspace(
+        self,
+        *,
+        goal_id: str | None,
+        accepted: dict[str, Any],
+    ) -> None:
+        """Persist accepted snapshot URI on the Goal for P0-5 REVISE cloning."""
+        if not goal_id:
+            return
+        try:
+            gid = uuid.UUID(str(goal_id))
+        except ValueError:
+            return
+        uri = str(accepted.get("uri") or "").strip()
+        if not uri:
+            return
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, gid)
+            if goal is None:
+                return
+            meta = dict(goal.metadata_json or {})
+            meta["last_accepted_workspace_uri"] = uri
+            meta["last_accepted_workspace"] = {
+                "uri": uri,
+                "snapshot_id": accepted.get("snapshot_id"),
+                "content_hash": accepted.get("content_hash"),
+                "manifest_hash": accepted.get("manifest_hash"),
+                "profile_hash": accepted.get("profile_hash"),
+                "verification_hash": accepted.get("verification_hash"),
+                "created_at": accepted.get("created_at"),
+            }
+            goal.metadata_json = meta
+            flag_modified(goal, "metadata_json")
 
     async def _fail(self, run_id: uuid.UUID, *, failure_code: str | None = None) -> None:
         async with self._sessions() as session, session.begin():

@@ -1,0 +1,129 @@
+{
+  "record_type": "AgenticOfflineQualificationReport",
+  "schema_version": "offline-qual-report/v3",
+  "mode": "live-golden",
+  "created_at": "2026-08-02T01:58:49.581870+00:00",
+  "plan_ref": "docs/agentic-repair-wave-2026-08-02.md",
+  "qualification_ref": "docs/decision-note-agentic-qualification-ladder-2026-08-01.md",
+  "gate": {
+    "contracts_green": true,
+    "golden_fixture_green": null,
+    "live_model_v2_green": false,
+    "allows_state": "OFFLINE_QUALIFICATION",
+    "does_not_auto_promote": true,
+    "does_not_open_canary": true,
+    "dogfood_requires": "live-model Agentic Runner + REVISE/V2 green in report (fixture Preview alone → OFFLINE_QUALIFICATION only)"
+  },
+  "checks": [
+    {
+      "id": "frozen_task_set",
+      "ok": true,
+      "n_tasks": 12,
+      "hash_match": true,
+      "digest": "7f804d295490115577d6432c4ec71bffa6ab32e3a169095f17188a544b138b26"
+    },
+    {
+      "id": "provider_recordings",
+      "ok": true,
+      "missing": [],
+      "present": [
+        "length_truncation.json",
+        "malformed_tool_args.json",
+        "http_401.json",
+        "http_429.json",
+        "http_503.json"
+      ]
+    },
+    {
+      "id": "ops_entrypoints",
+      "ok": true,
+      "missing": []
+    },
+    {
+      "id": "skill_packs_seven",
+      "ok": true,
+      "present": [
+        "evidence",
+        "http-api",
+        "persistence",
+        "runtime-contract",
+        "test-harness",
+        "ui",
+        "web-app-scaffold"
+      ],
+      "missing": []
+    },
+    {
+      "id": "contract_pytest",
+      "ok": true,
+      "returncode": 0,
+      "cmd": [
+        "C:\\regent\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "tests/unit/agent/test_agent_core_m0_m1_contracts.py",
+        "tests/unit/agent/test_agent_core_m1_m5_contracts.py",
+        "tests/unit/agent/test_w4_compact_skills.py",
+        "tests/unit/application/test_gq3_production_report.py",
+        "tests/unit/application/test_generation_quality.py",
+        "tests/unit/application/test_budget_ledger.py::test_all_cost_types_defined",
+        "tests/unit/application/test_goal_execution_contract.py::test_event_catalog_contains_all_p1_events",
+        "tests/unit/application/test_delivery_batches.py::test_subagent_seeded_incremental_files",
+        "tests/unit/infrastructure/test_preview_process.py",
+        "tests/unit/ops/test_agentic_qualification_gate.py",
+        "-q",
+        "--tb=line",
+        "--basetemp=C:\\Users\\SHOWMA~1\\AppData\\Local\\Temp\\regent_offline_qual_pytest_ttet1qsr"
+      ],
+      "stdout_tail": ".......................................................................  [100%]\n",
+      "stderr_tail": ""
+    },
+    {
+      "id": "fixture_golden_preview",
+      "ok": true,
+      "returncode": 0,
+      "stdout_tail": "SUCCEEDED\nTrue\nTrue\n",
+      "stderr_tail": "",
+      "note": "local fixture Preview+readiness; live-model agentic golden remains operator-run",
+      "allows_internal_dogfood_when_green": true
+    },
+    {
+      "id": "live_golden_lane",
+      "ok": true,
+      "require_live": false,
+      "live_model_v2_green": false,
+      "child_checks": [
+        {
+          "id": "revise_v2_structural",
+          "ok": true,
+          "errors": [],
+          "v1_uri": "file:///C:/Users/showmac2025/AppData/Local/Temp/regent_live_golden_6ys2il8u/store/accepted_workspace_snapshots/c93101d6-a578-404b-82d0-18ef20e5e91f",
+          "v2_uri": "file:///C:/Users/showmac2025/AppData/Local/Temp/regent_live_golden_6ys2il8u/store2/accepted_workspace_snapshots/08ca9530-cc3e-4d29-ad9c-96454a848cbf",
+          "note": "structural REVISE/V2 continuity; not live-model evidence"
+        }
+      ],
+      "returncode": 0,
+      "stdout_tail": "{\"out\": \"C:\\\\regent\\\\docs\\\\agentic-live-golden-report-2026-08-02.json\", \"allows_state\": \"OFFLINE_QUALIFICATION\", \"live_model_v2_green\": false}\n  revise_v2_structural: OK\n",
+      "stderr_tail": ""
+    },
+    {
+      "id": "revise_v2_structural",
+      "ok": true,
+      "errors": [],
+      "v1_uri": "file:///C:/Users/showmac2025/AppData/Local/Temp/regent_live_golden_6ys2il8u/store/accepted_workspace_snapshots/c93101d6-a578-404b-82d0-18ef20e5e91f",
+      "v2_uri": "file:///C:/Users/showmac2025/AppData/Local/Temp/regent_live_golden_6ys2il8u/store2/accepted_workspace_snapshots/08ca9530-cc3e-4d29-ad9c-96454a848cbf",
+      "note": "structural REVISE/V2 continuity; not live-model evidence"
+    }
+  ],
+  "next_ops": [
+    "python -B ops/set_agentic_qualification.py OFFLINE_QUALIFICATION --dry-run",
+    "python -B ops/set_agentic_qualification.py OFFLINE_QUALIFICATION",
+    "# INTERNAL_DOGFOOD only after a report with live_model_v2_green=true"
+  ],
+  "explicit_non_goals": [
+    "Do not open production canary from this report",
+    "Do not flip generation_strategy default to agentic",
+    "Do not auto-advance qualification_state",
+    "Do not treat fixture Preview as INTERNAL_DOGFOOD evidence"
+  ]
+}

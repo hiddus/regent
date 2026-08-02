@@ -27,7 +27,25 @@ SCAFFOLD_PLANNED_PATHS: tuple[str, ...] = (
 _ALLOWED_ROOT_FILES = frozenset(
     {"requirements.txt", "readme.md", "pyproject.toml"}
 )
-_ALLOWED_SUFFIXES = (".html", ".css", ".js", ".py", ".md", ".txt", ".json")
+# Keep aligned with agent/file_manifest.TEXT_EXTENSIONS (P0-2 / R0).
+_ALLOWED_SUFFIXES = (
+    ".html",
+    ".css",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".vue",
+    ".py",
+    ".md",
+    ".txt",
+    ".json",
+    ".svg",
+    ".sql",
+    ".toml",
+    ".yml",
+    ".yaml",
+)
 
 
 def normalize_relative_path(relative: str) -> str:

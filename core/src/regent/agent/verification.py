@@ -120,41 +120,32 @@ class VerificationAgent:
 
         smoke: dict[str, Any] = {"attempted": False}
         if run_smoke:
+            # R0 / B5: always attempt smoke so runtime evidence is not structurally
+            # unreachable when static fails. Static gaps remain; verdict still fails.
+            smoke = await self._smoke_http(files, success_criteria or {})
             if static_failed and self._profile and self._profile.project_shape != "static-web":
                 smoke = {
-                    "attempted": False,
-                    "passed": False,
-                    "blocked": True,
-                    "blocked_by": "STATIC_FAILED",
-                    "error": "smoke blocked by static failures",
+                    **smoke,
+                    "static_failed_concurrent": True,
+                    "note": "smoke attempted despite static failures (anti B5 short-circuit)",
                 }
+            if not smoke.get("passed") and not smoke.get("blocked"):
                 gaps.append(
                     VerificationGap(
-                        code="SMOKE_FAILED",
-                        detail="smoke blocked by static failures",
-                        blocked_by="STATIC_FAILED",
+                        code="SMOKE_FAILED" if smoke.get("attempted") else "START_FAILED",
+                        detail=str(smoke.get("error") or "app failed smoke"),
+                        artifact_snippet=str(smoke.get("log") or "")[:2_000],
+                    )
+                )
+            elif smoke.get("blocked"):
+                gaps.append(
+                    VerificationGap(
+                        code="START_FAILED",
+                        detail=str(smoke.get("error") or "start blocked"),
+                        blocked_by=str(smoke.get("blocked_by") or "unknown"),
                         status="BLOCKED",
                     )
                 )
-            else:
-                smoke = await self._smoke_http(files, success_criteria or {})
-                if not smoke.get("passed") and not smoke.get("blocked"):
-                    gaps.append(
-                        VerificationGap(
-                            code="SMOKE_FAILED" if smoke.get("attempted") else "START_FAILED",
-                            detail=str(smoke.get("error") or "app failed smoke"),
-                            artifact_snippet=str(smoke.get("log") or "")[:2_000],
-                        )
-                    )
-                elif smoke.get("blocked"):
-                    gaps.append(
-                        VerificationGap(
-                            code="START_FAILED",
-                            detail=str(smoke.get("error") or "start blocked"),
-                            blocked_by=str(smoke.get("blocked_by") or "unknown"),
-                            status="BLOCKED",
-                        )
-                    )
         stages["smoke"] = smoke
         stages["start"] = {
             "attempted": bool(smoke.get("attempted")),
@@ -292,9 +283,17 @@ class VerificationAgent:
 
         port = _pick_free_port()
         routes = _routes_from_profile_and_criteria(self._profile, success_criteria)
+        entry_object = (
+            str(self._profile.entry_object) if self._profile else "app"
+        ) or "app"
         probe_script = self._toolkit.root / ".regent_smoke_probe.py"
         probe_script.write_text(
-            _smoke_probe_script(module=module, port=port, routes=routes),
+            _smoke_probe_script(
+                module=module,
+                entry_object=entry_object,
+                port=port,
+                routes=routes,
+            ),
             encoding="utf-8",
         )
         try:
@@ -315,7 +314,9 @@ class VerificationAgent:
             probe_script.unlink(missing_ok=True)
 
 
-def _smoke_probe_script(*, module: str, port: int, routes: list[str]) -> str:
+def _smoke_probe_script(
+    *, module: str, entry_object: str, port: int, routes: list[str]
+) -> str:
     routes_lit = repr(list(routes))
     return f"""
 import importlib
@@ -325,15 +326,16 @@ import time
 import urllib.request
 
 MODULE = {module!r}
+ENTRY_OBJECT = {entry_object!r}
 PORT = {port}
 ROUTES = {routes_lit}
 LOG = []
 
 def _serve():
     mod = importlib.import_module(MODULE)
-    app = getattr(mod, "app", None)
+    app = getattr(mod, ENTRY_OBJECT, None)
     if app is None:
-        raise SystemExit("no app object")
+        raise SystemExit(f"no entry object {{ENTRY_OBJECT!r}} on {{MODULE}}")
     if hasattr(app, "run") and not hasattr(app, "router"):
         app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
         return

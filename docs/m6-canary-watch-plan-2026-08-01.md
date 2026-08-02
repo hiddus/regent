@@ -1,9 +1,11 @@
 # M6 Canary 观察窗执行计划（2026-08-01）
 
-> 状态：READY（5% canary 已开窗；本计划覆盖观察 → 指标 → 闭环 → 窗末决策）
-> 前置：`docs/m6-canary-window-2026-08-01.json`、`docs/m6-preflight-report-2026-08-01.json`
-> 开窗时刻：`2026-08-01T14:38:33+00:00`
-> 约束：默认策略保持 `artifact-backed`；不自动 GQ-4；不用 soft-pass 宣称 M6 出口达标
+> 状态：**HALTED_PENDING_QUALIFICATION**（2026-08-01：废止「失败 control 否决候选流量」；须先 Offline Qual）  
+> 裁决：[`decision-note-agentic-qualification-ladder-2026-08-01.md`](./decision-note-agentic-qualification-ladder-2026-08-01.md)  
+> 执行：[`agentic-qualification-executable-plan-2026-08-01.md`](./agentic-qualification-executable-plan-2026-08-01.md)  
+> 前置：`docs/m6-canary-window-2026-08-01.json`（开窗记录保留；**扩流禁止**；建议 clamp 至 Qual 出口）  
+> 开窗时刻：`2026-08-01T14:38:33+00:00`（历史；不计入新晋级样本）  
+> 约束：默认策略保持 `artifact-backed`（FALLBACK_ONLY）；GQ-4 关闭；禁止用本窗宣称 M6/GQ-4 达标
 
 ## 1. 目标
 
@@ -13,7 +15,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 配置 | `percent=5` + `gate=true` + 默认 artifact-backed |
+| 配置 | **已 clamp**：`percent=0` + `gate=false` + `QUAL=DISABLED` + 默认 artifact-backed（FALLBACK_ONLY） |
 | T0 探针 | 已落盘，但 24h 含开窗前历史 agentic（plan 级 share 失真） |
 | 出口四指标 | 尚未按开窗 since 计算 |
 | 真实闭环 | 未开始 |

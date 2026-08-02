@@ -142,6 +142,112 @@ async def test_provider_replay_malformed_tool_args() -> None:
 
 
 @pytest.mark.asyncio
+async def test_q0_3_parse_fail_never_completes_as_empty_tools(tmp_path: Path) -> None:
+    """Q0-3: ToolCallInvalidError must propagate — Runner must not treat as soft-complete."""
+    sample = json.loads((RECORDINGS / "malformed_tool_args.json").read_text(encoding="utf-8"))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=sample["response"])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="replay-model",
+            client=client,
+        )
+        runner = AgentRunner(
+            provider,
+            WorkspaceToolkit(tmp_path),
+            budget=AgentBudget(max_turns=4, max_tokens=50_000, max_wall_seconds=30),
+        )
+        with pytest.raises(ToolCallInvalidError):
+            await runner.run(plan={"goal_anchor_text": "build app", "success_criteria": {}})
+    # Must not leave a silent success artifact.
+    assert not (tmp_path / ".regent_submit.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_replay_503_retries_then_ok() -> None:
+    sample = json.loads((RECORDINGS / "http_503.json").read_text(encoding="utf-8"))
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                int(sample.get("http_status") or 503),
+                content=str(sample.get("response_text") or '{"error":"unavailable"}'),
+                headers={"content-type": "application/json"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "choices": [
+                    {"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="m",
+            max_http_retries=3,
+            retry_deadline_seconds=30,
+            client=client,
+        )
+
+        async def _noop(**_kwargs: Any) -> None:
+            return None
+
+        provider._sleep_backoff = _noop  # type: ignore[method-assign]
+        result = await provider.chat(messages=[ChatMessage(role="user", content="go")])
+    assert result.message.content == "ok"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_replay_401_and_403_not_retried() -> None:
+    for status_code, fixture in ((401, "http_401.json"), (403, None)):
+        calls = {"n": 0}
+
+        def make_handler(code: int, fix: str | None):
+            def handler(_request: httpx.Request) -> httpx.Response:
+                calls["n"] += 1
+                if fix:
+                    sample = json.loads((RECORDINGS / fix).read_text(encoding="utf-8"))
+                    return httpx.Response(
+                        int(sample.get("http_status") or sample.get("status") or code),
+                        content=str(
+                            sample.get("response_text")
+                            or json.dumps(sample.get("response") or {"error": "denied"})
+                        ),
+                        headers={"content-type": "application/json"},
+                    )
+                return httpx.Response(code, json={"error": "forbidden"})
+
+            return handler
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(make_handler(status_code, fixture))
+        ) as client:
+            provider = OpenAICompatibleProvider(
+                base_url="https://model.example/v1",
+                api_key="secret",
+                model="m",
+                max_http_retries=3,
+                client=client,
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await provider.chat(messages=[ChatMessage(role="user", content="go")])
+        assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
 async def test_provider_replay_normal_tool_call_and_max_tokens() -> None:
     sample = json.loads((RECORDINGS / "normal_tool_call.json").read_text(encoding="utf-8"))
     seen: dict[str, Any] = {}

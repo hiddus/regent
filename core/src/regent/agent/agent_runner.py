@@ -11,7 +11,12 @@ from typing import Any, Awaitable, Callable, Protocol
 from regent.agent.compact import ContextCompactor, HeuristicSummarizer, micro_compact
 from regent.agent.context_assembler import ContextAssembler
 from regent.agent.primary_failure import classify_finish_reason
-from regent.agent.repair_policy import plan_repair, record_branch_cost
+from regent.agent.repair_policy import (
+    IDENTICAL_GAP_STOP_AFTER,
+    gap_fingerprint,
+    plan_repair,
+    record_branch_cost,
+)
 from regent.agent.run_ledger import AgentRunLedger
 from regent.agent.runtime_profile_v1 import RuntimeProfileV1, parse_runtime_profile_v1
 from regent.agent.skills import select_skills_for_goal
@@ -224,6 +229,10 @@ class AgentRunner:
         gap_repeat: dict[str, int] = {}
         turn = 0
         verification: VerificationVerdict | None = None
+        # P0-4 anti-loop state (single trajectory — never recursive self.run).
+        repair_phase_turns_left: int | None = None
+        chat_temperature = 0.0
+        last_gap_fingerprint: str | None = None
 
         while turn < max_turns:
             wall = time.monotonic() - started
@@ -289,7 +298,7 @@ class AgentRunner:
                 response = await self._provider.chat(
                     messages=messages,
                     tools=TOOL_SPECS,
-                    temperature=0,
+                    temperature=chat_temperature,
                 )
             except (ModelTruncatedError, ToolCallInvalidError):
                 ledger.wall_seconds = time.monotonic() - started
@@ -314,6 +323,15 @@ class AgentRunner:
                 cached_tokens=turn_cached_i,
             )
             ledger.add_turn(1)
+            # W4-P0: calibrate local token estimate from real prompt_tokens.
+            if turn_in > 0:
+                from regent.agent.compact import estimate_tokens as _est_tok
+
+                est = _est_tok(messages)
+                if est > 0:
+                    self._compactor.observe_provider_prompt_tokens(
+                        estimated=est, actual_prompt_tokens=turn_in
+                    )
 
             assistant: ChatMessage = response.message
             conversation.append(assistant)
@@ -429,10 +447,27 @@ class AgentRunner:
 
             turn += 1
 
+            # Repair-phase turn budget: each model turn after a gap message counts.
+            if (
+                repair_phase_turns_left is not None
+                and not submitted_this_turn
+                and not self._toolkit.submitted
+            ):
+                repair_phase_turns_left -= 1
+                if repair_phase_turns_left <= 0:
+                    ledger.notes.append("repair_phase_turns_exhausted_without_submit")
+                    self._raise_budget_exhausted(
+                        "repair phase max_extra_turns exhausted without submit",
+                        transcript=transcript,
+                        ledger=ledger,
+                        compact_events=compact_events,
+                    )
+
             if not submitted_this_turn and not self._toolkit.submitted:
                 continue
 
             # Explicit submit → verify on same trajectory (M1-3 / M3-1).
+            repair_phase_turns_left = None
             if not verify:
                 break
 
@@ -446,13 +481,29 @@ class AgentRunner:
                 runtime_profile=profile,
             )
             if verification.passed:
+                chat_temperature = 0.0
                 break
 
             if repair_rounds_left <= 0 or not verification.gaps:
+                ledger.notes.append("repair_rounds_exhausted_or_no_gaps")
                 break
 
             primary = verification.gaps[0].code
+            fingerprint = gap_fingerprint([g.code for g in verification.gaps])
             gap_repeat[primary] = gap_repeat.get(primary, 0) + 1
+            # Identical gap set after a prior repair attempt → thrashing; stop.
+            if (
+                last_gap_fingerprint is not None
+                and fingerprint == last_gap_fingerprint
+                and gap_repeat[primary] >= IDENTICAL_GAP_STOP_AFTER
+            ):
+                ledger.notes.append(
+                    f"identical_gap_fingerprint_stop:{fingerprint}:n={gap_repeat[primary]}"
+                )
+                ledger.primary_failure_code = primary
+                break
+            last_gap_fingerprint = fingerprint
+
             remaining = self._budget.max_tokens - (input_tokens + output_tokens)
             repair = plan_repair(
                 primary,
@@ -463,10 +514,13 @@ class AgentRunner:
                 record_branch_cost(repair, tokens_used=input_tokens + output_tokens)
             )
             if repair.max_extra_turns <= 0:
+                ledger.notes.append(f"repair_fail_closed:{repair.strategy}")
                 break
 
             repair_rounds_left -= 1
             ledger.repair_rounds += 1
+            repair_phase_turns_left = int(repair.max_extra_turns)
+            chat_temperature = float(repair.temperature)
             if on_turn is not None:
                 await on_turn(-1, f"验证失败，同轨迹修正（{repair.strategy}）…")
             # Append structured gaps as a new user turn — no recursive self.run().
@@ -483,13 +537,22 @@ class AgentRunner:
                 ensure_ascii=False,
                 indent=2,
             )
+            branch_note = ""
+            if repair.allow_candidate_branch:
+                branch_note = (
+                    " Candidate branch authorized once: if the prior repair path is stuck, "
+                    "try one alternate minimal approach in the same workspace; keep diffs small."
+                )
+                ledger.notes.append("candidate_branch_authorized")
             conversation.append(
                 ChatMessage(
                     role="user",
                     content=(
                         "Verification failed. Repair with minimal edits "
-                        f"(strategy={repair.strategy}). Gaps:\n{gap_blob}\n"
+                        f"(strategy={repair.strategy}, temperature={chat_temperature}). "
+                        f"Gaps:\n{gap_blob}\n"
                         "Use edit_file/grep/glob when possible. Call submit when ready."
+                        f"{branch_note}"
                     ),
                 )
             )

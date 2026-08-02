@@ -345,6 +345,19 @@ def gq4_default_switch_gate(
                 "new Runs use fallback; in-flight complete frozen plan or cancel"
             ),
         }
+    if (
+        experiment_report.get("decision") == "INVALID_BASELINE"
+        or experiment_report.get("baseline_invalid")
+        or experiment_report.get("invalid_baseline_reasons")
+    ):
+        return {
+            "activation_allowed": False,
+            "proposed_default": "artifact-backed",
+            "reason": "invalid_baseline",
+            "in_flight_run_semantics": (
+                "new Runs use fallback; in-flight complete frozen plan or cancel"
+            ),
+        }
     if experiment_report.get("funnel_degraded") or (
         (experiment_report.get("funnel_health") or {}).get("degraded")
     ):

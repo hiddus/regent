@@ -1,6 +1,7 @@
-"""Repair strategy router by primary failure code (M3-4).
+"""Repair strategy router by primary failure code (M3-4 / P0-4).
 
-No default temperature ladder. Branches are budget-bounded and recorded.
+No recursive cold-restart. Branches are budget-bounded and recorded.
+Identical-gap thrashing fail-closes; mild temperature only on repeated gaps.
 """
 
 from __future__ import annotations
@@ -10,6 +11,9 @@ from typing import Any
 
 from regent.agent.primary_failure import PrimaryFailureCode, normalize_primary_failure_code
 
+# Same primary gap fingerprint this many times → stop repairing (anti-loop).
+IDENTICAL_GAP_STOP_AFTER = 2
+
 
 @dataclass(frozen=True, slots=True)
 class RepairPlan:
@@ -18,6 +22,11 @@ class RepairPlan:
     allow_candidate_branch: bool
     notes: str
     temperature: float = 0.0
+
+
+def gap_fingerprint(codes: list[str] | tuple[str, ...]) -> str:
+    """Stable fingerprint for a verification gap set (order-insensitive)."""
+    return "|".join(sorted({str(c) for c in codes if c}))
 
 
 def plan_repair(
@@ -43,6 +52,11 @@ def plan_repair(
             allow_candidate_branch=False,
             notes=f"{code}: do not repair-loop; fix provider/tooling first",
         )
+
+    # Mild diversity only after the same primary gap already failed once.
+    # Not a temperature ladder — just enough to escape argmax sticky errors.
+    temperature = 0.2 if repeat_count >= 2 else 0.0
+
     if code in {
         PrimaryFailureCode.STATIC_FAILED,
         PrimaryFailureCode.ARTIFACT_INCOMPLETE,
@@ -52,6 +66,7 @@ def plan_repair(
             max_extra_turns=6,
             allow_candidate_branch=False,
             notes="edit scaffolds / forbidden patterns via replace",
+            temperature=temperature,
         )
     if code in {
         PrimaryFailureCode.TEST_FAILED,
@@ -64,6 +79,7 @@ def plan_repair(
             max_extra_turns=8,
             allow_candidate_branch=branch,
             notes="feed structured gaps; optional single candidate branch on repeat",
+            temperature=temperature,
         )
     if code is PrimaryFailureCode.PREVIEW_FAILED:
         return RepairPlan(
@@ -71,12 +87,14 @@ def plan_repair(
             max_extra_turns=4,
             allow_candidate_branch=False,
             notes="align preview type with Runtime Profile",
+            temperature=temperature,
         )
     return RepairPlan(
         strategy="generic_gap_turn",
         max_extra_turns=4,
         allow_candidate_branch=False,
-        notes="append gaps as user turn; temperature stays 0",
+        notes="append gaps as user turn; stop on identical fingerprint thrash",
+        temperature=temperature,
     )
 
 
