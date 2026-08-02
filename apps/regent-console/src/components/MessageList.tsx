@@ -12,6 +12,7 @@ interface MessageListProps {
   currentProjectId?: string | null
   goalStatus?: string | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
+  onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
 }
 
@@ -22,7 +23,7 @@ function buildMovingGoals(items: Message[]): Set<string> {
     if (
       t === 'GOAL_CONFIRMED' || t === 'GOAL_EXECUTION_QUEUED' ||
       t.startsWith('GOAL_EXECUTION_') || t === 'PREVIEW_READY' ||
-      t === 'PREVIEW_DEPLOYMENT_SUCCEEDED'
+      t === 'PREVIEW_DEPLOYMENT_SUCCEEDED' || t === 'FORK_SELECTED'
     ) {
       const mid = m.metadata?.goal_id as string | undefined
       if (mid) set.add(mid)
@@ -64,19 +65,30 @@ function MessageItem({
   movingGoals,
   resolved,
   onConfirm,
+  onSelectOption,
   onTaskAction,
 }: {
   m: Message
   movingGoals: Set<string>
   resolved: boolean
   onConfirm: (projectId: string, goalId: string, hash: string) => void
+  onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
 }) {
-  const isConfirmation = m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
-    m.message_type === 'GOAL_UNDERSTANDING_READY'
+  const isConfirmation =
+    m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
+    m.message_type === 'GOAL_UNDERSTANDING_READY' ||
+    m.message_type === 'GOAL_PLAN_PROPOSED'
   const goalId = m.metadata?.goal_id as string | undefined
-  const isAwaiting = m.message_type === 'APP_CONFIRMATION_REQUIRED' &&
+  const needsUserFork = Boolean(m.metadata?.needs_user_fork)
+  const forkResolved = Boolean(
+    goalId ? movingGoals.has(goalId) : movingGoals.has('*'),
+  )
+  const isAwaiting =
+    m.message_type === 'APP_CONFIRMATION_REQUIRED' &&
     !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))
+  const showForkActions =
+    needsUserFork && !forkResolved && m.message_type === 'GOAL_PLAN_PROPOSED'
   const isCorrection = m.message_type === 'CORRECTION_APPLIED'
   const roleClass = m.role.toLowerCase()
   const avatarLabel = m.role === 'USER' ? '你' : 'R'
@@ -145,11 +157,16 @@ function MessageItem({
           <ConfirmationCard
             metadata={m.metadata}
             canConfirm={isAwaiting}
+            needsUserFork={showForkActions}
             onConfirm={() => {
               const pid = m.metadata?.app_project_id as string
               const gid = m.metadata?.goal_id as string
               const hash = (m.metadata?.goal_spec_hash as string) || ''
               onConfirm(pid, gid, hash)
+            }}
+            onSelectOption={(optionId, label) => {
+              const pid = m.metadata?.app_project_id as string
+              if (pid) onSelectOption?.(pid, optionId, label)
             }}
           />
         )}
@@ -176,7 +193,13 @@ function MessageItem({
   )
 }
 
-export function MessageList({ messages, goalStatus, onConfirm, onTaskAction }: MessageListProps) {
+export function MessageList({
+  messages,
+  goalStatus,
+  onConfirm,
+  onSelectOption,
+  onTaskAction,
+}: MessageListProps) {
   const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
   const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
 
@@ -186,7 +209,9 @@ export function MessageList({ messages, goalStatus, onConfirm, onTaskAction }: M
         <div className="stream">
           <div className="empty">
             <h1>创建你的第一个 App</h1>
-            <p>先描述产品想法。即使目标还很模糊，Core 也会从当前理解开始探索，并持续与你一起澄清。</p>
+            <p>
+              先描述产品想法。Core 会拆出拟议方案并按人步推进；只有推演不清时才请你从有限选项里拍板。
+            </p>
           </div>
         </div>
       </section>
@@ -226,6 +251,7 @@ export function MessageList({ messages, goalStatus, onConfirm, onTaskAction }: M
               movingGoals={movingGoals}
               resolved={resolved}
               onConfirm={onConfirm}
+              onSelectOption={onSelectOption}
               onTaskAction={onTaskAction}
             />
           )

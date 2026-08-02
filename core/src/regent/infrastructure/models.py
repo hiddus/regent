@@ -1364,7 +1364,10 @@ class ConversationCommandModel(Base):
     __tablename__ = "conversation_commands"
     __table_args__ = (
         CheckConstraint(
-            "command_type IN ('QUERY','MODIFY','CONTINUE')",
+            "command_type IN ("
+            "'QUERY','MODIFY','CONTINUE','PAUSE','RESUME',"
+            "'CORRECT','APPROVE','REJECT','SELECT_OPTION'"
+            ")",
             name="ck_conversation_commands_type",
         ),
         CheckConstraint(

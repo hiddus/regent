@@ -56,6 +56,9 @@ class AppDraftResponse(BaseModel):
     goal_spec_hash: str
     understanding: dict[str, object]
     model: str
+    plan: dict[str, object] = Field(default_factory=dict)
+    needs_user_fork: bool = False
+    auto_started: bool = False
 
 
 class ConfirmAppResponse(BaseModel):
@@ -73,22 +76,33 @@ async def create_app_draft(
     payload: CreateAppDraftBody, projects: ServiceDep, request: Request
 ) -> AppDraftResponse:
     receipt = await projects.create_draft(idea=payload.idea, actor=payload.actor)
-    await GoalExecutionService(request.app.state.sessions).start(
-        receipt.goal.id,
-        actor=payload.actor,
-        idempotency_key=f"auto-start:{receipt.goal.id}",
-    )
+    auto_started = False
+    # run-think-learn L2: when model cannot self-consistently deduce a path,
+    # wait for user fork selection before auto-start (human as auxiliary).
+    if not receipt.needs_user_fork:
+        started = await GoalExecutionService(request.app.state.sessions).start(
+            receipt.goal.id,
+            actor=payload.actor,
+            idempotency_key=f"auto-start:{receipt.goal.id}",
+        )
+        auto_started = True
+        goal_status = started.status
+    else:
+        goal_status = receipt.goal.status
     return AppDraftResponse(
         project=project_response(receipt.project),
         conversation_id=receipt.conversation.id,
         goal_id=receipt.goal.id,
-        goal_status=receipt.goal.status,
+        goal_status=goal_status,
         goal_spec_id=receipt.spec.id,
         goal_spec_version=receipt.spec.version,
         goal_spec_status=receipt.spec.status,
         goal_spec_hash=receipt.spec.content_hash,
         understanding=receipt.understanding.model_dump(mode="json"),
         model=receipt.model,
+        plan=dict(receipt.runtime_plan or {}),
+        needs_user_fork=bool(receipt.needs_user_fork),
+        auto_started=auto_started,
     )
 
 

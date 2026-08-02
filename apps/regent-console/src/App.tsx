@@ -66,7 +66,13 @@ export default function App() {
           ws.setCurrentConv(conv)
           await ws.loadMessages(conv.id)
         }
-        ws.showHint('Core 已基于当前理解开始探索；你可以随时补充或修正目标')
+        if (draft.needs_user_fork) {
+          ws.showHint('方案已就绪，请先选择一个方向后再继续')
+        } else if (draft.auto_started) {
+          ws.showHint('Core 已基于当前方案开始探索；你可以随时补充或修正')
+        } else {
+          ws.showHint('方案已形成；你可以补充后继续，或确认开始')
+        }
       } else {
         ws.showHint('Core 正在处理你的指令...')
         const result = await api.guidance(ws.currentProject!.id, text)
@@ -75,6 +81,7 @@ export default function App() {
           await api.startGoal(result.resulting_goal_id)
           ws.showHint('新目标版本已开始执行；你仍可继续补充')
         }
+        else if (result.command_type === 'SELECT_OPTION') ws.showHint('已记录你的选择，正在按该方向推进。')
         else if (result.command_type === 'PAUSE') ws.showHint('已暂停。可发送修正或恢复指令。')
         else if (result.command_type === 'RESUME') ws.showHint('已恢复执行。')
         else if (result.command_type === 'CORRECT') ws.showHint('修正已记录，将在下一步执行中生效。')
@@ -83,6 +90,25 @@ export default function App() {
         else ws.showHint('')
         if (ws.currentProject) await ws.loadStatus(ws.currentProject.id)
       }
+    } catch (e) {
+      ws.showHint((e as Error).message, true)
+    } finally {
+      setSending(false)
+    }
+  }, [ws])
+
+  const handleSelectOption = useCallback(async (
+    projectId: string,
+    optionId: string,
+    label: string,
+  ) => {
+    setSending(true)
+    try {
+      ws.showHint('正在按你选择的方向继续...')
+      await api.guidance(projectId, `option:${optionId} ${label}`)
+      await ws.refresh()
+      ws.showHint('已记录你的选择，正在按该方向推进。')
+      if (ws.currentProject) await ws.loadStatus(ws.currentProject.id)
     } catch (e) {
       ws.showHint((e as Error).message, true)
     } finally {
@@ -183,6 +209,7 @@ export default function App() {
           currentProjectId={ws.currentProject?.id || null}
           goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
           onConfirm={handleConfirm}
+          onSelectOption={handleSelectOption}
           onTaskAction={handleTaskAction}
         />
         <div ref={messagesEndRef} />

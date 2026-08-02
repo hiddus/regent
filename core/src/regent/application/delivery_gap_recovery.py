@@ -228,18 +228,36 @@ def build_failure_lesson(
 ) -> dict[str, Any]:
     """Structured lesson persisted for the next generation round."""
     halt = dict(halt_context or {})
+    reasons = list(gap_reasons)[:12]
+    constraints = build_learned_constraints(gap_kind, gap_reasons)
+    halt_message = str(halt.get("message") or "")[:400]
+    last_error = str(halt.get("last_error") or halt.get("error") or "")[:400]
+    summary_bits = [str(r) for r in reasons[:3] if str(r).strip()]
+    if not summary_bits and last_error:
+        summary_bits = [last_error]
+    if not summary_bits and halt_message:
+        summary_bits = [halt_message]
+    summary = "; ".join(summary_bits)[:400] or f"delivery gap: {gap_kind}"
+    avoid = (
+        "; ".join(str(c) for c in constraints[:4] if str(c).strip())[:400]
+        or "下次须避开本轮 gap_reasons，并满足 learned_constraints"
+    )
     lesson = {
         "at": datetime.now(UTC).isoformat(),
         "attempt": attempt,
         "gap_kind": gap_kind,
         "escalation_method": method,
-        "gap_reasons": list(gap_reasons)[:12],
-        "learned_constraints": build_learned_constraints(gap_kind, gap_reasons),
+        "gap_reasons": reasons,
+        "learned_constraints": constraints,
         "halt_stage": str(halt.get("stage") or halt.get("execution_stage") or ""),
-        "halt_message": str(halt.get("message") or "")[:400],
-        "last_error": str(halt.get("last_error") or halt.get("error") or "")[:400],
+        "halt_message": halt_message,
+        "last_error": last_error,
         "goal_text": goal_text[:240],
         "replan_required": True,
+        # Dual-write: same fields as append_failure_lesson for acceptance readers.
+        "summary": summary,
+        "avoid": avoid,
+        "code": f"DELIVERY_GAP_{str(gap_kind).upper()}"[:128],
     }
     lesson["lesson_digest"] = canonical_hash(
         {

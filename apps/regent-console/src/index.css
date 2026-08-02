@@ -715,6 +715,55 @@ body {
 
 .confirm-note { margin-top: 16px; color: #65d9bb; font-size: 13px; }
 
+.plan-steps,
+.plan-unknowns {
+  margin: 0;
+  padding-left: 1.2em;
+  display: grid;
+  gap: 4px;
+}
+.plan-steps li,
+.plan-unknowns li {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.fork-options {
+  margin-top: 14px;
+  display: grid;
+  gap: 8px;
+}
+.fork-lead {
+  margin: 0 0 2px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.fork-option-btn {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--hover);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.fork-option-btn:hover {
+  border-color: var(--accent);
+  background: #152028;
+}
+.fork-option-label {
+  font-size: 14px;
+  font-weight: 700;
+}
+.fork-option-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
 /* Task card */
 .task-card {
   margin-top: 8px;

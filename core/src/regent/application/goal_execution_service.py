@@ -50,6 +50,12 @@ class GoalExecutionService:
             )
             if project is None or spec is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "app goal context not found")
+            meta = dict(goal.metadata_json or {})
+            if meta.get("needs_user_fork"):
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "goal awaits user fork selection before start",
+                )
             auto_prepared = False
             if goal.status == "DRAFT":
                 if spec.status != "DRAFT" or project.status not in {"DRAFT", "ACTIVE"}:

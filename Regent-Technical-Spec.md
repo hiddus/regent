@@ -1,11 +1,11 @@
 # Regent 技术架构与实施规范
 
 > 状态：CURRENT  
-> 日期：2026-07-31（吸收对话式交付架构评审 + 交付可靠性差距审查 + 文档—实现对齐审计修复）
+> 日期：2026-08-01（吸收 M6 5% canary 开窗、交付缺口软暂停、prompt-cache 布局与 cached_tokens）
 > 性质：权威执行基线（Owner 批准）  
 > 配套需求：[`Regent-PRD.md`](./Regent-PRD.md)  
 > 永久定义（唯一规范源，仅引用不复述正文）：[`docs/definitions/REGENT-DEFINITION-1.0.txt`](docs/definitions/REGENT-DEFINITION-1.0.txt)（`REGENT-DEFINITION-1.0`）  
-> 编码执行清单：[`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md)（与 `Regent-Plan.md` §14 互指）  
+> 编码执行清单：[`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md)（与 `Regent-Plan.md` §14 互指）；M6 观察：[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)  
 > 附录：  
 > - [`docs/appendices/State-Machines-and-Invariants.md`](docs/appendices/State-Machines-and-Invariants.md)  
 > - [`docs/appendices/Durable-Execution-and-External-Effects.md`](docs/appendices/Durable-Execution-and-External-Effects.md)  
@@ -126,10 +126,10 @@ P2 前期继续采用模块化单体。除非测量证明 Outbox 已成为瓶颈
 |---|---|
 | Identity & Access | Agent/用户/工具身份与最小权限 |
 | Permit Manager | 一次性 ExecutionPermit：REQUESTED→GRANTED→CLAIMED→CONSUMED |
-| HumanTask Manager | 人工审批节点，等待期间不占 Worker |
+| HumanTask Manager | 人工审批节点，等待期间不占 Worker；仅用于发布/质量/外部效应/Permit 等真确认 |
 | Audit Logger | 不可变审计日志 |
 | Compliance Checker | 凭据扫描、PII 检查 |
-| Risk Engine | 高风险行动识别与升级 |
+| Risk Engine | 高风险行动识别与升级；`decision_policy.ACTION_RISK` 将 `delivery_gap_intervene` 标为 LOW（自动续跑/软暂停，不造权限卡） |
 
 ### 4.4 Resource Engine（资源引擎）
 
@@ -440,6 +440,16 @@ artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依
 - 运行时默认仍由 `generation_strategy` 驱动（Settings 代码默认 `artifact-backed`）；晋级步骤为「实验报告 → `apply_gq4_promotion` 通过 → 记录 DecisionRecord → 运维翻转 `REGENT_GENERATION_STRATEGY=agentic`」。kill switch 在运行时始终覆盖默认。
 - **运维覆盖**：生产 `.env` 可设置 `REGENT_GENERATION_STRATEGY=agentic` 作为运维侧运行时覆盖，**不等于** GQ-4 已正式晋级；部署流程不得擅自改写生产策略，除非 DecisionRecord 明确要求。
 
+#### 13.7.3 M6 生产 Canary 窗（2026-08-01）
+
+- **代码默认**仍为 `generation_strategy=artifact-backed`、`canary_gate=False`、`canary_percent=0`。
+- **生产窗覆盖**（须有窗记录）：`canary_gate=true`、`canary_percent=5`、`canary_variant=agentic`、默认策略保持 `artifact-backed`；权威：`docs/m6-canary-window-2026-08-01.json`。
+- 开闸脚本：`ops/open_m6_canary.py`；回滚：`ops/clamp_generation_strategy_freeze.py`（percent=0、gate=false）。
+- 观察：开窗后切片（`--since` 开窗时刻），禁止用开窗前历史 agentic 计划计算成功率；日更探针 `ops/probe_m6_canary.py`；出口四指标与真实闭环见 `docs/m6-canary-watch-plan-2026-08-01.md`。
+- 硬回滚触发：严重安全/错误发布、开窗后 agentic 连续硬失败且无 changeset、outbox/delivery-gap 失控、成本或 P95 明显越界。
+- **不等于 GQ-4**；护栏未过前禁止 EXPAND_10 与默认策略翻转。
+- Provider：`REGENT_MODEL_THINKING_MODE` ∈ `{disabled,enabled,default}`，默认 `disabled`；须解析并记账 `cached_tokens`（缺省字段记 `null`，不得当成 0 宣称命中）。
+
 ### 13.8 Agent 工具执行环境与两级 Effect（对话式交付前置）
 
 > 依据：架构评审 C2 / R0-1；统一计划 CD-0；PRD §4.4 / §10.5。
@@ -449,7 +459,7 @@ artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依
 - `AgentRunner` / `agent/tools.py` 中的命令与文件效应**必须**经 `infrastructure/sandbox.py` 的 `DockerSandboxDriver`（或等价隔离驱动）执行；**禁止**在持有数据库凭据与 Provider API key 的 worker 宿主进程内直接 `create_subprocess_shell`。
 - 生产配置：`sandbox_mode` 必须为 `docker`；`local` 仅允许显式测试/开发环境，且不得接入生产 canary。
 - 白名单含 `pip` / `python` / `curl` 时，隔离与出网策略必须满足 §19「网络默认拒绝」与 §13「断网非 root 构建」的等价约束（影子任务禁止发布与外部副作用）。
-- **本条未满足前，禁止**将 `generation_strategy_canary_gate` 置 True 或提高 `canary_percent` 于生产（即使 §13.7.1 控制流代码已就绪）。
+- **本条未满足前，禁止**将 `generation_strategy_canary_gate` 置 True 或提高 `canary_percent` 于生产（即使 §13.7.1 控制流代码已就绪）。生产 M6 开窗须同时满足本条沙箱前置，并留下 §13.7.3 窗记录；回滚使用 `ops/clamp_generation_strategy_freeze.py`。
 
 #### 13.8.2 两级 Effect 模型
 
@@ -462,11 +472,15 @@ artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依
 
 LLM 仍只提出结构化 Command / Tool 调用；聚合状态转换由确定性 Application Service 执行。不得为顺滑删除 Permit / Outbox / Evidence / Audit / Reconciler。
 
-#### 13.8.3 交付状态机接线
+#### 13.8.3 交付状态机与缺口恢复（2026-08-01 修订）
 
 - `application/delivery_state.py` 的 `decide_delivery_verdict` / `DeliveryState` **必须**被 `execution_orchestrator` 生产路径消费，并写入 `goal.metadata_json["delivery_state"]`。
 - 交付拒绝须使用类型化错误（建议 `DeliveryRejection`），携带 `gap_kind`、`reasons`、`draft_uri`；禁止仅依赖魔法字符串 `delivery-review-v1 rejected...` 作为唯一契约。
-- `goal_intent` / 需主观判断的 gap：在能力阶梯耗尽**之前**转入 `DELIVERED_FOR_REVIEW`（或等价 WAITING_HUMAN），并保留当前最优产出。
+- **能力阶梯自动续跑**：缺口恢复按 `REUSE→…→ACQUIRE` 等阶梯与 persona 预算推进；同 `gap_kind` 有硬顶，并受 `DELIVERY_GAP_AUTO_CONTINUE_MAX` 约束（见 `delivery_success_policy` / `delivery_gap_recovery`）。
+- **软暂停（非权限卡）**：阶梯或自动续跑预算耗尽后，写入 `execution_stage=DELIVERY_SOFT_PAUSE`（或等价）与用户可见对话提示，**不得**创建「总是允许」类 HumanTask。用户可通过对话补充方向后系统续跑。
+- **进度 watchdog**：`delivery_progress_watchdog` 对停滞 Goal 发出 warn / auto-nudge（续跑 `GoalExecutionRequested`），跳过真权限任务类型，**不** mint 交付缺口审批卡。
+- `goal_intent` / 需主观产品判断的 gap：仍可在能力阶梯耗尽前转入 `DELIVERED_FOR_REVIEW`（或等价 WAITING_HUMAN），并保留当前最优产出——与软暂停路径区分。
+- Console：`MessageList` 对 `DELIVERY_GAP_*` / `DELIVERY_SOFT_PAUSE` / 纯进度停滞消息**不渲染** TaskCard（故无「总是允许」）。
 - AC1 门禁（`ops/delivery_dead_end_gate.py`）须覆盖嵌套函数所在方法体，TARGETS 含真实终态文件，并进入 CI。
 
 ---
@@ -603,13 +617,17 @@ MAST_VERIFIER_FAILURE
 
 ### 18.6 长任务上下文与持久计划
 
-当前 `todo_write`、`micro_compact`、`autoCompact` 为实现基础，但需要以下耐久化补强：
+当前 `todo_write`、`micro_compact`、`autoCompact` 为实现基础，耐久化与成本合同如下：
 
 1. `ExecutionPlanItem` 持久化 `status/owner/dependencies/evidence_refs/next_action/version`，通过 Goal/Run checkpoint 恢复；
 2. 工具结果超过配置阈值（初始建议 20k Token）时写入不可变 Artifact，消息保存 URI、SHA-256、MIME、长度和截断预览；
 3. 每次 autoCompact 前保存完整 Transcript Artifact；压缩摘要使用 `goal_intent/produced_artifacts/open_risks/next_actions` 结构；
 4. rehydration 必须校验 Artifact 哈希，并重新注入硬约束、Permit 状态和未决 HumanTask；
-5. 相关指标记录压缩次数、压缩前后 Token、Artifact 读取命中和恢复失败，不把压缩本身视为成功。
+5. 相关指标记录压缩次数、压缩前后 Token、Artifact 读取命中和恢复失败，不把压缩本身视为成功；
+6. **Prompt-cache 布局（2026-08-01）**：`ContextAssembler.assemble` 必须保持  
+   `system → static user（goal/skills/REGENT.md/evidence）→ conversation → volatile user（tree-only workspace / todos / gaps / goal reminder）`。  
+   禁止把 recent 文件全文放进 static 前缀；`micro_compact` 须清除过旧 `write_file`/`edit_file` 参数中的全文（磁盘可重读）。  
+   `ChatUsage.cached_tokens` 与 Run ledger 累计命中；提供商缺字段时记 `null`。详见 `docs/token-cost-cache-fix-plan-2026-08-01.md`。
 
 ### 18.7 MCP 工具面边界
 
@@ -689,15 +707,17 @@ POST /v1/uploads
 **其它已挂载族（规范未逐一枚举，以实现为准）：**  
 `/v1/works`、`/v1/observations`、`/v1/baselines`、`/v1/governance`、`/v1/side-effects`、`/v1/experiments`、`/v1/self-improvement-runs`、`/v1/tools`、`/v1/memories`、`/v1/eval-runs`、`/v1/scheduler`、`/v1/runtime-profiles`、`/v1/webhooks`、`/v1/reports`、`/v1/public-deploy`、`/v1/deployments/*`、`/v2/*`（aar1）。
 
+**run-think-learn（L1–L3，2026-08-02）**：`POST .../drafts` 产出 `plan` / `needs_user_fork` / `auto_started`；`needs_user_fork=true` 时跳过 C1 auto-start。guidance 命令含 `SELECT_OPTION`（迁移 `0042` 扩展 `ck_conversation_commands_type`）。对话消息 `GOAL_PLAN_PROPOSED` / `FORK_SELECTED`。`goal.metadata.failure_lessons` 同时接受新 shape（`summary`/`avoid`）与交付缺口旧 shape（`gap_reasons`/`learned_constraints`）；`lessons_for_acceptance` 归一化后注入 generation `acceptance_contract`。细节见 [`docs/direction-note-run-think-learn-2026-08-02.md`](docs/direction-note-run-think-learn-2026-08-02.md)、[`docs/execution-plan-run-think-learn-2026-08-02.md`](docs/execution-plan-run-think-learn-2026-08-02.md)。
+
 App-projects 入口族是对 Goals 清单的**产品包装**，不是静默废弃 Goal 状态机。破坏性路径变更进入 `/v2`。
 ---
 
 ## 22. 可观测性
 
 统一记录 correlation、causation、Goal、Work、Run、Event、ExternalOperation、Actor。  
-必须观测：Outbox/Dead Letter、Lease、阶段耗时、UNKNOWN、对账、Permit/fencing、预算、Agent 协调 Token、`coordination_token_share`、`error_amplification_factor`、`dispatch_entropy`、MAST failure_code、压缩与恢复、Observation 排除原因、Decision 证据链。Agent 步骤优先对齐 OpenTelemetry GenAI 语义约定；语义版本必须记录，未稳定字段不得成为唯一事实源。
+必须观测：Outbox/Dead Letter、Lease、阶段耗时、UNKNOWN、对账、Permit/fencing、预算、Agent 协调 Token、`coordination_token_share`、`error_amplification_factor`、`dispatch_entropy`、MAST failure_code、压缩与恢复、Observation 排除原因、Decision 证据链、**agentic Run 的 `prompt_tokens` / `cached_tokens` / cache hit rate**、`thinking_mode` 诊断。Agent 步骤优先对齐 OpenTelemetry GenAI 语义约定；语义版本必须记录，未稳定字段不得成为唯一事实源。
 
-Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂等键。
+Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂等键。M6 观察探针须按**开窗后**切片输出双臂分流与护栏粗信号（见 `ops/probe_m6_canary.py`）。
 
 ---
 
@@ -755,18 +775,20 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **P1 R1–R6**：Goal 解释与分解、Discovery 编排、证据连接器、假设决策、需求修订、能力解析、WorkspaceWriter、Generation Service、Docker 沙箱构建、Preview 发布、观测回流、Gate 评估与 Iteration Decision。
 - **P1 R7**：DeploymentSmokeTestService 实现简化可体验性 Gate。
 - **P1 R8**：IterationLoopService 实现 Observation→Decision→REVISE 端到端闭环。
-- **对话与 App 身份**：Conversation 持久化、AppProject、GoalSpec DRAFT/FROZEN/SUPERSEDED、对话驱动修订（0019）。主链路 GoalSpec 冻结语义见 DecisionNote `docs/decision-note-auto-start-journey-2026-07-31.md`（快照启动 + 事后纠偏）；`/confirm` 保留为纠偏路径。
+- **对话与 App 身份**：Conversation 持久化、AppProject、GoalSpec DRAFT/FROZEN/SUPERSEDED、对话驱动修订（0019）。主链路 GoalSpec 冻结语义见 DecisionNote `docs/decision-note-auto-start-journey-2026-07-31.md`（快照启动 + 事后纠偏）；`/confirm` 保留为纠偏路径。run-think-learn：`GOAL_PLAN_PROPOSED`、`needs_user_fork` / `SELECT_OPTION`（0042）、`failure_lessons` 双 shape 兼容读取（见 §21）。
 - **真实 App 预览**：StaticAppPublisher、CSP 预览、观测钩子（0020）。
 - **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
 - **确认后自主执行闭环**：Outbox 指数退避与死信（0022）。产品语义已从「Confirm/Start 硬分离」更新为「快照启动 + 纠偏」（同上 DecisionNote）；发布审批仍独立且默认需要人类批准。
 - **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。该 flag 现受 §18.5 / MA-2 整体认证摘要约束（成员契约 + 五类 hash + 回归；摘要变更即旧认证失效）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
 - **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同、MAST 词表、成员契约、`ExecutionPlanItem` / `DispatchDecision`（迁移 `0039`）与模板认证回填（迁移 `0040`）。固定 Hive 候选必须通过五类摘要复算，opt-in 不得绕过 TaskFeatures 裁剪；Agent 生成主链已接入 todo 持久化、大结果卸载与压缩前 Transcript Artifact，固定 Hive 派工已接入过程审计。P2-4 仍是实验骨架，**P2-5 自适应拓扑仍禁止启用**。见 Plan §12。
   > **更正（2026-08-01 代码核查）**：MAST 失败码（`application/mast_failure.py`）已定义 9 码与 `classify_mast_failure`，但截至核查**尚未接入生产分类路径**（全库零生产引用，仅测试引用）；§18.4 要求的"轨迹引用 + 置信度 + 人工/离线复核"接入逻辑缺失，当前应视为"定义就绪、集成待 P2-4"，不得宣称已部署生效。另：PRD §12 原列 P2-3 Impact Graph / P2-5 AgentEnvelope HMAC / G0 ExternalOperation 核心闭环**均已实现**（见 `docs/registered-unimplemented-2026-07-30.md`），已从"未实现"清单移除，本 Spec 不再与 PRD 冲突。
-- **单 Agent 生成质量基线（GQ-0～GQ-4，2026-07-31）**：生成器元数据协议与 fail-closed 一致性；Worker 按 generation_strategy 分派；FailureEnvelope/RepairAttempt；独立生成策略实验合同；VerificationAgent pytest/项目测试与预算化修正；GQ-3/GQ-4 **控制流已实现**（标签：**已实现但默认不可启用** — canary_gate=False、canary_percent=0、代码默认 artifact-backed）。生产 .env 覆盖 ≠ GQ-4 晋级。GQ-3 真实流量窗与 GQ-4 DecisionRecord 仍待运维实验（见 docs/decision-note-gq4-pending-2026-07-31.md）。生产 CERTIFIED_HIVE opt-in **不扩容**。
+- **单 Agent 生成质量基线（GQ-0～GQ-4；状态更新 2026-08-01）**：生成器元数据协议与 fail-closed 一致性；Worker 按 generation_strategy 分派；FailureEnvelope/RepairAttempt；独立生成策略实验合同；VerificationAgent pytest/项目测试与预算化修正；GQ-3/GQ-4 **控制流已实现**。Settings **代码默认**仍 canary_gate=False、percent=0、artifact-backed。**生产 M6 已开 5% agentic canary**（§13.7.3；窗记录 `docs/m6-canary-window-2026-08-01.json`），**默认策略未翻转，GQ-4 DecisionRecord 仍 PENDING**（见 docs/decision-note-gq4-pending-2026-07-31.md）。生产 CERTIFIED_HIVE opt-in **不扩容**。
+- **Prompt cache / token 成本（2026-08-01）**：`ContextAssembler` 稳定前缀布局与 tree-only workspace、`cached_tokens` 解析与 ledger 累计、旧 write 参数 compact 已合入（§18.6）；观察命中率纳入 M6 成本护栏。
+- **交付缺口软暂停（2026-08-01）**：自动续跑 + soft-pause；watchdog 不造权限卡；Console 不对交付缺口渲染「总是允许」（§13.8.3 / PRD §4.3）。
 - **控制台前端**：React 19 + Vite + TS；SSE 自适应轮询；三栏布局；status.agents + live_action；GET /v1/app-projects/{id}/delivery-review 审阅面（plan/transcript/verification/budget）。
 - **桌面端（探索性）**：Tauri 骨架；未纳入 P0/P1 验收。
-- **交付状态机（CD-1，2026-07-31）**：decide_delivery_verdict **已接入** _apply_delivery_verdict；DeliveryRejection 类型化；goal_intent 早交人；AC1 门禁进 CI。
-- **下一步（CD-6…CD-12）**：**CD-6 代码侧已落地**（agent-exec 镜像、`--entrypoint sh`、`host_path_map` fail-closed、uid 对齐、T1–T6；见 `docs/cd6-execution-plan-2026-07-31.md`）。CD-7.1/7.4 已落地；7.2/7.3/7.5 与 GQ-3 窗仍待。权威：`docs/conversational-delivery-next-plan-2026-07-31.md`。生产 docker 三联未在目标主机验收前禁止开 canary。
+- **交付状态机（CD-1，2026-07-31）**：decide_delivery_verdict **已接入** _apply_delivery_verdict；DeliveryRejection 类型化；goal_intent 早交人；AC1 门禁进 CI；其后叠加快暂停与 watchdog（见上）。
+- **下一步**：**ACTIVE = M6 观察窗**（[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)）：开窗后切片指标、真实闭环、窗末 HOLD/EXPAND_10/ROLLBACK；成本护栏未过前不扩流量、不开 GQ-4。CD-6…12 与 agent-core 计划继续作为工程参照，但**不以「禁止一切 canary」为当前生产状态描述**。
 - **API 挂载（F-1 修复）**：human_tasks / uploads / webhooks / reports / public_deploy 已在 `api/main.py` `include_router`。
 
 ### 已知非阻塞限制
@@ -785,7 +807,8 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 | 标签 | 含义 |
 |---|---|
 | **已完成** | 生产路径可用且默认启用 |
-| **已实现但默认不可启用** | 控制流/代码就绪，须门禁或 DecisionRecord 后方可开流量（如 GQ-3/GQ-4） |
+| **已实现但默认不可启用** | 控制流/代码就绪，须门禁或 DecisionRecord 后方可开流量（如 **GQ-4 默认 agentic**） |
+| **小流量观察窗已开** | 代码默认仍关；生产经窗记录覆盖小比例 canary（如 **M6 5%**），不等于默认翻转 |
 | **门禁就绪，实验窗待运维** | 前置合规已满足代码侧；缺真实流量实验 |
 | **PENDING** | DecisionNote 未 ACCEPTED（如 GQ-4 晋级） |
 

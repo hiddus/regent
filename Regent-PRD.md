@@ -1,14 +1,14 @@
 # Regent 产品定义与需求文档
 
 > 状态：CURRENT  
-> 日期：2026-07-31（对话式交付 CD-0…5 闭环；下一步 CD-6…12 重订）  
+> 日期：2026-08-01（吸收 M6 5% canary 开窗、交付缺口软暂停、prompt-cache 成本修复）  
 > 性质：权威执行基线（Owner 批准）  
 > 配套技术规范：[`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md)  
 > 测量框架：[`Regent-Measurement-Decision-Framework.md`](./Regent-Measurement-Decision-Framework.md)  
 > 编码执行清单：[`Regent-Plan.md`](./Regent-Plan.md) §14；CD-0…5：[`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md)  
-> **下一步（ACTIVE）**：[`docs/conversational-delivery-next-plan-2026-07-31.md`](docs/conversational-delivery-next-plan-2026-07-31.md)（CD-6…12）；CD-6 执行级：[`docs/cd6-execution-plan-2026-07-31.md`](docs/cd6-execution-plan-2026-07-31.md)  
+> **下一步（ACTIVE）**：[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)（M6 观察窗）；内核：[`docs/agent-core-restoration-executable-plan-2026-08-01.md`](docs/agent-core-restoration-executable-plan-2026-08-01.md)  
 > 对齐审计：[`docs/doc-implementation-alignment-audit-2026-07-31.md`](docs/doc-implementation-alignment-audit-2026-07-31.md) §8  
-> 编码门禁：`P2StartDecisionRecord` 已签署 → **允许** `p2-scheduler-01`；**CD-6/7 未绿禁止生产 canary**
+> 编码门禁：`P2StartDecisionRecord` 已签署 → **允许** `p2-scheduler-01`；生产小比例 canary 须满足沙箱前置与窗记录；**GQ-4 默认切换仍禁止**（需独立 DecisionRecord）
 
 ---
 
@@ -152,7 +152,8 @@ regent/
 |---|---|---|
 | GoalSpec 需修订 | SUPERSEDED 旧版，新 DRAFT | 编辑后重新冻结 |
 | Evidence 不足或冲突 | RESEARCH_MORE / BLOCKED | 授权来源、绑定能力或停止 |
-| 人工审批节点 | WAITING_HUMAN + HumanTask | 批准 / 拒绝 / 超时 |
+| 人工审批节点（发布 / 质量 / 外部效应 / Permit） | WAITING_HUMAN + HumanTask | 批准 / 拒绝 / 超时；可对真确认卡使用「总是允许」 |
+| 交付缺口软暂停 / 进度停滞提示 | 对话提示 + `DELIVERY_SOFT_PAUSE`（或等价） | 用户补充方向后系统续跑，或停止；**非**审批卡 |
 | BLOCKED / UNKNOWN / 超预算 | 明确 failure_code | 对账、扩预算、取消 |
 | 暂停 / 恢复 / 取消 | PAUSED / ACTIVE / CANCELLED | 取消不回滚已发生副作用 |
 | Preview 拒绝 | 用户拒绝或 Journey 失败 | REVISE 或 STOP；保留证据 |
@@ -165,7 +166,8 @@ Web Console 是主交付面；下列为产品语义，不规定具体组件实�
 2. **参与 Agent 名册**：右侧主视图展示当前 Goal 的参与 Agent 及其活动状态（如主助手、Hive 角色），而不是以「汇总执行进度」作为默认主视图。产物与预览属于次要信息，需要时再展开。
 3. **与 Core 信号对齐**：名册与活动态应对齐 Core 提供的参与 Agent 列表及实时活动信号（含 live 活动摘要）；无列表时允许控制台用既有 Goal/组织信息做最小回退，但不得编造未部署的 Agent。Core 已在 guidance status 中提供 `agents` 时，控制台**必须**优先使用该列表，不得长期运行在推导回退分支。
 4. **可审阅交付物**：用户须能查看本轮改动摘要（文件/计划）、验证结论（含 smoke/测试日志摘要）与成本/剩余预算；仅预览 URL + zip 不足以宣称「完整交付」。
-5. **失败交人带答案**：自动恢复耗尽或需主观判断时，交人界面须提供 2–3 个可执行选项及大致代价（轮次/预算），不得只给「允许 / 拒绝」而把开放式难题甩回用户。
+5. **失败交人带答案**：当且仅当需要**真审批或主观产品判断**（发布、质量门、外部效应、Permit、goal_intent 等）时，交人界面须提供 2–3 个可执行选项及大致代价（轮次/预算），不得只给「允许 / 拒绝」而把开放式难题甩回用户。
+6. **人工介入边界（2026-08-01）**：人只处理权限与危险效应。交付缺口、进度停滞、自动修复耗尽后的软暂停属于**系统自愈 / 对话续跑**路径，不得要求用户点「允许」或「总是允许」才能继续。「总是允许」仅绑定真确认类 HumanTask；控制台不得对交付缺口 / 软暂停 / 纯进度停滞消息渲染该按钮。
 
 ### 4.4 对话式完整交付（新增需求）
 
@@ -182,6 +184,14 @@ Web Console 是主交付面；下列为产品语义，不规定具体组件实�
 5. **治理不降级**：沙箱内可逆效应可事后审计全速循环；不可逆/外部效应仍须前置 ExecutionPermit。不得为了顺滑删除 Outbox / Evidence / Audit / Reconciler。
 
 验收锚点（摘要；细节见统一开发计划 CD-3/CD-4）：用户一句话可触发多步执行；工具轨迹可观测；失败交人带选项与产物；交付物可审阅。
+
+### 4.5 边跑边想：方案可见与有限选项拍板（2026-08-02）
+
+> 产品方向见 [`docs/direction-note-run-think-learn-2026-08-02.md`](docs/direction-note-run-think-learn-2026-08-02.md)；切片执行见 [`docs/execution-plan-run-think-learn-2026-08-02.md`](docs/execution-plan-run-think-learn-2026-08-02.md)。与 C1 快照启动兼容：能自洽推演则可早开；推演不清时先拍板再 Start。
+
+1. **方案可见**：意图进入后，控制台展示拟议方案（理解、步骤、未知项），消息类型 `GOAL_PLAN_PROPOSED`，而非仅 JSON 元数据。
+2. **人辅助决断**：模型判定无法自洽推演时置 `needs_user_fork`，提供 2–4 个有限选项；用户选择后经 guidance `SELECT_OPTION` 写回 GoalSpec / metadata，再继续执行。无「澄清毕业门」。
+3. **失败即经验**：生成失败与交付缺口写入 `failure_lessons`，后续轮次注入 acceptance / 生成上下文；怕的不是花预算，是花了不沉淀经验。
 
 ---
 
@@ -417,9 +427,10 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 - 计划对象在 Worker 重启和上下文压缩后仍可恢复，至少保存状态、责任 Agent、依赖、完成证据和下一步；
 - 大于配置阈值的工具结果写入不可变 Artifact，消息仅保留引用、哈希和短预览；
 - 压缩前完整原文写入可检索 Artifact；压缩摘要必须结构化保留 Goal 意图、已产 Artifact、未决风险和下一步；
-- 压缩不得删除 Permit、约束、失败码、证据引用或用户尚未解决的决定。
+- 压缩不得删除 Permit、约束、失败码、证据引用或用户尚未解决的决定；
+- **前缀稳定性与成本（2026-08-01）**：同一次 Run 内，易变的 workspace / todos / 失败缺口不得破坏可缓存的稳定前缀；默认不把文件全文塞进每轮 prompt（按需 `read_file`）。产品与运维须能观测 prompt cache 命中（`cached_tokens`），区分「模型贵」与「拼装浪费」；成本护栏未达标前不得扩大 agentic 流量。
 
-这些能力是 Worker/Agent harness 的可靠性增强，不构成启用更多 Agent 的理由。
+这些能力是 Worker/Agent harness 的可靠性与成本增强，不构成启用更多 Agent 的理由。
 
 ### 10.5 单 Agent 生成闭环与质量基线
 
@@ -432,11 +443,13 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
 - artifact-backed 路径保留下游依赖构建、真实构建与部署后浏览器/smoke 验证，但反馈发生在较晚阶段、纠错成本高；必须补充**会话内、低延迟**的「运行—读错—修改」自纠正闭环（见 Tech-Spec §13.5）；
 - `VerificationAgent` 现有 `compileall` + 起服务 + 端点探测之外，应补充 pytest / 项目测试命令能力，并把真实构建、测试与 smoke 失败可靠回灌至同一次生成会话，而非仅由下游恢复流程处理（见 Tech-Spec §13.5、§13.6）；
 - 将 `agentic` 设为默认前，必须以隔离影子任务或小比例 canary 对照 artifact-backed 与 agentic，在预注册的代表性冻结任务集上比较成功率、成本、延迟、首次可运行率、修正轮次和人工介入率；门槛、样本量、停止规则与安全护栏必须在实验前冻结（见 Tech-Spec §13.7、Plan §13）；
-- GQ-3 canary 必须经强制控制流启用：canary 仅当 `generation_strategy_canary_gate=True`（GQ-2 反馈闭环验证后）**且** `canary_percent>0` 时，按 `stable_canary_bucket(goal_id)` 对**具体 goal** 选 `agentic` 生成器；`canary_rollout_allowed` 在策略解析中强制 GQ-2→GQ-3 顺序，闸门默认 False（见 Tech-Spec §13.7、§13.4）；
+- GQ-3 / M6 canary 必须经强制控制流启用：canary 仅当 `generation_strategy_canary_gate=True`（GQ-2 反馈闭环验证后）**且** `canary_percent>0` 时，按 `stable_canary_bucket(goal_id)` 对**具体 goal** 选 `agentic` 生成器；`canary_rollout_allowed` 在策略解析中强制 GQ-2→GQ-3 顺序；**Settings 代码默认** gate=False、percent=0（见 Tech-Spec §13.7、§13.4）；
+- **M6 受控 canary（产品状态，2026-08-01）**：在沙箱前置满足后，运维可打开**小比例**（当前生产 **5%**）agentic canary，**默认策略仍为 artifact-backed**。观察窗目标为 7 天或 100 新 Goal（先到为准），窗末仅可 HOLD / 扩至 10% / 回滚；**不等于 GQ-4**。soft-pass、单次 demo 或开窗前历史流量**不得**宣称 M6 出口达标。权威窗记录与观察计划：`docs/m6-canary-window-2026-08-01.json`、`docs/m6-canary-watch-plan-2026-08-01.md`；
 - **GQ-3 合规前置**：agent 工具循环必须在独立 sandbox 内执行（不得在持有 DB/Provider 凭据的 worker 宿主上 `subprocess` 跑白名单命令）。不满足则**禁止**打开 canary / 影子流量，即使控制流代码已就绪（见 Tech-Spec §13.8、统一计划 CD-0）；
 - 固定 Hive 的净收益目前未经真实任务实验确认，既不应假定必然改善，也不应假定必然放大；固定 Hive 与自适应组织的评估必须建立在上述强单 Agent 基线之上（见 Plan §13）。
-- GQ-4 默认切换必须经强制控制流：运行 GQ-3 实验后，唯有 `gq4_default_switch_gate` 判定 `PROMOTE_AGENTIC_CANDIDATE` 且无 kill switch 时，`apply_gq4_promotion` 才允许晋级；未通过则 `DomainError` 阻止翻转 `generation_strategy`。运行时默认仍由 `generation_strategy` 驱动，kill switch 始终覆盖。晋级须形成 DecisionRecord（见 Tech-Spec §13.7、Plan §13）。
-- **运维 `.env` 覆盖 `REGENT_GENERATION_STRATEGY=agentic` 不等于 GQ-4 晋级**，也不得替代上述沙箱前置与实验窗。
+- GQ-4 默认切换必须经强制控制流：运行对照实验后，唯有 `gq4_default_switch_gate` 判定 `PROMOTE_AGENTIC_CANDIDATE` 且无 kill switch 时，`apply_gq4_promotion` 才允许晋级；未通过则 `DomainError` 阻止翻转 `generation_strategy`。运行时默认仍由 `generation_strategy` 驱动，kill switch 始终覆盖。晋级须形成 DecisionRecord（见 Tech-Spec §13.7、Plan §13）。
+- **运维 `.env` 覆盖 `REGENT_GENERATION_STRATEGY=agentic` 不等于 GQ-4 晋级**，也不得替代上述沙箱前置与实验窗；打开小比例 canary 同样不等于默认策略翻转。
+- **模型 thinking 模式**属运维/成本旋钮（默认关闭），不是面向用户的功能承诺；开启须可配置且预算可观测（见 Tech-Spec）。
 
 ---
 

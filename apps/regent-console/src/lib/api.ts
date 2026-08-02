@@ -106,6 +106,7 @@ export const api = {
   getPlanItems: (goalId: string) =>
     request<PlanItem[]>(`/v1/goals/${goalId}/plan-items`),
 
+  /** TRANSITIONAL: metadata ring buffers — not durable event truth. */
   getGoalActivity: (goalId: string) =>
     request<{
       events: ActivityEvent[]
@@ -113,6 +114,7 @@ export const api = {
       live_action?: Record<string, unknown> | null
     }>(`/v1/goals/${goalId}/activity`),
 
+  /** TRANSITIONAL: in-process subagent roster may be empty after worker restart. */
   getGoalAgents: (goalId: string) =>
     request<RuntimeAgent[]>(`/v1/goals/${goalId}/agents`),
 

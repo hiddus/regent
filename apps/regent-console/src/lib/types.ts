@@ -82,6 +82,9 @@ export interface DraftResult {
   project: Project
   conversation_id: string
   goal_id: string
+  plan?: Record<string, unknown>
+  needs_user_fork?: boolean
+  auto_started?: boolean
 }
 
 export interface GuidanceResult {

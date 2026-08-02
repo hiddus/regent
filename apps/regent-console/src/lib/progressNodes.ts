@@ -52,6 +52,8 @@ const STAGES: StageDef[] = [
     events: {
       APP_CONFIRMATION_REQUIRED: { status: 'waiting', conclusion: '已初步理解你的产品想法' },
       GOAL_UNDERSTANDING_READY: { status: 'running', conclusion: '正在探索你的产品方向' },
+      GOAL_PLAN_PROPOSED: { status: 'running', conclusion: '已给出拟议方案' },
+      FORK_SELECTED: { status: 'running', conclusion: '已记录你的方向选择' },
       GOAL_CONFIRMED: { status: 'done', conclusion: '产品方向已确认' },
       GOAL_EXECUTION_QUEUED: { status: 'done', conclusion: '产品方向已确认并开始执行' },
       CORRECTION_APPLIED: { status: 'running', conclusion: '已记录你的补充，继续完善方案' },
@@ -184,6 +186,7 @@ const STATUS_RANK: Record<NodeStatus, number> = {
 
 const INTERACTIVE_TASK_TYPES = new Set([
   'APP_CONFIRMATION_REQUIRED',
+  'GOAL_PLAN_PROPOSED',
   'HUMAN_TASK_REQUIRED',
   'DELIVERY_GAP_EXHAUSTED',
   'BUILD_DELIVERY_GAP_EXHAUSTED',
@@ -191,6 +194,7 @@ const INTERACTIVE_TASK_TYPES = new Set([
   'CORRECTION_APPLIED',
   'APPROVE_RESULT',
   'REJECT_RESULT',
+  'FORK_SELECTED',
 ])
 
 export function isProgressEvent(m: Message): boolean {

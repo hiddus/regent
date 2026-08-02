@@ -283,6 +283,12 @@ class ExecutionOrchestrator:
                     ErrorCode.INVALID_STATE,
                     f"{FAILURE_GOAL_NOT_ACTIVE}: goal status is {goal.status}",
                 )
+            goal_meta = dict(goal.metadata_json or {})
+            if goal_meta.get("needs_user_fork"):
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "goal awaits user fork selection; refusing execution",
+                )
 
             spec = await session.scalar(
                 select(GoalSpecModel)
@@ -1231,6 +1237,11 @@ class ExecutionOrchestrator:
         async with self._sessions() as session:
             revision = await session.get(RequirementRevisionModel, requirement_id)
             goal = await session.get(GoalModel, goal_id)
+            if goal is not None and dict(goal.metadata_json or {}).get("needs_user_fork"):
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "goal awaits user fork selection; refusing generation",
+                )
             spec = await session.scalar(
                 select(GoalSpecModel)
                 .where(GoalSpecModel.goal_id == goal_id)
@@ -1400,9 +1411,11 @@ class ExecutionOrchestrator:
 
         # Failure-driven learning: always inject prior lessons when present so
         # plan digest changes and the generator sees concrete constraints.
-        failure_lessons = list(goal_meta.get("failure_lessons") or [])
+        from regent.application.goal_runtime_plan import lessons_for_acceptance
+
+        failure_lessons = lessons_for_acceptance(goal_meta, limit=8)
         if failure_lessons:
-            acceptance_contract["failure_lessons"] = failure_lessons[-8:]
+            acceptance_contract["failure_lessons"] = failure_lessons
         # Always surface latest gap reasons (not only attainment policy path).
         prior_gaps = list(
             goal_meta.get("delivery_gap_reasons") or payload.get("gap_reasons") or []
@@ -4413,29 +4426,49 @@ class ExecutionOrchestrator:
                     },
                 )
                 goal = await session.get(GoalModel, goal_id)
-                if goal is not None and draft_uri:
-                    meta = dict(goal.metadata_json or {})
-                    meta["last_good_draft_uri"] = str(draft_uri)
-                    # R1: failure path warm-start — snapshot so REVISE is not cold.
-                    try:
-                        from regent.agent.accepted_workspace import (
-                            write_recoverable_workspace_snapshot,
-                        )
-                        from regent.config import get_settings
+                if goal is not None:
+                    from regent.application.goal_runtime_plan import append_failure_lesson
 
-                        draft_path = self._local_path_from_uri(str(draft_uri))
-                        if draft_path is not None and draft_path.is_dir():
-                            meta["last_recoverable_workspace_uri"] = (
-                                write_recoverable_workspace_snapshot(
-                                    draft_path,
-                                    Path(get_settings().workspace_root),
-                                    reason=str(error_code or "generation_failed"),
-                                )
+                    meta = dict(goal.metadata_json or {})
+                    meta = append_failure_lesson(
+                        meta,
+                        code=str(error_code or "GENERATION_FAILED"),
+                        summary=summary[:400],
+                        avoid=(
+                            "下次生成须避开本轮失败模式；优先采用 failure_lessons "
+                            "与 learned_constraints 中的约束"
+                        ),
+                        gap_kind="generation",
+                        extra={
+                            "generation_run_id": (
+                                str(generation_run_id) if generation_run_id else None
+                            ),
+                            "plan_id": str(plan_id) if plan_id else None,
+                            "reasons": reasons[:8],
+                        },
+                    )
+                    if draft_uri:
+                        meta["last_good_draft_uri"] = str(draft_uri)
+                        # R1: failure path warm-start — snapshot so REVISE is not cold.
+                        try:
+                            from regent.agent.accepted_workspace import (
+                                write_recoverable_workspace_snapshot,
                             )
-                        else:
+                            from regent.config import get_settings
+
+                            draft_path = self._local_path_from_uri(str(draft_uri))
+                            if draft_path is not None and draft_path.is_dir():
+                                meta["last_recoverable_workspace_uri"] = (
+                                    write_recoverable_workspace_snapshot(
+                                        draft_path,
+                                        Path(get_settings().workspace_root),
+                                        reason=str(error_code or "generation_failed"),
+                                    )
+                                )
+                            else:
+                                meta["last_recoverable_workspace_uri"] = str(draft_uri)
+                        except Exception:
                             meta["last_recoverable_workspace_uri"] = str(draft_uri)
-                    except Exception:
-                        meta["last_recoverable_workspace_uri"] = str(draft_uri)
                     goal.metadata_json = meta
                     flag_modified(goal, "metadata_json")
         except Exception:

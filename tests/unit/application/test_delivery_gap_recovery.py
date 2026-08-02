@@ -612,6 +612,10 @@ def test_build_failure_lesson_and_constraints_absorb_deploy_gap() -> None:
     assert lesson["lesson_digest"]
     assert lesson["last_error"] == "boom"
     assert "stylesheet-present: missing" in lesson["gap_reasons"]
+    assert lesson.get("summary")
+    assert "stylesheet-present" in lesson["summary"] or "deployment-failed" in lesson["summary"]
+    assert lesson.get("avoid")
+    assert lesson.get("code", "").startswith("DELIVERY_GAP_")
 
 
 @pytest.mark.asyncio

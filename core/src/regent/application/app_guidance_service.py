@@ -102,6 +102,7 @@ class GuidanceInterpretation(BaseModel):
         "CORRECT",
         "APPROVE",
         "REJECT",
+        "SELECT_OPTION",
     ] = Field(
         description=(
             "QUERY: read status/history. "
@@ -112,7 +113,8 @@ class GuidanceInterpretation(BaseModel):
             "CORRECT: lightweight mid-execution correction (e.g. 'use REST not GraphQL', "
             "'add dark mode', 'change the API response format'). Creates a newer GoalSpec snapshot without requiring confirmation. "
             "APPROVE: approve a pending gate or human task. "
-            "REJECT: reject a pending gate result, trigger revision."
+            "REJECT: reject a pending gate result, trigger revision. "
+            "SELECT_OPTION: user chose a pending fork option (set selected_option_id)."
         )
     )
     summary: str = Field(min_length=1)
@@ -137,6 +139,11 @@ class GuidanceInterpretation(BaseModel):
     )
     # APPROVE/REJECT fields
     rejection_reason: str | None = None
+    # SELECT_OPTION fields (run-think-learn L2)
+    selected_option_id: str | None = Field(
+        default=None,
+        description="Id of pending fork_options entry the user selected",
+    )
     # CD-4.1: bounded chaining — optional immediate follow-up command executed
     # within the same guide() call (e.g. QUERY to clarify state, then CONTINUE to
     # resume execution). See AppGuidanceService._MAX_GUIDANCE_STEPS.
@@ -149,6 +156,7 @@ class GuidanceInterpretation(BaseModel):
         "CORRECT",
         "APPROVE",
         "REJECT",
+        "SELECT_OPTION",
     ] | None = Field(
         default=None,
         description=(
@@ -213,6 +221,7 @@ class AppGuidanceService:
             "CORRECT": self._handle_correct,
             "APPROVE": self._handle_approve,
             "REJECT": self._handle_reject,
+            "SELECT_OPTION": self._handle_select_option,
         }
 
     _TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -224,6 +233,7 @@ class AppGuidanceService:
         "CORRECT": "Apply a lightweight mid-execution correction (no new revision).",
         "APPROVE": "Approve a pending human task / gate.",
         "REJECT": "Reject a pending human task / gate, trigger revision.",
+        "SELECT_OPTION": "Choose a pending fork option so execution can proceed.",
     }
 
     def available_tools(self) -> list[ToolSpec]:
@@ -252,6 +262,22 @@ class AppGuidanceService:
     async def guide(self, project_id: uuid.UUID, *, message: str, actor: str) -> GuidanceReceipt:
         context = await self._context(project_id)
         history = await self._conversation_history(project_id, limit=10)
+
+        # L2: pending fork — match option id/label before LLM (deterministic).
+        goal_meta = dict((context.get("goal") or {}).get("metadata") or {})
+        if goal_meta.get("needs_user_fork"):
+            matched = _match_fork_option(
+                message, list(goal_meta.get("pending_fork_options") or [])
+            )
+            if matched is not None:
+                interpretation = GuidanceInterpretation(
+                    command_type="SELECT_OPTION",
+                    summary=f"选择方案：{matched.get('label') or matched.get('id')}",
+                    selected_option_id=str(matched.get("id") or ""),
+                )
+                return await self._dispatch(
+                    project_id, message, actor, interpretation, "regent-core:fork-match"
+                )
 
         generated = await self._provider.generate_structured(
             system_prompt=self._system_prompt(context, history),
@@ -359,6 +385,12 @@ class AppGuidanceService:
                 "the user message becomes the resume guidance. Use CORRECT only when there "
                 "is no pending task. Pure status questions remain QUERY."
             )
+        goal_meta = dict((context.get("goal") or {}).get("metadata") or {})
+        if goal_meta.get("needs_user_fork"):
+            parts.append(
+                "Hint: needs_user_fork is true — if the user picks a fork option, "
+                "use SELECT_OPTION with selected_option_id."
+            )
 
         parts.extend([
             "",
@@ -374,6 +406,7 @@ class AppGuidanceService:
             "Set correction_target and correction_detail fields.",
             "- APPROVE: user says 'approve', 'looks good', 'accept', 'yes'. Approves pending gate/human task.",
             "- REJECT: user says 'reject', 'no', 'wrong', 'this is not right'. Rejects pending gate, triggers revision.",
+            "- SELECT_OPTION: user chose a pending fork option; set selected_option_id.",
             "",
             "For CORRECT, always set correction_target (one of: requirements, design, api, constraints, behavior, other) "
             "and correction_detail (the specific change requested).",
@@ -2126,3 +2159,161 @@ class AppGuidanceService:
             idempotency_key=f"guidance-modify:{command_id}",
         )
         return GuidanceReceipt(command_id, "MODIFY", goal_id, False, interpretation.summary)
+
+    async def _handle_select_option(
+        self,
+        project_id: uuid.UUID,
+        message: str,
+        actor: str,
+        interpretation: GuidanceInterpretation,
+        model: str,
+    ) -> GuidanceReceipt:
+        """Apply a pending fork choice, clear the gate, and start if still DRAFT."""
+        context = await self._context(project_id)
+        goal_id = uuid.UUID(str(context["goal"]["id"]))
+        meta = dict((context.get("goal") or {}).get("metadata") or {})
+        options = list(meta.get("pending_fork_options") or [])
+        option_id = (interpretation.selected_option_id or "").strip()
+        chosen = next(
+            (o for o in options if isinstance(o, dict) and str(o.get("id")) == option_id),
+            None,
+        )
+        if chosen is None:
+            chosen = _match_fork_option(message, options)
+        if chosen is None:
+            labels = ", ".join(
+                str(o.get("label") or o.get("id")) for o in options if isinstance(o, dict)
+            )
+            response = f"未识别到有效选项。请从以下方向中选择其一：{labels}"
+            return await self._persist_simple(
+                project_id, message, actor, interpretation, model, response
+            )
+
+        command_id = uuid.uuid4()
+        should_start = False
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "goal not found")
+            metadata = dict(goal.metadata_json or {})
+            metadata["needs_user_fork"] = False
+            metadata["pending_fork_options"] = []
+            metadata["selected_fork"] = {
+                "id": str(chosen.get("id")),
+                "label": str(chosen.get("label") or ""),
+                "description": str(chosen.get("description") or ""),
+                "actor": actor,
+                "at": datetime.now(UTC).isoformat(),
+            }
+            metadata["goal_clarity_state"] = "FORK_RESOLVED"
+            plan = dict(metadata.get("runtime_plan") or {})
+            plan["needs_user_fork"] = False
+            plan["selected_fork"] = metadata["selected_fork"]
+            metadata["runtime_plan"] = plan
+
+            latest_spec = await session.scalar(
+                select(GoalSpecModel)
+                .where(GoalSpecModel.goal_id == goal_id)
+                .order_by(GoalSpecModel.version.desc())
+                .with_for_update()
+            )
+            if latest_spec is not None:
+                constraints = dict(latest_spec.explicit_constraints or {})
+                constraints["selected_fork_id"] = str(chosen.get("id"))
+                constraints["selected_fork_label"] = str(chosen.get("label") or "")
+                inferences = dict(latest_spec.system_inferences or {})
+                inferences["selected_fork"] = metadata["selected_fork"]
+                spec_content = {
+                    "explicit_constraints": constraints,
+                    "system_inferences": inferences,
+                    "unknowns": list(latest_spec.unknowns or []),
+                    "success_criteria": dict(latest_spec.success_criteria or {}),
+                    "source_refs": [
+                        *list(latest_spec.source_refs or []),
+                        {"type": "fork_selection", "id": str(chosen.get("id"))},
+                    ],
+                }
+                latest_spec.status = "SUPERSEDED"
+                next_spec = GoalSpecModel(
+                    id=uuid.uuid4(),
+                    goal_id=goal_id,
+                    version=latest_spec.version + 1,
+                    status="DRAFT" if goal.status == "DRAFT" else "FROZEN",
+                    content_hash=canonical_hash(spec_content),
+                    confirmed_by=(
+                        None if goal.status == "DRAFT" else "regent-core:fork-selection"
+                    ),
+                    confirmed_at=None if goal.status == "DRAFT" else datetime.now(UTC),
+                    **spec_content,
+                )
+                session.add(next_spec)
+                metadata["latest_goal_spec_version"] = next_spec.version
+
+            goal.metadata_json = metadata
+            flag_modified(goal, "metadata_json")
+            should_start = goal.status == "DRAFT"
+
+            conversation = await self._conversation(session, project_id)
+            ordinal = await self._next_ordinal(session, conversation.id)
+            label = str(chosen.get("label") or chosen.get("id"))
+            user_msg = await self._persist_message_pair(
+                session,
+                conversation.id,
+                ordinal,
+                message,
+                actor,
+                f"已记录你的选择：{label}。将按该方向继续推进。",
+                "FORK_SELECTED",
+                {
+                    "command_id": str(command_id),
+                    "goal_id": str(goal_id),
+                    "selected_fork": metadata["selected_fork"],
+                },
+            )
+            cid = await self._persist_command(
+                session,
+                conversation.id,
+                project_id,
+                user_msg.id,
+                "SELECT_OPTION",
+                interpretation,
+                model,
+                actor,
+            )
+            command_id = cid
+
+        if should_start:
+            await GoalExecutionService(self._sessions).start(
+                goal_id,
+                actor=actor,
+                idempotency_key=f"fork-start:{goal_id}:{chosen.get('id')}",
+            )
+        return GuidanceReceipt(
+            command_id,
+            "SELECT_OPTION",
+            goal_id,
+            False,
+            f"已选择：{chosen.get('label') or chosen.get('id')}",
+        )
+
+
+def _match_fork_option(
+    message: str, options: list[Any]
+) -> dict[str, Any] | None:
+    text = (message or "").strip()
+    if not text or not options:
+        return None
+    lowered = text.lower()
+    # Exact id / "option:id" / bare index 1..n
+    for idx, raw in enumerate(options):
+        if not isinstance(raw, dict):
+            continue
+        oid = str(raw.get("id") or "").strip()
+        label = str(raw.get("label") or "").strip()
+        if oid and (lowered == oid.lower() or f"option:{oid.lower()}" in lowered):
+            return raw
+        if label and (label.lower() in lowered or lowered in label.lower()):
+            return raw
+        if lowered in {str(idx + 1), f"选项{idx + 1}", f"方案{idx + 1}"}:
+            return raw
+    return None

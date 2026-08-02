@@ -20,6 +20,12 @@ from regent.infrastructure.models import (
 from regent.model import ModelProvider, ModelUsage
 
 
+class ForkOptionUnderstanding(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=400)
+
+
 class ProductUnderstanding(BaseModel):
     app_name: str = Field(min_length=1, max_length=120)
     product_intent: str = Field(min_length=1)
@@ -30,6 +36,10 @@ class ProductUnderstanding(BaseModel):
     explicit_constraints: dict[str, str | int | float | bool] = Field(default_factory=dict)
     non_goals: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
+    # run-think-learn L1/L2: model-proposed steps + self-assessed clarity
+    proposed_steps: list[str] = Field(default_factory=list)
+    deduction_clear: bool = True
+    fork_options: list[ForkOptionUnderstanding] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +51,8 @@ class AppProjectDraftReceipt:
     understanding: ProductUnderstanding
     model: str
     usage: ModelUsage
+    runtime_plan: dict
+    needs_user_fork: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,17 +72,37 @@ class AppProjectService:
         self._provider = provider
 
     async def create_draft(self, *, idea: str, actor: str) -> AppProjectDraftReceipt:
+        from regent.application.goal_runtime_plan import build_runtime_plan
+
         response = await self._provider.generate_structured(
             system_prompt=(
                 "Turn the product idea into a concise provisional understanding. Do not "
                 "invent user constraints. Preserve ambiguity as explicit unknowns. Success "
-                "criteria must be externally "
-                "observable. Keep the first deliverable small enough for a preview validation."
+                "criteria must be externally observable. Keep the first deliverable small "
+                "enough for a preview validation.\n"
+                "Also fill proposed_steps (3-6 human-like steps). "
+                "Set deduction_clear=true only if you can self-consistently deduce an "
+                "executable path; otherwise deduction_clear=false and provide 2-4 "
+                "fork_options (id/label/description) for the user to choose."
             ),
             user_prompt=idea,
             response_model=ProductUnderstanding,
         )
         understanding = response.output
+        runtime_plan = build_runtime_plan(
+            app_name=understanding.app_name,
+            product_intent=understanding.product_intent,
+            target_users=understanding.target_users,
+            problem=understanding.problem,
+            first_deliverable=understanding.first_deliverable,
+            success_criteria=dict(understanding.success_criteria),
+            unknowns=list(understanding.unknowns),
+            proposed_steps=list(understanding.proposed_steps),
+            deduction_clear=bool(understanding.deduction_clear),
+            fork_options=[o.model_dump() for o in understanding.fork_options],
+            non_goals=list(understanding.non_goals),
+        )
+        needs_user_fork = bool(runtime_plan["needs_user_fork"])
         project_id, goal_id, spec_id, conversation_id = (uuid.uuid4() for _ in range(4))
         correlation_id = uuid.uuid4()
         constraints = {
@@ -86,6 +118,8 @@ class AppProjectService:
                 "target_users": understanding.target_users,
                 "problem": understanding.problem,
                 "first_deliverable": understanding.first_deliverable,
+                "proposed_steps": runtime_plan["proposed_steps"],
+                "runtime_plan": runtime_plan,
             },
             "unknowns": unknowns,
             "success_criteria": understanding.success_criteria,
@@ -111,6 +145,9 @@ class AppProjectService:
                 "problem": understanding.problem,
                 "first_deliverable": understanding.first_deliverable,
                 "understanding_model": response.model,
+                "runtime_plan": runtime_plan,
+                "needs_user_fork": needs_user_fork,
+                "pending_fork_options": runtime_plan.get("fork_options") or [],
             },
         )
         spec = GoalSpecModel(
@@ -129,6 +166,16 @@ class AppProjectService:
             created_by=actor,
             metadata_json={"type": "APP"},
         )
+        if needs_user_fork:
+            assistant_content = (
+                "我已形成第一版方案，但还有关键分叉需要你辅助决断。"
+                "请选择一个方向后，我会按该路径继续推进。"
+            )
+        else:
+            assistant_content = (
+                "我已形成第一版产品方案，并将基于当前理解开始探索。"
+                "你可以随时补充或修正目标。"
+            )
         messages = (
             ConversationMessageModel(
                 id=uuid.uuid4(),
@@ -145,11 +192,8 @@ class AppProjectService:
                 conversation_id=conversation_id,
                 ordinal=2,
                 role="ASSISTANT",
-                message_type="GOAL_UNDERSTANDING_READY",
-                content=(
-                    "我已形成第一版产品理解, 并将基于当前信息开始探索。"
-                    "你可以随时补充或修正目标。"
-                ),
+                message_type="GOAL_PLAN_PROPOSED",
+                content=assistant_content,
                 metadata_json={
                     "app_project_id": str(project_id),
                     "goal_id": str(goal_id),
@@ -158,6 +202,8 @@ class AppProjectService:
                     "goal_spec_version": spec.version,
                     "goal_spec_status": spec.status,
                     "understanding": understanding.model_dump(mode="json"),
+                    "plan": runtime_plan,
+                    "needs_user_fork": needs_user_fork,
                 },
                 created_by="regent-core",
             ),
@@ -167,7 +213,15 @@ class AppProjectService:
             await session.flush()
             session.add_all(messages)
         return AppProjectDraftReceipt(
-            project, goal, spec, conversation, understanding, response.model, response.usage
+            project,
+            goal,
+            spec,
+            conversation,
+            understanding,
+            response.model,
+            response.usage,
+            runtime_plan,
+            needs_user_fork,
         )
 
     async def list_projects(self, *, limit: int = 100) -> list[AppProjectModel]:
