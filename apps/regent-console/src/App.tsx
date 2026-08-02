@@ -211,6 +211,7 @@ export default function App() {
           onConfirm={handleConfirm}
           onSelectOption={handleSelectOption}
           onTaskAction={handleTaskAction}
+          onInspectSource={() => setArtifactPanelOpen(true)}
         />
         <div ref={messagesEndRef} />
         <Composer

@@ -1200,6 +1200,72 @@ class AppGuidanceService:
                     "已记录停止请求。目标保持暂停；如需恢复请再发继续指令。",
                 )
 
+            # RecoveryCard primary actions → new Attempt from snapshot (never revive old run).
+            continue_from_snap = any(
+                key in msg_l
+                for key in (
+                    "continue_from_snapshot",
+                    "option:continue_current",
+                    "option:continue_budget",
+                    "继续修复",
+                )
+            )
+            revise_scope = any(
+                key in msg_l
+                for key in (
+                    "revise_scope",
+                    "option:narrow_scope",
+                    "缩小范围",
+                )
+            )
+            if continue_from_snap or revise_scope:
+                direction = (
+                    "缩小范围：先交付核心页面与主流程；"
+                    if revise_scope
+                    else "从已保存快照继续修复当前版本；"
+                )
+                human_msg = f"{direction} {message}".strip()
+                if goal_status == "WAITING_HUMAN":
+                    goal_version = int(context["goal"].get("version", 0))
+                    try:
+                        await TransitionService(self._sessions).transition_goal(
+                            TransitionContext(
+                                aggregate_id=goal_id,
+                                expected_version=goal_version,
+                                actor=actor,
+                                correlation_id=uuid.uuid4(),
+                            ),
+                            GoalCommand.HUMAN_RESOLVED,
+                        )
+                    except DomainError as exc:
+                        return await self._persist_simple(
+                            project_id,
+                            message,
+                            actor,
+                            interpretation,
+                            model,
+                            f"无法续跑：{exc.message}",
+                        )
+                recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    actor=actor,
+                    human_message=human_msg,
+                )
+                response = (
+                    "已从保存的快照开新一轮修复"
+                    f"（{recovery.method}）。不会复活旧 Run。"
+                    if recovery.recovered
+                    else (
+                        f"已尝试从快照续跑：{recovery.message}"
+                        if recovery.message
+                        else "已收到继续修复请求。"
+                    )
+                )
+                return await self._persist_simple(
+                    project_id, message, actor, interpretation, model, response
+                )
+
             if goal_status == "WAITING_HUMAN":
                 goal_version = int(context["goal"].get("version", 0))
                 try:

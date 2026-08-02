@@ -66,6 +66,7 @@ function MessageItem({
   m,
   movingGoals,
   resolved,
+  currentProjectId,
   onConfirm,
   onSelectOption,
   onTaskAction,
@@ -74,6 +75,7 @@ function MessageItem({
   m: Message
   movingGoals: Set<string>
   resolved: boolean
+  currentProjectId?: string | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
@@ -172,10 +174,14 @@ function MessageItem({
           <RecoveryCard
             delivery={diagnosticDelivery}
             summary={m.content}
-            projectId={String(m.metadata?.app_project_id || '')}
+            projectId={String(
+              m.metadata?.app_project_id || currentProjectId || '',
+            )}
             onInspect={onInspectSource}
             onAction={(action, label) => {
-              const pid = m.metadata?.app_project_id as string
+              const pid = String(
+                m.metadata?.app_project_id || currentProjectId || '',
+              )
               if (pid) onSelectOption?.(pid, action, label)
             }}
           />
@@ -187,13 +193,17 @@ function MessageItem({
             canConfirm={isAwaiting}
             needsUserFork={showForkActions}
             onConfirm={() => {
-              const pid = m.metadata?.app_project_id as string
+              const pid = String(
+                m.metadata?.app_project_id || currentProjectId || '',
+              )
               const gid = m.metadata?.goal_id as string
               const hash = (m.metadata?.goal_spec_hash as string) || ''
               onConfirm(pid, gid, hash)
             }}
             onSelectOption={(optionId, label) => {
-              const pid = m.metadata?.app_project_id as string
+              const pid = String(
+                m.metadata?.app_project_id || currentProjectId || '',
+              )
               if (pid) onSelectOption?.(pid, optionId, label)
             }}
           />
@@ -223,6 +233,7 @@ function MessageItem({
 
 export function MessageList({
   messages,
+  currentProjectId,
   goalStatus,
   onConfirm,
   onSelectOption,
@@ -279,6 +290,7 @@ export function MessageList({
               m={item.message}
               movingGoals={movingGoals}
               resolved={resolved}
+              currentProjectId={currentProjectId}
               onConfirm={onConfirm}
               onSelectOption={onSelectOption}
               onTaskAction={onTaskAction}

@@ -936,6 +936,7 @@ class DeliveryGapRecoveryService:
             content=public.get("summary") or summary,
             metadata={
                 "goal_id": str(goal.id),
+                "app_project_id": str(project_id),
                 "attempts": attempts,
                 "gap_reasons": reasons,
                 "gap_kind": gap_kind,
