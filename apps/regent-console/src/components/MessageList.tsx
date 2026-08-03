@@ -360,6 +360,12 @@ export function MessageList({
   const resultBundle = (agentLoopExit?.result_bundle || null) as Record<string, unknown> | null
   const showResultCard = exitKind === 'COMPLETE' || exitKind === 'STOP'
 
+  // Must run before any early return — hooks order must be stable.
+  const timeline = useMemo(
+    () => collapseRetryClusters(buildTimeline(messages, extras)),
+    [messages, extras],
+  )
+
   if (messages.length === 0 && !showPinnedRecovery && !showResultCard) {
     return (
       <section className="messages">
@@ -386,10 +392,6 @@ export function MessageList({
     )
   }
 
-  const timeline = useMemo(
-    () => collapseRetryClusters(buildTimeline(messages, extras)),
-    [messages, extras],
-  )
   const liveMode = !goalStatus || ['ACTIVE', 'WAITING_HUMAN', 'PAUSED', 'READY', 'BLOCKED', 'EXHAUSTED'].includes(goalStatus)
 
   // Last unsettled progress node stays detailed; older settled ones compress (Claude/Cursor).

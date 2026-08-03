@@ -8,13 +8,10 @@ const RETRY_SURFACE_TYPES = new Set([
 ])
 
 export function isRetrySurfaceMessage(m: Message): boolean {
+  const t = String(m.message_type || '')
   if (m.role !== 'ASSISTANT' && m.role !== 'EVENT') return false
-  if (RETRY_SURFACE_TYPES.has(m.message_type)) return true
-  return (
-    m.role === 'ASSISTANT' &&
-    m.message_type.endsWith('_FAILED') &&
-    m.message_type !== 'GOAL_FAILED'
-  )
+  if (RETRY_SURFACE_TYPES.has(t)) return true
+  return m.role === 'ASSISTANT' && t.endsWith('_FAILED') && t !== 'GOAL_FAILED'
 }
 
 /** Stable key for "same failure" across retries (ignore attempt counters). */
