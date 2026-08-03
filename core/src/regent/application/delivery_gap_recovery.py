@@ -785,6 +785,21 @@ class DeliveryGapRecoveryService:
                     gap_reasons=reasons,
                     ask_type="doom_loop" if stop_reason.startswith("doom_loop") else "delivery_gap",
                 )
+            # H1.5: surface which plan item is blocking.
+            try:
+                from regent.application.execution_plan import ExecutionPlanService
+                from regent.application.work_plan import current_blocked_item_key
+
+                plan_views = await ExecutionPlanService(self._sessions).list_items(goal.id)
+                blocked = current_blocked_item_key([i.as_dict() for i in plan_views])
+                if ask is not None and blocked:
+                    ask = dict(ask)
+                    ask["blocked_item_key"] = blocked
+                    ask["question"] = (
+                        f"{ask.get('question') or ''}\n（卡在清单项: {blocked}）"
+                    )[:800]
+            except Exception:
+                pass
         exit_payload = build_exit(
             exit_kind=exit_kind,  # type: ignore[arg-type]
             stop_reason=stop_reason,

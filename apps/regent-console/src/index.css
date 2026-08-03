@@ -1034,6 +1034,34 @@ body {
   color: var(--muted);
   text-transform: none;
 }
+.timeline-lane {
+  margin-bottom: 10px;
+}
+.timeline-lane-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.timeline-bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.timeline-bar {
+  display: grid;
+  grid-template-columns: 1em 1fr auto;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border, #333);
+}
+.timeline-bar.status-in_progress {
+  font-weight: 600;
+}
 .mode-toggle {
   display: inline-flex;
   gap: 4px;

@@ -1,7 +1,7 @@
 # 混合落地方案：控制面先行 × 体验面跟上 × 运营面远期
 
 **日期**：2026-08-03  
-**状态**：H0 IN PROGRESS — 控制面已开工落地（见 DecisionNote）；H1–H3 待闸门  
+**状态**：H0–H2 LANDED — 控制面 + 体验面 + 只读时间线已落地；H3 Hive 仅 opt-in 预埋（编码默认仍 Primary）  
 **DecisionNote**：[`decision-note-hybrid-h0-control-plane-2026-08-03.md`](decision-note-hybrid-h0-control-plane-2026-08-03.md)  
 **立场修正**：调研文档将 Hive / 甘特 / 流式·事件 / Ask-vs-Act 标为「缓做」；**长远仍要**。本方案把它们纳入**同一产品叙事的分期混合路径**，而不是永久砍掉。  
 **依据**：

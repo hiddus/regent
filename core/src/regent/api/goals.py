@@ -295,6 +295,58 @@ async def list_plan_items(goal_id: uuid.UUID, request: Request) -> list[dict[str
     return out
 
 
+@router.get("/{goal_id}/plan-timeline")
+async def get_plan_timeline(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """H2: read-only work-plan timeline / swimlanes (ExecutionPlan projection)."""
+    from regent.application.execution_plan import ExecutionPlanService
+    from regent.application.hive_policy import coding_default_is_primary, get_goal_kind
+    from regent.infrastructure.models import GoalModel
+
+    items = await ExecutionPlanService(request.app.state.sessions).list_items(goal_id)
+    lanes: dict[str, list[dict[str, Any]]] = {}
+    nodes: list[dict[str, Any]] = []
+    for item in items:
+        payload = item.as_dict()
+        owner = str(payload.get("owner_agent_id") or "primary")
+        node = {
+            "id": payload["id"],
+            "item_key": payload["item_key"],
+            "content": payload["content"],
+            "status": payload["status"],
+            "owner_agent_id": payload.get("owner_agent_id"),
+            "dependencies": payload.get("dependencies") or [],
+            "lane": owner,
+        }
+        nodes.append(node)
+        lanes.setdefault(owner, []).append(node)
+    edges: list[dict[str, str]] = []
+    keys = {n["item_key"] for n in nodes}
+    for n in nodes:
+        for dep in n["dependencies"]:
+            dep_s = str(dep)
+            if dep_s in keys:
+                edges.append({"from": dep_s, "to": n["item_key"]})
+    goal_kind = "coding"
+    hive_primary = True
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        if goal is not None:
+            meta = goal.metadata_json if isinstance(goal.metadata_json, dict) else {}
+            goal_kind = get_goal_kind(meta)
+            hive_primary = coding_default_is_primary(meta)
+    return {
+        "goal_id": str(goal_id),
+        "nodes": nodes,
+        "edges": edges,
+        "lanes": [
+            {"owner": owner, "items": lane_items}
+            for owner, lane_items in lanes.items()
+        ],
+        "goal_kind": goal_kind,
+        "coding_primary_default": hive_primary,
+    }
+
+
 @router.get("/{goal_id}/activity")
 async def get_goal_activity(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
     """TRANSITIONAL: read metadata ring buffers (activity_log / tool_events).

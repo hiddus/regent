@@ -505,6 +505,7 @@ class AgentRunner:
         repair_phase_turns_left: int | None = None
         chat_temperature = 0.0
         last_gap_fingerprint: str | None = None
+        turns_since_plan_update = 0
 
         while turn < max_turns:
             self._raise_if_aborted(plan)
@@ -584,6 +585,22 @@ class AgentRunner:
                         "detail": auto.summary,
                         "failures": self._compactor.state.auto_failures,
                     }
+                )
+
+            from regent.application.work_plan import todo_nudge_message
+
+            nudge = todo_nudge_message(
+                self._toolkit.todos,
+                turns_since_plan_update=turns_since_plan_update,
+            )
+            if nudge and (
+                not conversation
+                or not str(getattr(conversation[-1], "content", "") or "").startswith(
+                    "[Work-plan nudge]"
+                )
+            ):
+                conversation.append(
+                    ChatMessage(role="user", content=f"[Work-plan nudge]\n{nudge}")
                 )
 
             messages = assembler.assemble(turn=turn, conversation=conversation)
@@ -747,6 +764,7 @@ class AgentRunner:
                     },
                 )
                 if call.name in {"todo_write", "plan_update"}:
+                    turns_since_plan_update = 0
                     await _emit(
                         on_event,
                         {
@@ -804,6 +822,7 @@ class AgentRunner:
                 conversation = micro_compact(conversation, keep_recent=8)
 
             turn += 1
+            turns_since_plan_update += 1
 
             # Repair-phase turn budget: each model turn after a gap message counts.
             if (
@@ -1064,5 +1083,21 @@ def _seed_session_conversation(
                     "Reuse existing files; fix gaps with tools. Do not scaffold from scratch."
                 ),
             ),
+        )
+    # H1.4 mid-run steering notes (CORRECT / user redirect).
+    steer = str(
+        plan.get("session_steer_brief")
+        or acceptance.get("session_steer_brief")
+        or ""
+    ).strip()
+    if steer:
+        seeded.append(
+            ChatMessage(
+                role="user",
+                content=(
+                    f"[Human steering — apply before next writes]\n{steer[:1200]}\n"
+                    "Update the work plan if scope changed; do not ignore this correction."
+                ),
+            )
         )
     return seeded

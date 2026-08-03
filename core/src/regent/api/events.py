@@ -25,16 +25,16 @@ async def _poll_changes(
     project_id: uuid.UUID | None,
     last_message_ordinal: int,
     last_status_fingerprint: str | None,
-) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """Poll for new messages and real status changes.
+    last_regent_event_count: int = 0,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None, int]:
+    """Poll for new messages, status, and RegentEvent deltas.
 
-    Returns ``(events, status_fingerprint, live_action)``.
-    ``status_change`` is emitted only when the fingerprint changes.
-    ``live_action`` is always returned (when available) for heartbeat sync.
+    Returns ``(events, status_fingerprint, live_action, regent_event_count)``.
     """
     events: list[dict[str, Any]] = []
     status_fingerprint = last_status_fingerprint
     live_action: dict[str, Any] | None = None
+    regent_count = last_regent_event_count
     try:
         async with sessions_factory() as session:
             if project_id:
@@ -89,6 +89,22 @@ async def _poll_changes(
                     metadata = g_row[2] if isinstance(g_row[2], dict) else {}
                     if isinstance(metadata.get("live_action"), dict):
                         live_action = dict(metadata["live_action"])
+                    # H1.2: push new RegentEvent rows as agent_event.
+                    regent_buf = metadata.get("regent_events")
+                    if isinstance(regent_buf, list):
+                        regent_count = len(regent_buf)
+                        if regent_count > last_regent_event_count:
+                            for row in regent_buf[last_regent_event_count:]:
+                                if isinstance(row, dict):
+                                    events.append(
+                                        {
+                                            "type": "agent_event",
+                                            "data": {
+                                                "goal_id": str(g_row[0]),
+                                                **row,
+                                            },
+                                        }
+                                    )
                     updated_at = g_row[3]
                     updated_iso = (
                         updated_at.isoformat()
@@ -97,7 +113,13 @@ async def _poll_changes(
                     )
                     stage = str(metadata.get("execution_stage") or "") if isinstance(metadata, dict) else ""
                     live_at = str((live_action or {}).get("updated_at") or "")
-                    fingerprint = f"{g_row[1]}|{stage}|{updated_iso}|{live_at}"
+                    exit_kind = ""
+                    exit_row = metadata.get("agent_loop_exit")
+                    if isinstance(exit_row, dict):
+                        exit_kind = str(exit_row.get("exit_kind") or "")
+                    fingerprint = (
+                        f"{g_row[1]}|{stage}|{updated_iso}|{live_at}|{exit_kind}|{regent_count}"
+                    )
                     if fingerprint != last_status_fingerprint:
                         status_fingerprint = fingerprint
                         events.append({
@@ -108,11 +130,13 @@ async def _poll_changes(
                                 "metadata": metadata,
                                 "updated_at": updated_iso or None,
                                 "live_action": live_action,
+                                "agent_loop_exit": exit_row if isinstance(exit_row, dict) else None,
+                                "execution_mode": metadata.get("execution_mode") or "ask",
                             },
                         })
     except Exception:
         pass
-    return events, status_fingerprint, live_action
+    return events, status_fingerprint, live_action, regent_count
 
 
 @router.get("/stream")
@@ -128,6 +152,7 @@ async def event_stream(
 
         last_ordinal = 0
         last_status_fingerprint: str | None = None
+        last_regent_event_count = 0
         pid = uuid.UUID(project_id) if project_id else None
         poll_backoff = _ADAPTIVE_POLL_MIN
 
@@ -147,8 +172,14 @@ async def event_stream(
                 break
 
             sessions = request.app.state.sessions
-            changes, last_status_fingerprint, live_action = await _poll_changes(
-                sessions, pid, last_ordinal, last_status_fingerprint
+            changes, last_status_fingerprint, live_action, last_regent_event_count = (
+                await _poll_changes(
+                    sessions,
+                    pid,
+                    last_ordinal,
+                    last_status_fingerprint,
+                    last_regent_event_count,
+                )
             )
 
             for event in changes:

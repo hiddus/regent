@@ -65,6 +65,11 @@ export function useWorkspace() {
   const [coreHintError, setCoreHintError] = useState(false)
   const [toolEvents, setToolEvents] = useState<Record<string, unknown>[]>([])
   const [planItems, setPlanItems] = useState<PlanItem[]>([])
+  const [planTimeline, setPlanTimeline] = useState<{
+    nodes: Array<Record<string, unknown>>
+    edges: Array<{ from: string; to: string }>
+    lanes: Array<{ owner: string; items: Record<string, unknown>[] }>
+  } | null>(null)
   const [activity, setActivity] = useState<ActivityEvent[]>([])
   const [runtimeAgents, setRuntimeAgents] = useState<RuntimeAgent[]>([])
   const [liveActivity, setLiveActivity] = useState<LiveActivity>({
@@ -85,12 +90,20 @@ export function useWorkspace() {
   const loadGoalExtras = useCallback(async (goalId: string | null | undefined) => {
     if (!goalId) return
     try {
-      const [plan, act, agents] = await Promise.all([
+      const [plan, act, agents, timeline] = await Promise.all([
         api.getPlanItems(goalId).catch(() => [] as PlanItem[]),
         api.getGoalActivity(goalId).catch(() => ({ events: [] as ActivityEvent[], tool_events: [] as Record<string, unknown>[] })),
         api.getGoalAgents(goalId).catch(() => [] as RuntimeAgent[]),
+        api.getPlanTimeline(goalId).catch(() => null),
       ])
       setPlanItems(plan)
+      if (timeline && Array.isArray(timeline.nodes)) {
+        setPlanTimeline({
+          nodes: timeline.nodes as Array<Record<string, unknown>>,
+          edges: timeline.edges || [],
+          lanes: timeline.lanes || [],
+        })
+      }
       if (Array.isArray(act.events)) setActivity(act.events)
       if (Array.isArray(act.tool_events) && act.tool_events.length > 0) {
         setToolEvents(act.tool_events.filter(e => e && typeof e === 'object') as Record<string, unknown>[])
@@ -256,6 +269,7 @@ export function useWorkspace() {
     })
     setToolEvents([])
     setPlanItems([])
+    setPlanTimeline(null)
     setActivity([])
     setRuntimeAgents([])
     setCoreHint('')
@@ -302,6 +316,32 @@ export function useWorkspace() {
         markProgress(Number.isNaN(created) ? Date.now() : created)
         const project = currentProjectRef.current
         if (project) void loadStatus(project.id)
+      } else if (type === 'agent_event') {
+        // H1.2: structured RegentEvent → activity feed (no Chinese reverse parse).
+        const summary = String(data.summary || data.type || 'agent_event')
+        const evType = String(data.type || 'status')
+        setActivity(prev => {
+          const next = [
+            ...prev,
+            {
+              type: evType,
+              turn: typeof data.turn === 'number' ? data.turn : null,
+              tool: typeof data.tool === 'string' ? data.tool : null,
+              summary,
+              args_preview: null,
+              result_preview: null,
+              updated_at: typeof data.at === 'string' ? data.at : null,
+            } as ActivityEvent,
+          ]
+          return next.slice(-80)
+        })
+        if (evType === 'plan_updated' || evType === 'tool_call') {
+          const goalId = statusRef.current?.goal?.id
+          if (goalId) void loadGoalExtras(goalId)
+        }
+        markProgress(Date.now())
+        const toolBit = data.tool ? ` · ${String(data.tool)}` : ''
+        showCoreHint(`Core：${summary}${toolBit}`)
       } else if (type === 'status_change') {
         const nextStatus = typeof data.status === 'string' ? data.status : null
         const nextMeta = (data.metadata && typeof data.metadata === 'object')
@@ -398,7 +438,7 @@ export function useWorkspace() {
   return {
     projects, conversations, currentProject, currentConv, messages, status,
     hint, hintError, userHint, userHintError, coreHint, coreHintError, toolEvents,
-    planItems, activity, runtimeAgents,
+    planItems, planTimeline, activity, runtimeAgents,
     liveActivity,
     setCurrentProject, setCurrentConv, setMessages, setStatus,
     setHint: setUserHint, setHintError: setUserHintError,

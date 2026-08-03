@@ -89,6 +89,53 @@ def plan_approve_envelope(*, items: Sequence[dict[str, Any]], goal_summary: str 
     )
 
 
+def current_blocked_item_key(todos: Sequence[dict[str, Any]] | None) -> str | None:
+    for item in todos or []:
+        if str(item.get("status") or "").lower() == "in_progress":
+            return str(item.get("id") or item.get("item_key") or "") or None
+    for item in todos or []:
+        if str(item.get("status") or "").lower() == "pending":
+            return str(item.get("id") or item.get("item_key") or "") or None
+    return None
+
+
+def todo_nudge_message(
+    todos: Sequence[dict[str, Any]] | None,
+    *,
+    turns_since_plan_update: int,
+    nudge_after_turns: int = 8,
+) -> str | None:
+    """System催办 when checklist exists but is not being progressed (H1.5)."""
+    if turns_since_plan_update < nudge_after_turns:
+        return None
+    open_items = open_plan_item_contents(todos)
+    if not open_items:
+        return None
+    blocked = current_blocked_item_key(todos)
+    head = open_items[0]
+    return (
+        f"Work-plan nudge: {turns_since_plan_update} turns since last plan update. "
+        f"Mark progress with plan_update/todo_write. "
+        f"Current focus should be: {blocked or head}. "
+        f"Open: {'; '.join(open_items[:4])}"
+    )
+
+
+def looks_like_replan_request(text: str) -> bool:
+    t = (text or "").lower()
+    keys = (
+        "重新规划",
+        "重规划",
+        "改计划",
+        "修改计划",
+        "revise_plan",
+        "replan",
+        "new plan",
+        "换个方案",
+    )
+    return any(k in t for k in keys)
+
+
 def normalize_single_in_progress(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """At most one in_progress (W-2 soft)."""
     seen = False

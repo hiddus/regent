@@ -1572,6 +1572,13 @@ class ExecutionOrchestrator:
                     acceptance_contract["authorized_session_resume"] = True
                 if gmeta.get("work_plan_seen"):
                     acceptance_contract["work_plan_seen"] = True
+                if gmeta.get("session_steer_brief"):
+                    acceptance_contract["session_steer_brief"] = str(
+                        gmeta.get("session_steer_brief")
+                    )[:1200]
+                if gmeta.get("work_plan_replan_requested"):
+                    acceptance_contract["work_plan_approved"] = False
+                    acceptance_contract.pop("skip_plan_approve", None)
                 from regent.application.agent_control import (
                     get_execution_mode,
                     session_always_tools,

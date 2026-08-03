@@ -106,6 +106,24 @@ export const api = {
   getPlanItems: (goalId: string) =>
     request<PlanItem[]>(`/v1/goals/${goalId}/plan-items`),
 
+  getPlanTimeline: (goalId: string) =>
+    request<{
+      goal_id: string
+      nodes: Array<{
+        id: string
+        item_key: string
+        content: string
+        status: string
+        owner_agent_id?: string | null
+        dependencies: string[]
+        lane: string
+      }>
+      edges: Array<{ from: string; to: string }>
+      lanes: Array<{ owner: string; items: Record<string, unknown>[] }>
+      goal_kind?: string
+      coding_primary_default?: boolean
+    }>(`/v1/goals/${goalId}/plan-timeline`),
+
   abortGoal: (goalId: string, actor = ACTOR, reason = 'user_abort') =>
     request<{ ok: boolean; goal_id: string; abort?: boolean }>(`/v1/goals/${goalId}/abort`, {
       actor,

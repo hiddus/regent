@@ -1587,6 +1587,15 @@ class AppGuidanceService:
                 "summary": interpretation.summary,
             })
             metadata["active_corrections"] = corrections
+            # H1.4: durable steering brief for next AgentRunner seed.
+            metadata["session_steer_brief"] = str(detail)[:1200]
+            metadata["session_steer_at"] = datetime.now(timezone.utc).isoformat()
+            from regent.application.work_plan import looks_like_replan_request
+
+            if looks_like_replan_request(message) or looks_like_replan_request(detail):
+                metadata["work_plan_approved"] = False
+                metadata.pop("skip_plan_approve", None)
+                metadata["work_plan_replan_requested"] = True
             latest_spec = await session.scalar(
                 select(GoalSpecModel)
                 .where(GoalSpecModel.goal_id == goal_id)

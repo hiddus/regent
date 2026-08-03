@@ -25,6 +25,11 @@ interface ArtifactPanelProps {
   liveAction?: LiveAction | null
   toolEvents?: Record<string, unknown>[]
   planItems?: PlanItem[]
+  planTimeline?: {
+    nodes: Array<Record<string, unknown>>
+    edges: Array<{ from: string; to: string }>
+    lanes: Array<{ owner: string; items: Record<string, unknown>[] }>
+  } | null
   activity?: ActivityEvent[]
   runtimeAgents?: RuntimeAgent[]
   isOpen: boolean
@@ -116,6 +121,7 @@ export function ArtifactPanel({
   liveAction = null,
   toolEvents = [],
   planItems = [],
+  planTimeline = null,
   activity = [],
   runtimeAgents = [],
   isOpen,
@@ -126,6 +132,7 @@ export function ArtifactPanel({
   const [reviewOpen, setReviewOpen] = useState(false)
   const [sourceOpen, setSourceOpen] = useState(false)
   const [planOpen, setPlanOpen] = useState(true)
+  const [timelineOpen, setTimelineOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const [review, setReview] = useState<DeliveryReview | null>(null)
   const [reviewLoading, setReviewLoading] = useState(false)
@@ -418,6 +425,50 @@ export function ArtifactPanel({
               </div>
             )}
           </div>
+
+          {planTimeline && planTimeline.lanes.length > 0 && (
+            <div className="artifact-fold-section">
+              <button
+                type="button"
+                className={`artifact-fold-toggle ${timelineOpen ? 'open' : ''}`}
+                onClick={() => setTimelineOpen(!timelineOpen)}
+              >
+                <span>时间线{planTimeline.nodes.length ? `（${planTimeline.nodes.length}）` : ''}</span>
+                <span className="artifact-fold-arrow" aria-hidden>›</span>
+              </button>
+              {timelineOpen && (
+                <div className="artifact-fold-body">
+                  <div className="plan-timeline">
+                    {planTimeline.lanes.map(lane => (
+                      <div key={lane.owner} className="timeline-lane">
+                        <div className="timeline-lane-title">
+                          {String(lane.owner).startsWith('subagent') ? '子 Agent' : lane.owner === 'primary' ? 'Primary' : lane.owner}
+                        </div>
+                        <ul className="timeline-bars">
+                          {lane.items.map((item) => {
+                            const status = String(item.status || 'pending').toLowerCase()
+                            const deps = Array.isArray(item.dependencies) ? item.dependencies as string[] : []
+                            return (
+                              <li key={String(item.id || item.item_key)} className={`timeline-bar status-${status}`}>
+                                <span className="plan-mark" aria-hidden>{PLAN_STATUS_MARK[status] || '○'}</span>
+                                <span className="plan-content">{String(item.content || item.item_key || '')}</span>
+                                {deps.length > 0 && (
+                                  <span className="plan-owner">← {deps.join(', ')}</span>
+                                )}
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    ))}
+                    {planTimeline.edges.length > 0 && (
+                      <p className="hint">依赖边 {planTimeline.edges.length} 条（只读）</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {activityFeed.length > 0 && (
             <div className="artifact-fold-section">

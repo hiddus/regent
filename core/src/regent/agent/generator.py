@@ -141,6 +141,7 @@ class AgenticCodeGenerator:
             "authorized_session_resume",
             "work_plan_seen",
             "work_plan_items",
+            "session_steer_brief",
             "execution_mode",
             "permission_always_tools",
             "permission_allow_once_tools",

@@ -262,6 +262,7 @@ export default function App() {
         liveAction={ws.liveActivity.liveAction}
         toolEvents={ws.toolEvents}
         planItems={ws.planItems}
+        planTimeline={ws.planTimeline}
         activity={ws.activity}
         runtimeAgents={ws.runtimeAgents}
       />
