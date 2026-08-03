@@ -320,6 +320,8 @@
 
 ## 11. 建议下一步
 
+对话流二次打磨（2026-08-04）：确认卡去重正文、timeline 接入 toolEvents、过程气泡折叠、sticky 闸门、空态示例、Markdown 层级 — 对标 OpenHands 折叠工具条 / Claude 进度压缩。
+
 1. ~~拍板 Q1–Q6。~~ 已按默认项落地。  
 2. ~~开 PR：本提案 + PRD §4.3.2 修订。~~ 正文已同步。  
 3. ~~开工 UX-0…UX-2。~~ 已合入 `apps/regent-console`（build 通过）。  

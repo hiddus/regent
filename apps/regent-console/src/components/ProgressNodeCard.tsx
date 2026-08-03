@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { ProgressNode } from '../lib/progressNodes'
 import { NODE_STATUS_LABEL } from '../lib/progressNodes'
-import { ToolTrace } from './ToolTrace'
+import { ToolTrace, summarizeTools } from './ToolTrace'
 
 interface ProgressNodeCardProps {
   node: ProgressNode
   /** When true, running/waiting nodes expand detail by default. */
   liveMode?: boolean
+  /** Older settled nodes start compressed to keep the dialog scannable. */
+  preferCompressed?: boolean
 }
 
 function formatTime(iso?: string): string {
@@ -21,14 +23,19 @@ function formatTime(iso?: string): string {
 
 type ViewMode = 'detail' | 'overview' | 'compressed'
 
-export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardProps) {
+export function ProgressNodeCard({
+  node,
+  liveMode = false,
+  preferCompressed = false,
+}: ProgressNodeCardProps) {
   const isLive = node.status === 'running' || node.status === 'waiting'
   const isSettled = node.status === 'done' || node.status === 'failed'
   const highlights = Object.entries(node.highlights || {})
-  const hasExtra = !!(node.detail || highlights.length > 0)
+  const hasExtra = !!(node.detail || highlights.length > 0 || (node.toolTrace && node.toolTrace.length > 0))
 
   const defaultMode = (): ViewMode => {
     if (liveMode && isLive) return 'detail'
+    if (preferCompressed && isSettled) return 'compressed'
     return 'overview'
   }
 
@@ -37,14 +44,13 @@ export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardPro
   useEffect(() => {
     setMode(defaultMode())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveMode, node.status, node.updatedAt, node.key])
+  }, [liveMode, preferCompressed, node.status, node.updatedAt, node.key])
 
   const cycleMode = () => {
     if (isLive) {
       setMode(m => (m === 'detail' ? 'overview' : 'detail'))
       return
     }
-    // Settled: overview → compressed → (detail if extras) → overview
     if (mode === 'overview') setMode('compressed')
     else if (mode === 'compressed') setMode(hasExtra ? 'detail' : 'overview')
     else setMode('overview')
@@ -55,6 +61,10 @@ export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardPro
   const primaryText = isLive && mode === 'detail' && node.detail
     ? node.detail
     : node.conclusion
+  const toolHint =
+    isLive && node.toolTrace && node.toolTrace.length > 0
+      ? summarizeTools(node.toolTrace)
+      : ''
 
   return (
     <article
@@ -90,9 +100,9 @@ export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardPro
               {NODE_STATUS_LABEL[node.status]}
             </span>
           )}
-          {isLive && node.toolTrace && node.toolTrace.length > 0 && (
-            <span className="progress-node-tool-hint" title="最近调用的工具">
-              🔧 {node.toolTrace[node.toolTrace.length - 1]}
+          {toolHint && mode !== 'detail' && (
+            <span className="progress-node-tool-hint" title="工具轨迹">
+              {toolHint}
             </span>
           )}
           <span
@@ -111,6 +121,11 @@ export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardPro
 
         {mode === 'compressed' && (
           <p className="progress-node-compressed-hint">已折叠 · 点击展开</p>
+        )}
+
+        {/* Live overview still shows collapsed tool strip (OpenHands). */}
+        {mode === 'overview' && isLive && node.toolTrace && node.toolTrace.length > 0 && (
+          <ToolTrace tools={node.toolTrace} defaultOpen={false} />
         )}
 
         <div className={`progress-node-detail-wrap ${mode === 'detail' ? 'open' : ''}`}>

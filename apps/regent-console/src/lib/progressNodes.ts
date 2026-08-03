@@ -457,9 +457,13 @@ export type TimelineItem =
  * - EVENT progress collapses into nodes inserted at first occurrence
  * - Preview events are shown in the artifact panel, not inline
  * - Historical task/handoff cards collapse: only latest open + last stub remain
+ * - extras.toolEvents / liveTool attach to the live progress node (OpenHands-style tool strip)
  */
-export function buildTimeline(messages: Message[]): TimelineItem[] {
-  const nodes = buildProgressNodes(messages)
+export function buildTimeline(
+  messages: Message[],
+  extras: ProgressNodeExtras = {},
+): TimelineItem[] {
+  const nodes = buildProgressNodes(messages, extras)
   const nodeByFirstMsg = new Map<string, ProgressNode>()
   for (const n of nodes) {
     if (n.messageIds[0]) nodeByFirstMsg.set(n.messageIds[0], n)

@@ -278,12 +278,15 @@ export default function App() {
               ?.agent_loop_exit as Record<string, unknown> | undefined)
             || null
           }
+          toolEvents={ws.toolEvents}
+          liveTool={ws.liveActivity.liveAction?.tool || null}
           onConfirm={handleConfirm}
           onSelectOption={handleSelectOption}
           onTaskAction={handleTaskAction}
           onInspectSource={() => openWorkspace('changes')}
           onOpenPreview={() => openWorkspace('preview')}
           onOpenReview={() => openWorkspace('review')}
+          onExampleSend={(text) => { void handleSend(text) }}
         />
         <div ref={messagesEndRef} />
         <Composer

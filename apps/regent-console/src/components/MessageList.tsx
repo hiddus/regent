@@ -1,28 +1,35 @@
 import { useMemo } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import type { DiagnosticDelivery, Message } from '../lib/types'
-import { buildTimeline } from '../lib/progressNodes'
+import { buildTimeline, type ProgressNodeExtras } from '../lib/progressNodes'
 import { ConfirmationCard } from './ConfirmationCard'
 import { RecoveryCard } from './RecoveryCard'
 import { TaskCard, type TaskActionOptions } from './TaskCard'
 import { ProgressNodeCard } from './ProgressNodeCard'
 import { ResultCard } from './ResultCard'
+import { LeadLine, MarkdownBody } from './MarkdownBody'
+
+const EMPTY_EXAMPLES = [
+  '做一个景区门票预约小程序，支持选日期和人数',
+  '帮我做一个团队周报收集网页，能导出 Markdown',
+  '创建一个本地待办 App，支持标签和截止日期',
+]
 
 interface MessageListProps {
   messages: Message[]
   currentProjectId?: string | null
   goalStatus?: string | null
-  /** Goal-level DiagnosticDelivery fallback when chat messages lack metadata. */
   goalDiagnostic?: DiagnosticDelivery | null
   executionStage?: string | null
   agentLoopExit?: Record<string, unknown> | null
+  toolEvents?: Record<string, unknown>[]
+  liveTool?: string | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
   onInspectSource?: () => void
   onOpenPreview?: () => void
   onOpenReview?: () => void
+  onExampleSend?: (text: string) => void
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -69,12 +76,28 @@ function taskMetaResolved(taskMeta?: Record<string, unknown>) {
   return Number.isFinite(dueAt) && dueAt <= Date.now()
 }
 
+function isProcessNoise(m: Message): boolean {
+  const t = m.message_type || ''
+  return (
+    t === 'DELIVERY_GAP_CAPABILITY_ESCALATED' ||
+    t === 'GENERATION_ATTEMPT_FAILED' ||
+    t === 'STALE_PROGRESS_NOTE' ||
+    (m.role === 'ASSISTANT' && t.endsWith('_FAILED') && t !== 'GOAL_FAILED')
+  )
+}
+
+function looksLikeRawJson(text: string): boolean {
+  const t = text.trim()
+  return (t.startsWith('{') && t.includes('"')) || (t.startsWith('[') && t.includes('{'))
+}
+
 function MessageItem({
   m,
   movingGoals,
   resolved,
   currentProjectId,
   goalDiagnostic,
+  stickyGate,
   onConfirm,
   onSelectOption,
   onTaskAction,
@@ -85,6 +108,7 @@ function MessageItem({
   resolved: boolean
   currentProjectId?: string | null
   goalDiagnostic?: DiagnosticDelivery | null
+  stickyGate?: boolean
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
@@ -108,6 +132,7 @@ function MessageItem({
   const roleClass = m.role.toLowerCase()
   const avatarLabel = m.role === 'USER' ? '你' : 'R'
   const metaLabel = m.role === 'USER' ? '你' : 'Regent'
+  const processNoise = isProcessNoise(m)
 
   if (m.message_type === 'PREVIEW_READY' || m.message_type === 'PREVIEW_DEPLOYMENT_SUCCEEDED') {
     return null
@@ -171,15 +196,60 @@ function MessageItem({
     !isDeliveryGapIntervene &&
     (m.message_type === 'HUMAN_TASK_REQUIRED' || isExhaustedHandoff)
 
+  // OpenHands-style: structured card is the primary surface; don't duplicate markdown body.
+  const hideBodyForCard = isConfirmation || showTaskCard || showRecoveryCard || isCorrection
+  const rawJsonBody = looksLikeRawJson(m.content || '')
+  const showMarkdown =
+    !hideBodyForCard &&
+    !!m.content?.trim() &&
+    !rawJsonBody
+
+  const gateActive =
+    stickyGate &&
+    ((isConfirmation && (isAwaiting || showForkActions)) ||
+      (showTaskCard && !resolved) ||
+      showRecoveryCard)
+
   return (
-    <article className={`message ${roleClass}${showTaskCard ? ' message-task' : ''}`}>
-      <div className="avatar">{avatarLabel}</div>
+    <article
+      className={[
+        'message',
+        roleClass,
+        showTaskCard ? 'message-task' : '',
+        isConfirmation ? 'message-confirm' : '',
+        processNoise ? 'message-noise' : '',
+        gateActive ? 'gate-sticky' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      data-message-type={m.message_type || ''}
+    >
+      <div className="avatar" aria-hidden>{avatarLabel}</div>
       <div className="body">
-        <div className="meta">{metaLabel}</div>
-        {!showTaskCard && !showRecoveryCard && (
-          <div className="content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-          </div>
+        <div className="meta">
+          <span>{metaLabel}</span>
+          {processNoise ? <span className="meta-chip">过程</span> : null}
+          {isConfirmation ? <span className="meta-chip">方案</span> : null}
+        </div>
+
+        {isConfirmation && !showMarkdown && (
+          <LeadLine>
+            {showForkActions
+              ? '需要你选一个方向后继续'
+              : isAwaiting
+                ? '已形成拟议方案，确认后开始'
+                : '方案如下，可随时在输入框补充修正'}
+          </LeadLine>
+        )}
+
+        {showMarkdown && (
+          <MarkdownBody
+            collapsible={processNoise || (m.role === 'ASSISTANT' && (m.content?.length || 0) > 480)}
+            collapseAt={processNoise ? 180 : 420}
+            collapsedLabel={processNoise ? '展开过程说明' : '展开全文'}
+          >
+            {m.content}
+          </MarkdownBody>
         )}
 
         {showRecoveryCard && diagnosticDelivery && (
@@ -250,15 +320,23 @@ export function MessageList({
   goalDiagnostic,
   executionStage,
   agentLoopExit,
+  toolEvents = [],
+  liveTool = null,
   onConfirm,
   onSelectOption,
   onTaskAction,
   onInspectSource,
   onOpenPreview,
   onOpenReview,
+  onExampleSend,
 }: MessageListProps) {
   const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
   const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
+
+  const extras: ProgressNodeExtras = useMemo(
+    () => ({ toolEvents, liveTool }),
+    [toolEvents, liveTool],
+  )
 
   const hasMessageRecovery = useMemo(
     () =>
@@ -285,29 +363,92 @@ export function MessageList({
       <section className="messages">
         <div className="stream">
           <div className="empty">
-            <h1>创建你的第一个 App</h1>
-            <p>
-              先描述产品想法。Core 会给出拟议方案与工作清单；需要时再请你从有限选项里拍板。随时可停止。
-            </p>
+            <div className="empty-brand">Regent</div>
+            <h1>用一句话描述你要的 App</h1>
+            <p>Core 会给出拟议方案与工作清单；需要时再请你拍板。随时可停止。</p>
+            <div className="empty-examples">
+              {EMPTY_EXAMPLES.map(ex => (
+                <button
+                  key={ex}
+                  type="button"
+                  className="empty-example"
+                  onClick={() => onExampleSend?.(ex)}
+                >
+                  {ex}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </section>
     )
   }
 
-  const timeline = buildTimeline(messages)
+  const timeline = buildTimeline(messages, extras)
   const liveMode = !goalStatus || ['ACTIVE', 'WAITING_HUMAN', 'PAUSED', 'READY', 'BLOCKED', 'EXHAUSTED'].includes(goalStatus)
+
+  // Last unsettled progress node stays detailed; older settled ones compress (Claude/Cursor).
+  let lastLiveNodeIdx = -1
+  timeline.forEach((item, idx) => {
+    if (item.kind === 'node' && (item.node.status === 'running' || item.node.status === 'waiting')) {
+      lastLiveNodeIdx = idx
+    }
+  })
+  let lastSettledNodeIdx = -1
+  timeline.forEach((item, idx) => {
+    if (item.kind === 'node' && (item.node.status === 'done' || item.node.status === 'failed')) {
+      lastSettledNodeIdx = idx
+    }
+  })
+
+  // Sticky the last unresolved gate message in the stream.
+  let stickyMessageId: string | null = null
+  for (let i = timeline.length - 1; i >= 0; i -= 1) {
+    const item = timeline[i]
+    if (item.kind !== 'message') continue
+    const m = item.message
+    const taskMeta = (m.metadata || {}) as Record<string, unknown>
+    const taskId = String(taskMeta.id || taskMeta.human_task_id || '')
+    const goalId = (taskMeta.goal_id as string | undefined) || (m.metadata?.goal_id as string | undefined)
+    const resolved =
+      taskMetaResolved(taskMeta) ||
+      (taskId ? resolvedIndex.byTaskId.has(taskId) : false) ||
+      (goalId ? resolvedIndex.byGoalId.has(goalId) : false)
+    const isConf =
+      m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
+      m.message_type === 'GOAL_PLAN_PROPOSED'
+    const awaiting =
+      (m.message_type === 'APP_CONFIRMATION_REQUIRED' &&
+        !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))) ||
+      (Boolean(m.metadata?.needs_user_fork) &&
+        m.message_type === 'GOAL_PLAN_PROPOSED' &&
+        !(goalId ? movingGoals.has(goalId) : movingGoals.has('*')))
+    const isTask = m.message_type === 'HUMAN_TASK_REQUIRED' || String(m.message_type).includes('EXHAUSTED')
+    const isRec =
+      m.message_type === 'DIAGNOSTIC_DELIVERY_READY' ||
+      m.message_type === 'DELIVERY_SOFT_PAUSE'
+    if ((isConf && awaiting) || (isTask && !resolved) || isRec) {
+      stickyMessageId = m.id
+      break
+    }
+  }
 
   return (
     <section className="messages">
       <div className="stream">
         {timeline.map((item, idx) => {
           if (item.kind === 'node') {
+            const preferCompressed =
+              liveMode &&
+              (item.node.status === 'done' || item.node.status === 'failed') &&
+              idx !== lastSettledNodeIdx &&
+              idx !== lastLiveNodeIdx
             return (
               <ProgressNodeCard
                 key={`node-${item.node.key}-${idx}`}
                 node={item.node}
                 liveMode={liveMode}
+                preferCompressed={preferCompressed}
               />
             )
           }
@@ -329,6 +470,7 @@ export function MessageList({
               resolved={resolved}
               currentProjectId={currentProjectId}
               goalDiagnostic={goalDiagnostic}
+              stickyGate={stickyMessageId === m.id}
               onConfirm={onConfirm}
               onSelectOption={onSelectOption}
               onTaskAction={onTaskAction}
@@ -337,7 +479,7 @@ export function MessageList({
           )
         })}
         {showPinnedRecovery && goalDiagnostic && (
-          <article className="message assistant">
+          <article className="message assistant gate-sticky">
             <div className="avatar">R</div>
             <div className="body">
               <div className="meta">Regent</div>
