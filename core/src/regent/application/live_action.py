@@ -1,4 +1,11 @@
-"""Publish Core's current action for console live sync (not conversation spam)."""
+"""Publish Core's current action for console live sync (not conversation spam).
+
+TRANSITIONAL OBSERVABILITY — not the durable event truth source.
+``live_action`` is a legitimate *projection* ("what now").
+``tool_events`` / ``activity_log`` on goal.metadata are ring buffers only —
+not audit, billing, or qualification evidence.
+See docs/decision-note-delivery-machine-invariants-2026-08-02.md §3.
+"""
 
 from __future__ import annotations
 
@@ -19,25 +26,30 @@ EVENT_LIVE_SUMMARY: dict[str, str] = {
     "DISCOVERY_ROUND_REQUESTED": "正在继续市场调研",
     "DISCOVERY_COMPLETED": "市场调研刚完成，正在进入下一步",
     "RESEARCH_MORE_ADAPT_CONTINUE": "正在深入取证调研",
-    "REQUIREMENT_REQUESTED": "正在规划产品方案",
-    "REQUIREMENT_VALIDATED": "产品方案已规划完成",
-    "CAPABILITY_RESOLUTION_REQUESTED": "正在准备技术方案",
-    "CAPABILITY_RESOLUTION_PLANNED": "技术方案已就绪",
-    "GENERATION_RUN_REQUESTED": "正在生成应用代码",
-    "WORKSPACE_SNAPSHOT_READY": "应用源码已打包",
+    "REQUIREMENT_REQUESTED": "Agent Session：规划中",
+    "REQUIREMENT_VALIDATED": "Agent Session：方案已就绪",
+    "CAPABILITY_RESOLUTION_REQUESTED": "Agent Session：准备执行环境",
+    "CAPABILITY_RESOLUTION_PLANNED": "Agent Session：执行环境已就绪",
+    "GENERATION_RUN_REQUESTED": "Agent Session：编写与修复中",
+    "PROJECT_AGENT_SESSION_RESUME": "Agent Session：同工作区续跑",
+    "PROJECT_AGENT_SESSION_RESUMED": "Agent Session：已续跑",
+    "AGENT_LOOP_COMPLETE": "Agent Session：本轮已完成",
+    "AGENT_LOOP_STOP": "Agent Session：已停止",
+    "AGENT_LOOP_ASK": "Agent Session：等待你确认",
+    "WORKSPACE_SNAPSHOT_READY": "Agent Session：源码已打包",
     "DEPENDENCY_RESOLUTION_REQUESTED": "正在解析依赖",
-    "APP_BUILD_REQUESTED": "正在构建并做质量检查",
+    "APP_BUILD_REQUESTED": "Agent Session：构建与核对中",
     "APP_BUILD_PASSED": "构建已通过，准备预览",
     "PREVIEW_DEPLOYMENT_REQUESTED": "正在部署预览环境",
     "PREVIEW_DEPLOYMENT_SUCCEEDED": "预览已部署",
     "PREVIEW_READY": "预览已就绪",
-    "ATTAINMENT_RECOVERY_STARTED": "目标未达成，正在重新规划",
-    "DELIVERY_GAP_CAPABILITY_ESCALATED": "正在升级能力并重试交付",
+    "ATTAINMENT_RECOVERY_STARTED": "Agent Session：未达成，继续修复",
+    "DELIVERY_GAP_CAPABILITY_ESCALATED": "交付缺口：Session 续跑或能力兜底",
     "MILESTONE_ATTAINED": "当前阶段已达成",
     "GOAL_ACHIEVED": "目标已完成",
-    "HUMAN_TASK_REQUIRED": "等待你确认以继续",
-    "DELIVERY_GAP_EXHAUSTED": "等待你确认以继续",
-    "DELIVERY_GAP_HUMAN_APPROVED": "已批准，正在重新规划并继续生成",
+    "HUMAN_TASK_REQUIRED": "Agent Session：已暂停，等待你的方向",
+    "DELIVERY_GAP_EXHAUSTED": "Agent Session：已软暂停，等待你的方向",
+    "DELIVERY_GAP_HUMAN_APPROVED": "已批准，同一 Session 继续修复",
 }
 
 _MAX_TOOL_EVENTS = 20

@@ -1003,16 +1003,41 @@ body {
   flex-direction: column;
   gap: 6px;
 }
-.plan-item, .activity-feed li {
+.plan-item {
+  font-size: 12px;
+  line-height: 1.35;
+  display: grid;
+  grid-template-columns: 1em 3.5em 1fr auto;
+  gap: 6px;
+  align-items: start;
+}
+.activity-feed li {
   font-size: 12px;
   line-height: 1.35;
 }
+.plan-item.status-in_progress .plan-mark,
+.plan-item.status-in_progress .plan-status {
+  color: var(--fg);
+  font-weight: 600;
+}
+.plan-item.status-completed .plan-content {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.plan-mark {
+  color: var(--muted);
+  text-align: center;
+}
 .plan-status {
   display: inline-block;
-  min-width: 4.5em;
-  margin-right: 6px;
   color: var(--muted);
-  text-transform: lowercase;
+  text-transform: none;
+}
+.plan-owner {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 .activity-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .source-layout {

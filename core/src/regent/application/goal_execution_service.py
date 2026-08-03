@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.application.live_action import build_live_action
+from regent.application.project_agent_session import ProjectAgentSessionService
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
     AppProjectModel,
@@ -134,10 +135,22 @@ class GoalExecutionService:
             event_id = uuid.uuid4()
             goal.status = "ACTIVE"
             goal.version += 1
+            # I-A: ACTIVE project must have exactly one ProjectAgentSession.
+            # Chassis only — does not create a third Agent loop.
+            session_view = await ProjectAgentSessionService(self._sessions).ensure_active_session_in(
+                session,
+                app_project_id=project.id,
+                goal_id=goal.id,
+                actor=actor,
+            )
             goal.metadata_json = {
+                **dict(goal.metadata_json or {}),
                 **metadata,
                 "execution_idempotency_key": idempotency_key,
                 "execution_event_id": str(event_id),
+                "project_agent_session_id": str(session_view.id),
+                "project_agent_session_epoch": session_view.epoch,
+                "project_agent_session_workspace_uri": session_view.workspace_uri,
             }
             payload = {
                 "goal_id": str(goal.id),
@@ -146,6 +159,8 @@ class GoalExecutionService:
                 "idempotency_key": idempotency_key,
                 "auto_prepared": auto_prepared,
                 "goal_spec_version": spec.version,
+                "project_agent_session_id": str(session_view.id),
+                "project_agent_session_epoch": session_view.epoch,
             }
             session.add_all(
                 (

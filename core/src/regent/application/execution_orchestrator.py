@@ -1163,20 +1163,34 @@ class ExecutionOrchestrator:
             if goal is None:
                 return
             gen_idempotency = make_idempotency_key("generation", goal_id, idempotency_key)
+            # I-A/I-B: stamp Session lease onto GenerationRunRequested so epoch
+            # fencing and AgentRunner workspace bind apply on the primary path.
+            meta = dict(goal.metadata_json or {})
+            gen_payload: dict[str, Any] = {
+                "goal_id": str(goal_id),
+                "app_project_id": str(project_id),
+                "requirement_revision_id": str(requirement_id),
+                "capability_resolution_plan_id": str(resolution_plan_id),
+                "actor": actor,
+                "idempotency_key": gen_idempotency,
+            }
+            sid = str(meta.get("project_agent_session_id") or "").strip()
+            if sid:
+                gen_payload["project_agent_session_id"] = sid
+                if meta.get("project_agent_session_epoch") is not None:
+                    gen_payload["project_agent_session_epoch"] = int(
+                        meta.get("project_agent_session_epoch") or 0
+                    )
+                ws = str(meta.get("project_agent_session_workspace_uri") or "").strip()
+                if ws:
+                    gen_payload["project_agent_session_workspace_uri"] = ws
             outbox_event = make_outbox_event(
                 EventEnvelope(
                     event_type=GENERATION_RUN_REQUESTED,
                     aggregate_type="goal",
                     aggregate_id=goal_id,
                     aggregate_version=goal.version,
-                    payload={
-                        "goal_id": str(goal_id),
-                        "app_project_id": str(project_id),
-                        "requirement_revision_id": str(requirement_id),
-                        "capability_resolution_plan_id": str(resolution_plan_id),
-                        "actor": actor,
-                        "idempotency_key": gen_idempotency,
-                    },
+                    payload=gen_payload,
                     idempotency_key=gen_idempotency,
                     correlation_id=goal.correlation_id,
                 )
@@ -1186,8 +1200,8 @@ class ExecutionOrchestrator:
                 session,
                 project_id,
                 "GENERATION_RUN_REQUESTED",
-                "正在生成应用源代码。",
-                {"goal_id": str(goal_id)},
+                "Agent Session 正在继续编写与修复应用（同一工作区）。",
+                {"goal_id": str(goal_id), "project_agent_session_id": sid or None},
             )
 
     # ---------------------------------------------------------------------------
@@ -1208,6 +1222,18 @@ class ExecutionOrchestrator:
         if self._generator is None or self._workspace_writer is None:
             logger.warning("generation skipped: generator or workspace writer not configured")
             return
+
+        # SESSION_RESUME epoch fence: drop stale outbox that lost the race.
+        payload_session_id = str(payload.get("project_agent_session_id") or "").strip()
+        payload_epoch_raw = payload.get("project_agent_session_epoch")
+        if payload_session_id and payload_epoch_raw is not None:
+            from regent.application.project_agent_session import ProjectAgentSessionService
+
+            await ProjectAgentSessionService(self._sessions).assert_resume_epoch(
+                project_id,
+                session_id=payload_session_id,
+                epoch=int(payload_epoch_raw),
+            )
 
         # Soft concurrency gate: defer via retryable LEASE_CONFLICT rather than drop.
         from regent.application.delivery_success_policy import (
@@ -1476,6 +1502,56 @@ class ExecutionOrchestrator:
         acceptance_contract["goal_id"] = str(goal_id)
         acceptance_contract.setdefault("org_key", "default")
 
+        # I-A/I-C: stamp ProjectAgentSession onto the frozen plan so AgentRunner
+        # binds the durable workspace (not a disposable agentic/{run_id} tree).
+        try:
+            from regent.application.project_agent_session import ProjectAgentSessionService
+
+            sessions_svc = ProjectAgentSessionService(self._sessions)
+            # Prefer payload workspace from SESSION_RESUME when present.
+            payload_ws = str(payload.get("project_agent_session_workspace_uri") or "").strip()
+            session_view = await sessions_svc.ensure_active_session(
+                app_project_id=project_id,
+                goal_id=goal_id,
+                actor=actor,
+                workspace_uri=payload_ws or None,
+            )
+            acceptance_contract["project_agent_session_id"] = str(session_view.id)
+            acceptance_contract["project_agent_session_epoch"] = session_view.epoch
+            acceptance_contract["project_agent_session_workspace_uri"] = (
+                payload_ws or session_view.workspace_uri
+            )
+            # Propagate onto plan root for AgentRunner resume seeding.
+            acceptance_contract.setdefault(
+                "session_prior_messages",
+                list((session_view.checkpoint or {}).get("prior_messages") or [])[:12],
+            )
+            ckpt = dict(session_view.checkpoint or {})
+            if ckpt.get("last_gap_reasons") and not acceptance_contract.get(
+                "delivery_gap_reasons"
+            ):
+                acceptance_contract["delivery_gap_reasons"] = list(
+                    ckpt.get("last_gap_reasons") or []
+                )[:12]
+            if ckpt or payload.get("escalation_step") == "SESSION_RESUME":
+                acceptance_contract["session_resume_brief"] = (
+                    f"Continue ProjectAgentSession {session_view.id} "
+                    f"epoch={session_view.epoch} in the same workspace. "
+                    f"Prior method={ckpt.get('resume_method') or payload.get('escalation_step') or 'start'}; "
+                    f"fix verification gaps with tools — do not scaffold from scratch."
+                )
+        except DomainError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "project agent session ensure failed; refusing generation without Session (I-A)",
+                extra={"goal_id": str(goal_id), "app_project_id": str(project_id)},
+            )
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                f"ACTIVE project requires ProjectAgentSession before generation: {exc}",
+            ) from exc
+
         from regent.config import get_settings
         from regent.application.generator_factory import plan_metadata_for_settings
         from regent.application.generator_metadata import assert_generator_consistency
@@ -1489,6 +1565,13 @@ class ExecutionOrchestrator:
             goal_row = await session.get(GoalModel, goal_id)
             if goal_row is not None:
                 gmeta = dict(goal_row.metadata_json or {})
+                if gmeta.get("work_plan_approved"):
+                    acceptance_contract["work_plan_approved"] = True
+                    acceptance_contract["work_plan_seen"] = True
+                if gmeta.get("authorized_session_resume"):
+                    acceptance_contract["authorized_session_resume"] = True
+                if gmeta.get("work_plan_seen"):
+                    acceptance_contract["work_plan_seen"] = True
                 if gmeta.get("awaiting_human_intervention") or gmeta.get(
                     "stale_progress_handoff_at"
                 ):
@@ -1657,10 +1740,18 @@ class ExecutionOrchestrator:
                         activity_event=tool_event,
                     )
 
+                live_summary = "Agent Session 正在工作（读代码 / 改文件 / 验证）…"
+                async with self._sessions() as _sess:
+                    _goal = await _sess.get(GoalModel, goal_id)
+                    _meta = dict((_goal.metadata_json or {}) if _goal else {})
+                    if not _meta.get("project_agent_session_id"):
+                        live_summary = "正在生成应用代码…"
+                    elif str(_meta.get("capability_resolution", {}).get("delivery_method") or "") == "SESSION_RESUME":
+                        live_summary = "同一 Agent Session 续跑修复中…"
                 await set_goal_live_action(
                     self._sessions,
                     goal_id,
-                    "正在生成应用代码…",
+                    live_summary,
                     stage="GENERATING",
                     event_type="GENERATION_RUN_REQUESTED",
                 )
@@ -1670,6 +1761,20 @@ class ExecutionOrchestrator:
                     generation_run_id=run.id,
                     plan_id=run.plan_id,
                 )
+                try:
+                    from regent.application.project_agent_session import (
+                        ProjectAgentSessionService,
+                    )
+
+                    await ProjectAgentSessionService(self._sessions).bind_generation_run(
+                        project_id, generation_run_id=run.id
+                    )
+                except Exception:
+                    logger.warning(
+                        "bind generation run to project agent session failed",
+                        extra={"goal_id": str(goal_id), "run_id": str(run.id)},
+                        exc_info=True,
+                    )
                 base_workspace = await self._resolve_revise_base_workspace(goal_id)
                 snapshot = await gen_service.execute(
                     run.id,
@@ -1681,6 +1786,13 @@ class ExecutionOrchestrator:
                     generation_run_id=run.id,
                     plan_id=run.plan_id,
                     completed=True,
+                )
+                await self._stamp_agent_loop_complete(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    generation_run_id=run.id,
+                    summary="本轮生成与验证已通过，结果已写入工作区。",
+                    open_items=await self._open_work_plan_items(goal_id),
                 )
             # Phase 2.3: Record generation token costs in BudgetLedger
             await self._record_generation_costs(goal_id, run.id)
@@ -3681,6 +3793,27 @@ class ExecutionOrchestrator:
                 if achieve_reason == "soft_pass_preview":
                     metadata["delivery_state"] = DeliveryState.DELIVERED_FOR_REVIEW.value
                     metadata["delivery_soft_pass"] = True
+                    # A0: soft ACHIEVE is not verified_pass COMPLETE.
+                    from regent.application.agent_loop_exit import (
+                        apply_exit_to_metadata,
+                        build_exit,
+                        build_result_bundle,
+                    )
+
+                    metadata = apply_exit_to_metadata(
+                        metadata,
+                        build_exit(
+                            exit_kind="COMPLETE",
+                            stop_reason="soft_preview",
+                            session_id=metadata.get("project_agent_session_id"),
+                            epoch=metadata.get("project_agent_session_epoch"),
+                            result_bundle=build_result_bundle(
+                                summary="预览软通过（非完整验证 COMPLETE）",
+                                preview_url=metadata.get("last_preview_endpoint"),
+                                open_items=["soft_pass_preview: 完整产品门未强制"],
+                            ),
+                        ),
+                    )
                 goal.metadata_json = metadata
                 version = goal.version
                 corr = goal.correlation_id
@@ -4150,6 +4283,90 @@ class ExecutionOrchestrator:
                     extra={"goal_id": str(goal_id), "command": terminal.value},
                 )
 
+    async def _open_work_plan_items(self, goal_id: uuid.UUID) -> list[str]:
+        """W2: COMPLETE result_bundle lists unfinished plan items (Q3)."""
+        try:
+            from regent.application.execution_plan import ExecutionPlanService
+            from regent.application.work_plan import open_plan_item_contents
+
+            items = await ExecutionPlanService(self._sessions).list_items(goal_id)
+            return open_plan_item_contents([i.as_dict() for i in items])
+        except Exception:
+            logger.warning(
+                "open work plan items lookup failed",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+            return []
+
+    async def _stamp_agent_loop_complete(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        generation_run_id: uuid.UUID,
+        summary: str,
+        open_items: list[str] | None = None,
+        preview_url: str | None = None,
+    ) -> None:
+        """A0: persist COMPLETE exit (does not ACHIEVE Goal — Q4)."""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        from regent.application.agent_loop_exit import (
+            apply_exit_to_metadata,
+            build_exit,
+            build_result_bundle,
+            conversation_copy_for_exit,
+        )
+
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                return
+            meta = dict(goal.metadata_json or {})
+            exit_payload = build_exit(
+                exit_kind="COMPLETE",
+                stop_reason="verified_pass",
+                lease_id=generation_run_id,
+                session_id=meta.get("project_agent_session_id"),
+                epoch=meta.get("project_agent_session_epoch"),
+                result_bundle=build_result_bundle(
+                    summary=summary,
+                    preview_url=preview_url or meta.get("last_preview_endpoint"),
+                    artifact_uri=meta.get("last_good_draft_uri"),
+                    evidence_summary="verification passed for this lease",
+                    open_items=open_items or [],
+                ),
+            )
+            meta = apply_exit_to_metadata(meta, exit_payload)
+            # Clear soft-pause / ask markers after real COMPLETE.
+            meta.pop("ops_soft_pause", None)
+            meta.pop("pending_agent_loop_ask", None)
+            meta["session_resume_attempts"] = 0
+            msg_type, content = conversation_copy_for_exit(exit_payload)
+            from regent.application.live_action import merge_live_action_into_metadata
+
+            meta = merge_live_action_into_metadata(
+                meta,
+                content.split("\n")[0][:120],
+                stage="AGENT_LOOP_COMPLETE",
+                event_type=msg_type,
+            )
+            goal.metadata_json = meta
+            flag_modified(goal, "metadata_json")
+            await self._append_conversation_message(
+                session,
+                project_id,
+                role="ASSISTANT",
+                message_type=msg_type,
+                content=content,
+                metadata={
+                    "goal_id": str(goal_id),
+                    "agent_loop_exit": exit_payload,
+                    "generation_run_id": str(generation_run_id),
+                },
+            )
+
     async def _apply_delivery_verdict(
         self,
         recovery: "DeliveryGapRecoveryResult",
@@ -4208,13 +4425,14 @@ class ExecutionOrchestrator:
         if recovery.terminal_exhaust:
             # Soft-pause is not a permission gate: do not WAIT_FOR_HUMAN /
             # HUMAN_TASK_REQUIRED (that mints Console「总是允许」cards).
-            if recovery.method == "SOFT_PAUSE":
+            if recovery.method in {"SOFT_PAUSE", "ASK_HUMAN", "STOP"}:
                 logger.info(
-                    "delivery gap soft-paused without human task",
+                    "delivery gap exited without permission TaskCard",
                     extra={
                         "goal_id": str(goal_id),
                         "gap_kind": recovery.gap_kind,
                         "attempts": recovery.attempts,
+                        "method": recovery.method,
                     },
                 )
                 return True

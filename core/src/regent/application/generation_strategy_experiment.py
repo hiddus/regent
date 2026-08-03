@@ -1,7 +1,12 @@
 """Independent generation-strategy experiment contract (GQ-0 / Tech-Spec §13.7).
 
-Reuses P2-4 statistics / DecisionRecord shapes but MUST NOT occupy the
-A_single_agent / B_certified_hive / C_control organization dimensions.
+DEPRECATED as a peer AB↔agentic product experiment (M3 / ProjectAgentSession):
+comparing one-shot artifact-backed vs AgentRunner is a type error. Retain this
+module for historical reports and offline analysis; do not use it to decide the
+default product execution path. Future experiments should vary Agent capability
+configs (tools / memory / model), not "presence of Agent".
+
+See ``peer_ab_agentic_canary_deprecated`` in generation_strategy_policy.
 """
 
 from __future__ import annotations

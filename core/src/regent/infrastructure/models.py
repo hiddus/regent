@@ -1994,6 +1994,52 @@ class FailureEnvelopeModel(Base):
     )
 
 
+class ProjectAgentSessionModel(Timestamped, Base):
+    """Durable project-scoped agent session (identity + workspace + checkpoint).
+
+    Not a third Agent loop: execution remains AgentRunner; dialogue remains
+    AppGuidanceService. This row is the chassis that binds them across Runs.
+    """
+
+    __tablename__ = "project_agent_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ACTIVE','PAUSED','STOPPED')",
+            name="ck_project_agent_sessions_status",
+        ),
+        CheckConstraint("epoch >= 0", name="ck_project_agent_sessions_epoch"),
+        CheckConstraint("version >= 0", name="ck_project_agent_sessions_version"),
+        Index("ix_project_agent_sessions_goal", "goal_id", "status"),
+        # Exactly one ACTIVE session per project (partial unique).
+        Index(
+            "uq_project_agent_sessions_active_project",
+            "app_project_id",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE'"),
+            postgresql_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    app_project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("app_projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
+    workspace_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    checkpoint_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False, default="regent-core")
+
+
 class RepairAttemptModel(Base):
     """Idempotent repair ledger bound to a FailureEnvelope (GQ-0 / §13.5)."""
 

@@ -20,6 +20,18 @@ from regent.infrastructure.product_surface_capability import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_agent_loop_exit_for_ladder_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ATTRIBUTE_3 ladder tests; A0 exit covered in test_agent_loop_exit / session_resume."""
+    from regent.config import get_settings
+
+    base = get_settings()
+    monkeypatch.setattr(
+        "regent.application.delivery_gap_recovery.get_settings",
+        lambda: base.model_copy(update={"agent_loop_exit_enforced": False}),
+    )
+
+
 def test_classify_presentation_before_evidence() -> None:
     assert (
         classify_delivery_gap_kind(

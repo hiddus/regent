@@ -1,4 +1,10 @@
-"""In-process SubagentRunner runtime roster for console observability."""
+"""In-process SubagentRunner runtime roster for console observability.
+
+TRANSITIONAL OBSERVABILITY — not the durable event truth source.
+Process-local dict; lost on worker restart / not shared across replicas.
+Target: persist agent_* events and project a registry from that stream.
+See docs/decision-note-delivery-machine-invariants-2026-08-02.md §3.
+"""
 
 from __future__ import annotations
 

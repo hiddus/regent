@@ -1,15 +1,12 @@
-"""Recover delivery/goal-attainment gaps by organizing more capability — not shipping junk.
+"""Recover delivery/goal-attainment gaps.
 
-Per REGENT-DEFINITION-1.0:
-- ATTRIBUTE_3: discover capability gaps; REUSE→CONFIGURE→COMPOSE→BUILD→request human last
-- ATTRIBUTE_4: organization is a means; grow agents/capabilities when needed
-- ATTRIBUTE_6: external outcome loop — do not treat generator self-score as Goal success
-- ATTRIBUTE_7: explicit termination when Goal cannot be attained
+A0 Agent Loop exit (2026-08-03):
+- VerificationGap / delivery gap → ``ASK_HUMAN`` or ``STOP`` (hard cap).
+- **Forbidden**: silent auto ``SESSION_RESUME`` / lesson lottery / ATTRIBUTE_3 as brain.
+- Same Session resume only after human answers (``resume_after_human``) or explicit CONTINUE.
 
-GAC-D: escalate the ladder across attempts, reorganize the goal org, BUILD real packages.
-
-Product principle: every retry must absorb prior failure experience and replan —
-never blind same-input retries that re-hit the same wall.
+Legacy: ATTRIBUTE_3 ladder remains fallback only when no Session and exit not enforced,
+or when ``agent_loop_exit_enforced=False`` (ops kill-switch).
 """
 
 from __future__ import annotations
@@ -162,6 +159,8 @@ def classify_delivery_gap_kind(gap_reasons: list[str]) -> str:
     joined = " ".join(str(r).lower() for r in gap_reasons if str(r).strip())
     if not joined:
         return "product_surface"
+    if "plan_approve" in joined:
+        return "PLAN_APPROVE"
     if "budget_exhausted" in joined:
         return "BUDGET_EXHAUSTED"
     if any(m in joined for m in _PRESENTATION_MARKERS):
@@ -380,7 +379,77 @@ class DeliveryGapRecoveryService:
                         "同一目标交付缺口多次自动修复仍未过关，已暂停自动升级。"
                         "可在对话补充方向后继续。"
                     ),
+                    extra_termination={
+                        "total_attempts_cap": True,
+                        "gap_kind": gap_kind,
+                        "draft_uri": draft_uri,
+                    },
                 )
+
+            # A0: gap → ASK_HUMAN (or STOP on hard cap). Do NOT auto SESSION_RESUME.
+            # Same-session continue only after human answers (resume_after_human).
+            exit_enforced = bool(
+                getattr(get_settings(), "agent_loop_exit_enforced", True)
+            )
+            if exit_enforced:
+                from regent.application.agent_loop_exit import detect_doom_loop
+
+                is_doom, doom_reason = detect_doom_loop(metadata, gap_kind=gap_kind)
+                # Update streak for doom tracking even when asking.
+                prior_kind = str(metadata.get("delivery_gap_kind") or "")
+                streak = int(metadata.get("delivery_gap_kind_streak") or 0)
+                metadata["delivery_gap_kind"] = gap_kind
+                metadata["delivery_gap_kind_streak"] = (
+                    streak + 1 if prior_kind == gap_kind else 1
+                )
+                if is_doom or total_attempts >= DELIVERY_GAP_TOTAL_ATTEMPTS_HARD_CAP:
+                    stop_reason = doom_reason or "hard_cap"
+                    return await self._exit_stop_or_ask(
+                        session,
+                        goal=goal,
+                        project_id=project_id,
+                        metadata=metadata,
+                        gap_kind=gap_kind,
+                        reasons=reasons,
+                        attempts=total_attempts,
+                        draft_uri=draft_uri or None,
+                        exit_kind="STOP" if total_attempts >= DELIVERY_GAP_TOTAL_ATTEMPTS_HARD_CAP else "ASK_HUMAN",
+                        stop_reason=stop_reason if is_doom else "total_attempts_hard_cap",
+                        actor=actor,
+                    )
+                return await self._exit_stop_or_ask(
+                    session,
+                    goal=goal,
+                    project_id=project_id,
+                    metadata=metadata,
+                    gap_kind=gap_kind,
+                    reasons=reasons,
+                    attempts=total_attempts,
+                    draft_uri=draft_uri or None,
+                    exit_kind="ASK_HUMAN",
+                    stop_reason="verification_gap",
+                    actor=actor,
+                )
+
+            # Legacy kill-switch path: auto SESSION_RESUME when exit not enforced.
+            if bool(getattr(get_settings(), "agent_session_resume_enabled", True)) and metadata.get(
+                "project_agent_session_id"
+            ):
+                session_resume = await self._resume_same_agent_session(
+                    session,
+                    goal=goal,
+                    project_id=project_id,
+                    requirement_revision_id=requirement_revision_id,
+                    capability_resolution_plan_id=capability_resolution_plan_id,
+                    actor=actor,
+                    reasons=reasons,
+                    gap_kind=gap_kind,
+                    metadata=metadata,
+                    merged_halt=merged_halt,
+                    total_attempts=total_attempts,
+                )
+                if session_resume is not None:
+                    return session_resume
 
             prior_kind = str(metadata.get("delivery_gap_kind") or "")
             streak = int(metadata.get("delivery_gap_kind_streak") or 0)
@@ -616,6 +685,334 @@ class DeliveryGapRecoveryService:
         assert result is not None
         return result
 
+    async def _exit_stop_or_ask(
+        self,
+        session: AsyncSession,
+        *,
+        goal: GoalModel,
+        project_id: uuid.UUID,
+        metadata: dict[str, Any],
+        gap_kind: str,
+        reasons: list[str],
+        attempts: int,
+        draft_uri: str | None,
+        exit_kind: str,
+        stop_reason: str,
+        actor: str,
+    ) -> DeliveryGapRecoveryResult:
+        """A0: persist COMPLETE/STOP/ASK_HUMAN and stop auto-burn."""
+        from regent.application.agent_loop_exit import (
+            apply_exit_to_metadata,
+            build_ask_envelope,
+            build_exit,
+            conversation_copy_for_exit,
+        )
+        from regent.application.project_agent_session import ProjectAgentSessionService
+
+        session_id = metadata.get("project_agent_session_id")
+        epoch = metadata.get("project_agent_session_epoch")
+        ask = None
+        if exit_kind == "ASK_HUMAN":
+            if gap_kind == "PLAN_APPROVE":
+                from regent.application.work_plan import plan_approve_envelope
+
+                plan_items = []
+                for r in reasons:
+                    text = str(r)
+                    if text.startswith("plan:"):
+                        parts = text.split(":", 2)
+                        if len(parts) >= 3:
+                            plan_items.append({"id": parts[1], "content": parts[2]})
+                ask = plan_approve_envelope(items=plan_items or [{"content": r} for r in reasons[:6]])
+            else:
+                why = (
+                    f"交付验证未通过（{gap_kind}）。"
+                    if stop_reason == "verification_gap"
+                    else f"检测到无进展循环（{stop_reason}）。"
+                )
+                ask = build_ask_envelope(
+                    question=(
+                        "本轮未能完成交付。请选择下一步，或补充修改方向后发送「继续」。"
+                    ),
+                    why_blocked=why,
+                    gap_kind=gap_kind,
+                    gap_reasons=reasons,
+                    ask_type="doom_loop" if stop_reason.startswith("doom_loop") else "delivery_gap",
+                )
+        exit_payload = build_exit(
+            exit_kind=exit_kind,  # type: ignore[arg-type]
+            stop_reason=stop_reason,
+            lease_id=metadata.get("last_generation_run_id"),
+            session_id=session_id,
+            epoch=int(epoch) if epoch is not None else None,
+            ask_envelope=ask,
+            draft_uri=draft_uri,
+        )
+        metadata = apply_exit_to_metadata(metadata, exit_payload)
+        metadata["delivery_gap_reasons"] = reasons
+        metadata["delivery_gap_kind"] = gap_kind
+        metadata["ops_soft_pause"] = {
+            "at": datetime.now(UTC).isoformat(),
+            "reason": f"agent_loop_exit:{exit_kind}:{stop_reason}",
+            "gap_kind": gap_kind,
+            "attempts": attempts,
+        }
+        msg_type, content = conversation_copy_for_exit(exit_payload)
+        metadata = merge_live_action_into_metadata(
+            metadata,
+            content.split("\n")[0][:120],
+            stage="DELIVERY_SOFT_PAUSE",
+            event_type=msg_type,
+        )
+        # Drop busy live spinner — waiting on human or stopped.
+        if exit_kind in {"ASK_HUMAN", "STOP"}:
+            # keep live_action from merge above (exit summary)
+            pass
+        goal.metadata_json = metadata
+        flag_modified(goal, "metadata_json")
+
+        # Pause Session chassis so require_active fails until resume_from_paused.
+        try:
+            sessions_svc = ProjectAgentSessionService(self._sessions)
+            active = await sessions_svc.get_active_in(session, project_id)
+            if active is not None:
+                row = await sessions_svc._require_active_row(session, project_id)  # noqa: SLF001
+                from regent.application.project_agent_session import SESSION_STATUS_PAUSED
+
+                row.status = SESSION_STATUS_PAUSED
+                row.version = int(row.version or 0) + 1
+                ckpt = dict(row.checkpoint_json or {})
+                ckpt["last_exit"] = exit_payload
+                row.checkpoint_json = ckpt
+        except Exception:
+            logger.warning(
+                "failed to pause ProjectAgentSession on loop exit",
+                extra={"goal_id": str(goal.id)},
+                exc_info=True,
+            )
+
+        await self._append(
+            session,
+            project_id,
+            role="ASSISTANT",
+            message_type=msg_type,
+            content=content,
+            metadata={
+                "goal_id": str(goal.id),
+                "app_project_id": str(project_id),
+                "agent_loop_exit": exit_payload,
+                "actor": actor,
+            },
+        )
+
+        # Optional HumanTask for console (not DELIVERY_GAP_INTERVENE / 总是允许).
+        if exit_kind == "ASK_HUMAN":
+            try:
+                from datetime import timedelta
+
+                from regent.infrastructure.models import HumanTaskModel
+
+                session.add(
+                    HumanTaskModel(
+                        id=uuid.uuid4(),
+                        goal_id=goal.id,
+                        work_id=None,
+                        run_id=None,
+                        task_type="AGENT_LOOP_ASK",
+                        prompt=str((ask or {}).get("question") or content)[:500],
+                        requested_by=actor or "regent-core",
+                        due_at=datetime.now(UTC) + timedelta(days=7),
+                        status="OPEN",
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "AGENT_LOOP_ASK human task create failed (conversation still has ask)",
+                    extra={"goal_id": str(goal.id)},
+                    exc_info=True,
+                )
+
+        method = "ASK_HUMAN" if exit_kind == "ASK_HUMAN" else "STOP"
+        return DeliveryGapRecoveryResult(
+            False,
+            method,
+            content[:500],
+            attempts,
+            gap_kind,
+            terminal_exhaust=True,
+        )
+
+    async def _resume_same_agent_session(
+        self,
+        session: AsyncSession,
+        *,
+        goal: GoalModel,
+        project_id: uuid.UUID,
+        requirement_revision_id: uuid.UUID,
+        capability_resolution_plan_id: uuid.UUID,
+        actor: str,
+        reasons: list[str],
+        gap_kind: str,
+        metadata: dict[str, Any],
+        merged_halt: dict[str, Any],
+        total_attempts: int,
+    ) -> DeliveryGapRecoveryResult | None:
+        """Resume existing ProjectAgentSession — no ATTRIBUTE_3 / org reorg.
+
+        Returns None when no ACTIVE session exists so the ladder remains fallback.
+        """
+        from regent.application.project_agent_session import ProjectAgentSessionService
+
+        sessions_svc = ProjectAgentSessionService(self._sessions)
+        active = await sessions_svc.get_active_in(session, project_id)
+        if active is None:
+            # No chassis yet → keep ATTRIBUTE_3 ladder as fallback (legacy / tests).
+            return None
+
+        bumped = await sessions_svc.bump_epoch_in(
+            session,
+            project_id,
+            checkpoint_patch={
+                "last_gap_kind": gap_kind,
+                "last_gap_reasons": reasons[:12],
+                "last_halt": {
+                    k: merged_halt[k]
+                    for k in ("draft_uri", "error_code", "summary")
+                    if k in merged_halt
+                },
+                "resume_method": "SESSION_RESUME",
+            },
+        )
+        lesson = build_failure_lesson(
+            gap_reasons=reasons,
+            gap_kind=gap_kind,
+            method="SESSION_RESUME",
+            attempt=total_attempts,
+            halt_context=merged_halt,
+            goal_text=goal.original_input or "",
+        )
+        prior_lessons = list(metadata.get("failure_lessons") or [])
+        prior_lessons.append(lesson)
+        learned = list(
+            dict.fromkeys(
+                [
+                    *list(metadata.get("learned_constraints") or []),
+                    *lesson["learned_constraints"],
+                ]
+            )
+        )[:16]
+        nonce = f"session:{bumped.epoch}:{gap_kind}:{lesson['lesson_digest']}"
+        metadata["delivery_gap_reasons"] = reasons
+        metadata["delivery_gap_kind"] = gap_kind
+        metadata["execution_stage"] = "GENERATING"
+        metadata["awaiting_authorized_sources"] = False
+        metadata["failure_lessons"] = prior_lessons[-8:]
+        metadata["learned_constraints"] = learned
+        metadata["replan_nonce"] = nonce
+        metadata["project_agent_session_id"] = str(bumped.id)
+        metadata["project_agent_session_epoch"] = bumped.epoch
+        metadata["project_agent_session_workspace_uri"] = bumped.workspace_uri
+        metadata["session_resume_attempts"] = (
+            int(metadata.get("session_resume_attempts") or 0) + 1
+        )
+        # Do not advance ATTRIBUTE_3 ladder counters on session resume.
+        metadata["capability_resolution"] = {
+            **dict(metadata.get("capability_resolution") or {}),
+            "delivery_method": "SESSION_RESUME",
+            "escalation_step": "SESSION_RESUME",
+            "delivery_gap_kind": gap_kind,
+            "generation_guidance": [
+                f"Resume ProjectAgentSession {bumped.id} epoch={bumped.epoch} "
+                f"gap_kind={gap_kind}.",
+                "Continue in the same workspace; fix verification gaps with AgentRunner.",
+                *[f"Constraint: {c}" for c in learned[:6]],
+            ],
+            "replan_nonce": nonce,
+            "failure_lesson_digest": lesson["lesson_digest"],
+            "project_agent_session_id": str(bumped.id),
+            "project_agent_session_workspace_uri": bumped.workspace_uri,
+        }
+        metadata.update(
+            merge_live_action_into_metadata(
+                metadata,
+                "正在同一 Agent Session 中根据验证反馈继续修复…",
+                stage="GENERATING",
+                event_type="PROJECT_AGENT_SESSION_RESUME",
+            )
+        )
+        goal.metadata_json = metadata
+        flag_modified(goal, "metadata_json")
+        goal.version = int(goal.version or 0) + 1
+
+        resume_key = make_idempotency_key(
+            "generation-session-resume",
+            goal.id,
+            f"{requirement_revision_id}:{bumped.id}:{bumped.epoch}:{lesson['lesson_digest']}",
+        )
+        session.add(
+            make_outbox_event(
+                EventEnvelope(
+                    event_type=GENERATION_RUN_REQUESTED,
+                    aggregate_type="goal",
+                    aggregate_id=goal.id,
+                    aggregate_version=goal.version,
+                    payload={
+                        "goal_id": str(goal.id),
+                        "app_project_id": str(project_id),
+                        "requirement_revision_id": str(requirement_revision_id),
+                        "capability_resolution_plan_id": str(
+                            capability_resolution_plan_id
+                        ),
+                        "actor": actor,
+                        "idempotency_key": resume_key,
+                        "delivery_policy": _DELIVERY_POLICY,
+                        "delivery_gap_kind": gap_kind,
+                        "escalation_step": "SESSION_RESUME",
+                        "gap_reasons": reasons,
+                        "replan_nonce": nonce,
+                        "failure_lesson_digest": lesson["lesson_digest"],
+                        "project_agent_session_id": str(bumped.id),
+                        "project_agent_session_epoch": bumped.epoch,
+                        "project_agent_session_workspace_uri": bumped.workspace_uri,
+                    },
+                    idempotency_key=resume_key,
+                    correlation_id=goal.correlation_id,
+                )
+            )
+        )
+        message = (
+            f"交付未达成（{', '.join(reasons[:3]) or 'review failed'}；"
+            f"gap_kind={gap_kind}）。"
+            f"已回到同一 ProjectAgentSession 续跑 AgentRunner"
+            f"（session={bumped.id} epoch={bumped.epoch}），"
+            "不升 ATTRIBUTE_3 能力阶梯。"
+        )
+        await self._append(
+            session,
+            project_id,
+            role="ASSISTANT",
+            message_type="PROJECT_AGENT_SESSION_RESUMED",
+            content=message,
+            metadata={
+                "goal_id": str(goal.id),
+                "method": "SESSION_RESUME",
+                "gap_reasons": reasons,
+                "gap_kind": gap_kind,
+                "project_agent_session_id": str(bumped.id),
+                "project_agent_session_epoch": bumped.epoch,
+                "replan_nonce": nonce,
+                "failure_lesson_digest": lesson["lesson_digest"],
+                "total_attempts": total_attempts,
+            },
+        )
+        return DeliveryGapRecoveryResult(
+            True,
+            "SESSION_RESUME",
+            message,
+            total_attempts,
+            gap_kind,
+        )
+
     async def _commit_recovery_escalation(
         self,
         session: AsyncSession,
@@ -839,6 +1236,25 @@ class DeliveryGapRecoveryService:
         ).strip()
         if draft_uri:
             metadata["last_good_draft_uri"] = draft_uri
+        # A0: hard-cap soft-pause is STOP (not silent retry fuel).
+        from regent.application.agent_loop_exit import (
+            apply_exit_to_metadata,
+            build_exit,
+        )
+
+        stop_reason = "budget" if gap_kind == "BUDGET_EXHAUSTED" else "hard_cap_soft_pause"
+        if (extra_termination or {}).get("total_attempts_cap"):
+            stop_reason = "total_attempts_hard_cap"
+        metadata = apply_exit_to_metadata(
+            metadata,
+            build_exit(
+                exit_kind="STOP",
+                stop_reason=stop_reason,
+                session_id=metadata.get("project_agent_session_id"),
+                epoch=metadata.get("project_agent_session_epoch"),
+                draft_uri=draft_uri or None,
+            ),
+        )
         preview_endpoint = str(metadata.get("last_preview_endpoint") or "").strip()
         metadata["termination"] = {
             "reason": "goal_attainment_soft_pause",
@@ -971,6 +1387,8 @@ class DeliveryGapRecoveryService:
         delivery_gap_recovery_attempts stays exhausted and nothing regenerates.
         """
         gap_reasons: list[str] = []
+        legacy_req_id: uuid.UUID | None = None
+        legacy_plan_id: uuid.UUID | None = None
         async with self._sessions() as session, session.begin():
             goal = await session.get(GoalModel, goal_id, with_for_update=True)
             if goal is None:
@@ -978,6 +1396,8 @@ class DeliveryGapRecoveryService:
                     False, "BLOCK", "goal not found", 0, terminal_exhaust=False
                 )
             metadata = dict(goal.metadata_json or {})
+            # Session chassis is created at GoalExecutionService.start and stamped
+            # onto metadata. recover() prefers SESSION_RESUME when that id is present.
             termination = dict(metadata.get("termination") or {})
             pending = dict(metadata.get("pending_delivery_gap_human") or {})
             raw_reasons = (
@@ -1006,13 +1426,30 @@ class DeliveryGapRecoveryService:
             metadata.pop("termination", None)
             metadata.pop("pending_delivery_gap_human", None)
             metadata.pop("ops_soft_pause", None)
+            # A0: mark ASK answered so exit gate allows authorized Session resume.
+            from regent.application.agent_loop_exit import mark_ask_answered
+
+            metadata = mark_ask_answered(
+                metadata,
+                answer=(human_message or "human approved continue")[:800],
+                option_id="continue_fix",
+            )
+            # Work Plan: human approve (or any authorized continue after plan_approve ASK).
+            pending_ask = dict(metadata.get("pending_agent_loop_ask") or {})
+            if (
+                str(pending_ask.get("ask_type") or "") == "plan_approve"
+                or str(metadata.get("delivery_gap_kind") or "") == "PLAN_APPROVE"
+            ):
+                metadata["work_plan_approved"] = True
+                metadata["work_plan_seen"] = True
             metadata["execution_stage"] = "GENERATING"
+            metadata["authorized_session_resume"] = True
             metadata["human_resume_nonce"] = (
                 f"human:{datetime.now(UTC).isoformat()}:{uuid.uuid4().hex[:8]}"
             )
             goal.metadata_json = merge_live_action_into_metadata(
                 metadata,
-                "已批准，正在重新规划并继续生成",
+                "已确认，同一 Agent Session 继续修复",
                 stage="GENERATING",
                 event_type="ATTAINMENT_RECOVERY_STARTED",
             )
@@ -1066,11 +1503,77 @@ class DeliveryGapRecoveryService:
                     terminal_exhaust=False,
                 )
 
+            # A0 authorized path: resume same Session when chassis id is present.
+            # Ladder unit tests omit session_id — fall through to recover() unchanged.
+            reasons = gap_reasons
+            gap_kind = classify_delivery_gap_kind(reasons)
+            merged_halt = {
+                "stage": "HUMAN_AUTHORIZED_RESUME",
+                "message": (human_message or "human approved continue")[:400],
+                "last_error": "human-authorized-replan",
+                "gac": "GAC-D1",
+            }
+            if str(metadata.get("project_agent_session_id") or "").strip():
+                from regent.application.project_agent_session import (
+                    SESSION_STATUS_ACTIVE,
+                    SESSION_STATUS_PAUSED,
+                    ProjectAgentSessionService,
+                )
+                from regent.infrastructure.models import ProjectAgentSessionModel
+
+                paused = None
+                active_check = None
+                try:
+                    paused_row = await session.scalar(
+                        select(ProjectAgentSessionModel)
+                        .where(
+                            ProjectAgentSessionModel.app_project_id == project_id,
+                            ProjectAgentSessionModel.status == SESSION_STATUS_PAUSED,
+                        )
+                        .order_by(ProjectAgentSessionModel.updated_at.desc())
+                        .limit(1)
+                    )
+                    if isinstance(paused_row, ProjectAgentSessionModel):
+                        paused = paused_row
+                        paused.status = SESSION_STATUS_ACTIVE
+                        paused.version = int(paused.version or 0) + 1
+                    active_check = await ProjectAgentSessionService(
+                        self._sessions
+                    ).get_active_in(session, project_id)
+                except (StopAsyncIteration, StopIteration):
+                    paused = None
+                    active_check = None
+                if active_check is not None or paused is not None:
+                    resumed = await self._resume_same_agent_session(
+                        session,
+                        goal=goal,
+                        project_id=project_id,
+                        requirement_revision_id=req_id,
+                        capability_resolution_plan_id=plan_id,
+                        actor=actor,
+                        reasons=reasons,
+                        gap_kind=gap_kind,
+                        metadata=dict(goal.metadata_json or {}),
+                        merged_halt=merged_halt,
+                        total_attempts=1,
+                    )
+                    if resumed is not None:
+                        return resumed
+                    return DeliveryGapRecoveryResult(
+                        False,
+                        "SESSION_RESUME_FAILED",
+                        "authorized resume could not schedule Session lease",
+                        0,
+                        gap_kind,
+                        terminal_exhaust=False,
+                    )
+            legacy_req_id, legacy_plan_id = req_id, plan_id
+
         return await self.recover(
             goal_id=goal_id,
             project_id=project_id,
-            requirement_revision_id=req_id,
-            capability_resolution_plan_id=plan_id,
+            requirement_revision_id=legacy_req_id,
+            capability_resolution_plan_id=legacy_plan_id,
             actor=actor,
             gap_reasons=gap_reasons,
             halt_context={
@@ -1252,6 +1755,27 @@ class DeliveryGapRecoveryService:
                     False, "BLOCK", "goal not found", 0, gap_kind
                 )
             metadata = dict(goal.metadata_json or {})
+            # I-E: while ProjectAgentSession is ACTIVE, do not expand ATTRIBUTE_3 /
+            # org as the "brain" — Session + AgentRunner remains the controller.
+            if bool(getattr(get_settings(), "agent_session_resume_enabled", True)) and metadata.get(
+                "project_agent_session_id"
+            ):
+                from regent.application.project_agent_session import ProjectAgentSessionService
+
+                active = await ProjectAgentSessionService(self._sessions).get_active_in(
+                    session, project_id
+                )
+                if active is not None:
+                    return DeliveryGapRecoveryResult(
+                        False,
+                        "SESSION_ACTIVE",
+                        (
+                            "ProjectAgentSession still ACTIVE; skip gate capability/org "
+                            "reorganization (I-E). Prefer Session resume / soft-pause."
+                        ),
+                        int(metadata.get("gate_reorg_attempts") or 0),
+                        gap_kind,
+                    )
             attempts = int(metadata.get("gate_reorg_attempts") or 0)
             # CD-7.3: Gate budget scales with delivery_profile (same authority as recover).
             _persona = getattr(get_settings(), "delivery_profile", "balanced")

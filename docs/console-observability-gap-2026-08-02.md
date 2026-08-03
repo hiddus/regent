@@ -5,6 +5,10 @@
 >
 > 本文分两部分：**A. 实现复查（W4 后的现状）**、**B. 控制台缺口根因与修复方案**。
 
+> **状态更新（2026-08-02）**：P0 止血与部分 REST 出口已落地（`0ce5963`）。  
+> `ProgressEvent` / `activity_log` / `tool_events` / 进程内 agents **正式标为 TRANSITIONAL**，不是终态事件架构。  
+> 团队共识：[`decision-note-delivery-machine-invariants-2026-08-02.md`](decision-note-delivery-machine-invariants-2026-08-02.md)。
+
 ---
 
 # A. 实现复查（相对 `agent-core-vs-claudecode-audit-2026-08-02.md` 的增量）

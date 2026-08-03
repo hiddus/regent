@@ -14,6 +14,7 @@ __all__ = [
     "ChatMessage",
     "ChatResponse",
     "ChatUsage",
+    "PlanApproveRequiredError",
     "ToolCall",
     "ToolSpec",
     "TranscriptTurn",
@@ -71,6 +72,21 @@ class ArtifactIncompleteError(RuntimeError):
         super().__init__(reason)
         self.reason = reason
         self.failure_code = "ARTIFACT_INCOMPLETE"
+
+
+class PlanApproveRequiredError(RuntimeError):
+    """Raised when first work plan needs human approve (OpenWork plan_approve)."""
+
+    def __init__(
+        self,
+        reason: str = "work plan awaiting human approve",
+        *,
+        items: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.failure_code = "PLAN_APPROVE_REQUIRED"
+        self.items = list(items or [])
 
 
 class BudgetExhaustedError(RuntimeError):

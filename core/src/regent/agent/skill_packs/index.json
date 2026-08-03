@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "schema": "regent-skill-catalog-v1",
+  "progressive_disclosure": true,
+  "skills": [
+    {
+      "skill_id": "evidence",
+      "version": "1.0.0",
+      "title": "Evidence",
+      "description": "Capture external or generated evidence inputs required by the Goal Journey.",
+      "applies_when": ["evidence", "upload", "import", "csv", "source", "fetch", "attachment", "上传", "导入", "证据", "附件"],
+      "gap_codes": ["ARTIFACT_INCOMPLETE", "TEST_FAILED", "evidence", "journey"]
+    },
+    {
+      "skill_id": "http-api",
+      "version": "1.0.0",
+      "title": "HTTP API",
+      "description": "Stable JSON/HTTP routes aligned with Runtime Profile smoke and Journey.",
+      "applies_when": ["api", "rest", "json", "endpoint", "flask", "fastapi", "route", "接口", "服务", "路由"],
+      "gap_codes": ["SMOKE_FAILED", "START_FAILED", "smoke-http", "PREVIEW_FAILED"]
+    },
+    {
+      "skill_id": "persistence",
+      "version": "1.0.0",
+      "title": "Persistence",
+      "description": "SQLite/file persistence with empty-state UX instead of fake seed data.",
+      "applies_when": ["sqlite", "persist", "database", "crud", "todo", "notes", "storage", "持久化", "数据库", "存储", "待办", "笔记"],
+      "gap_codes": ["ARTIFACT_INCOMPLETE", "TEST_FAILED", "forbid-demo-shell", "persistence"]
+    },
+    {
+      "skill_id": "runtime-contract",
+      "version": "1.0.0",
+      "title": "Runtime Contract",
+      "description": "Align generated apps with Runtime Profile entry/start/smoke/test contracts.",
+      "applies_when": ["flask", "fastapi", "runtime", "health", "smoke", "profile", "web app", "网站", "应用", "后端", "启动"],
+      "gap_codes": ["START_FAILED", "SMOKE_FAILED", "smoke-http", "smoke-start", "no app.py"]
+    },
+    {
+      "skill_id": "test-harness",
+      "version": "1.0.0",
+      "title": "Test Harness",
+      "description": "Add pytest coverage for routes and persistence Journeys.",
+      "applies_when": ["pytest", "test", "harness", "ci", "verify"],
+      "gap_codes": ["TEST_FAILED", "project-tests", "TEST_COMMAND_MISSING"]
+    },
+    {
+      "skill_id": "ui",
+      "version": "1.0.0",
+      "title": "UI",
+      "description": "Minimal usable UI bound to real backend actions — not a demo poster.",
+      "applies_when": ["ui", "frontend", "template", "form", "page", "dashboard", "website", "页面", "表单", "看板", "地图", "前端"],
+      "gap_codes": ["STATIC_FAILED", "forbid-pure-static-backend", "SMOKE_FAILED", "presentation"]
+    },
+    {
+      "skill_id": "web-app-scaffold",
+      "version": "1.0.0",
+      "title": "Web App Scaffold",
+      "description": "Minimal Flask/FastAPI scaffold with persistence and a first Journey. Deliver a runnable surface first.",
+      "applies_when": ["todo", "crud", "persist", "sqlite", "notes", "scaffold", "flask", "website", "待办", "笔记", "网站", "应用", "系统"],
+      "gap_codes": ["ARTIFACT_INCOMPLETE", "STATIC_FAILED", "forbid-pure-static-backend", "forbid-demo-shell"]
+    }
+  ]
+}

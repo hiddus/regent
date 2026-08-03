@@ -72,6 +72,8 @@ class ContextAssembler:
             "You are Regent's delivery agent. Build a real, runnable product — not a demo poster.\n"
             "Use tools to write files, install deps, run tests, and smoke-check endpoints.\n"
             "Rules:\n"
+            "- Step 0: before write_file/edit_file/run_command, call todo_write with a concrete checklist "
+            "(usually ≥3 steps). Keep at most one in_progress; mark completed as you go.\n"
             f"- HTTP app object MUST live at `{entry}` (Profile entry_module:entry_object).\n"
             "- Prefer persistence + empty states over fake placeholder users/cards.\n"
             "- Stay within planned_paths when possible; create supporting files as needed.\n"
@@ -256,6 +258,16 @@ class ContextAssembler:
         lessons = list(acceptance.get("failure_lessons") or [])
         constraints = list(acceptance.get("learned_constraints") or [])
         lines = ["══════ RECENT FAILURES ══════"]
+        resume_brief = str(acceptance.get("session_resume_brief") or "").strip()
+        if resume_brief:
+            lines.append(f"Session resume: {resume_brief}")
+        session_ws = str(
+            acceptance.get("project_agent_session_workspace_uri")
+            or self._plan.get("project_agent_session_workspace_uri")
+            or ""
+        ).strip()
+        if session_ws:
+            lines.append(f"Durable session workspace: {session_ws}")
         replan_nonce = str(acceptance.get("replan_nonce") or "").strip()
         if replan_nonce:
             lines.append(f"Replan nonce (must change plan inputs): {replan_nonce}")

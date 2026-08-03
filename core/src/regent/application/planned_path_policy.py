@@ -25,7 +25,17 @@ SCAFFOLD_PLANNED_PATHS: tuple[str, ...] = (
 )
 
 _ALLOWED_ROOT_FILES = frozenset(
-    {"requirements.txt", "readme.md", "pyproject.toml"}
+    {
+        "requirements.txt",
+        "readme.md",
+        "pyproject.toml",
+        "index.html",
+        "styles.css",
+        "style.css",
+        "app.js",
+        "app.py",
+        "main.py",
+    }
 )
 # Keep aligned with agent/file_manifest.TEXT_EXTENSIONS (P0-2 / R0).
 _ALLOWED_SUFFIXES = (

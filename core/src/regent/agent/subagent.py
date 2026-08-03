@@ -19,6 +19,7 @@ class SubagentBrief:
     milestone_ordinal: int
     acceptance: dict[str, Any] = field(default_factory=dict)
     planned_paths: list[str] = field(default_factory=list)
+    plan_item_key: str | None = None
 
 
 @dataclass
@@ -47,12 +48,53 @@ class SubagentRunner:
         budget: AgentBudget | None = None,
         regent_md: str = "",
         goal_id: str | None = None,
+        execution_plans: Any | None = None,
+        run_id: Any | None = None,
     ) -> None:
         self._provider = provider
         self._workspace_root = workspace_root.resolve()
         self._budget = budget or AgentBudget(max_turns=30, max_tokens=120_000)
         self._regent_md = regent_md
         self._goal_id = goal_id
+        self._execution_plans = execution_plans
+        self._run_id = run_id
+
+    async def _writeback_plan_item(self, brief: SubagentBrief, *, status: str) -> None:
+        if self._execution_plans is None or not self._goal_id or not brief.plan_item_key:
+            return
+        import uuid
+
+        from regent.application.execution_plan import UpsertPlanItem
+        from regent.domain.errors import DomainError, ErrorCode
+
+        goal_uuid = uuid.UUID(str(self._goal_id))
+        run_uuid = None
+        if self._run_id is not None:
+            try:
+                run_uuid = uuid.UUID(str(self._run_id))
+            except (TypeError, ValueError):
+                run_uuid = self._run_id if hasattr(self._run_id, "hex") else None
+        run_scope = str(run_uuid) if run_uuid is not None else ""
+        item_key = (
+            f"{run_scope}:{brief.plan_item_key}" if run_scope else str(brief.plan_item_key)
+        )
+        try:
+            await self._execution_plans.upsert_items(
+                [
+                    UpsertPlanItem(
+                        goal_id=goal_uuid,
+                        run_id=run_uuid,
+                        item_key=item_key,
+                        content=brief.milestone_title or brief.plan_item_key,
+                        status=status,
+                        owner_agent_id=f"subagent-{brief.milestone_ordinal}-{brief.milestone_key}",
+                        metadata={"plan_item_key": brief.plan_item_key},
+                    )
+                ]
+            )
+        except DomainError as exc:
+            if exc.code != ErrorCode.INVALID_STATE:
+                raise
 
     async def run_milestone(
         self,
@@ -106,7 +148,22 @@ class SubagentRunner:
             toolkit,
             budget=self._budget,
             regent_md=self._regent_md,
+            # Subagent inherits parent plan items for Step 0; skip re-approve.
         )
+        # Mark as already approved / trivial so child does not ASK plan_approve again.
+        plan["work_plan_approved"] = True
+        plan["skip_plan_approve"] = True
+        plan["work_plan_trivial"] = True
+        if brief.plan_item_key:
+            plan["work_plan_items"] = [
+                {
+                    "id": brief.plan_item_key,
+                    "content": brief.milestone_title,
+                    "status": "in_progress",
+                    "owner_agent_id": agent_id,
+                }
+            ]
+        await self._writeback_plan_item(brief, status="in_progress")
 
         async def _on_event(event: dict[str, Any]) -> None:
             if event.get("type") != "tool_call":
@@ -137,12 +194,14 @@ class SubagentRunner:
                 detail="子代理执行失败",
                 milestone_key=brief.milestone_key,
             )
+            await self._writeback_plan_item(brief, status="failed")
             raise
 
         summary = {
             "milestone_key": brief.milestone_key,
             "milestone_ordinal": brief.milestone_ordinal,
             "title": brief.milestone_title,
+            "plan_item_key": brief.plan_item_key,
             "files": sorted(result.files.keys()),
             "verification": (
                 {
@@ -164,6 +223,10 @@ class SubagentRunner:
             # Explicitly omit conversation / transcript from parent context.
             "sidechain_omitted": True,
         }
+        passed = None if result.verification is None else result.verification.passed
+        await self._writeback_plan_item(
+            brief, status="completed" if passed is not False else "failed"
+        )
         upsert_subagent_runtime(
             self._goal_id,
             agent_id=agent_id,
@@ -176,9 +239,7 @@ class SubagentRunner:
             brief=brief,
             summary=summary,
             files=result.files,
-            verification_passed=(
-                None if result.verification is None else result.verification.passed
-            ),
+            verification_passed=passed,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             turns=result.turns,

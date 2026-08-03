@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
 from regent.agent.compact import ContextCompactor, HeuristicSummarizer, micro_compact
@@ -26,6 +27,7 @@ from regent.agent.types import (
     ArtifactIncompleteError,
     BudgetExhaustedError,
     ChatMessage,
+    PlanApproveRequiredError,
     TranscriptTurn,
     VerificationGap,
     VerificationVerdict,
@@ -177,6 +179,195 @@ class AgentRunner:
             ledger=ledger,
         )
 
+    async def _seed_work_plan(self, plan: dict[str, Any]) -> None:
+        """Restore todos from plan checkpoint or durable ExecutionPlan items."""
+        if self._toolkit.todos:
+            return
+        seeded = list(plan.get("work_plan_items") or plan.get("todos") or [])
+        if not seeded and self._execution_plans is not None and self._goal_id is not None:
+            try:
+                views = await self._execution_plans.list_items(self._goal_id)
+                seeded = [
+                    {
+                        "id": v.item_key.rsplit(":", 1)[-1],
+                        "content": v.content,
+                        "status": v.status,
+                        **({"owner_agent_id": v.owner_agent_id} if v.owner_agent_id else {}),
+                        **({"dependencies": list(v.dependencies)} if v.dependencies else {}),
+                    }
+                    for v in views
+                    if v.status not in {"cancelled"}
+                ]
+            except Exception:
+                seeded = []
+        if seeded:
+            from regent.application.work_plan import normalize_single_in_progress
+
+            self._toolkit.todos = normalize_single_in_progress(
+                [
+                    {
+                        "id": str(item.get("id") or item.get("item_key") or ""),
+                        "content": str(item.get("content") or ""),
+                        "status": str(item.get("status") or "pending"),
+                        **(
+                            {"owner_agent_id": str(item["owner_agent_id"])}
+                            if item.get("owner_agent_id")
+                            else {}
+                        ),
+                    }
+                    for item in seeded
+                    if isinstance(item, dict) and (item.get("id") or item.get("item_key"))
+                ]
+            )
+
+    def _step0_blocks_write(self, plan: dict[str, Any], tool_name: str) -> str | None:
+        from regent.config import get_settings
+        from regent.application.work_plan import (
+            WRITE_TOOLS,
+            has_active_plan_items,
+            is_trivial_work,
+            step0_rejection_message,
+        )
+
+        if tool_name not in WRITE_TOOLS:
+            return None
+        if not bool(getattr(get_settings(), "agent_work_plan_required", True)):
+            return None
+        if is_trivial_work(plan):
+            return None
+        if has_active_plan_items(self._toolkit.todos):
+            return None
+        return step0_rejection_message()
+
+    async def _persist_work_plan(self) -> None:
+        if self._execution_plans is None or self._goal_id is None:
+            return
+        from regent.application.execution_plan import UpsertPlanItem
+        from regent.domain.errors import DomainError, ErrorCode
+
+        run_scope = str(self._run_id) if self._run_id is not None else ""
+        try:
+            await self._execution_plans.upsert_items(
+                [
+                    UpsertPlanItem(
+                        goal_id=self._goal_id,
+                        run_id=self._run_id,
+                        item_key=(
+                            f"{run_scope}:{item.get('id')}"
+                            if run_scope
+                            else str(item.get("id") or "")
+                        ),
+                        content=str(item.get("content") or ""),
+                        status=str(item.get("status") or "pending"),
+                        owner_agent_id=(
+                            str(item["owner_agent_id"])
+                            if item.get("owner_agent_id")
+                            else None
+                        ),
+                        dependencies=list(item.get("dependencies") or ()),
+                        metadata={"session_work_plan": True},
+                    )
+                    for item in self._toolkit.todos
+                    if item.get("id")
+                ]
+            )
+        except DomainError as exc:
+            if exc.code != ErrorCode.INVALID_STATE:
+                raise
+
+    def _should_ask_plan_approve(self, plan: dict[str, Any]) -> bool:
+        from regent.config import get_settings
+        from regent.application.work_plan import is_trivial_work
+
+        if not bool(getattr(get_settings(), "agent_plan_approve_on_first", True)):
+            return False
+        if plan.get("work_plan_approved") or plan.get("skip_plan_approve"):
+            return False
+        if is_trivial_work(plan):
+            return False
+        # Resume / same Session small continue: already has approved stamp or prior items done.
+        if plan.get("authorized_session_resume") and plan.get("work_plan_seen"):
+            return False
+        return True
+
+    async def _run_delegate_plan_item(
+        self,
+        *,
+        plan: dict[str, Any],
+        item_id: str,
+        acceptance_notes: str,
+        prior_gaps: list[VerificationGap] | None,
+    ) -> str:
+        from regent.agent.subagent import SubagentBrief, SubagentRunner
+
+        match = next(
+            (t for t in self._toolkit.todos if str(t.get("id") or "") == item_id),
+            None,
+        )
+        if match is None:
+            return json.dumps({"ok": False, "error": f"plan item not found: {item_id}"})
+        owner = f"subagent-{item_id}"
+        match["status"] = "in_progress"
+        match["owner_agent_id"] = owner
+        await self._persist_work_plan()
+        brief = SubagentBrief(
+            milestone_key=str(item_id),
+            milestone_title=str(match.get("content") or item_id)[:120],
+            milestone_ordinal=max(
+                1,
+                next(
+                    (
+                        i + 1
+                        for i, t in enumerate(self._toolkit.todos)
+                        if str(t.get("id") or "") == item_id
+                    ),
+                    1,
+                ),
+            ),
+            acceptance={
+                "acceptance_notes": acceptance_notes,
+                "plan_item_key": item_id,
+            },
+            planned_paths=list(plan.get("planned_paths") or []),
+            plan_item_key=str(item_id),
+        )
+        runner = SubagentRunner(
+            self._provider,
+            workspace_root=self._toolkit.root,
+            budget=AgentBudget(
+                max_turns=min(20, self._budget.max_turns),
+                max_tokens=min(80_000, self._budget.max_tokens),
+            ),
+            regent_md=self._regent_md,
+            goal_id=str(self._goal_id) if self._goal_id else None,
+            execution_plans=self._execution_plans,
+            run_id=self._run_id,
+        )
+        result = await runner.run_milestone(
+            goal_anchor_text=str(plan.get("goal_anchor_text") or ""),
+            success_criteria=(plan.get("acceptance_contract") or {}).get("success_criteria"),
+            brief=brief,
+            prior_gaps=prior_gaps,
+            verify=True,
+        )
+        passed = result.verification_passed
+        for t in self._toolkit.todos:
+            if str(t.get("id") or "") == item_id:
+                t["status"] = "completed" if passed is not False else "pending"
+                t["owner_agent_id"] = owner
+        await self._persist_work_plan()
+        return json.dumps(
+            {
+                "ok": True,
+                "id": item_id,
+                "verification_passed": passed,
+                "turns": result.turns,
+                "summary": result.summary,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
     async def run(
         self,
         plan: dict[str, Any],
@@ -223,7 +414,12 @@ class AgentRunner:
             regent_md=self._regent_md,
             gaps=prior_gaps,
         )
-        conversation: list[ChatMessage] = []
+        await self._seed_work_plan(plan)
+        # I-C: seed conversation from Session checkpoint / prior transcript
+        # (same AgentRunner — not a third loop).
+        conversation: list[ChatMessage] = _seed_session_conversation(
+            plan, toolkit_root=self._toolkit.root
+        )
         transcript: list[TranscriptTurn] = []
         compact_events: list[dict[str, Any]] = []
         repair_branch_log: list[dict[str, Any]] = []
@@ -421,7 +617,25 @@ class AgentRunner:
             submitted_this_turn = False
             for call in assistant.tool_calls:
                 ledger.add_tool_invocation(1)
-                result_text = await self._toolkit.execute(call)
+                step0_block = self._step0_blocks_write(plan, call.name)
+                if step0_block:
+                    result_text = f"ERROR: WorkPlanRequired: {step0_block}"
+                elif call.name == "delegate_plan_item":
+                    # Toolkit validates; runner executes isolated subagent.
+                    probe = await self._toolkit.execute(call)
+                    if probe.startswith("ERROR:"):
+                        result_text = probe
+                    else:
+                        result_text = await self._run_delegate_plan_item(
+                            plan=plan,
+                            item_id=str(call.arguments.get("id") or ""),
+                            acceptance_notes=str(
+                                call.arguments.get("acceptance_notes") or ""
+                            ),
+                            prior_gaps=prior_gaps,
+                        )
+                else:
+                    result_text = await self._toolkit.execute(call)
                 message_result = result_text
                 if call.name == "submit":
                     submitted_this_turn = True
@@ -449,13 +663,13 @@ class AgentRunner:
                         "output_tokens": output_tokens,
                     },
                 )
-                if call.name == "todo_write":
+                if call.name in {"todo_write", "plan_update"}:
                     await _emit(
                         on_event,
                         {
                             "type": "plan_updated",
                             "turn": turn,
-                            "tool": "todo_write",
+                            "tool": call.name,
                             "summary": f"计划已更新（{len(self._toolkit.todos)} 项）",
                             "detail": _preview(self._toolkit.todos, 400),
                         },
@@ -474,36 +688,18 @@ class AgentRunner:
                             ref=str(getattr(ref, "uri", None) or ref),
                             text=result_text,
                         )
+                if call.name in {"todo_write", "plan_update", "delegate_plan_item"}:
+                    await self._persist_work_plan()
                 if (
                     call.name == "todo_write"
-                    and self._execution_plans is not None
-                    and self._goal_id is not None
+                    and not result_text.startswith("ERROR:")
+                    and self._should_ask_plan_approve(plan)
+                    and len(self._toolkit.todos) >= 1
                 ):
-                    from regent.application.execution_plan import UpsertPlanItem
-                    from regent.domain.errors import DomainError, ErrorCode
-
-                    run_scope = str(self._run_id) if self._run_id is not None else ""
-                    try:
-                        await self._execution_plans.upsert_items(
-                            [
-                                UpsertPlanItem(
-                                    goal_id=self._goal_id,
-                                    run_id=self._run_id,
-                                    item_key=(
-                                        f"{run_scope}:{item.get('id')}"
-                                        if run_scope
-                                        else str(item.get("id") or "")
-                                    ),
-                                    content=str(item.get("content") or ""),
-                                    status=str(item.get("status") or "pending"),
-                                )
-                                for item in self._toolkit.todos
-                                if item.get("id")
-                            ]
-                        )
-                    except DomainError as exc:
-                        if exc.code != ErrorCode.INVALID_STATE:
-                            raise
+                    raise PlanApproveRequiredError(
+                        "PLAN_APPROVE_REQUIRED: work plan awaiting human approve",
+                        items=list(self._toolkit.todos),
+                    )
                 tool_msg = ChatMessage(
                     role="tool",
                     content=message_result,
@@ -709,3 +905,81 @@ class AgentRunner:
             encoding="utf-8",
         )
         return result
+
+
+def _seed_session_conversation(
+    plan: dict[str, Any], *, toolkit_root: Path
+) -> list[ChatMessage]:
+    """Load prior Session turns so resume is not a cold start (I-C).
+
+    Prefer explicit ``session_prior_messages`` on the plan; else hydrate a short
+    tail from ``.regent_agent_transcript.json`` in the Session workspace.
+    """
+    acceptance = dict(plan.get("acceptance_contract") or {})
+    seeded: list[ChatMessage] = []
+    raw_prior = plan.get("session_prior_messages") or acceptance.get(
+        "session_prior_messages"
+    )
+    if isinstance(raw_prior, list) and raw_prior:
+        for item in raw_prior[-12:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "")
+            if role not in {"user", "assistant", "system", "tool"}:
+                continue
+            content = item.get("content")
+            if content is None and role != "assistant":
+                continue
+            seeded.append(
+                ChatMessage(
+                    role=role,  # type: ignore[arg-type]
+                    content=str(content) if content is not None else None,
+                    tool_call_id=str(item["tool_call_id"])
+                    if item.get("tool_call_id")
+                    else None,
+                    name=str(item["name"]) if item.get("name") else None,
+                )
+            )
+    if not seeded:
+        path = toolkit_root / ".regent_agent_transcript.json"
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = []
+            if isinstance(payload, list):
+                # Keep only user/assistant text turns (skip tool noise for resume).
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    role = str(item.get("role") or "")
+                    if role not in {"user", "assistant"}:
+                        continue
+                    content = item.get("content")
+                    if not content:
+                        continue
+                    seeded.append(
+                        ChatMessage(role=role, content=str(content)[:4_000])  # type: ignore[arg-type]
+                    )
+                seeded = seeded[-8:]
+    brief = str(
+        plan.get("session_resume_brief") or acceptance.get("session_resume_brief") or ""
+    ).strip()
+    session_id = str(
+        plan.get("project_agent_session_id")
+        or acceptance.get("project_agent_session_id")
+        or ""
+    ).strip()
+    if brief or session_id:
+        note = brief or f"Continue ProjectAgentSession {session_id} in the same workspace."
+        seeded.insert(
+            0,
+            ChatMessage(
+                role="user",
+                content=(
+                    f"[Session resume]\n{note}\n"
+                    "Reuse existing files; fix gaps with tools. Do not scaffold from scratch."
+                ),
+            ),
+        )
+    return seeded

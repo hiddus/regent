@@ -31,12 +31,22 @@ interface ArtifactPanelProps {
   onToggle: () => void
 }
 
-const PREVIEW_READY_STATUSES = new Set([
-  'PREVIEW_READY',
-  'PREVIEW_DEPLOYMENT_SUCCEEDED',
-  'PREVIEW_SUCCEEDED',
-  'SUCCEEDED',
-])
+const PLAN_STATUS_MARK: Record<string, string> = {
+  pending: '○',
+  in_progress: '●',
+  completed: '✓',
+  cancelled: '–',
+  failed: '!',
+}
+
+function planStatusLabel(status: string): string {
+  const s = (status || 'pending').toLowerCase()
+  if (s === 'in_progress') return '进行中'
+  if (s === 'completed') return '完成'
+  if (s === 'cancelled') return '取消'
+  if (s === 'failed') return '失败'
+  return '待办'
+}
 
 function normalizePreviewUrl(ep: string | null | undefined): string | null {
   if (!ep) return null
@@ -109,7 +119,7 @@ export function ArtifactPanel({
   const [reviewOpen, setReviewOpen] = useState(false)
   const [sourceOpen, setSourceOpen] = useState(false)
   const [planOpen, setPlanOpen] = useState(true)
-  const [activityOpen, setActivityOpen] = useState(true)
+  const [activityOpen, setActivityOpen] = useState(false)
   const [review, setReview] = useState<DeliveryReview | null>(null)
   const [reviewLoading, setReviewLoading] = useState(false)
   const [reviewError, setReviewError] = useState<string | null>(null)
@@ -117,6 +127,14 @@ export function ArtifactPanel({
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [fileContent, setFileContent] = useState<string>('')
   const [fileError, setFileError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const hasOpen = planItems.some(i => {
+      const s = String(i.status || '').toLowerCase()
+      return s === 'pending' || s === 'in_progress'
+    })
+    if (hasOpen) setPlanOpen(true)
+  }, [planItems])
   const agents = useMemo(() => {
     const base = deriveAgents(status, liveAction, messages)
     if (!runtimeAgents.length) return base
@@ -290,30 +308,45 @@ export function ArtifactPanel({
             )}
           </div>
 
-          {planItems.length > 0 && (
-            <div className="artifact-fold-section">
-              <button
-                type="button"
-                className={`artifact-fold-toggle ${planOpen ? 'open' : ''}`}
-                onClick={() => setPlanOpen(!planOpen)}
-              >
-                <span>执行计划</span>
-                <span className="artifact-fold-arrow" aria-hidden>›</span>
-              </button>
-              {planOpen && (
-                <div className="artifact-fold-body">
+          <div className="artifact-fold-section">
+            <button
+              type="button"
+              className={`artifact-fold-toggle ${planOpen ? 'open' : ''}`}
+              onClick={() => setPlanOpen(!planOpen)}
+            >
+              <span>工作清单{planItems.length > 0 ? `（${planItems.length}）` : ''}</span>
+              <span className="artifact-fold-arrow" aria-hidden>›</span>
+            </button>
+            {planOpen && (
+              <div className="artifact-fold-body">
+                {planItems.length === 0 ? (
+                  <div className="artifact-empty compact">
+                    <p>尚未生成工作清单 — Agent 规划中…</p>
+                  </div>
+                ) : (
                   <ul className="plan-checklist">
-                    {planItems.map(item => (
-                      <li key={item.id || item.item_key} className={`plan-item status-${item.status}`}>
-                        <span className="plan-status">{item.status}</span>
-                        <span className="plan-content">{item.content || item.item_key}</span>
-                      </li>
-                    ))}
+                    {planItems.map(item => {
+                      const status = String(item.status || 'pending').toLowerCase()
+                      const mark = PLAN_STATUS_MARK[status] || '○'
+                      const owner = item.owner_agent_id
+                        ? String(item.owner_agent_id).startsWith('subagent')
+                          ? '子 Agent'
+                          : String(item.owner_agent_id)
+                        : null
+                      return (
+                        <li key={item.id || item.item_key} className={`plan-item status-${status}`}>
+                          <span className="plan-mark" aria-hidden>{mark}</span>
+                          <span className="plan-status">{planStatusLabel(status)}</span>
+                          <span className="plan-content">{item.content || item.item_key}</span>
+                          {owner && <span className="plan-owner">{owner}</span>}
+                        </li>
+                      )
+                    })}
                   </ul>
-                </div>
-              )}
-            </div>
-          )}
+                )}
+              </div>
+            )}
+          </div>
 
           {activityFeed.length > 0 && (
             <div className="artifact-fold-section">

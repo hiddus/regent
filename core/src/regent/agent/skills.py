@@ -1,17 +1,46 @@
 """Minimal Agent Skills package (M5): manifest, load-by-need, version/hash.
 
 Skills never grant extra permissions — Permit remains the authority.
+
+Progressive disclosure (agent-matrix catalog / agentskills.io):
+  1. Load catalog index (id + description only)
+  2. Route by goal keywords / gap codes
+  3. Load full guidance only for selected skills
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 SKILLS_ROOT = Path(__file__).resolve().parent / "skill_packs"
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.S)
+
+
+@dataclass(frozen=True, slots=True)
+class SkillCatalogEntry:
+    """Lightweight discovery row — no guidance body."""
+
+    skill_id: str
+    version: str
+    title: str
+    description: str
+    applies_when: tuple[str, ...]
+    gap_codes: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "skill_id": self.skill_id,
+            "version": self.version,
+            "title": self.title,
+            "description": self.description,
+            "applies_when": list(self.applies_when),
+            "gap_codes": list(self.gap_codes),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,35 +74,183 @@ def _hash_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def load_skill_manifest(skill_id: str, *, root: Path | None = None) -> SkillManifest:
+def _parse_simple_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
+    """Parse YAML-ish frontmatter without requiring PyYAML (agentskills SKILL.md)."""
+    text = raw if raw.endswith("\n") else f"{raw}\n"
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        # No frontmatter — treat whole file as guidance.
+        return {}, raw.strip()
+    meta_block, body = match.group(1), match.group(2)
+    meta: dict[str, Any] = {}
+    current_list_key: str | None = None
+    for line in meta_block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- ") and current_list_key:
+            meta.setdefault(current_list_key, []).append(stripped[2:].strip().strip("\"'"))
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if value == "" or value == "[]":
+            current_list_key = key
+            meta[key] = [] if value == "[]" else meta.get(key, [])
+            continue
+        current_list_key = None
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            meta[key] = [
+                p.strip().strip("\"'") for p in inner.split(",") if p.strip()
+            ]
+        else:
+            meta[key] = value.strip("\"'")
+    return meta, body.strip()
+
+
+def _skill_dir_has_manifest(path: Path) -> bool:
+    return (path / "SKILL.json").is_file() or (path / "SKILL.md").is_file()
+
+
+def load_skill_catalog(*, root: Path | None = None) -> list[SkillCatalogEntry]:
+    """Stage-1 discovery: prefer index.json; fall back to dir scan metadata only."""
     base = root or SKILLS_ROOT
-    path = base / skill_id / "SKILL.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"skill not found: {skill_id}")
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    guidance_path = base / skill_id / "GUIDANCE.md"
-    guidance = guidance_path.read_text(encoding="utf-8") if guidance_path.is_file() else ""
-    payload = {**raw, "guidance": guidance}
-    digest = _hash_payload(payload)
-    return SkillManifest(
-        skill_id=str(raw["skill_id"]),
-        version=str(raw["version"]),
-        title=str(raw["title"]),
-        description=str(raw.get("description") or ""),
-        applies_when=tuple(str(x) for x in (raw.get("applies_when") or ())),
-        anti_examples=tuple(str(x) for x in (raw.get("anti_examples") or ())),
-        guidance=guidance,
-        gap_codes=tuple(str(x) for x in (raw.get("gap_codes") or ())),
-        content_hash=digest,
-    )
+    index_path = base / "index.json"
+    if index_path.is_file():
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+        entries: list[SkillCatalogEntry] = []
+        for item in raw.get("skills") or []:
+            if not isinstance(item, dict):
+                continue
+            sid = str(item.get("skill_id") or "").strip()
+            if not sid:
+                continue
+            entries.append(
+                SkillCatalogEntry(
+                    skill_id=sid,
+                    version=str(item.get("version") or "0"),
+                    title=str(item.get("title") or sid),
+                    description=str(item.get("description") or ""),
+                    applies_when=tuple(str(x) for x in (item.get("applies_when") or ())),
+                    gap_codes=tuple(str(x) for x in (item.get("gap_codes") or ())),
+                )
+            )
+        if entries:
+            return entries
+    # Fallback: skim SKILL.json / SKILL.md without loading GUIDANCE.md bodies.
+    out: list[SkillCatalogEntry] = []
+    for skill_id in list_builtin_skill_ids(root=base):
+        json_path = base / skill_id / "SKILL.json"
+        if json_path.is_file():
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            out.append(
+                SkillCatalogEntry(
+                    skill_id=str(data.get("skill_id") or skill_id),
+                    version=str(data.get("version") or "0"),
+                    title=str(data.get("title") or skill_id),
+                    description=str(data.get("description") or ""),
+                    applies_when=tuple(str(x) for x in (data.get("applies_when") or ())),
+                    gap_codes=tuple(str(x) for x in (data.get("gap_codes") or ())),
+                )
+            )
+            continue
+        md_path = base / skill_id / "SKILL.md"
+        if md_path.is_file():
+            meta, _ = _parse_simple_frontmatter(md_path.read_text(encoding="utf-8"))
+            sid = str(meta.get("name") or meta.get("skill_id") or skill_id)
+            out.append(
+                SkillCatalogEntry(
+                    skill_id=sid,
+                    version=str(meta.get("version") or "0"),
+                    title=str(meta.get("title") or sid),
+                    description=str(meta.get("description") or ""),
+                    applies_when=tuple(str(x) for x in (meta.get("applies_when") or ())),
+                    gap_codes=tuple(str(x) for x in (meta.get("gap_codes") or ())),
+                )
+            )
+    return out
+
+
+def load_skill_manifest(skill_id: str, *, root: Path | None = None) -> SkillManifest:
+    """Stage-3: load full guidance for a selected skill.
+
+    Prefer SKILL.json + GUIDANCE.md (legacy Regent). Fall back to agentskills
+    SKILL.md (frontmatter + body).
+    """
+    base = root or SKILLS_ROOT
+    json_path = base / skill_id / "SKILL.json"
+    md_path = base / skill_id / "SKILL.md"
+    if json_path.is_file():
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+        guidance_path = base / skill_id / "GUIDANCE.md"
+        guidance = guidance_path.read_text(encoding="utf-8") if guidance_path.is_file() else ""
+        # Optional SKILL.md body can append (agentskills dual-format packs).
+        if md_path.is_file() and not guidance:
+            _, guidance = _parse_simple_frontmatter(md_path.read_text(encoding="utf-8"))
+        payload = {**raw, "guidance": guidance}
+        digest = _hash_payload(payload)
+        return SkillManifest(
+            skill_id=str(raw["skill_id"]),
+            version=str(raw["version"]),
+            title=str(raw["title"]),
+            description=str(raw.get("description") or ""),
+            applies_when=tuple(str(x) for x in (raw.get("applies_when") or ())),
+            anti_examples=tuple(str(x) for x in (raw.get("anti_examples") or ())),
+            guidance=guidance,
+            gap_codes=tuple(str(x) for x in (raw.get("gap_codes") or ())),
+            content_hash=digest,
+        )
+    if md_path.is_file():
+        meta, guidance = _parse_simple_frontmatter(md_path.read_text(encoding="utf-8"))
+        sid = str(meta.get("name") or meta.get("skill_id") or skill_id)
+        payload = {**meta, "guidance": guidance}
+        digest = _hash_payload(payload)
+        applies = meta.get("applies_when") or []
+        gaps = meta.get("gap_codes") or []
+        anti = meta.get("anti_examples") or []
+        if isinstance(applies, str):
+            applies = [applies]
+        if isinstance(gaps, str):
+            gaps = [gaps]
+        if isinstance(anti, str):
+            anti = [anti]
+        return SkillManifest(
+            skill_id=sid,
+            version=str(meta.get("version") or "1.0.0"),
+            title=str(meta.get("title") or sid),
+            description=str(meta.get("description") or ""),
+            applies_when=tuple(str(x) for x in applies),
+            anti_examples=tuple(str(x) for x in anti),
+            guidance=guidance,
+            gap_codes=tuple(str(x) for x in gaps),
+            content_hash=digest,
+        )
+    raise FileNotFoundError(f"skill not found: {skill_id}")
 
 
 def list_builtin_skill_ids(*, root: Path | None = None) -> list[str]:
     base = root or SKILLS_ROOT
     if not base.is_dir():
         return []
+    catalog = None
+    index_path = base / "index.json"
+    if index_path.is_file():
+        try:
+            catalog = load_skill_catalog(root=base)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            catalog = None
+    if catalog:
+        ids = [e.skill_id for e in catalog]
+        # Include on-disk packs missing from index (dev packs).
+        for p in base.iterdir():
+            if p.is_dir() and _skill_dir_has_manifest(p) and p.name not in ids:
+                ids.append(p.name)
+        return sorted(ids)
     return sorted(
-        p.name for p in base.iterdir() if p.is_dir() and (p / "SKILL.json").is_file()
+        p.name for p in base.iterdir() if p.is_dir() and _skill_dir_has_manifest(p)
     )
 
 
@@ -83,19 +260,18 @@ def route_skills_for_gaps(
     """Map verification gap codes → skill guidance (verifier does not mutate artifacts)."""
     selected: list[SkillManifest] = []
     seen: set[str] = set()
-    for skill_id in list_builtin_skill_ids(root=root):
-        manifest = load_skill_manifest(skill_id, root=root)
+    for entry in load_skill_catalog(root=root):
         matched = False
         for code in gap_codes:
-            for gc in manifest.gap_codes:
+            for gc in entry.gap_codes:
                 if code == gc or code.startswith(gc) or gc in code:
                     matched = True
                     break
             if matched:
                 break
-        if matched and manifest.skill_id not in seen:
-            seen.add(manifest.skill_id)
-            selected.append(manifest)
+        if matched and entry.skill_id not in seen:
+            seen.add(entry.skill_id)
+            selected.append(load_skill_manifest(entry.skill_id, root=root))
     return selected
 
 
@@ -126,30 +302,39 @@ def select_skills_for_goal(
     enabled: bool = True,
     root: Path | None = None,
 ) -> list[SkillManifest]:
-    """Lightweight keyword router for on/off ablation (M5-4)."""
+    """Lightweight keyword router with progressive disclosure (catalog → full load)."""
     if not enabled:
         return []
     raw = goal_text or ""
     text = raw.lower()
-    chosen: list[SkillManifest] = []
-    for skill_id in list_builtin_skill_ids(root=root):
-        manifest = load_skill_manifest(skill_id, root=root)
-        if any(token.lower() in text or token in raw for token in manifest.applies_when):
-            chosen.append(manifest)
+    catalog = load_skill_catalog(root=root)
+    chosen_ids: list[str] = []
+    for entry in catalog:
+        if any(token.lower() in text or token in raw for token in entry.applies_when):
+            chosen_ids.append(entry.skill_id)
     # English web shapes.
-    if not chosen and any(k in text for k in ("app", "web", "flask", "api", "site")):
-        if "runtime-contract" in list_builtin_skill_ids(root=root):
-            chosen.append(load_skill_manifest("runtime-contract", root=root))
+    if not chosen_ids and any(k in text for k in ("app", "web", "flask", "api", "site")):
+        ids = {e.skill_id for e in catalog}
+        if "runtime-contract" in ids:
+            chosen_ids.append("runtime-contract")
     # W4: Chinese product goals often miss English tokens — inject defaults.
     has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in raw)
-    if not chosen and (
+    if not chosen_ids and (
         any(h in raw for h in _CJK_WEB_HINTS)
         or (has_cjk and len(raw.strip()) >= 4)
     ):
-        ids = list_builtin_skill_ids(root=root)
+        ids = {e.skill_id for e in catalog}
         for sid in ("runtime-contract", "web-app-scaffold", "persistence", "ui"):
             if sid in ids:
-                chosen.append(load_skill_manifest(sid, root=root))
+                chosen_ids.append(sid)
+    # Deduplicate preserving order; load full guidance only now.
+    seen: set[str] = set()
+    chosen: list[SkillManifest] = []
+    for sid in chosen_ids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        chosen.append(load_skill_manifest(sid, root=root))
     return chosen
 
 
@@ -172,3 +357,4 @@ def skill_ablation_report(
         "engineering_gate_only": True,
         "no_significance_claims": True,
     }
+

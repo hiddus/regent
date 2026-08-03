@@ -176,6 +176,8 @@ export interface PlanItem {
   item_key: string
   content: string
   status: string
+  owner_agent_id?: string | null
+  dependencies?: string[]
   updated_at?: string | null
 }
 

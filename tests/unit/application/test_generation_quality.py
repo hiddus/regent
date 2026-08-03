@@ -109,11 +109,20 @@ def test_factory_dispatches_both_strategies(tmp_path, monkeypatch) -> None:
 
     settings_a = Settings(
         generation_strategy="agentic",
-        agentic_qualification_state="OFFLINE_QUALIFICATION",
         workspace_root=str(tmp_path / "ws2"),
     )
     gen_a = build_code_generator(settings_a, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
     assert isinstance(gen_a, AgenticCodeGenerator)
+
+
+def test_default_settings_product_path_is_agentic() -> None:
+    assert Settings.model_fields["generation_strategy"].default == "agentic"
+    # Qualification DISABLED must not demote product path to one-shot generator.
+    settings = Settings(
+        generation_strategy="agentic",
+        agentic_qualification_state="DISABLED",
+    )
+    assert resolve_effective_generation_strategy(settings, goal_id="g1") == "agentic"
 
 
 def test_kill_switch_forces_fallback() -> None:
@@ -126,6 +135,11 @@ def test_kill_switch_forces_fallback() -> None:
 
 
 def test_canary_stable_bucket_and_gate() -> None:
+    from regent.application.generation_strategy_policy import (
+        ARTIFACT_BACKED_ROLE,
+        peer_ab_agentic_canary_deprecated,
+    )
+
     a = stable_canary_bucket("goal-aaa")
     b = stable_canary_bucket("goal-aaa")
     assert a == b
@@ -134,33 +148,15 @@ def test_canary_stable_bucket_and_gate() -> None:
     assert canary_rollout_allowed(kill_switch=False, gq2_closed=True) is True
     assert canary_rollout_allowed(kill_switch=True, gq2_closed=True) is False
 
-    # DISABLED qualification blocks canary even when gate+percent would open.
-    settings_qual_blocked = Settings(
-        generation_strategy="artifact-backed",
-        generation_strategy_canary_percent=100,
-        generation_strategy_canary_variant="agentic",
-        generation_strategy_canary_gate=True,
+    # M3: product path is agentic; AB↔agentic peer canary is ignored.
+    settings_default = Settings(
+        generation_strategy="agentic",
         agentic_qualification_state="DISABLED",
     )
-    assert (
-        resolve_effective_generation_strategy(settings_qual_blocked, goal_id="any")
-        == "artifact-backed"
-    )
+    assert resolve_effective_generation_strategy(settings_default, goal_id="any") == "agentic"
 
-    # Canary now requires the GQ-2 gate (diagnosis order: feedback loop before canary).
-    settings_blocked = Settings(
-        generation_strategy="artifact-backed",
-        generation_strategy_canary_percent=100,
-        generation_strategy_canary_variant="agentic",
-        generation_strategy_canary_gate=False,
-        agentic_qualification_state="CANARY_5",
-    )
-    assert (
-        resolve_effective_generation_strategy(settings_blocked, goal_id="any")
-        == "artifact-backed"
-    )
-
-    settings_open = Settings(
+    # Explicit scaffold opt-in still allowed (not champion).
+    settings_scaffold = Settings(
         generation_strategy="artifact-backed",
         generation_strategy_canary_percent=100,
         generation_strategy_canary_variant="agentic",
@@ -168,8 +164,24 @@ def test_canary_stable_bucket_and_gate() -> None:
         agentic_qualification_state="CANARY_5",
     )
     assert (
-        resolve_effective_generation_strategy(settings_open, goal_id="any") == "agentic"
+        resolve_effective_generation_strategy(settings_scaffold, goal_id="any")
+        == "artifact-backed"
     )
+
+    # Deprecated canary knobs do not demote agentic back to AB.
+    settings_open = Settings(
+        generation_strategy="agentic",
+        generation_strategy_canary_percent=100,
+        generation_strategy_canary_variant="artifact-backed",
+        generation_strategy_canary_gate=True,
+        agentic_qualification_state="CANARY_5",
+    )
+    assert resolve_effective_generation_strategy(settings_open, goal_id="any") == "agentic"
+
+    note = peer_ab_agentic_canary_deprecated()
+    assert note["deprecated"] is True
+    assert ARTIFACT_BACKED_ROLE["eligible_as_champion"] is False
+    assert ARTIFACT_BACKED_ROLE["peer_canary_with_agentic"] is False
 
 
 def test_shadow_and_kill_switch_contracts_frozen() -> None:
@@ -366,43 +378,31 @@ def _make_promoting_report() -> dict:
 
 
 def test_generator_selector_picks_per_goal_strategy(tmp_path) -> None:
-    """Selector routes to agentic only for canary-bucketed goals; default is artifact-backed."""
+    """Selector default product path is agentic; explicit AB remains scaffold."""
     from regent.infrastructure.artifact_store import FileArtifactStore
 
     artifacts = FileArtifactStore(tmp_path / "arts")
     settings = Settings(
-        generation_strategy="artifact-backed",
-        generation_strategy_canary_percent=100,
-        generation_strategy_canary_variant="agentic",
-        generation_strategy_canary_gate=True,
-        agentic_qualification_state="CANARY_5",
+        generation_strategy="agentic",
         workspace_root=str(tmp_path / "ws"),
     )
     selector = build_generator_selector(settings, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
     assert isinstance(selector, GeneratorSelector)
-    # Agentic must remain lazy until first agentic hit.
     assert selector._agentic_by_budget == {}
-    # No goal_id → default artifact-backed (canary needs a goal).
-    assert isinstance(selector.select(None), ArtifactBackedCodeGenerator)
-    assert selector._agentic_by_budget == {}
-    # canary_percent=100 → every goal bucket selects agentic (constructed on first hit).
-    first = selector.select("goal-x")
+    first = selector.select(None)
     assert isinstance(first, AgenticCodeGenerator)
     assert len(selector._agentic_by_budget) == 1
-    # Second agentic select reuses the same budget-keyed instance.
     assert selector.select("goal-y") is first
-    # Gate off → canary inert → artifact-backed even for canary bucket.
-    settings_off = Settings(
+
+    settings_scaffold = Settings(
         generation_strategy="artifact-backed",
-        generation_strategy_canary_percent=100,
-        generation_strategy_canary_variant="agentic",
-        generation_strategy_canary_gate=False,
-        agentic_qualification_state="CANARY_5",
         workspace_root=str(tmp_path / "ws2"),
     )
-    selector_off = build_generator_selector(settings_off, _FakeProvider(), artifacts, enforce_consistency=True)  # type: ignore[arg-type]
-    assert isinstance(selector_off.select("goal-x"), ArtifactBackedCodeGenerator)
-    assert selector_off._agentic_by_budget == {}
+    selector_ab = build_generator_selector(
+        settings_scaffold, _FakeProvider(), artifacts, enforce_consistency=True
+    )  # type: ignore[arg-type]
+    assert isinstance(selector_ab.select("goal-x"), ArtifactBackedCodeGenerator)
+    assert selector_ab._agentic_by_budget == {}
 
 
 def test_generator_selector_lazy_skips_agentic_at_build(tmp_path) -> None:

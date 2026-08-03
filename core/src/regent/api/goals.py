@@ -287,6 +287,8 @@ async def list_plan_items(goal_id: uuid.UUID, request: Request) -> list[dict[str
                 "item_key": payload["item_key"],
                 "content": payload["content"],
                 "status": payload["status"],
+                "owner_agent_id": payload.get("owner_agent_id"),
+                "dependencies": payload.get("dependencies") or [],
                 "updated_at": None,
             }
         )
@@ -295,7 +297,11 @@ async def list_plan_items(goal_id: uuid.UUID, request: Request) -> list[dict[str
 
 @router.get("/{goal_id}/activity")
 async def get_goal_activity(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
-    """Structured activity stream from goal.metadata (tool + turn events)."""
+    """TRANSITIONAL: read metadata ring buffers (activity_log / tool_events).
+
+    Not the durable event truth source. Do not use for audit / gates / billing.
+    See docs/decision-note-delivery-machine-invariants-2026-08-02.md §3.
+    """
     from regent.infrastructure.models import GoalModel
 
     async with request.app.state.sessions() as session:
@@ -314,7 +320,10 @@ async def get_goal_activity(goal_id: uuid.UUID, request: Request) -> dict[str, A
 
 @router.get("/{goal_id}/agents")
 async def get_goal_agents(goal_id: uuid.UUID, request: Request) -> list[dict[str, Any]]:
-    """Merge SubagentRunner runtime roster with any persisted console agents."""
+    """TRANSITIONAL: in-process subagent roster (+ optional metadata snapshot).
+
+    Not durable across workers. See decision-note-delivery-machine-invariants §3.
+    """
     from regent.application.subagent_runtime import list_subagent_runtime
     from regent.infrastructure.models import GoalModel
 

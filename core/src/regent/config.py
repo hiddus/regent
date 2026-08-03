@@ -35,14 +35,16 @@ class Settings(BaseSettings):
     # DeepSeek V4 enables thinking by default; CoT shares max_tokens with content/tools.
     # Agent tool loops default to disabled to avoid empty finish_reason=length.
     model_thinking_mode: Literal["disabled", "enabled", "default"] = "disabled"
-    generation_strategy: Literal["artifact-backed", "agentic"] = "artifact-backed"
+    generation_strategy: Literal["artifact-backed", "agentic"] = "agentic"
     generation_strategy_kill_switch: bool = False
     generation_strategy_fallback: Literal["artifact-backed", "agentic"] = "artifact-backed"
+    # Peer AB↔agentic canary is dead (M3). Retained for ops telemetry only;
+    # resolve_effective_generation_strategy ignores percent for arm selection.
     generation_strategy_canary_percent: int = Field(default=0, ge=0, le=100)
     generation_strategy_canary_variant: Literal["artifact-backed", "agentic"] = "agentic"
     generation_strategy_canary_gate: bool = False
-    # Agentic qualification ladder (Day0): traffic requires DOGFOOD/CANARY_*/DEFAULT.
-    # artifact-backed remains FALLBACK_ONLY — not an eligible champion.
+    # Ops reporting ladder only — does NOT demote product path to artifact-backed.
+    # artifact-backed remains SCAFFOLD_OR_KILL_SWITCH_FALLBACK (see generation_strategy_policy).
     agentic_qualification_state: Literal[
         "DISABLED",
         "OFFLINE_QUALIFICATION",
@@ -59,6 +61,18 @@ class Settings(BaseSettings):
     agent_max_tokens: int = Field(default=200_000, ge=1_000)
     agent_max_wall_seconds: int = Field(default=900, ge=30)
     agent_nested_repair_max: int = Field(default=4, ge=0, le=8)
+    # M1: VerificationGap prefers Session chassis; A0 forbids silent auto-resume.
+    # When agent_loop_exit_enforced, gap → ASK_HUMAN/STOP; resume only after human.
+    agent_session_resume_enabled: bool = True
+    agent_loop_exit_enforced: bool = True
+    # Session Work Plan (W1–W2): force Step 0 checklist before write tools.
+    agent_work_plan_required: bool = True
+    # First substantial plan in a Session may ASK plan_approve (OpenWork-style).
+    agent_plan_approve_on_first: bool = True
+    # soft: product HTML/tests/smoke do not hard-reject; only empty + BLOCKING_* fail.
+    # full: legacy hard gates (death-loop risk). off: skip product review (still empty/safety).
+    # A0: soft must NOT map to exit_kind COMPLETE with stop_reason=verified_pass.
+    delivery_product_gates_mode: Literal["full", "soft", "off"] = "soft"
     # W4-P1-4: follow model context window (default matches common 128k).
     agent_context_window_tokens: int = Field(default=128_000, ge=8_000, le=2_000_000)
     goal_semantic_alignment_enabled: bool = False

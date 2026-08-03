@@ -32,9 +32,8 @@ def build_code_generator(
 ) -> Any:
     """Construct the generator implied by effective generation_strategy.
 
-    Applies kill-switch / canary resolution first. When ``enforce_consistency``
-    is True (default), immediately fail-closes if constructed object metadata
-    disagrees with the resolved strategy.
+    Product default is agentic (AgentRunner). Artifact-backed is scaffold /
+    kill-switch fallback only — see generation_strategy_policy M3.
     """
     strategy: GenerationStrategy = resolve_effective_generation_strategy(
         settings, goal_id=goal_id

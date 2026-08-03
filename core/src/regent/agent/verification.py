@@ -62,6 +62,16 @@ class VerificationAgent:
             "profile_hash": self._profile.content_hash if self._profile else None,
         }
 
+        from regent.config import get_settings
+        from regent.application.delivery_success_policy import is_blocking_delivery_gap_code
+
+        gates_mode = str(
+            getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
+        ).lower()
+        stages["product_gates_mode"] = gates_mode
+        smoke: dict[str, Any] = {"attempted": False}
+        test_result: dict[str, Any] = {"attempted": False}
+
         if report.truncated or not report.integrity_ok:
             gaps.append(
                 VerificationGap(
@@ -71,93 +81,118 @@ class VerificationAgent:
                 )
             )
 
-        review = review_files_for_delivery(
-            files,
-            acceptance_contract=acceptance_contract,
-            success_criteria=success_criteria,
-        )
-        static_failed = False
-        for check in review.checks:
-            if not check.passed:
-                static_failed = True
-                snippet = ""
-                if "static" in check.name or "trivial" in check.name:
-                    snippet = self._snippet_for(["src/app.py", "app.py"])
-                gaps.append(
-                    VerificationGap(
-                        code=check.name,
-                        detail=check.detail or "failed",
-                        artifact_snippet=snippet,
-                    )
-                )
-        stages["static"]["passed"] = not static_failed
-        stages["static"]["summary"] = review.summary
-
-        # M2-3: always attempt tests when physically possible (even if static failed).
-        test_result = await self._run_project_tests(files, success_criteria or {})
-        stages["tests"] = test_result
-        if test_result.get("failed"):
-            gaps.append(
-                VerificationGap(
-                    code="TEST_FAILED" if test_result.get("attempted") else "TEST_COMMAND_MISSING",
-                    detail=str(test_result.get("error") or "project tests failed"),
-                    artifact_snippet=str(test_result.get("log") or "")[:2_000],
-                    status="FAIL",
-                )
+        if gates_mode == "off":
+            # Still enforce empty / incomplete only.
+            soft_skipped: list[str] = ["product_review_skipped", "tests_skipped", "smoke_skipped"]
+            stages["static"]["passed"] = not any(g.code == "ARTIFACT_INCOMPLETE" for g in gaps)
+            stages["static"]["summary"] = "product gates off"
+            stages["soft_skipped"] = soft_skipped
+        else:
+            review = review_files_for_delivery(
+                files,
+                acceptance_contract=acceptance_contract,
+                success_criteria=success_criteria,
             )
-        elif test_result.get("blocked"):
-            gaps.append(
-                VerificationGap(
-                    code="TEST_COMMAND_MISSING",
-                    detail=str(test_result.get("error") or "tests blocked"),
-                    blocked_by=str(test_result.get("blocked_by") or "profile"),
-                    status="BLOCKED",
-                )
-            )
-        elif test_result.get("degraded"):
-            # Exploratory profile: explicit degradation, cannot promote as formal delivery.
-            stages["tests"]["promotion_allowed"] = False
+            static_failed = False
+            for check in review.checks:
+                if not check.passed:
+                    static_failed = True
+                    snippet = ""
+                    if "static" in check.name or "trivial" in check.name:
+                        snippet = self._snippet_for(["src/app.py", "app.py"])
+                    gaps.append(
+                        VerificationGap(
+                            code=check.name,
+                            detail=check.detail or "failed",
+                            artifact_snippet=snippet,
+                        )
+                    )
+            stages["static"]["passed"] = not static_failed
+            stages["static"]["summary"] = review.summary
 
-        smoke: dict[str, Any] = {"attempted": False}
-        if run_smoke:
-            # R0 / B5: always attempt smoke so runtime evidence is not structurally
-            # unreachable when static fails. Static gaps remain; verdict still fails.
-            smoke = await self._smoke_http(files, success_criteria or {})
-            if static_failed and self._profile and self._profile.project_shape != "static-web":
-                smoke = {
-                    **smoke,
-                    "static_failed_concurrent": True,
-                    "note": "smoke attempted despite static failures (anti B5 short-circuit)",
-                }
-            if not smoke.get("passed") and not smoke.get("blocked"):
-                gaps.append(
-                    VerificationGap(
-                        code="SMOKE_FAILED" if smoke.get("attempted") else "START_FAILED",
-                        detail=str(smoke.get("error") or "app failed smoke"),
-                        artifact_snippet=str(smoke.get("log") or "")[:2_000],
+            # soft: do not burn turns on project tests / smoke — soft-skipped.
+            if gates_mode == "full":
+                test_result = await self._run_project_tests(files, success_criteria or {})
+                stages["tests"] = test_result
+                if test_result.get("failed"):
+                    gaps.append(
+                        VerificationGap(
+                            code="TEST_FAILED" if test_result.get("attempted") else "TEST_COMMAND_MISSING",
+                            detail=str(test_result.get("error") or "project tests failed"),
+                            artifact_snippet=str(test_result.get("log") or "")[:2_000],
+                            status="FAIL",
+                        )
                     )
-                )
-            elif smoke.get("blocked"):
-                gaps.append(
-                    VerificationGap(
-                        code="START_FAILED",
-                        detail=str(smoke.get("error") or "start blocked"),
-                        blocked_by=str(smoke.get("blocked_by") or "unknown"),
-                        status="BLOCKED",
+                elif test_result.get("blocked"):
+                    gaps.append(
+                        VerificationGap(
+                            code="TEST_COMMAND_MISSING",
+                            detail=str(test_result.get("error") or "tests blocked"),
+                            blocked_by=str(test_result.get("blocked_by") or "profile"),
+                            status="BLOCKED",
+                        )
                     )
-                )
-        stages["smoke"] = smoke
-        stages["start"] = {
-            "attempted": bool(smoke.get("attempted")),
-            "passed": bool(smoke.get("passed")),
-            "blocked": bool(smoke.get("blocked")),
-            "blocked_by": smoke.get("blocked_by"),
-        }
+                elif test_result.get("degraded"):
+                    stages["tests"]["promotion_allowed"] = False
+
+                if run_smoke:
+                    smoke = await self._smoke_http(files, success_criteria or {})
+                    if static_failed and self._profile and self._profile.project_shape != "static-web":
+                        smoke = {
+                            **smoke,
+                            "static_failed_concurrent": True,
+                            "note": "smoke attempted despite static failures (anti B5 short-circuit)",
+                        }
+                    if not smoke.get("passed") and not smoke.get("blocked"):
+                        gaps.append(
+                            VerificationGap(
+                                code="SMOKE_FAILED" if smoke.get("attempted") else "START_FAILED",
+                                detail=str(smoke.get("error") or "app failed smoke"),
+                                artifact_snippet=str(smoke.get("log") or "")[:2_000],
+                            )
+                        )
+                    elif smoke.get("blocked"):
+                        gaps.append(
+                            VerificationGap(
+                                code="START_FAILED",
+                                detail=str(smoke.get("error") or "start blocked"),
+                                blocked_by=str(smoke.get("blocked_by") or "unknown"),
+                                status="BLOCKED",
+                            )
+                        )
+            else:
+                stages["tests"] = {"attempted": False, "soft_skipped": True}
+                stages["smoke_soft_skipped"] = True
+            stages["smoke"] = smoke
+            stages["start"] = {
+                "attempted": bool(smoke.get("attempted")),
+                "passed": bool(smoke.get("passed")),
+                "blocked": bool(smoke.get("blocked")),
+                "blocked_by": smoke.get("blocked_by"),
+            }
+
+        # soft mode: record non-blocking gaps as advisory; A0 forbids washing FAIL→PASS.
+        if gates_mode in {"soft", "off"} and gaps:
+            hard: list[VerificationGap] = []
+            soft_codes: list[str] = []
+            for gap in gaps:
+                if is_blocking_delivery_gap_code(gap.code):
+                    hard.append(gap)
+                else:
+                    soft_codes.append(gap.code)
+            stages["soft_skipped_gaps"] = soft_codes
+            stages["soft_advisory_only"] = True
+            # Keep full gaps list so verdict stays FAIL when any gap remains.
+            # Downstream DeliveryRejection → ASK_HUMAN (not silent COMPLETE).
+            if not hard and soft_codes:
+                stages["soft_would_have_passed"] = True
 
         # Attach skill guidance refs (verifier does not mutate artifacts) — M5-3.
         skill_refs = [
             m.as_dict()
-            for m in route_skills_for_gaps([g.code for g in gaps])
+            for m in route_skills_for_gaps(
+                [g.code for g in gaps] + list(stages.get("soft_skipped_gaps") or [])
+            )
         ]
         stages["skill_guidance"] = skill_refs
 
@@ -184,14 +219,25 @@ class VerificationAgent:
             return VerificationVerdict(
                 verdict="BLOCKED" if has_only_blocked else "FAIL",
                 gaps=gaps,
-                smoke={**smoke, "project_tests": test_result, "stages": stages},
+                smoke={
+                    **(smoke if isinstance(smoke, dict) else {}),
+                    "project_tests": test_result if isinstance(test_result, dict) else {},
+                    "stages": stages,
+                },
                 summary=f"{'BLOCKED' if has_only_blocked else 'FAIL'} with {len(gaps)} gaps",
             )
+        static_summary = ""
+        if isinstance(stages.get("static"), dict):
+            static_summary = str(stages["static"].get("summary") or "")
         return VerificationVerdict(
             verdict="PASS",
             gaps=[],
-            smoke={**smoke, "project_tests": test_result, "stages": stages},
-            summary=review.summary or "PASS",
+            smoke={
+                **(smoke if isinstance(smoke, dict) else {}),
+                "project_tests": test_result if isinstance(test_result, dict) else {},
+                "stages": stages,
+            },
+            summary=static_summary or "PASS",
         )
 
     def _snippet_for(self, candidates: list[str]) -> str:

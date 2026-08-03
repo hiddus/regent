@@ -1166,6 +1166,20 @@ class AppGuidanceService:
         if soft_or_gap_continue:
             from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
 
+            try:
+                await self._ensure_project_agent_session_on_goal(
+                    project_id=project_id, goal_id=goal_id, actor=actor
+                )
+            except DomainError as exc:
+                return await self._persist_simple(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    model,
+                    f"无法续跑同一 Agent Session：{exc.message}",
+                )
+
             msg_l = (message or "").lower()
             # RecoveryCard INSPECT / STOP must not blindly re-enter generation.
             if any(
@@ -1253,11 +1267,11 @@ class AppGuidanceService:
                     human_message=human_msg,
                 )
                 response = (
-                    "已从保存的快照开新一轮修复"
-                    f"（{recovery.method}）。不会复活旧 Run。"
+                    "已在同一 Agent Session 续跑修复"
+                    f"（{recovery.method}）。工作区与轨迹保持连续。"
                     if recovery.recovered
                     else (
-                        f"已尝试从快照续跑：{recovery.message}"
+                        f"已尝试同 Session 续跑：{recovery.message}"
                         if recovery.message
                         else "已收到继续修复请求。"
                     )
@@ -1294,13 +1308,13 @@ class AppGuidanceService:
                 human_message=message,
             )
             response = (
-                "已收到新方向，正在重新规划并继续生成交付物"
-                f"（恢复方法 {recovery.method}）。"
+                "已收到新方向，正在同一 Agent Session 续跑修复"
+                f"（{recovery.method}）。"
                 if recovery.recovered
                 else (
-                    f"已尝试按新方向继续：{recovery.message}"
+                    f"已尝试同 Session 续跑：{recovery.message}"
                     if recovery.message
-                    else "已收到继续请求，正在恢复执行。"
+                    else "已收到继续请求，正在同一 Session 恢复执行。"
                 )
             )
             return await self._persist_simple(
@@ -1313,15 +1327,17 @@ class AppGuidanceService:
         should_replan = goal_status in {"EXHAUSTED", "FAILED", "BLOCKED"}
 
         if goal_status == "READY":
-            response = "Core 已接受继续请求并开始执行。"
+            response = "Core 已接受继续请求；将在同一 Agent Session 中开始执行。"
         elif goal_status == "ACTIVE":
             response = (
-                "Core 正在安全重试。" if should_start else f"Core 正在执行。当前阶段: {_STAGE_LABELS.get(stage, stage)}。"
+                "Core 正在同一 Agent Session 安全重试。"
+                if should_start
+                else f"Agent Session 执行中。当前阶段: {_STAGE_LABELS.get(stage, stage)}。"
             )
         elif goal_status == "PAUSED":
-            response = "目标已暂停。发送“恢复”或“resume”以继续执行。"
+            response = "目标已暂停。发送“恢复”或“resume”以继续同一 Agent Session。"
         elif should_replan:
-            response = "已收到继续请求，正在从上次中断处重新规划并恢复执行。"
+            response = "已收到继续请求，正在同一 Agent Session 从中断处续跑。"
         else:
             response = f"当前 Goal 状态为 {goal_status}, 当前不可直接继续。"
         receipt = await self._persist_simple(
@@ -1350,6 +1366,19 @@ class AppGuidanceService:
                     interpretation,
                     model,
                     f"无法续跑：{exc.message}",
+                )
+            try:
+                await self._ensure_project_agent_session_on_goal(
+                    project_id=project_id, goal_id=goal_id, actor=actor
+                )
+            except DomainError as exc:
+                return await self._persist_simple(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    model,
+                    f"无法续跑同一 Agent Session：{exc.message}",
                 )
             # Prefer delivery-gap resume when lineage/pending gap exists.
             if await self._goal_needs_delivery_gap_resume(goal_id):
@@ -1403,7 +1432,14 @@ class AppGuidanceService:
                 ),
                 GoalCommand.PAUSE,
             )
-            response = "已暂停执行。你可以发送修正指令，或发送“恢复”继续。"
+            # I-D: keep Session chassis in sync with Goal PAUSED.
+            try:
+                from regent.application.project_agent_session import ProjectAgentSessionService
+
+                await ProjectAgentSessionService(self._sessions).pause(project_id, actor=actor)
+            except DomainError:
+                pass
+            response = "已暂停执行（Agent Session 已挂起）。你可以发送修正指令，或发送“恢复”继续同一 Session。"
         except DomainError as exc:
             response = f"暂停失败: {exc.message}"
 
@@ -1452,17 +1488,48 @@ class AppGuidanceService:
                 ),
                 GoalCommand.RESUME,
             )
+            # I-D: resume same ProjectAgentSession (bump epoch) before re-lease.
+            from regent.application.project_agent_session import ProjectAgentSessionService
+
+            sessions_svc = ProjectAgentSessionService(self._sessions)
+            try:
+                await sessions_svc.resume_from_paused(project_id, goal_id=goal_id)
+            except DomainError:
+                await sessions_svc.ensure_active_session(
+                    app_project_id=project_id,
+                    goal_id=goal_id,
+                    actor=actor,
+                )
+            view = await sessions_svc.bump_epoch(
+                project_id,
+                checkpoint_patch={"resume_method": "GUIDANCE_RESUME", "actor": actor},
+            )
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                if goal is not None:
+                    meta = dict(goal.metadata_json or {})
+                    meta["project_agent_session_id"] = str(view.id)
+                    meta["project_agent_session_epoch"] = view.epoch
+                    meta["project_agent_session_workspace_uri"] = view.workspace_uri
+                    # Clear soft-pause markers so worker can proceed.
+                    meta.pop("ops_soft_pause", None)
+                    if str(meta.get("execution_stage") or "") == "DELIVERY_SOFT_PAUSE":
+                        meta["execution_stage"] = "QUEUED"
+                    goal.metadata_json = meta
             # Try to re-trigger execution; if it fails (e.g. already ACTIVE), that's OK
             # — the goal is back to ACTIVE and pending events will be processed.
             try:
                 await GoalExecutionService(self._sessions).start(
                     goal_id,
                     actor=actor,
-                    idempotency_key=f"guidance-resume:{uuid.uuid4()}",
+                    idempotency_key=f"guidance-continue:resume:{view.id}:{uuid.uuid4()}",
                 )
             except DomainError:
                 pass  # Goal is ACTIVE, worker will pick up pending events
-            response = "已恢复执行。Core 将继续从当前阶段推进。"
+            response = (
+                f"已恢复同一 Agent Session（{view.id}）。"
+                "Core 将在同一工作区继续，不会开空白新轨迹。"
+            )
         except DomainError as exc:
             response = f"恢复失败: {exc.message}"
 
@@ -1767,6 +1834,42 @@ class AppGuidanceService:
             )
             command_id = cid
         return GuidanceReceipt(command_id, "APPROVE", None, False, response)
+
+    async def _ensure_project_agent_session_on_goal(
+        self,
+        *,
+        project_id: uuid.UUID,
+        goal_id: uuid.UUID,
+        actor: str,
+    ) -> None:
+        """I-D: CONTINUE/soft-pause resume must keep Session metadata on the Goal.
+
+        Fail closed: Session ensure errors surface to the caller (no silent blank Run).
+        """
+        from regent.application.project_agent_session import ProjectAgentSessionService
+
+        sessions_svc = ProjectAgentSessionService(self._sessions)
+        try:
+            view = await sessions_svc.resume_from_paused(project_id, goal_id=goal_id)
+        except DomainError:
+            view = await sessions_svc.ensure_active_session(
+                app_project_id=project_id,
+                goal_id=goal_id,
+                actor=actor,
+            )
+        view = await sessions_svc.bump_epoch(
+            project_id,
+            checkpoint_patch={"resume_method": "GUIDANCE_CONTINUE", "actor": actor},
+        )
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "goal not found for session ensure")
+            meta = dict(goal.metadata_json or {})
+            meta["project_agent_session_id"] = str(view.id)
+            meta["project_agent_session_epoch"] = view.epoch
+            meta["project_agent_session_workspace_uri"] = view.workspace_uri
+            goal.metadata_json = meta
 
     async def _goal_needs_delivery_gap_resume(self, goal_id: uuid.UUID) -> bool:
         async with self._sessions() as session:

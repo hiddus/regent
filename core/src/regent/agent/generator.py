@@ -19,6 +19,7 @@ from regent.agent.types import (
     AgentBudget,
     ArtifactIncompleteError,
     BudgetExhaustedError,
+    PlanApproveRequiredError,
     VerificationGap,
 )
 from regent.application.delivery_rejection import DeliveryRejection
@@ -65,6 +66,22 @@ class AgenticCodeGenerator:
             projects_root=self._workspace_root / "project_memory",
         )
 
+    def _resolve_sandbox(self, plan: dict[str, Any], run_id: str) -> tuple[Path, bool]:
+        """Prefer ProjectAgentSession workspace; never rmtree that root.
+
+        Returns (sandbox_path, used_session_workspace).
+        """
+        acceptance = dict(plan.get("acceptance_contract") or {})
+        raw = (
+            plan.get("project_agent_session_workspace_uri")
+            or acceptance.get("project_agent_session_workspace_uri")
+            or ""
+        )
+        raw = str(raw).strip()
+        if raw:
+            return Path(raw), True
+        return self._workspace_root / "agentic" / run_id, False
+
     async def generate(
         self,
         plan: dict[str, Any],
@@ -72,10 +89,15 @@ class AgenticCodeGenerator:
         on_progress: Callable[[Any], Awaitable[None]] | None = None,
     ) -> GeneratedFileChangeSet:
         run_id = str(plan.get("generation_run_id") or uuid.uuid4())
-        sandbox = self._workspace_root / "agentic" / run_id
+        sandbox, used_session_workspace = self._resolve_sandbox(plan, run_id)
         base_workspace = _resolve_base(plan)
-        _prepare_sandbox(sandbox, base_workspace)
-        base_files = _read_tree_bytes(sandbox) if base_workspace is not None else {}
+        if used_session_workspace:
+            _ensure_session_workspace(sandbox, base_workspace)
+        else:
+            _prepare_sandbox(sandbox, base_workspace)
+        base_files = _read_tree_bytes(sandbox) if (
+            base_workspace is not None or used_session_workspace
+        ) else {}
 
         project_id = plan.get("app_project_id") or plan.get("project_id")
         if not project_id:
@@ -99,6 +121,22 @@ class AgenticCodeGenerator:
         toolkit = WorkspaceToolkit(sandbox, command_sandbox=build_agent_sandbox())
         prior_gaps = _gaps_from_plan(plan)
         acceptance = dict(plan.get("acceptance_contract") or {})
+        # Flatten Session resume fields onto plan root for AgentRunner seeding (I-C).
+        for key in (
+            "project_agent_session_id",
+            "project_agent_session_epoch",
+            "project_agent_session_workspace_uri",
+            "session_resume_brief",
+            "session_prior_messages",
+            "work_plan_approved",
+            "skip_plan_approve",
+            "work_plan_trivial",
+            "authorized_session_resume",
+            "work_plan_seen",
+            "work_plan_items",
+        ):
+            if key not in plan and acceptance.get(key) is not None:
+                plan[key] = acceptance[key]
         run_smoke = bool(acceptance.get("batch_run_smoke", True))
         context_artifacts = None
         execution_plans = None
@@ -199,45 +237,111 @@ class AgenticCodeGenerator:
                 on_turn=_on_turn if on_progress else None,
                 on_event=_on_event if on_progress else None,
             )
-        except BudgetExhaustedError as exc:
-            # M1-4: diagnostics already on disk; never promote / never count as success.
-            if not (sandbox / ".regent_budget_exhausted.json").exists():
-                (sandbox / ".regent_budget_exhausted.json").write_text(
-                    json.dumps(
-                        exc.diagnostic_manifest
-                        or {
-                            "primary_failure_code": "BUDGET_EXHAUSTED",
-                            "reason": exc.reason,
-                            "promote_allowed": False,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
-                )
-            # Promote sandbox → recoverable snapshot before sandbox can be reaped.
+        except PlanApproveRequiredError as exc:
             draft_uri = sandbox.resolve().as_uri()
-            try:
-                from regent.agent.accepted_workspace import (
-                    write_recoverable_workspace_snapshot,
-                )
-                from regent.config import get_settings
-
-                draft_uri = write_recoverable_workspace_snapshot(
-                    sandbox,
-                    Path(get_settings().workspace_root),
-                    reason="budget_exhausted",
-                    include_diagnostics=True,
-                )
-            except Exception:
-                pass
             raise DeliveryRejection(
-                reasons=[f"BUDGET_EXHAUSTED: {exc.reason}"],
+                reasons=[
+                    "PLAN_APPROVE_REQUIRED: work plan awaiting human approve",
+                    *[
+                        f"plan:{item.get('id')}:{item.get('content')}"
+                        for item in (exc.items or [])[:8]
+                    ],
+                ],
                 draft_uri=draft_uri,
                 producer_ref=GENERATOR_REF,
-                gap_kind="BUDGET_EXHAUSTED",
-                message="agent budget exhausted; diagnostics retained, promote forbidden",
+                gap_kind="PLAN_APPROVE",
+                message="work plan needs human approve before write tools",
             ) from exc
+        except (BudgetExhaustedError, ArtifactIncompleteError) as exc:
+            from regent.config import get_settings
+            from regent.agent.agent_runner import AgentRunResult
+            from regent.agent.types import VerificationVerdict
+
+            gates_mode = str(
+                getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
+            ).lower()
+            soft_files = _text_files_from_sandbox(sandbox)
+            # A0: soft-rescue must NOT fake Verification PASS / COMPLETE.
+            # Keep draft on disk and exit via DeliveryRejection → ASK_HUMAN.
+            if (
+                gates_mode in {"soft", "off"}
+                and soft_files
+                and isinstance(exc, ArtifactIncompleteError)
+            ):
+                logger.warning(
+                    "soft draft retained after %s (A0: not COMPLETE)",
+                    type(exc).__name__,
+                    extra={"file_count": len(soft_files), "gates_mode": gates_mode},
+                )
+                draft_uri = sandbox.resolve().as_uri()
+                try:
+                    from regent.agent.accepted_workspace import (
+                        write_recoverable_workspace_snapshot,
+                    )
+
+                    draft_uri = write_recoverable_workspace_snapshot(
+                        sandbox,
+                        Path(get_settings().workspace_root),
+                        reason=f"soft_draft_{type(exc).__name__.lower()}",
+                        include_diagnostics=True,
+                    )
+                except Exception:
+                    pass
+                raise DeliveryRejection(
+                    reasons=[
+                        f"ARTIFACT_INCOMPLETE: soft draft retained ({len(soft_files)} files); "
+                        "needs human confirm before continue (A0)"
+                    ],
+                    draft_uri=draft_uri,
+                    producer_ref=GENERATOR_REF,
+                    gap_kind="ARTIFACT_INCOMPLETE",
+                )
+            elif isinstance(exc, BudgetExhaustedError):
+                # M1-4: diagnostics already on disk; never promote / never count as success.
+                if not (sandbox / ".regent_budget_exhausted.json").exists():
+                    (sandbox / ".regent_budget_exhausted.json").write_text(
+                        json.dumps(
+                            exc.diagnostic_manifest
+                            or {
+                                "primary_failure_code": "BUDGET_EXHAUSTED",
+                                "reason": exc.reason,
+                                "promote_allowed": False,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                # Promote sandbox → recoverable snapshot before sandbox can be reaped.
+                draft_uri = sandbox.resolve().as_uri()
+                try:
+                    from regent.agent.accepted_workspace import (
+                        write_recoverable_workspace_snapshot,
+                    )
+
+                    draft_uri = write_recoverable_workspace_snapshot(
+                        sandbox,
+                        Path(get_settings().workspace_root),
+                        reason="budget_exhausted",
+                        include_diagnostics=True,
+                    )
+                except Exception:
+                    pass
+                raise DeliveryRejection(
+                    reasons=[f"BUDGET_EXHAUSTED: {exc.reason}"],
+                    draft_uri=draft_uri,
+                    producer_ref=GENERATOR_REF,
+                    gap_kind="BUDGET_EXHAUSTED",
+                    message="agent budget exhausted; diagnostics retained, promote forbidden",
+                ) from exc
+            else:
+                raise DeliveryRejection(
+                    reasons=[f"ARTIFACT_INCOMPLETE: {exc.reason}"],
+                    draft_uri=sandbox.resolve().as_uri(),
+                    producer_ref=GENERATOR_REF,
+                    gap_kind="ARTIFACT_INCOMPLETE",
+                    message="agent did not submit a complete artifact",
+                ) from exc
         except (ModelTruncatedError, ToolCallInvalidError) as exc:
             code = getattr(exc, "failure_code", "UNKNOWN")
             raise DeliveryRejection(
@@ -246,14 +350,6 @@ class AgenticCodeGenerator:
                 producer_ref=GENERATOR_REF,
                 gap_kind=str(code),
                 message=f"agent model failure ({code})",
-            ) from exc
-        except ArtifactIncompleteError as exc:
-            raise DeliveryRejection(
-                reasons=[f"ARTIFACT_INCOMPLETE: {exc.reason}"],
-                draft_uri=sandbox.resolve().as_uri(),
-                producer_ref=GENERATOR_REF,
-                gap_kind="ARTIFACT_INCOMPLETE",
-                message="agent did not submit a complete artifact",
             ) from exc
 
         # Always persist transcript for audit (even on verification failure).
@@ -314,11 +410,28 @@ class AgenticCodeGenerator:
             )
 
         planned = set(plan.get("planned_paths") or [])
-        scope = uuid.UUID(str(plan["hypothesis_decision_id"]))
+        hyp = plan.get("hypothesis_decision_id") or plan.get("generation_run_id")
+        if not hyp:
+            hyp = uuid.uuid4()
+        scope = uuid.UUID(str(hyp))
 
         if result.verification is not None and not result.verification.passed:
-            # Keep a draft tree + artifact URIs so recovery/human review is not
-            # an empty terminal — files existed; verification rejected publish.
+            from regent.config import get_settings
+            from regent.application.delivery_success_policy import (
+                partition_delivery_gap_codes,
+            )
+
+            gates_mode = str(
+                getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
+            ).lower()
+            gap_codes = [g.code for g in (result.verification.gaps or [])]
+            blocking_codes, soft_codes = partition_delivery_gap_codes(gap_codes)
+            # Soft/off: retain draft but never COMPLETE (A0) — always ASK via rejection.
+            soft_only = (
+                gates_mode in {"soft", "off"}
+                and bool(result.files)
+                and not blocking_codes
+            )
             draft_note = _persist_verification_draft(
                 workspace_root=self._workspace_root,
                 sandbox=sandbox,
@@ -343,15 +456,34 @@ class AgenticCodeGenerator:
             reject_reasons = [
                 f"verification-agent: {reason}" for reason in gaps[:8]
             ] or [f"verification-agent: {result.verification.summary}"]
+            if soft_only:
+                reject_reasons = [
+                    f"verification-soft: {c}" for c in soft_codes[:8]
+                ] or reject_reasons
+                logger.warning(
+                    "soft draft after verification FAIL (A0: ASK not COMPLETE)",
+                    extra={
+                        "soft_gaps": soft_codes[:12],
+                        "file_count": len(result.files),
+                        "gates_mode": gates_mode,
+                    },
+                )
             reject_reasons.append(
                 f"draft_files={len(result.files)} draft_artifacts={draft_changes}"
             )
-            # Prefer canonical primary failure code when present.
             primary = str(
                 (result.verification.smoke or {})
                 .get("stages", {})
                 .get("primary_failure_code")
-                or (result.verification.gaps[0].code if result.verification.gaps else "VERIFICATION_FAILED")
+                or (
+                    soft_codes[0]
+                    if soft_only and soft_codes
+                    else (
+                        result.verification.gaps[0].code
+                        if result.verification.gaps
+                        else "VERIFICATION_FAILED"
+                    )
+                )
             )
             raise DeliveryRejection(
                 reasons=reject_reasons,
@@ -401,6 +533,31 @@ class AgenticCodeGenerator:
             artifacts=self._artifacts,
             scope=scope,
         )
+        if not changes and result.files:
+            from regent.config import get_settings
+
+            gates_mode = str(
+                getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
+            ).lower()
+            # Soft/off: planned-path filter must not erase a non-empty agent product.
+            # Session resume often rewrites identical files → empty delta; still deliver.
+            if gates_mode in {"soft", "off"}:
+                logger.warning(
+                    "soft-pass materialize force-include (planned/identical)",
+                    extra={
+                        "file_count": len(result.files),
+                        "planned_count": len(planned),
+                        "gates_mode": gates_mode,
+                    },
+                )
+                changes = _materialize_incremental_changes(
+                    base_files=base_files,
+                    files=result.files,
+                    planned=set(),
+                    artifacts=self._artifacts,
+                    scope=scope,
+                    include_identical=True,
+                )
         if not changes:
             raise DeliveryRejection(
                 reasons=["empty-changeset: no materializable files after planned-path filter"],
@@ -491,6 +648,30 @@ def _resolve_base(plan: dict[str, Any]) -> Path | None:
     return path if path.exists() else None
 
 
+def _ensure_session_workspace(sandbox: Path, base: Path | None) -> None:
+    """Bind AgentRunner to the durable session tree — never wipe the root."""
+    import shutil
+
+    sandbox.mkdir(parents=True, exist_ok=True)
+    if base is None or not base.exists():
+        return
+    if base.resolve() == sandbox.resolve():
+        return
+    # First boot only: seed from revise/accepted baseline when session is empty.
+    has_files = any(p.is_file() for p in sandbox.rglob("*"))
+    if has_files:
+        return
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(base).as_posix()
+        if rel.startswith(".regent") or rel.endswith(".regent-source.zip"):
+            continue
+        dest = sandbox / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dest)
+
+
 def _prepare_sandbox(sandbox: Path, base: Path | None) -> None:
     import shutil
 
@@ -524,6 +705,41 @@ def _read_tree_bytes(root: Path) -> dict[str, bytes]:
     return out
 
 
+def _text_files_from_sandbox(sandbox: Path) -> dict[str, str]:
+    """Collect UTF-8 product files from sandbox for soft-rescue delivery."""
+    out: dict[str, str] = {}
+    if not sandbox.exists():
+        return out
+    for path in sorted(sandbox.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(sandbox).as_posix()
+        if rel.startswith(".regent") or "__pycache__" in rel or rel.endswith(".pyc"):
+            continue
+        if not rel.lower().endswith(
+            (
+                ".html",
+                ".css",
+                ".js",
+                ".py",
+                ".md",
+                ".txt",
+                ".json",
+                ".toml",
+                ".yml",
+                ".yaml",
+                ".svg",
+                ".sql",
+            )
+        ):
+            continue
+        try:
+            out[rel] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return out
+
+
 def _materialize_incremental_changes(
     *,
     base_files: dict[str, bytes],
@@ -531,6 +747,7 @@ def _materialize_incremental_changes(
     planned: set[str],
     artifacts: FileArtifactStore,
     scope: uuid.UUID,
+    include_identical: bool = False,
 ) -> list[FileChange]:
     changes: list[FileChange] = []
     for relative, content in sorted(files.items()):
@@ -544,7 +761,10 @@ def _materialize_incremental_changes(
             op = FileOperation.CREATE
             prev_hash = None
         elif previous == content_bytes:
-            continue
+            if not include_identical:
+                continue
+            op = FileOperation.REPLACE
+            prev_hash = digest
         else:
             op = FileOperation.REPLACE
             prev_hash = hashlib.sha256(previous).hexdigest()

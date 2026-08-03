@@ -198,6 +198,18 @@ class StaticPreviewDeploymentProvider:
             if not review.passed:
                 # GAC-D6: Core auto-fix only mutates HTML; skip for structural gaps.
                 failed_checks = [c for c in review.checks if not c.passed]
+                from regent.config import get_settings
+                from regent.application.delivery_success_policy import (
+                    is_blocking_delivery_gap_code,
+                )
+
+                gates_mode = str(
+                    getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
+                ).lower()
+                if gates_mode in {"soft", "off"}:
+                    failed_checks = [
+                        c for c in failed_checks if is_blocking_delivery_gap_code(c.name)
+                    ]
                 structural = {
                     "forbid-pure-static-backend",
                     "forbid-trivial-server",
@@ -206,7 +218,9 @@ class StaticPreviewDeploymentProvider:
                     "require-dependencies-declared",
                     "min-file-count",
                 }
-                html_only_gaps = all(c.name not in structural for c in failed_checks)
+                html_only_gaps = bool(failed_checks) and all(
+                    c.name not in structural for c in failed_checks
+                )
                 if html_only_gaps:
                     auto_fix = AutoFixService()
                     fix_result = auto_fix.fix(
@@ -223,8 +237,28 @@ class StaticPreviewDeploymentProvider:
                             acceptance_contract=request.acceptance_contract,
                             success_criteria=request.success_criteria,
                         )
-                if not review.passed:
+                        if gates_mode in {"soft", "off"}:
+                            failed_checks = [
+                                c
+                                for c in review.checks
+                                if (not c.passed) and is_blocking_delivery_gap_code(c.name)
+                            ]
+                        else:
+                            failed_checks = [c for c in review.checks if not c.passed]
+                if failed_checks and gates_mode == "full":
                     review.raise_if_failed()
+                elif failed_checks:
+                    # Soft/off: only raise on remaining blocking checks.
+                    from regent.application.delivery_review_service import DeliveryReviewResult
+
+                    blocking_review = DeliveryReviewResult(
+                        passed=False,
+                        capability=review.capability,
+                        summary=review.summary,
+                        checks=failed_checks,
+                    )
+                    blocking_review.raise_if_failed()
+                # else: soft-pass preview with non-blocking gaps
             (target_dir / "regent-preview.js").write_text(_ACTIVATION_JS, encoding="utf-8")
             if "regent-preview.js" not in html:
                 if "</body>" in html:

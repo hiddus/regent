@@ -1,8 +1,13 @@
-"""Structured generation progress (avoids Chinese-string round-trips)."""
+"""Structured generation progress (avoids Chinese-string round-trips).
+
+TRANSITIONAL OBSERVABILITY — not the durable event truth source.
+Callback/dataclass bridge only; no persistent event_id / parent tree / audit log.
+See docs/decision-note-delivery-machine-invariants-2026-08-02.md §3.
+"""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any
 
 

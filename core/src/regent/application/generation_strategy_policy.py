@@ -1,9 +1,12 @@
-"""Generation-strategy canary / kill-switch policy (GQ-0 contract, GQ-3/GQ-4 hooks).
+"""Generation-strategy policy (GQ contract + ProjectAgentSession product path).
 
-Independent of P2-4 organization A/B/C dimensions. Default remains
-artifact-backed (FALLBACK_ONLY) until the agentic qualification ladder
-reaches DEFAULT via DecisionRecord. Canary traffic requires a
-traffic-eligible qualification state — not merely a recovered control funnel.
+M3 product rule (DecisionNote project-agent-session):
+- Product execution path is always ``agentic`` (AgentRunner + Session).
+- ``artifact-backed`` is SCAFFOLD / kill-switch fallback only — never a peer champion.
+- AB ↔ agentic peer canary is deprecated and ignored for selection.
+
+Qualification state remains an ops signal for rollout reporting; it no longer
+demotes the product path to a one-shot generator.
 """
 
 from __future__ import annotations
@@ -23,7 +26,8 @@ IN_FLIGHT_RUN_SEMANTICS = (
     "are forbidden."
 )
 
-# States that may assign agentic via production canary / dogfood rollout.
+# Historical ladder labels (ops reporting). Traffic eligibility no longer gates
+# whether AgentRunner is the product path — see resolve_effective_generation_strategy.
 QUALIFICATION_TRAFFIC_ELIGIBLE: Final[frozenset[str]] = frozenset(
     {
         "INTERNAL_DOGFOOD",
@@ -34,15 +38,20 @@ QUALIFICATION_TRAFFIC_ELIGIBLE: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Explicit generation_strategy=agentic (Offline Qual lane + traffic ladder).
 QUALIFICATION_EXPLICIT_AGENTIC_ELIGIBLE: Final[frozenset[str]] = frozenset(
     {"OFFLINE_QUALIFICATION", *QUALIFICATION_TRAFFIC_ELIGIBLE}
 )
 
 ARTIFACT_BACKED_ROLE: Final[dict[str, Any]] = {
-    "role": "FALLBACK_ONLY",
+    "role": "SCAFFOLD_OR_KILL_SWITCH_FALLBACK",
     "eligible_as_champion": False,
     "verified_delivery_claim": False,
+    "peer_canary_with_agentic": False,
+    "allowed_uses": (
+        "scaffold_project_tool",
+        "kill_switch_fallback",
+        "explicit_ops_bootstrap",
+    ),
 }
 
 
@@ -51,11 +60,12 @@ def qualification_allows_agentic_traffic(state: str | None) -> bool:
 
 
 def qualification_allows_explicit_agentic(state: str | None) -> bool:
+    """Deprecated gate: product path is agentic regardless of qualification."""
     return str(state or "DISABLED") in QUALIFICATION_EXPLICIT_AGENTIC_ELIGIBLE
 
 
 def stable_canary_bucket(key: str, *, buckets: int = 100) -> int:
-    """Stable 0..buckets-1 assignment for canary traffic splitting."""
+    """Stable 0..buckets-1 assignment (retained for future capability canaries)."""
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return int(digest[:8], 16) % buckets
 
@@ -67,15 +77,12 @@ def resolve_effective_generation_strategy(
     gq2_closed: bool | None = None,
     live_active: bool | None = None,
 ) -> GenerationStrategy:
-    """Resolve runtime strategy with kill switch, qualification, and optional canary.
+    """Resolve runtime strategy.
 
-    Order:
-    1. Kill switch → fallback (never agentic while switch is on).
-    2. Canary requires traffic-eligible qualification (DOGFOOD / CANARY_* / DEFAULT)
-       plus ``canary_percent > 0`` and GQ-2 gate. Funnel health does not unlock
-       traffic. Pass ``live_active=False`` to skip canary on zombie goals.
-    3. Explicit ``generation_strategy=agentic`` only when qualification allows
-       (Offline Qual or traffic-eligible). Otherwise FALLBACK_ONLY artifact-backed.
+    Order (M3):
+    1. Kill switch → artifact-backed fallback (scaffold / safety).
+    2. Explicit ``generation_strategy=artifact-backed`` → scaffold-only opt-in.
+    3. Otherwise → agentic (product Agent runtime). Peer AB↔agentic canary ignored.
     """
     fallback: GenerationStrategy = getattr(
         settings, "generation_strategy_fallback", "artifact-backed"
@@ -86,59 +93,46 @@ def resolve_effective_generation_strategy(
         settings, "generation_strategy_canary_variant", "agentic"
     )
     qual_state = str(getattr(settings, "agentic_qualification_state", "DISABLED") or "DISABLED")
-    configured = getattr(settings, "generation_strategy", "artifact-backed")
+    configured = getattr(settings, "generation_strategy", "agentic")
     if canary_variant not in {"artifact-backed", "agentic"}:
         canary_variant = "agentic"
     if gq2_closed is None:
         gq2_closed = bool(getattr(settings, "generation_strategy_canary_gate", False))
 
-    reason = "default"
+    reason = "product_agent_runtime"
     selected: GenerationStrategy
     bucket: int | None = None
 
-    def _default_strategy() -> GenerationStrategy:
-        strategy = configured
-        if strategy not in {"artifact-backed", "agentic"}:
-            return "artifact-backed"
-        if strategy == "agentic" and not qualification_allows_explicit_agentic(qual_state):
-            return "artifact-backed"
-        return strategy  # type: ignore[return-value]
-
     if kill_switch:
         reason = "kill_switch"
-        selected = fallback if fallback in {"artifact-backed", "agentic"} else "artifact-backed"
-        if selected == "agentic" and not qualification_allows_explicit_agentic(qual_state):
+        selected = (
+            fallback if fallback in {"artifact-backed", "agentic"} else "artifact-backed"
+        )
+        # Kill-switch fallback must stay non-agentic for safety rollback.
+        if selected == "agentic":
             selected = "artifact-backed"
-    elif live_active is False:
-        reason = "canary_skipped_not_live_active"
-        selected = _default_strategy()
-        if configured == "agentic" and selected == "artifact-backed":
-            reason = "qualification_not_eligible"
-    elif (
-        qualification_allows_agentic_traffic(qual_state)
-        and canary_percent > 0
-        and goal_id
-        and canary_rollout_allowed(kill_switch=kill_switch, gq2_closed=gq2_closed)
-    ):
-        bucket = stable_canary_bucket(str(goal_id))
-        if bucket < canary_percent:
-            reason = "canary_hit"
-            selected = canary_variant
-        else:
-            reason = "canary_miss"
-            selected = _default_strategy()
+            reason = "kill_switch_forced_scaffold"
+    elif configured == "artifact-backed":
+        reason = "explicit_scaffold"
+        selected = "artifact-backed"
     else:
-        selected = _default_strategy()
-        if configured == "agentic" and selected == "artifact-backed":
-            reason = "qualification_not_eligible"
-        elif canary_percent > 0 and not qualification_allows_agentic_traffic(qual_state):
-            reason = "qualification_not_eligible"
-        elif canary_percent > 0 and not goal_id:
-            reason = "canary_skipped_no_goal_id"
-        elif canary_percent > 0 and not gq2_closed:
-            reason = "canary_gate_closed"
-        else:
-            reason = "default"
+        selected = "agentic"
+        reason = "product_agent_runtime"
+        if canary_percent > 0:
+            # Deprecated: treating artifact-backed as a peer canary arm.
+            bucket = stable_canary_bucket(str(goal_id)) if goal_id else None
+            reason = "product_agent_runtime_ab_peer_canary_deprecated"
+            logger.warning(
+                "AB↔agentic peer canary is deprecated; product path is agentic",
+                extra={
+                    "goal_id": goal_id,
+                    "canary_percent": canary_percent,
+                    "canary_variant": canary_variant,
+                    "qualification_state": qual_state,
+                    "live_active": live_active,
+                    "gq2_closed": bool(gq2_closed),
+                },
+            )
 
     logger.info(
         "generation_strategy_resolved",
@@ -152,6 +146,7 @@ def resolve_effective_generation_strategy(
             "qualification_state": qual_state,
             "selected": selected,
             "reason": reason,
+            "artifact_backed_role": ARTIFACT_BACKED_ROLE["role"],
         },
     )
     return selected
@@ -178,14 +173,25 @@ def kill_switch_contract() -> dict[str, Any]:
         ],
         "in_flight_run_semantics": IN_FLIGHT_RUN_SEMANTICS,
         "forbid_mid_run_generator_swap": True,
+        "fallback_role": ARTIFACT_BACKED_ROLE["role"],
     }
 
 
 def canary_rollout_allowed(*, kill_switch: bool, gq2_closed: bool) -> bool:
-    """Ops second door: kill switch off + canary gate on.
-
-    Funnel health does not unlock traffic (self-lock protocol abolished).
-    ``gq2_closed`` here is the ops ``generation_strategy_canary_gate`` flag —
-    extra insurance after qualification_state already qualifies the lane.
-    """
+    """Legacy ops door retained for tooling; does not select AB as product path."""
     return (not kill_switch) and bool(gq2_closed)
+
+
+def peer_ab_agentic_canary_deprecated() -> dict[str, Any]:
+    """Contract note: do not A/B artifact-backed vs agentic as equal strategies."""
+    return {
+        "version": "m3-agent-runtime/v1",
+        "deprecated": True,
+        "message": (
+            "Comparing artifact-backed vs agentic as peer generation strategies is a "
+            "type error. Product path is Persistent Agent Session + AgentRunner; "
+            "artifact-backed is scaffold/fallback only. Future experiments compare "
+            "Agent capability configs (tools/memory/model), not presence of Agent."
+        ),
+        "artifact_backed_role": ARTIFACT_BACKED_ROLE,
+    }

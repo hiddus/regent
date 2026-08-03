@@ -14,8 +14,35 @@ BLOCKING_DELIVERY_GAP_CODES: frozenset[str] = frozenset(
         "forbid-trivial-server",
         "forbid-pure-static-backend",
         "goal-semantic-alignment",
+        "ARTIFACT_INCOMPLETE",
+        "index-html",
+        "empty-changeset",
     }
 )
+
+
+def is_blocking_delivery_gap_code(code: str) -> bool:
+    raw = str(code or "").strip()
+    if not raw:
+        return False
+    if raw in BLOCKING_DELIVERY_GAP_CODES:
+        return True
+    # Prefix match for namespaced codes (e.g. forbid-demo-shell: detail).
+    head = raw.split(":", 1)[0].strip()
+    return head in BLOCKING_DELIVERY_GAP_CODES
+
+
+def partition_delivery_gap_codes(codes: list[str]) -> tuple[list[str], list[str]]:
+    """Return (blocking, soft) gap code lists."""
+    blocking: list[str] = []
+    soft: list[str] = []
+    for code in codes:
+        if is_blocking_delivery_gap_code(code):
+            blocking.append(code)
+        else:
+            soft.append(code)
+    return blocking, soft
+
 
 # Same gap_kind may only auto-escalate this many times before a soft reset / pause.
 SAME_GAP_KIND_HARD_CAP = 3

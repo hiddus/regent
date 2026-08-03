@@ -133,7 +133,12 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     ToolSpec(
         name="todo_write",
-        description="Update the in-session todo list for long-running delivery work.",
+        description=(
+            "Step 0 / work plan: create or replace the durable checklist BEFORE "
+            "write_file/edit_file/run_command on multi-step work. "
+            "Prefer ≥3 concrete steps; keep at most one status=in_progress. "
+            "Alias of plan upsert (persists to ExecutionPlan)."
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -148,12 +153,66 @@ TOOL_SPECS: list[ToolSpec] = [
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed", "cancelled"],
                             },
+                            "owner_agent_id": {
+                                "type": "string",
+                                "description": "Optional owner; use subagent-<key> when delegating.",
+                            },
+                            "dependencies": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
                         },
                         "required": ["id", "content", "status"],
                     },
                 }
             },
             "required": ["todos"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
+        name="plan_list",
+        description="Read the current in-session work plan checklist (prevents forgetting steps).",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
+        name="plan_update",
+        description=(
+            "Update one work-plan item status (pending/in_progress/completed/cancelled). "
+            "Use after finishing a step; keep a single in_progress item."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed", "cancelled"],
+                },
+                "content": {"type": "string"},
+                "owner_agent_id": {"type": "string"},
+            },
+            "required": ["id", "status"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
+        name="delegate_plan_item",
+        description=(
+            "Delegate one work-plan item to an isolated sub-agent. "
+            "Requires an existing todo id; marks owner + in_progress, then runs the subagent."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Todo / plan item id"},
+                "acceptance_notes": {"type": "string"},
+            },
+            "required": ["id"],
             "additionalProperties": False,
         },
     ),
@@ -516,19 +575,80 @@ class WorkspaceToolkit:
                     timeout_seconds=int(call.arguments.get("timeout_seconds") or 60),
                 )
             if call.name == "todo_write":
+                from regent.application.work_plan import normalize_single_in_progress
+
                 todos = call.arguments.get("todos") or []
                 if not isinstance(todos, list):
                     raise ValueError("todos must be a list")
-                self.todos = [
+                raw = [
                     {
                         "id": str(item.get("id") or ""),
                         "content": str(item.get("content") or ""),
                         "status": str(item.get("status") or "pending"),
+                        **(
+                            {"owner_agent_id": str(item["owner_agent_id"])}
+                            if item.get("owner_agent_id")
+                            else {}
+                        ),
+                        **(
+                            {"dependencies": list(item.get("dependencies") or [])}
+                            if item.get("dependencies")
+                            else {}
+                        ),
                     }
                     for item in todos
                     if isinstance(item, dict)
                 ]
+                self.todos = normalize_single_in_progress(raw)
                 return json.dumps(self.todos, ensure_ascii=False)
+            if call.name == "plan_list":
+                return json.dumps(self.todos, ensure_ascii=False)
+            if call.name == "plan_update":
+                from regent.application.work_plan import normalize_single_in_progress
+
+                item_id = str(call.arguments.get("id") or "")
+                if not item_id:
+                    raise ValueError("id is required")
+                found = False
+                updated: list[dict[str, Any]] = []
+                for item in self.todos:
+                    row = dict(item)
+                    if str(row.get("id") or "") == item_id:
+                        found = True
+                        row["status"] = str(call.arguments.get("status") or row.get("status"))
+                        if call.arguments.get("content"):
+                            row["content"] = str(call.arguments["content"])
+                        if call.arguments.get("owner_agent_id") is not None:
+                            owner = call.arguments.get("owner_agent_id")
+                            if owner:
+                                row["owner_agent_id"] = str(owner)
+                            else:
+                                row.pop("owner_agent_id", None)
+                    updated.append(row)
+                if not found:
+                    raise ValueError(f"plan item not found: {item_id}")
+                self.todos = normalize_single_in_progress(updated)
+                return json.dumps(self.todos, ensure_ascii=False)
+            if call.name == "delegate_plan_item":
+                # Handled by AgentRunner (needs ChatProvider); toolkit only validates id.
+                item_id = str(call.arguments.get("id") or "")
+                if not item_id:
+                    raise ValueError("id is required")
+                match = next(
+                    (t for t in self.todos if str(t.get("id") or "") == item_id),
+                    None,
+                )
+                if match is None:
+                    raise ValueError(f"plan item not found: {item_id}")
+                return json.dumps(
+                    {
+                        "delegated": True,
+                        "id": item_id,
+                        "content": match.get("content"),
+                        "acceptance_notes": call.arguments.get("acceptance_notes") or "",
+                    },
+                    ensure_ascii=False,
+                )
             if call.name == "submit":
                 self.submitted = True
                 self.submit_summary = str(call.arguments.get("summary") or "")
