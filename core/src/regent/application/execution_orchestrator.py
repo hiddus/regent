@@ -1572,6 +1572,28 @@ class ExecutionOrchestrator:
                     acceptance_contract["authorized_session_resume"] = True
                 if gmeta.get("work_plan_seen"):
                     acceptance_contract["work_plan_seen"] = True
+                from regent.application.agent_control import (
+                    get_execution_mode,
+                    session_always_tools,
+                )
+
+                acceptance_contract["execution_mode"] = get_execution_mode(gmeta)
+                acceptance_contract["permission_always_tools"] = sorted(
+                    session_always_tools(gmeta)
+                )
+                if gmeta.get("permission_allow_once_tools"):
+                    acceptance_contract["permission_allow_once_tools"] = list(
+                        gmeta.get("permission_allow_once_tools") or []
+                    )[:32]
+                acceptance_contract["goal_metadata"] = {
+                    k: gmeta[k]
+                    for k in (
+                        "agent_abort_requested",
+                        "execution_mode",
+                        "agent_permission_always",
+                    )
+                    if k in gmeta
+                }
                 if gmeta.get("awaiting_human_intervention") or gmeta.get(
                     "stale_progress_handoff_at"
                 ):
@@ -1739,6 +1761,50 @@ class ExecutionOrchestrator:
                         tool_event=tool_event,
                         activity_event=tool_event,
                     )
+                    # H0.6: dual-write RegentEvent ring (prebury for H1 SSE).
+                    try:
+                        from sqlalchemy.orm.attributes import flag_modified
+
+                        from regent.agent.events import RegentEvent, append_regent_event
+
+                        etype = str(event.type or "status")
+                        if etype not in {
+                            "turn_start",
+                            "turn_end",
+                            "tool_call",
+                            "plan_updated",
+                            "submit",
+                            "budget",
+                            "status",
+                        }:
+                            etype = "status"
+                        async with self._sessions() as ev_sess, ev_sess.begin():
+                            g_ev = await ev_sess.get(GoalModel, goal_id, with_for_update=True)
+                            if g_ev is not None:
+                                g_ev.metadata_json = append_regent_event(
+                                    dict(g_ev.metadata_json or {}),
+                                    RegentEvent(
+                                        type=etype,  # type: ignore[arg-type]
+                                        summary=str(event.summary or "")[:240],
+                                        run_id=str(run.id),
+                                        goal_id=str(goal_id),
+                                        turn=event.turn,
+                                        tool=tool,
+                                        payload={
+                                            k: v
+                                            for k, v in tool_event.items()
+                                            if k not in {"type", "summary", "tool", "turn"}
+                                            and v is not None
+                                        },
+                                    ),
+                                )
+                                flag_modified(g_ev, "metadata_json")
+                    except Exception:
+                        logger.debug(
+                            "regent_event append skipped",
+                            extra={"goal_id": str(goal_id)},
+                            exc_info=True,
+                        )
 
                 live_summary = "Agent Session 正在工作（读代码 / 改文件 / 验证）…"
                 async with self._sessions() as _sess:

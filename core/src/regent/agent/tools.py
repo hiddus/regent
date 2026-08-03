@@ -217,6 +217,34 @@ TOOL_SPECS: list[ToolSpec] = [
         },
     ),
     ToolSpec(
+        name="ask_user_question",
+        description=(
+            "Ask the human a structured question and wait for an answer before continuing. "
+            "Use when requirements are ambiguous, a risky choice is needed, or plan direction "
+            "must be confirmed. Do not guess — call this tool."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                        },
+                        "required": ["id", "label"],
+                    },
+                },
+                "suggested": {"type": "string"},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    ),
+    ToolSpec(
         name="submit",
         description=(
             "Declare the workspace ready for independent verification. "
@@ -648,6 +676,38 @@ class WorkspaceToolkit:
                         "acceptance_notes": call.arguments.get("acceptance_notes") or "",
                     },
                     ensure_ascii=False,
+                )
+            if call.name == "ask_user_question":
+                from regent.application.agent_control import AskUserRequiredError
+                from regent.application.agent_loop_exit import build_ask_envelope
+
+                question = str(call.arguments.get("question") or "").strip()
+                if not question:
+                    raise ValueError("question is required")
+                raw_opts = call.arguments.get("options") or []
+                options: list[dict[str, str]] = []
+                if isinstance(raw_opts, list):
+                    for item in raw_opts:
+                        if isinstance(item, dict) and item.get("id"):
+                            options.append(
+                                {
+                                    "id": str(item["id"]),
+                                    "label": str(item.get("label") or item["id"]),
+                                }
+                            )
+                suggested = str(call.arguments.get("suggested") or "") or (
+                    options[0]["id"] if options else "continue_fix"
+                )
+                raise AskUserRequiredError(
+                    question,
+                    options=options,
+                    envelope=build_ask_envelope(
+                        question=question,
+                        why_blocked="Agent 通过 ask_user_question 请求确认。",
+                        options=options or None,
+                        suggested=suggested,
+                        ask_type="ask_user",
+                    ),
                 )
             if call.name == "submit":
                 self.submitted = True

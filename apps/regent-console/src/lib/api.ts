@@ -106,12 +106,36 @@ export const api = {
   getPlanItems: (goalId: string) =>
     request<PlanItem[]>(`/v1/goals/${goalId}/plan-items`),
 
+  abortGoal: (goalId: string, actor = ACTOR, reason = 'user_abort') =>
+    request<{ ok: boolean; goal_id: string; abort?: boolean }>(`/v1/goals/${goalId}/abort`, {
+      actor,
+      reason,
+    }),
+
+  getAgentLoopExit: (goalId: string) =>
+    request<{
+      exit: Record<string, unknown> | null
+      pending_ask?: Record<string, unknown> | null
+      execution_mode?: string
+      work_plan_approved?: boolean
+    }>(`/v1/goals/${goalId}/agent-loop-exit`),
+
+  setExecutionMode: (goalId: string, mode: 'ask' | 'act', actor = ACTOR) =>
+    request<{ ok: boolean; execution_mode: string }>(`/v1/goals/${goalId}/execution-mode`, {
+      actor,
+      mode,
+    }),
+
   /** TRANSITIONAL: metadata ring buffers — not durable event truth. */
   getGoalActivity: (goalId: string) =>
     request<{
       events: ActivityEvent[]
       tool_events: Record<string, unknown>[]
       live_action?: Record<string, unknown> | null
+      regent_events?: Record<string, unknown>[]
+      agent_loop_exit?: Record<string, unknown> | null
+      execution_mode?: string
+      pending_agent_loop_ask?: Record<string, unknown> | null
     }>(`/v1/goals/${goalId}/activity`),
 
   /** TRANSITIONAL: in-process subagent roster may be empty after worker restart. */

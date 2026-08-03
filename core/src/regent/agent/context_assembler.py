@@ -74,6 +74,8 @@ class ContextAssembler:
             "Rules:\n"
             "- Step 0: before write_file/edit_file/run_command, call todo_write with a concrete checklist "
             "(usually ≥3 steps). Keep at most one in_progress; mark completed as you go.\n"
+            "- If requirements are unclear or a risky choice is needed, call ask_user_question "
+            "(structured options) instead of guessing.\n"
             f"- HTTP app object MUST live at `{entry}` (Profile entry_module:entry_object).\n"
             "- Prefer persistence + empty states over fake placeholder users/cards.\n"
             "- Stay within planned_paths when possible; create supporting files as needed.\n"

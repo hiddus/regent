@@ -159,6 +159,12 @@ def classify_delivery_gap_kind(gap_reasons: list[str]) -> str:
     joined = " ".join(str(r).lower() for r in gap_reasons if str(r).strip())
     if not joined:
         return "product_surface"
+    if "user_abort" in joined:
+        return "USER_ABORT"
+    if "tool_permission" in joined:
+        return "TOOL_PERMISSION"
+    if "ask_user_required" in joined or "ask_user:" in joined:
+        return "ASK_USER"
     if "plan_approve" in joined:
         return "PLAN_APPROVE"
     if "budget_exhausted" in joined:
@@ -393,6 +399,22 @@ class DeliveryGapRecoveryService:
             )
             if exit_enforced:
                 from regent.application.agent_loop_exit import detect_doom_loop
+
+                # H0: user abort is always STOP (not another ASK).
+                if gap_kind == "USER_ABORT":
+                    return await self._exit_stop_or_ask(
+                        session,
+                        goal=goal,
+                        project_id=project_id,
+                        metadata=metadata,
+                        gap_kind=gap_kind,
+                        reasons=reasons,
+                        attempts=total_attempts,
+                        draft_uri=draft_uri or None,
+                        exit_kind="STOP",
+                        stop_reason="user_abort",
+                        actor=actor,
+                    )
 
                 is_doom, doom_reason = detect_doom_loop(metadata, gap_kind=gap_kind)
                 # Update streak for doom tracking even when asking.
@@ -724,6 +746,30 @@ class DeliveryGapRecoveryService:
                         if len(parts) >= 3:
                             plan_items.append({"id": parts[1], "content": parts[2]})
                 ask = plan_approve_envelope(items=plan_items or [{"content": r} for r in reasons[:6]])
+            elif gap_kind == "TOOL_PERMISSION":
+                from regent.application.agent_control import permission_ask_envelope
+
+                tool_name = "tool"
+                preview = ""
+                for r in reasons:
+                    text = str(r)
+                    if text.startswith("TOOL_PERMISSION_REQUIRED:"):
+                        tool_name = text.split(":", 1)[-1].strip() or tool_name
+                    if text.startswith("preview:"):
+                        preview = text.split(":", 1)[-1].strip()
+                ask = permission_ask_envelope(tool_name=tool_name, args_preview=preview)
+            elif gap_kind == "ASK_USER":
+                question = "Agent 需要你确认后再继续。"
+                for r in reasons:
+                    text = str(r)
+                    if text.startswith("ASK_USER_REQUIRED:"):
+                        question = text.split(":", 1)[-1].strip() or question
+                        break
+                ask = build_ask_envelope(
+                    question=question[:800],
+                    why_blocked="Agent 调用了 ask_user_question。",
+                    ask_type="ask_user",
+                )
             else:
                 why = (
                     f"交付验证未通过（{gap_kind}）。"
@@ -1380,6 +1426,7 @@ class DeliveryGapRecoveryService:
         project_id: uuid.UUID,
         actor: str,
         human_message: str | None = None,
+        option_id: str | None = None,
     ) -> DeliveryGapRecoveryResult:
         """After human authorizes continue: reset ladder counter and re-enter recover/replan.
 
@@ -1429,19 +1476,67 @@ class DeliveryGapRecoveryService:
             # A0: mark ASK answered so exit gate allows authorized Session resume.
             from regent.application.agent_loop_exit import mark_ask_answered
 
+            pending_ask_before = dict(metadata.get("pending_agent_loop_ask") or {})
+            effective_option = (option_id or "").strip()
+            if not effective_option and human_message:
+                msg_l = human_message.strip().lower()
+                for cand in (
+                    "allow_always_session",
+                    "allow_once",
+                    "approve_plan",
+                    "deny",
+                    "stop",
+                    "continue_fix",
+                    "revise_plan",
+                ):
+                    if cand in msg_l or cand.replace("_", " ") in msg_l:
+                        effective_option = cand
+                        break
+            if not effective_option:
+                effective_option = str(pending_ask_before.get("suggested") or "continue_fix")
+
             metadata = mark_ask_answered(
                 metadata,
                 answer=(human_message or "human approved continue")[:800],
-                option_id="continue_fix",
+                option_id=effective_option,
             )
             # Work Plan: human approve (or any authorized continue after plan_approve ASK).
             pending_ask = dict(metadata.get("pending_agent_loop_ask") or {})
+            ask_type = str(pending_ask.get("ask_type") or pending_ask_before.get("ask_type") or "")
             if (
-                str(pending_ask.get("ask_type") or "") == "plan_approve"
+                ask_type == "plan_approve"
                 or str(metadata.get("delivery_gap_kind") or "") == "PLAN_APPROVE"
             ):
-                metadata["work_plan_approved"] = True
-                metadata["work_plan_seen"] = True
+                if effective_option != "stop":
+                    metadata["work_plan_approved"] = True
+                    metadata["work_plan_seen"] = True
+                    # After plan approve, allow checklist writes in ask mode without
+                    # re-prompting every write_file (run_command still gated).
+                    from regent.application.agent_control import grant_session_always
+
+                    metadata = grant_session_always(metadata, "write_file")
+                    metadata = grant_session_always(metadata, "edit_file")
+            # H0 Permission grants (session-scoped always / once via metadata for next lease).
+            if ask_type == "permission" or str(metadata.get("delivery_gap_kind") or "") == "TOOL_PERMISSION":
+                from regent.application.agent_control import grant_session_always
+
+                tool_hint = ""
+                for r in gap_reasons:
+                    if "TOOL_PERMISSION_REQUIRED:" in str(r):
+                        tool_hint = str(r).split(":", 1)[-1].strip()
+                if effective_option == "allow_always_session" and tool_hint:
+                    metadata = grant_session_always(metadata, tool_hint)
+                elif effective_option == "allow_once" and tool_hint:
+                    once = list(metadata.get("permission_allow_once_tools") or [])
+                    if tool_hint not in once:
+                        once.append(tool_hint)
+                    metadata["permission_allow_once_tools"] = once[:32]
+                elif effective_option == "deny":
+                    metadata["permission_denied_at"] = datetime.now(UTC).isoformat()
+            metadata.pop("agent_abort_requested", None)
+            from regent.application.agent_control import clear_abort
+
+            clear_abort(str(goal_id))
             metadata["execution_stage"] = "GENERATING"
             metadata["authorized_session_resume"] = True
             metadata["human_resume_nonce"] = (

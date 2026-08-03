@@ -1034,10 +1034,28 @@ body {
   color: var(--muted);
   text-transform: none;
 }
-.plan-owner {
-  color: var(--muted);
+.mode-toggle {
+  display: inline-flex;
+  gap: 4px;
+}
+.mode-toggle button {
   font-size: 11px;
-  white-space: nowrap;
+  padding: 2px 8px;
+  border: 1px solid var(--border, #333);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.mode-toggle button.active {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+.result-bundle .result-summary {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+.result-link {
+  font-size: 12px;
 }
 .activity-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .source-layout {

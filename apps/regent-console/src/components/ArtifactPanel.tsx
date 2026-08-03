@@ -278,6 +278,70 @@ export function ArtifactPanel({
         </div>
 
         <div className="artifact-panel-content">
+          {(() => {
+            const exit = (status?.goal?.metadata?.agent_loop_exit || null) as Record<string, unknown> | null
+            const bundle = (exit?.result_bundle || null) as Record<string, unknown> | null
+            const exitKind = String(exit?.exit_kind || '')
+            const goalId = status?.goal?.id
+            const mode = String(status?.goal?.metadata?.execution_mode || 'ask')
+            if (!exit && !goalId) return null
+            return (
+              <div className="artifact-fold-section result-surface">
+                <div className="artifact-section-title" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span>本轮结果{exitKind ? ` · ${exitKind}` : ''}</span>
+                  {goalId && (
+                    <span className="mode-toggle">
+                      <button
+                        type="button"
+                        className={mode === 'ask' ? 'active' : ''}
+                        onClick={() => api.setExecutionMode(goalId, 'ask').then(() => {/* refresh via parent */})}
+                      >Ask</button>
+                      <button
+                        type="button"
+                        className={mode === 'act' ? 'active' : ''}
+                        onClick={() => {
+                          if (window.confirm('Act 模式：已批清单内可连跑；删除/外发仍会询问。确定？')) {
+                            api.setExecutionMode(goalId, 'act')
+                          }
+                        }}
+                      >Act</button>
+                    </span>
+                  )}
+                </div>
+                {exitKind === 'COMPLETE' && bundle && (
+                  <div className="result-bundle">
+                    <p className="result-summary">{String(bundle.summary || '本轮已完成')}</p>
+                    {Array.isArray(bundle.open_items) && bundle.open_items.length > 0 && (
+                      <div className="result-open">
+                        <div className="hint">未决项</div>
+                        <ul className="plan-checklist">
+                          {(bundle.open_items as string[]).map((item, i) => (
+                            <li key={i} className="plan-item status-pending">
+                              <span className="plan-mark">○</span>
+                              <span className="plan-content">{item}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {bundle.preview_url ? (
+                      <a className="result-link" href={String(bundle.preview_url)} target="_blank" rel="noreferrer">打开预览</a>
+                    ) : null}
+                  </div>
+                )}
+                {exitKind === 'STOP' && (
+                  <p className="hint">已停止（{String(exit?.stop_reason || 'stop')}）。草稿已保留，可继续或调整方向。</p>
+                )}
+                {exitKind === 'ASK_HUMAN' && (
+                  <p className="hint">等待你确认 — 请看对话中的问题卡。</p>
+                )}
+                {!exitKind && (
+                  <p className="hint">运行中尚无出口；需要时可点顶部「停止」。</p>
+                )}
+              </div>
+            )
+          })()}
+
           <div className="agent-roster-section">
             {agents.length === 0 ? (
               <div className="artifact-empty">

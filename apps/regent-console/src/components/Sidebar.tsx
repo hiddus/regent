@@ -262,6 +262,9 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
       </div>
 
       <div className="quick-actions">
+        {(goal.status === 'ACTIVE' || stage === 'GENERATING' || stage === 'DELIVERY_SOFT_PAUSE') && (
+          <button className="qa-btn danger" onClick={() => onQuickAction('停止执行')}>停止</button>
+        )}
         {goal.status === 'ACTIVE' && genProgress !== 'stalled' && (
           <button className="qa-btn" onClick={() => onQuickAction('暂停执行')}>暂停</button>
         )}

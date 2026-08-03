@@ -98,6 +98,10 @@ class AgentRunner:
         producer_ref: str = "regent-agent",
         runtime_profile: RuntimeProfileV1 | dict[str, Any] | None = None,
         skills_enabled: bool = True,
+        execution_mode: str = "ask",
+        permission_always_tools: set[str] | frozenset[str] | None = None,
+        subagent_depth: int = 0,
+        max_subagent_depth: int = 1,
     ) -> None:
         self._provider = provider
         self._toolkit = toolkit
@@ -115,10 +119,59 @@ class AgentRunner:
                 dict(runtime_profile) if runtime_profile else None
             )
         self._skills_enabled = skills_enabled
+        self._execution_mode = "act" if str(execution_mode).lower() == "act" else "ask"
+        self._permission_always = set(permission_always_tools or ())
+        self._subagent_depth = int(subagent_depth)
+        self._max_subagent_depth = int(max_subagent_depth)
         self._compactor = ContextCompactor(
             toolkit=toolkit,
             summarizer=HeuristicSummarizer(),
             context_window_tokens=context_window_tokens,
+        )
+
+    def _raise_if_aborted(self, plan: dict[str, Any]) -> None:
+        from regent.application.agent_control import UserAbortError, is_abort_requested
+
+        meta = dict(plan.get("goal_metadata") or {})
+        if is_abort_requested(
+            str(self._goal_id) if self._goal_id else plan.get("goal_id"),
+            meta,
+        ):
+            raise UserAbortError("user_abort")
+
+    def _maybe_require_tool_permission(
+        self, plan: dict[str, Any], tool_name: str, arguments: dict[str, Any]
+    ) -> None:
+        from regent.application.agent_control import (
+            ToolPermissionRequiredError,
+            permission_ask_envelope,
+            tool_needs_permission,
+        )
+
+        # One-shot allow from prior human answer on this lease.
+        once = set(plan.get("permission_allow_once_tools") or ())
+        always = set(self._permission_always) | set(
+            plan.get("permission_always_tools") or ()
+        )
+        if tool_name in once:
+            once.discard(tool_name)
+            plan["permission_allow_once_tools"] = sorted(once)
+            return
+        if not tool_needs_permission(
+            tool_name,
+            execution_mode=self._execution_mode,  # type: ignore[arg-type]
+            always_tools=always,
+        ):
+            return
+        preview = _preview(arguments, 180)
+        raise ToolPermissionRequiredError(
+            tool_name,
+            args_preview=preview,
+            envelope=permission_ask_envelope(
+                tool_name=tool_name,
+                args_preview=preview,
+                execution_mode=self._execution_mode,  # type: ignore[arg-type]
+            ),
         )
 
     def _raise_budget_exhausted(
@@ -306,6 +359,17 @@ class AgentRunner:
         )
         if match is None:
             return json.dumps({"ok": False, "error": f"plan item not found: {item_id}"})
+        if self._subagent_depth >= self._max_subagent_depth:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        f"subagent depth exceeded ({self._subagent_depth} >= "
+                        f"{self._max_subagent_depth})"
+                    ),
+                }
+            )
+        self._raise_if_aborted(plan)
         owner = f"subagent-{item_id}"
         match["status"] = "in_progress"
         match["owner_agent_id"] = owner
@@ -337,11 +401,14 @@ class AgentRunner:
             budget=AgentBudget(
                 max_turns=min(20, self._budget.max_turns),
                 max_tokens=min(80_000, self._budget.max_tokens),
+                max_wall_seconds=min(600, self._budget.max_wall_seconds),
             ),
             regent_md=self._regent_md,
             goal_id=str(self._goal_id) if self._goal_id else None,
             execution_plans=self._execution_plans,
             run_id=self._run_id,
+            parent_depth=self._subagent_depth,
+            max_subagent_depth=self._max_subagent_depth,
         )
         result = await runner.run_milestone(
             goal_anchor_text=str(plan.get("goal_anchor_text") or ""),
@@ -440,6 +507,7 @@ class AgentRunner:
         last_gap_fingerprint: str | None = None
 
         while turn < max_turns:
+            self._raise_if_aborted(plan)
             wall = time.monotonic() - started
             if wall > self._budget.max_wall_seconds:
                 ledger.wall_seconds = wall
@@ -617,24 +685,39 @@ class AgentRunner:
             submitted_this_turn = False
             for call in assistant.tool_calls:
                 ledger.add_tool_invocation(1)
+                self._raise_if_aborted(plan)
                 step0_block = self._step0_blocks_write(plan, call.name)
                 if step0_block:
                     result_text = f"ERROR: WorkPlanRequired: {step0_block}"
                 elif call.name == "delegate_plan_item":
-                    # Toolkit validates; runner executes isolated subagent.
-                    probe = await self._toolkit.execute(call)
-                    if probe.startswith("ERROR:"):
-                        result_text = probe
-                    else:
-                        result_text = await self._run_delegate_plan_item(
-                            plan=plan,
-                            item_id=str(call.arguments.get("id") or ""),
-                            acceptance_notes=str(
-                                call.arguments.get("acceptance_notes") or ""
-                            ),
-                            prior_gaps=prior_gaps,
+                    if self._subagent_depth >= self._max_subagent_depth:
+                        result_text = (
+                            "ERROR: SubagentDepthExceeded: nested delegate_plan_item "
+                            f"forbidden (depth={self._subagent_depth}, "
+                            f"max={self._max_subagent_depth})"
                         )
+                    else:
+                        # Toolkit validates; runner executes isolated subagent.
+                        probe = await self._toolkit.execute(call)
+                        if probe.startswith("ERROR:"):
+                            result_text = probe
+                        else:
+                            self._maybe_require_tool_permission(
+                                plan, call.name, dict(call.arguments or {})
+                            )
+                            result_text = await self._run_delegate_plan_item(
+                                plan=plan,
+                                item_id=str(call.arguments.get("id") or ""),
+                                acceptance_notes=str(
+                                    call.arguments.get("acceptance_notes") or ""
+                                ),
+                                prior_gaps=prior_gaps,
+                            )
                 else:
+                    if not str(call.name).startswith("ask_"):
+                        self._maybe_require_tool_permission(
+                            plan, call.name, dict(call.arguments or {})
+                        )
                     result_text = await self._toolkit.execute(call)
                 message_result = result_text
                 if call.name == "submit":

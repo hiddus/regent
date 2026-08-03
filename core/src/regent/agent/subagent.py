@@ -50,6 +50,8 @@ class SubagentRunner:
         goal_id: str | None = None,
         execution_plans: Any | None = None,
         run_id: Any | None = None,
+        parent_depth: int = 0,
+        max_subagent_depth: int = 1,
     ) -> None:
         self._provider = provider
         self._workspace_root = workspace_root.resolve()
@@ -58,6 +60,8 @@ class SubagentRunner:
         self._goal_id = goal_id
         self._execution_plans = execution_plans
         self._run_id = run_id
+        self._parent_depth = int(parent_depth)
+        self._max_subagent_depth = int(max_subagent_depth)
 
     async def _writeback_plan_item(self, brief: SubagentBrief, *, status: str) -> None:
         if self._execution_plans is None or not self._goal_id or not brief.plan_item_key:
@@ -148,6 +152,9 @@ class SubagentRunner:
             toolkit,
             budget=self._budget,
             regent_md=self._regent_md,
+            execution_mode="act",
+            subagent_depth=self._parent_depth + 1,
+            max_subagent_depth=self._max_subagent_depth,
             # Subagent inherits parent plan items for Step 0; skip re-approve.
         )
         # Mark as already approved / trivial so child does not ASK plan_approve again.

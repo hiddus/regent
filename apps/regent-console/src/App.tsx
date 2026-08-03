@@ -167,9 +167,25 @@ export default function App() {
     }
   }, [ws])
 
-  const handleQuickAction = useCallback((text: string) => {
+  const handleQuickAction = useCallback(async (text: string) => {
+    if (text === '停止执行') {
+      const goalId = ws.status?.goal?.id
+      if (!goalId) {
+        ws.showHint('当前没有可停止的目标', true)
+        return
+      }
+      try {
+        await api.abortGoal(goalId)
+        ws.showHint('已请求停止：本轮将结束并保留草稿')
+        await ws.refresh()
+        if (ws.currentProject) await ws.loadStatus(ws.currentProject.id)
+      } catch (e) {
+        ws.showHint((e as Error).message, true)
+      }
+      return
+    }
     handleSend(text)
-  }, [handleSend])
+  }, [handleSend, ws])
 
   const handleUpload = useCallback(async (file: File) => {
     try {

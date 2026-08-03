@@ -307,7 +307,15 @@ async def get_goal_activity(goal_id: uuid.UUID, request: Request) -> dict[str, A
     async with request.app.state.sessions() as session:
         goal = await session.get(GoalModel, goal_id)
         if goal is None:
-            return {"events": [], "tool_events": [], "live_action": None}
+            return {
+                "events": [],
+                "tool_events": [],
+                "live_action": None,
+                "regent_events": [],
+                "agent_loop_exit": None,
+                "execution_mode": "ask",
+                "pending_agent_loop_ask": None,
+            }
         meta = goal.metadata_json if isinstance(goal.metadata_json, dict) else {}
         activity = meta.get("activity_log")
         tools = meta.get("tool_events")
@@ -315,7 +323,113 @@ async def get_goal_activity(goal_id: uuid.UUID, request: Request) -> dict[str, A
             "events": list(activity) if isinstance(activity, list) else [],
             "tool_events": list(tools) if isinstance(tools, list) else [],
             "live_action": meta.get("live_action"),
+            "regent_events": list(meta.get("regent_events") or [])
+            if isinstance(meta.get("regent_events"), list)
+            else [],
+            "agent_loop_exit": meta.get("agent_loop_exit"),
+            "execution_mode": meta.get("execution_mode") or "ask",
+            "pending_agent_loop_ask": meta.get("pending_agent_loop_ask"),
         }
+
+
+class AbortGoalRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=255)
+    reason: str = Field(default="user_abort", max_length=200)
+
+
+class ExecutionModeRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=255)
+    mode: str = Field(pattern="^(ask|act)$")
+
+
+@router.post("/{goal_id}/abort")
+async def abort_goal_run(goal_id: uuid.UUID, payload: AbortGoalRequest, request: Request) -> dict[str, Any]:
+    """H0.1: request mid-run abort → STOP with draft on next agent turn check."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from regent.agent.events import RegentEvent, append_regent_event
+    from regent.application.agent_control import apply_abort_to_goal_metadata
+    from regent.application.agent_loop_exit import apply_exit_to_metadata, build_exit
+    from regent.application.live_action import merge_live_action_into_metadata
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session, session.begin():
+        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        meta = apply_abort_to_goal_metadata(
+            dict(goal.metadata_json or {}),
+            str(goal_id),
+            actor=payload.actor,
+            reason=payload.reason or "user_abort",
+        )
+        # Optimistic STOP stamp (runner also raises UserAbortError → recovery STOP).
+        exit_payload = build_exit(
+            exit_kind="STOP",
+            stop_reason="user_abort",
+            lease_id=meta.get("last_generation_run_id"),
+            session_id=meta.get("project_agent_session_id"),
+            epoch=meta.get("project_agent_session_epoch"),
+            draft_uri=meta.get("last_good_draft_uri"),
+        )
+        meta = apply_exit_to_metadata(meta, exit_payload)
+        meta = append_regent_event(
+            meta,
+            RegentEvent(
+                type="abort_requested",
+                summary="用户请求停止",
+                goal_id=str(goal_id),
+                payload={"actor": payload.actor, "reason": payload.reason},
+            ),
+        )
+        meta = merge_live_action_into_metadata(
+            meta,
+            "已请求停止：本轮将结束并保留草稿",
+            stage="DELIVERY_SOFT_PAUSE",
+            event_type="AGENT_LOOP_STOP",
+        )
+        goal.metadata_json = meta
+        flag_modified(goal, "metadata_json")
+    return {"ok": True, "goal_id": str(goal_id), "abort": True}
+
+
+@router.get("/{goal_id}/agent-loop-exit")
+async def get_agent_loop_exit(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """H0.4: COMPLETE/STOP/ASK result surface for console."""
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return {"exit": None, "execution_mode": "ask"}
+        meta = goal.metadata_json if isinstance(goal.metadata_json, dict) else {}
+        return {
+            "exit": meta.get("agent_loop_exit"),
+            "pending_ask": meta.get("pending_agent_loop_ask"),
+            "execution_mode": meta.get("execution_mode") or "ask",
+            "work_plan_approved": bool(meta.get("work_plan_approved")),
+        }
+
+
+@router.post("/{goal_id}/execution-mode")
+async def set_goal_execution_mode(
+    goal_id: uuid.UUID, payload: ExecutionModeRequest, request: Request
+) -> dict[str, Any]:
+    """H0/H1: Ask vs Act mode (default ask)."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from regent.application.agent_control import set_execution_mode
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session, session.begin():
+        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        mode = "act" if payload.mode == "act" else "ask"
+        meta = set_execution_mode(dict(goal.metadata_json or {}), mode)  # type: ignore[arg-type]
+        goal.metadata_json = meta
+        flag_modified(goal, "metadata_json")
+    return {"ok": True, "goal_id": str(goal_id), "execution_mode": mode}
 
 
 @router.get("/{goal_id}/agents")

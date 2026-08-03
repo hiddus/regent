@@ -22,6 +22,13 @@ from regent.agent.types import (
     PlanApproveRequiredError,
     VerificationGap,
 )
+from regent.application.agent_control import (
+    AskUserRequiredError,
+    ToolPermissionRequiredError,
+    UserAbortError,
+    get_execution_mode,
+    session_always_tools,
+)
 from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.p1_contracts import FileChange, FileChangeSet, FileMode, FileOperation
 from regent.application.p1_ports import GeneratedFileChangeSet
@@ -134,9 +141,28 @@ class AgenticCodeGenerator:
             "authorized_session_resume",
             "work_plan_seen",
             "work_plan_items",
+            "execution_mode",
+            "permission_always_tools",
+            "permission_allow_once_tools",
+            "goal_metadata",
         ):
             if key not in plan and acceptance.get(key) is not None:
                 plan[key] = acceptance[key]
+        # Default execution_mode ask; merge permission grants from acceptance.
+        if "execution_mode" not in plan:
+            plan["execution_mode"] = get_execution_mode(acceptance)
+        if "permission_always_tools" not in plan:
+            plan["permission_always_tools"] = sorted(session_always_tools(acceptance))
+        if "goal_metadata" not in plan:
+            plan["goal_metadata"] = {
+                k: acceptance[k]
+                for k in (
+                    "agent_abort_requested",
+                    "execution_mode",
+                    "agent_permission_always",
+                )
+                if k in acceptance
+            }
         run_smoke = bool(acceptance.get("batch_run_smoke", True))
         context_artifacts = None
         execution_plans = None
@@ -172,6 +198,8 @@ class AgenticCodeGenerator:
             producer_ref=GENERATOR_REF,
             runtime_profile=plan.get("runtime_profile"),
             skills_enabled=bool(plan.get("skills_enabled", True)),
+            execution_mode=str(plan.get("execution_mode") or "ask"),
+            permission_always_tools=set(plan.get("permission_always_tools") or ()),
         )
 
         from regent.agent.progress_event import ProgressEvent
@@ -237,6 +265,36 @@ class AgenticCodeGenerator:
                 on_turn=_on_turn if on_progress else None,
                 on_event=_on_event if on_progress else None,
             )
+        except UserAbortError as exc:
+            draft_uri = sandbox.resolve().as_uri()
+            raise DeliveryRejection(
+                reasons=[f"USER_ABORT: {exc.reason}"],
+                draft_uri=draft_uri,
+                producer_ref=GENERATOR_REF,
+                gap_kind="USER_ABORT",
+                message="user aborted agent loop",
+            ) from exc
+        except ToolPermissionRequiredError as exc:
+            draft_uri = sandbox.resolve().as_uri()
+            raise DeliveryRejection(
+                reasons=[
+                    f"TOOL_PERMISSION_REQUIRED: {exc.tool_name}",
+                    f"preview:{exc.args_preview}",
+                ],
+                draft_uri=draft_uri,
+                producer_ref=GENERATOR_REF,
+                gap_kind="TOOL_PERMISSION",
+                message="tool permission required",
+            ) from exc
+        except AskUserRequiredError as exc:
+            draft_uri = sandbox.resolve().as_uri()
+            raise DeliveryRejection(
+                reasons=[f"ASK_USER_REQUIRED: {exc.question[:200]}"],
+                draft_uri=draft_uri,
+                producer_ref=GENERATOR_REF,
+                gap_kind="ASK_USER",
+                message="agent asked the human a question",
+            ) from exc
         except PlanApproveRequiredError as exc:
             draft_uri = sandbox.resolve().as_uri()
             raise DeliveryRejection(

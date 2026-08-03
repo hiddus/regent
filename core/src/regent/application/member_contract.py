@@ -134,6 +134,7 @@ def certified_hive_member_contracts() -> list[MemberContract]:
                 "plan_list",
                 "plan_update",
                 "delegate_plan_item",
+                "ask_user_question",
                 "submit",
             ],
             delegatable_to=[],
