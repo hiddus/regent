@@ -1,11 +1,13 @@
 import { useMemo } from 'react'
 import type { DiagnosticDelivery, Message } from '../lib/types'
 import { buildTimeline, type ProgressNodeExtras } from '../lib/progressNodes'
+import { collapseRetryClusters } from '../lib/retryClusters'
 import { ConfirmationCard } from './ConfirmationCard'
 import { RecoveryCard } from './RecoveryCard'
 import { TaskCard, type TaskActionOptions } from './TaskCard'
 import { ProgressNodeCard } from './ProgressNodeCard'
 import { ResultCard } from './ResultCard'
+import { RetryClusterCard } from './RetryClusterCard'
 import { LeadLine, MarkdownBody } from './MarkdownBody'
 
 const EMPTY_EXAMPLES = [
@@ -384,7 +386,10 @@ export function MessageList({
     )
   }
 
-  const timeline = buildTimeline(messages, extras)
+  const timeline = useMemo(
+    () => collapseRetryClusters(buildTimeline(messages, extras)),
+    [messages, extras],
+  )
   const liveMode = !goalStatus || ['ACTIVE', 'WAITING_HUMAN', 'PAUSED', 'READY', 'BLOCKED', 'EXHAUSTED'].includes(goalStatus)
 
   // Last unsettled progress node stays detailed; older settled ones compress (Claude/Cursor).
@@ -437,6 +442,9 @@ export function MessageList({
     <section className="messages">
       <div className="stream">
         {timeline.map((item, idx) => {
+          if (item.kind === 'retry_cluster') {
+            return <RetryClusterCard key={`retry-${item.fingerprint}-${idx}`} cluster={item} />
+          }
           if (item.kind === 'node') {
             const preferCompressed =
               liveMode &&

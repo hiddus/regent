@@ -199,7 +199,8 @@ const INTERACTIVE_TASK_TYPES = new Set([
 
 export function isProgressEvent(m: Message): boolean {
   if (INTERACTIVE_TASK_TYPES.has(m.message_type)) return false
-  // Keep learning / attempt history as visible chat bubbles (do not fold away).
+  // Learning / attempt history: still chat-surface (not folded into stage nodes),
+  // but MessageList collapses consecutive same-cause retries into RetryClusterCard.
   if (
     m.role === 'ASSISTANT' &&
     (m.message_type === 'DELIVERY_GAP_CAPABILITY_ESCALATED' ||
