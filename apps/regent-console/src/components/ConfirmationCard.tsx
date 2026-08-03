@@ -1,7 +1,10 @@
+import { InterventionCard } from './InterventionCard'
+
 interface ForkOption {
   id: string
   label: string
   description?: string
+  cost_hint?: string
 }
 
 interface ConfirmationCardProps {
@@ -60,6 +63,7 @@ function asForkOptions(value: unknown): ForkOption[] {
       id,
       label,
       description: String(row.description || '').trim() || undefined,
+      cost_hint: String(row.cost_hint || '').trim() || undefined,
     })
   }
   return out
@@ -90,8 +94,11 @@ export function ConfirmationCard({
   const showFork = needsUserFork && forkOptions.length >= 2
 
   return (
-    <div className="confirm-card">
-      <h3>{showFork ? '需要你辅助决断的方向' : '拟议方案'}</h3>
+    <InterventionCard
+      askType={showFork ? 'ask_user' : 'plan_approve'}
+      title={showFork ? '需要你辅助决断的方向' : '请确认本轮计划'}
+      className="confirm-card"
+    >
       <dl className="facts">
         <dt>App 名称</dt>
         <dd>{(plan.app_name as string) || (u.app_name as string) || '待定'}</dd>
@@ -161,8 +168,8 @@ export function ConfirmationCard({
       </dl>
 
       {showFork ? (
-        <div className="fork-options">
-          <p className="fork-lead">请选择一个方向继续（2–4 项，不必写长问卷）：</p>
+        <div className="fork-options intervention-actions">
+          <p className="fork-lead">请选择一个方向继续（2–4 项）：</p>
           {forkOptions.map(opt => (
             <button
               key={opt.id}
@@ -174,16 +181,23 @@ export function ConfirmationCard({
               {opt.description ? (
                 <span className="fork-option-desc">{opt.description}</span>
               ) : null}
+              {opt.cost_hint ? (
+                <span className="fork-option-cost">代价：{opt.cost_hint}</span>
+              ) : null}
             </button>
           ))}
         </div>
       ) : canConfirm ? (
-        <button className="confirm-btn" onClick={onConfirm}>按当前理解开始</button>
+        <div className="intervention-actions">
+          <button className="confirm-btn" onClick={onConfirm}>
+            批准并继续
+          </button>
+        </div>
       ) : (
         <p className="confirm-note">
           Core 已按当前方案开始探索；目标会随证据和你的补充持续变清晰。
         </p>
       )}
-    </div>
+    </InterventionCard>
   )
 }

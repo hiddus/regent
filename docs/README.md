@@ -9,6 +9,7 @@
 | [`definitions/REGENT-DEFINITION-1.0.txt`](definitions/REGENT-DEFINITION-1.0.txt) | FROZEN | **唯一规范定义源** + `.sha256`；CI 防漂移 |
 | [`direction-note-run-think-learn-2026-08-02.md`](direction-note-run-think-learn-2026-08-02.md) | **DIRECTION** | 边跑边干边想；模型主理、人辅助决断；无退出门；经验吸收优先于怕浪费 |
 | [`execution-plan-run-think-learn-2026-08-02.md`](execution-plan-run-think-learn-2026-08-02.md) | **ACTIVE** | 产品×技术逻辑执行方案：L0–L5 人步切片（方案可见→选项→lessons→cache 闭环→稳态） |
+| [`console-ux-redesign-2026-08-03.md`](console-ux-redesign-2026-08-03.md) | **LANDED** | 控制台体验重梳：工作区 Tab、闸门卡族、Stop 一等、清单默认 |
 | [`decision-note-delivery-machine-invariants-2026-08-02.md`](decision-note-delivery-machine-invariants-2026-08-02.md) | **DRAFT** | 交付不变量草案（待按方向注记修订）；ProgressEvent/activity 标 TRANSITIONAL |
 | [`../Regent-Measurement-Decision-Framework.md`](../Regent-Measurement-Decision-Framework.md) | CURRENT | P2-4 Eval / 组织晋测合同 |
 | [`../Regent-Plan.md`](../Regent-Plan.md) | ACTIVE | **唯一编码执行清单**与开发切片（含 §14 CD-*） |

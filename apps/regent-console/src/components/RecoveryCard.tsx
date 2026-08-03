@@ -1,4 +1,5 @@
 import type { DiagnosticDelivery, DiagnosticRecommendation } from '../lib/types'
+import { InterventionCard } from './InterventionCard'
 
 interface RecoveryCardProps {
   delivery: DiagnosticDelivery
@@ -31,8 +32,12 @@ export function RecoveryCard({
   }
 
   return (
-    <div className="recovery-card">
-      <div className="recovery-card-badge">未验证草稿 · 非正式交付</div>
+    <InterventionCard
+      askType="recovery"
+      title="卡住了，建议这样继续"
+      badge="未验证草稿"
+      className="recovery-card"
+    >
       <p className="recovery-card-summary">
         {summary || delivery.summary || '本轮已暂停，当前成果已保存。'}
       </p>
@@ -78,7 +83,7 @@ export function RecoveryCard({
         </div>
       )}
 
-      <div className="recovery-card-actions">
+      <div className="recovery-card-actions intervention-actions">
         {recs.map(rec => (
           <button
             key={rec.id || rec.action}
@@ -90,7 +95,7 @@ export function RecoveryCard({
           </button>
         ))}
       </div>
-      <p className="recovery-card-hint">无需点「允许」或「总是允许」— 直接选下一步即可。</p>
-    </div>
+      <p className="recovery-card-hint">无需点「允许」或「本会话允许」— 直接选下一步即可。</p>
+    </InterventionCard>
   )
 }

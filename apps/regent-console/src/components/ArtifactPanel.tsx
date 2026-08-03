@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { LiveAction } from '../lib/liveActivity'
 import type {
   ActivityEvent,
@@ -17,66 +17,9 @@ import {
   deriveAgents,
 } from '../lib/agents'
 import { api } from '../lib/api'
+import { ResultCard } from './ResultCard'
 
-function TrustPostureInline({ goalId }: { goalId: string }) {
-  const [label, setLabel] = useState('姿态…')
-  useEffect(() => {
-    let cancelled = false
-    api.getTrustPosture(goalId).then((r) => {
-      if (cancelled || !r.posture) return
-      const level = String(r.posture.level || 'standard')
-      const mode = String(r.posture.execution_mode || 'ask')
-      const map: Record<string, string> = {
-        restricted: '受限',
-        standard: '标准',
-        elevated: '高信任',
-      }
-      setLabel(`姿态 · ${map[level] || level} · ${mode}`)
-    }).catch(() => {
-      if (!cancelled) setLabel('姿态 · 未知')
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [goalId])
-  return <span title="Trust posture">{label}</span>
-}
-
-function SideQuestionInline({ goalId }: { goalId: string }) {
-  const [q, setQ] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [answer, setAnswer] = useState<string | null>(null)
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 6 }}>
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="侧问（不改计划）"
-          style={{ flex: 1, fontSize: 12 }}
-          disabled={busy}
-        />
-        <button
-          type="button"
-          disabled={busy || !q.trim()}
-          onClick={async () => {
-            setBusy(true)
-            try {
-              const r = await api.sideQuestion(goalId, q.trim())
-              setAnswer(String(r.text || ''))
-              setQ('')
-            } finally {
-              setBusy(false)
-            }
-          }}
-        >
-          快问
-        </button>
-      </div>
-      {answer ? <p className="hint" style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>{answer}</p> : null}
-    </div>
-  )
-}
+export type WorkspaceTab = 'plan' | 'run' | 'changes' | 'preview' | 'review'
 
 interface ArtifactPanelProps {
   project: Project | null
@@ -94,6 +37,12 @@ interface ArtifactPanelProps {
   runtimeAgents?: RuntimeAgent[]
   isOpen: boolean
   onToggle: () => void
+  /** Controlled tab (optional); parent can force-open preview/review. */
+  activeTab?: WorkspaceTab
+  onTabChange?: (tab: WorkspaceTab) => void
+  highlightItemKey?: string | null
+  onSelectPlanItem?: (itemKey: string) => void
+  onModeChanged?: () => void
 }
 
 const PLAN_STATUS_MARK: Record<string, string> = {
@@ -104,6 +53,14 @@ const PLAN_STATUS_MARK: Record<string, string> = {
   failed: '!',
 }
 
+const TABS: { id: WorkspaceTab; label: string }[] = [
+  { id: 'plan', label: '清单' },
+  { id: 'run', label: '运行' },
+  { id: 'changes', label: '改动' },
+  { id: 'preview', label: '预览' },
+  { id: 'review', label: '审阅' },
+]
+
 function planStatusLabel(status: string): string {
   const s = (status || 'pending').toLowerCase()
   if (s === 'in_progress') return '进行中'
@@ -111,6 +68,29 @@ function planStatusLabel(status: string): string {
   if (s === 'cancelled') return '取消'
   if (s === 'failed') return '失败'
   return '待办'
+}
+
+function fileExtLabel(path: string): string {
+  const base = path.split('/').pop() || path
+  const i = base.lastIndexOf('.')
+  if (i <= 0) return '文件'
+  const ext = base.slice(i + 1).toLowerCase()
+  const map: Record<string, string> = {
+    ts: 'TypeScript',
+    tsx: 'TSX',
+    js: 'JavaScript',
+    jsx: 'JSX',
+    py: 'Python',
+    css: 'CSS',
+    html: 'HTML',
+    json: 'JSON',
+    md: 'Markdown',
+    yml: 'YAML',
+    yaml: 'YAML',
+    toml: 'TOML',
+    sql: 'SQL',
+  }
+  return map[ext] || ext.toUpperCase()
 }
 
 const PREVIEW_READY_STATUSES = new Set([
@@ -174,6 +154,30 @@ function resolveDeliverable(status: ProjectStatus | null, messages: Message[]): 
   }
 }
 
+function TrustPostureInline({ goalId }: { goalId: string }) {
+  const [label, setLabel] = useState('姿态…')
+  useEffect(() => {
+    let cancelled = false
+    api.getTrustPosture(goalId).then((r) => {
+      if (cancelled || !r.posture) return
+      const level = String(r.posture.level || 'standard')
+      const mode = String(r.posture.execution_mode || 'ask')
+      const map: Record<string, string> = {
+        restricted: '受限',
+        standard: '标准',
+        elevated: '高信任',
+      }
+      setLabel(`姿态 · ${map[level] || level} · ${mode}`)
+    }).catch(() => {
+      if (!cancelled) setLabel('姿态 · 未知')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [goalId])
+  return <span title="Trust posture">{label}</span>
+}
+
 export function ArtifactPanel({
   project,
   status,
@@ -186,14 +190,22 @@ export function ArtifactPanel({
   runtimeAgents = [],
   isOpen,
   onToggle,
+  activeTab: controlledTab,
+  onTabChange,
+  highlightItemKey = null,
+  onSelectPlanItem,
+  onModeChanged,
 }: ArtifactPanelProps) {
+  const [internalTab, setInternalTab] = useState<WorkspaceTab>('plan')
+  const tab = controlledTab ?? internalTab
+  const setTab = useCallback((next: WorkspaceTab) => {
+    if (onTabChange) onTabChange(next)
+    else setInternalTab(next)
+  }, [onTabChange])
+
   const [previewExpanded, setPreviewExpanded] = useState(false)
-  const [artifactsOpen, setArtifactsOpen] = useState(false)
-  const [reviewOpen, setReviewOpen] = useState(false)
-  const [sourceOpen, setSourceOpen] = useState(false)
-  const [planOpen, setPlanOpen] = useState(true)
-  const [timelineOpen, setTimelineOpen] = useState(false)
-  const [activityOpen, setActivityOpen] = useState(false)
+  const [showTimeline, setShowTimeline] = useState(false)
+  const [showAdvancedJson, setShowAdvancedJson] = useState(false)
   const [review, setReview] = useState<DeliveryReview | null>(null)
   const [reviewLoading, setReviewLoading] = useState(false)
   const [reviewError, setReviewError] = useState<string | null>(null)
@@ -201,14 +213,9 @@ export function ArtifactPanel({
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [fileContent, setFileContent] = useState<string>('')
   const [fileError, setFileError] = useState<string | null>(null)
+  const autoPreviewDone = useRef<string | null>(null)
+  const autoCompleteDone = useRef<string | null>(null)
 
-  useEffect(() => {
-    const hasOpen = planItems.some(i => {
-      const s = String(i.status || '').toLowerCase()
-      return s === 'pending' || s === 'in_progress'
-    })
-    if (hasOpen) setPlanOpen(true)
-  }, [planItems])
   const agents = useMemo(() => {
     const base = deriveAgents(status, liveAction, messages)
     if (!runtimeAgents.length) return base
@@ -235,16 +242,46 @@ export function ArtifactPanel({
   const previewUrl = deliverable.url
   const hasPreview = deliverable.ready
 
-  useEffect(() => {
-    if (hasPreview) setArtifactsOpen(true)
-  }, [hasPreview])
+  const exit = (status?.goal?.metadata?.agent_loop_exit || null) as Record<string, unknown> | null
+  const bundle = (exit?.result_bundle || null) as Record<string, unknown> | null
+  const exitKind = String(exit?.exit_kind || '')
+  const goalId = status?.goal?.id
+  const mode = String(status?.goal?.metadata?.execution_mode || 'ask')
 
-  // CD-3.1: reset review data when switching projects — it is project-scoped.
+  // Default to plan when items appear; auto-switch preview once per project.
+  useEffect(() => {
+    if (!project?.id) return
+    if (planItems.length > 0 && tab === 'run' && !controlledTab) {
+      // keep user choice if they left plan
+    }
+  }, [project?.id, planItems.length, tab, controlledTab])
+
+  useEffect(() => {
+    if (!project?.id || !hasPreview) return
+    if (autoPreviewDone.current === project.id) return
+    autoPreviewDone.current = project.id
+    setTab('preview')
+  }, [project?.id, hasPreview, setTab])
+
+  useEffect(() => {
+    if (!project?.id || exitKind !== 'COMPLETE') return
+    if (autoCompleteDone.current === project.id) return
+    autoCompleteDone.current = project.id
+    if (hasPreview) setTab('preview')
+    else setTab('review')
+  }, [project?.id, exitKind, hasPreview, setTab])
+
   useEffect(() => {
     setReview(null)
     setReviewError(null)
-    setReviewOpen(false)
-  }, [project?.id])
+    setShowAdvancedJson(false)
+    setTree([])
+    setSelectedFile(null)
+    setFileContent('')
+    autoPreviewDone.current = null
+    autoCompleteDone.current = null
+    if (!controlledTab) setInternalTab('plan')
+  }, [project?.id, controlledTab])
 
   const loadReview = useCallback(async () => {
     if (!project) return
@@ -254,22 +291,17 @@ export function ArtifactPanel({
       const data = await api.getDeliveryReview(project.id)
       setReview(data)
     } catch (e) {
-      // Backend endpoint may not exist yet (CD-3.2 client-first) — degrade quietly.
       setReviewError((e as Error).message || '暂无审阅数据')
     } finally {
       setReviewLoading(false)
     }
   }, [project])
 
-  const toggleReview = useCallback(() => {
-    setReviewOpen(open => {
-      const next = !open
-      if (next && !review && !reviewLoading) {
-        loadReview()
-      }
-      return next
-    })
-  }, [review, reviewLoading, loadReview])
+  useEffect(() => {
+    if (tab === 'review' && project && !review && !reviewLoading) {
+      void loadReview()
+    }
+  }, [tab, project, review, reviewLoading, loadReview])
 
   const loadTree = useCallback(async () => {
     if (!project) return
@@ -283,6 +315,12 @@ export function ArtifactPanel({
     }
   }, [project])
 
+  useEffect(() => {
+    if (tab === 'changes' && project && tree.length === 0) {
+      void loadTree()
+    }
+  }, [tab, project, tree.length, loadTree])
+
   const openFile = useCallback(async (path: string) => {
     if (!project) return
     setSelectedFile(path)
@@ -295,14 +333,6 @@ export function ArtifactPanel({
       setFileError((e as Error).message || '无法读取文件')
     }
   }, [project])
-
-  const toggleSource = useCallback(() => {
-    setSourceOpen(open => {
-      const next = !open
-      if (next && tree.length === 0) void loadTree()
-      return next
-    })
-  }, [tree.length, loadTree])
 
   const budget = review?.budget
   const activityFeed = activity.length > 0
@@ -324,515 +354,504 @@ export function ArtifactPanel({
     ? `${budgetTokens.toLocaleString()}${budget.max_tokens != null ? ` / ${budget.max_tokens.toLocaleString()}` : ''} tokens`
     : null
 
+  const hasDeps = !!(planTimeline && planTimeline.edges.length > 0)
+
   return (
     <>
+      {isOpen && (
+        <button
+          type="button"
+          className="workspace-backdrop"
+          aria-label="关闭工作区"
+          onClick={onToggle}
+        />
+      )}
       {!isOpen && (
-        <button className="artifact-panel-toggle" onClick={onToggle} title="打开 Agent 面板">
+        <button className="artifact-panel-toggle" onClick={onToggle} title="打开工作区">
           <span className="toggle-icon">◁</span>
-          <span className="toggle-label">Agent</span>
+          <span className="toggle-label">工作区</span>
         </button>
       )}
 
-      <aside className={`artifact-panel ${isOpen ? 'open' : ''}`}>
+      <aside className={`artifact-panel workspace-panel ${isOpen ? 'open' : ''}`}>
+        <div className="workspace-sheet-handle" aria-hidden />
         <div className="artifact-panel-header">
-          <h3>参与 Agent</h3>
-          {agents.length > 0 && (
-            <span className="agent-panel-count">
-              {activeCount > 0 ? `${activeCount} 个活动` : `${agents.length} 个`}
-            </span>
-          )}
+          <h3>工作区</h3>
           <button className="close-btn" onClick={onToggle} aria-label="关闭面板">×</button>
         </div>
 
-        <div className="artifact-panel-content">
-          {(() => {
-            const exit = (status?.goal?.metadata?.agent_loop_exit || null) as Record<string, unknown> | null
-            const bundle = (exit?.result_bundle || null) as Record<string, unknown> | null
-            const exitKind = String(exit?.exit_kind || '')
-            const goalId = status?.goal?.id
-            const mode = String(status?.goal?.metadata?.execution_mode || 'ask')
-            if (!exit && !goalId) return null
-            return (
-              <div className="artifact-fold-section result-surface">
-                <div className="artifact-section-title" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                  <span>本轮结果{exitKind ? ` · ${exitKind}` : ''}</span>
-                  {goalId && (
-                    <span className="mode-toggle">
-                      <button
-                        type="button"
-                        className={mode === 'ask' ? 'active' : ''}
-                        onClick={() => api.setExecutionMode(goalId, 'ask').then(() => {/* refresh via parent */})}
-                      >Ask</button>
-                      <button
-                        type="button"
-                        className={mode === 'act' ? 'active' : ''}
-                        onClick={() => {
-                          if (window.confirm('Act 模式：已批清单内可连跑；删除/外发仍会询问。确定？')) {
-                            api.setExecutionMode(goalId, 'act')
-                          }
-                        }}
-                      >Act</button>
-                    </span>
-                  )}
-                </div>
-                {goalId && (
-                  <div className="trust-posture-row hint" style={{ marginBottom: 8 }}>
-                    <TrustPostureInline goalId={goalId} />
-                  </div>
-                )}
-                {goalId && (
-                  <div className="side-question-row" style={{ marginBottom: 8 }}>
-                    <SideQuestionInline goalId={goalId} />
-                  </div>
-                )}
-                {goalId && exitKind && (
-                  <div className="evidence-row hint" style={{ marginBottom: 8 }}>
-                    <button
-                      type="button"
-                      className="linkish"
-                      onClick={() => {
-                        api.getEvidenceBundle(goalId).then((r) => {
-                          const dig = String(r.bundle?.digest || '').slice(0, 16)
-                          window.alert(
-                            r.verify?.ok
-                              ? `证据包校验通过 · digest ${dig}…`
-                              : `证据包校验失败 · ${JSON.stringify(r.verify || {})}`,
-                          )
-                        })
-                      }}
-                    >导出/校验证据包</button>
-                    {' · '}
-                    <button
-                      type="button"
-                      className="linkish"
-                      onClick={() => {
-                        api.undoTurn(goalId, true).then((r) => {
-                          if (!r.ok) {
-                            window.alert(r.preview || '无法撤回')
-                            return
-                          }
-                          if (window.confirm(`${r.preview || '确认撤回上一回合？'}\n\n应用撤回？`)) {
-                            api.undoTurn(goalId, false)
-                          }
-                        })
-                      }}
-                    >撤回上一回合</button>
-                  </div>
-                )}
-                {exitKind === 'COMPLETE' && bundle && (
-                  <div className="result-bundle">
-                    <p className="result-summary">{String(bundle.summary || '本轮已完成')}</p>
-                    {Array.isArray(bundle.open_items) && bundle.open_items.length > 0 && (
-                      <div className="result-open">
-                        <div className="hint">未决项</div>
-                        <ul className="plan-checklist">
-                          {(bundle.open_items as string[]).map((item, i) => (
-                            <li key={i} className="plan-item status-pending">
-                              <span className="plan-mark">○</span>
-                              <span className="plan-content">{item}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {bundle.preview_url ? (
-                      <a className="result-link" href={String(bundle.preview_url)} target="_blank" rel="noreferrer">打开预览</a>
-                    ) : null}
-                  </div>
-                )}
-                {exitKind === 'STOP' && (
-                  <p className="hint">已停止（{String(exit?.stop_reason || 'stop')}）。草稿已保留，可继续或调整方向。</p>
-                )}
-                {exitKind === 'ASK_HUMAN' && (
-                  <p className="hint">等待你确认 — 请看对话中的问题卡。</p>
-                )}
-                {!exitKind && (
-                  <p className="hint">运行中尚无出口；需要时可点顶部「停止」。</p>
-                )}
-              </div>
-            )
-          })()}
-
-          <div className="agent-roster-section">
-            {agents.length === 0 ? (
-              <div className="artifact-empty">
-                <p>开始创建 App 后，这里会显示参与的 Agent。</p>
-              </div>
-            ) : (
-              <ul className="agent-roster">
-                {agents.map(agent => (
-                  <li
-                    key={agent.id}
-                    className={`agent-roster-item activity-${agent.activity} ${agent.is_main ? 'is-main' : ''}`}
-                  >
-                    <div className={`agent-avatar activity-${agent.activity}`} aria-hidden>
-                      <span>{agentInitials(agent)}</span>
-                      <span className={`agent-status-badge activity-${agent.activity}`} />
-                    </div>
-                    <div className="agent-roster-body">
-                      <div className="agent-roster-head">
-                        <span className="agent-roster-name">{agent.name}</span>
-                        <span className={`agent-activity-chip activity-${agent.activity}`}>
-                          {ACTIVITY_LABEL[agent.activity]}
-                        </span>
-                      </div>
-                      <div className="agent-roster-meta">
-                        {agent.is_main ? 'Core' : agent.role_label}
-                        {agent.kind === 'hive' ? ' · Hive' : ''}
-                      </div>
-                      {agent.detail && (
-                        <p className="agent-roster-detail">{agent.detail}</p>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="artifact-fold-section">
+        <nav className="workspace-tabs" aria-label="工作区视图">
+          {TABS.map(t => (
             <button
+              key={t.id}
               type="button"
-              className={`artifact-fold-toggle ${planOpen ? 'open' : ''}`}
-              onClick={() => setPlanOpen(!planOpen)}
+              className={`workspace-tab ${tab === t.id ? 'active' : ''}`}
+              onClick={() => setTab(t.id)}
             >
-              <span>工作清单{planItems.length > 0 ? `（${planItems.length}）` : ''}</span>
-              <span className="artifact-fold-arrow" aria-hidden>›</span>
+              {t.label}
+              {t.id === 'plan' && planItems.length > 0 ? (
+                <span className="tab-count">{planItems.length}</span>
+              ) : null}
+              {t.id === 'run' && activeCount > 0 ? (
+                <span className="tab-count live">{activeCount}</span>
+              ) : null}
+              {t.id === 'preview' && hasPreview ? (
+                <span className="tab-dot" aria-hidden />
+              ) : null}
             </button>
-            {planOpen && (
-              <div className="artifact-fold-body">
-                {planItems.length === 0 ? (
-                  <div className="artifact-empty compact">
-                    <p>尚未生成工作清单 — Agent 规划中…</p>
-                  </div>
-                ) : (
-                  <ul className="plan-checklist">
-                    {planItems.map(item => {
-                      const status = String(item.status || 'pending').toLowerCase()
-                      const mark = PLAN_STATUS_MARK[status] || '○'
-                      const owner = item.owner_agent_id
-                        ? String(item.owner_agent_id).startsWith('subagent')
-                          ? '子 Agent'
-                          : String(item.owner_agent_id)
-                        : null
-                      return (
-                        <li key={item.id || item.item_key} className={`plan-item status-${status}`}>
+          ))}
+        </nav>
+
+        <div className="artifact-panel-content workspace-tab-body">
+          {tab === 'plan' && (
+            <div className="workspace-pane plan-pane">
+              {goalId && (
+                <div className="plan-mode-row">
+                  <span className="mode-toggle">
+                    <button
+                      type="button"
+                      className={mode === 'ask' ? 'active' : ''}
+                      onClick={() => {
+                        void api.setExecutionMode(goalId, 'ask').then(() => onModeChanged?.())
+                      }}
+                    >
+                      Ask
+                    </button>
+                    <button
+                      type="button"
+                      className={mode === 'act' ? 'active' : ''}
+                      onClick={() => {
+                        if (window.confirm('Act 模式：已批清单内可连跑；删除/外发仍会询问。确定？')) {
+                          void api.setExecutionMode(goalId, 'act').then(() => onModeChanged?.())
+                        }
+                      }}
+                    >
+                      Act
+                    </button>
+                  </span>
+                  <span className="hint">
+                    {mode === 'act' ? '清单内连跑 · 删除仍询问' : '逐步确认 · 默认更安全'}
+                  </span>
+                </div>
+              )}
+
+              {exitKind === 'COMPLETE' && bundle && (
+                <ResultCard
+                  exitKind="COMPLETE"
+                  summary={String(bundle.summary || '本轮已完成')}
+                  openItems={Array.isArray(bundle.open_items) ? (bundle.open_items as string[]) : []}
+                  previewUrl={bundle.preview_url ? String(bundle.preview_url) : previewUrl}
+                  onOpenPreview={() => setTab('preview')}
+                  onOpenReview={() => setTab('review')}
+                />
+              )}
+              {exitKind === 'STOP' && (
+                <ResultCard
+                  exitKind="STOP"
+                  summary=""
+                  stopReason={String(exit?.stop_reason || '')}
+                />
+              )}
+
+              {planItems.length === 0 ? (
+                <div className="artifact-empty">
+                  <p>尚未生成工作清单 — Agent 规划中…</p>
+                </div>
+              ) : (
+                <ul className="plan-checklist">
+                  {planItems.map(item => {
+                    const st = String(item.status || 'pending').toLowerCase()
+                    const mark = PLAN_STATUS_MARK[st] || '○'
+                    const owner = item.owner_agent_id
+                      ? String(item.owner_agent_id).startsWith('subagent')
+                        ? '子 Agent'
+                        : String(item.owner_agent_id)
+                      : null
+                    const key = item.item_key || item.id
+                    const highlighted = highlightItemKey && highlightItemKey === item.item_key
+                    return (
+                      <li
+                        key={item.id || item.item_key}
+                        className={`plan-item status-${st}${highlighted ? ' is-highlight' : ''}`}
+                        data-item-key={item.item_key}
+                      >
+                        <button
+                          type="button"
+                          className="plan-item-btn"
+                          onClick={() => onSelectPlanItem?.(item.item_key)}
+                        >
                           <span className="plan-mark" aria-hidden>{mark}</span>
-                          <span className="plan-status">{planStatusLabel(status)}</span>
+                          <span className="plan-status">{planStatusLabel(st)}</span>
                           <span className="plan-content">{item.content || item.item_key}</span>
                           {owner && <span className="plan-owner">{owner}</span>}
-                        </li>
-                      )
-                    })}
-                  </ul>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+
+              {hasDeps && (
+                <div className="plan-timeline-fold">
+                  <button
+                    type="button"
+                    className="task-detail-toggle"
+                    onClick={() => setShowTimeline(v => !v)}
+                  >
+                    {showTimeline ? '收起依赖视图' : '依赖视图（只读）'}
+                  </button>
+                  {showTimeline && planTimeline && (
+                    <div className="plan-timeline">
+                      {planTimeline.lanes.map(lane => (
+                        <div key={lane.owner} className="timeline-lane">
+                          <div className="timeline-lane-title">
+                            {String(lane.owner).startsWith('subagent')
+                              ? '子 Agent'
+                              : lane.owner === 'primary'
+                                ? 'Primary'
+                                : lane.owner}
+                          </div>
+                          <ul className="timeline-bars">
+                            {lane.items.map((item) => {
+                              const st = String(item.status || 'pending').toLowerCase()
+                              const deps = Array.isArray(item.dependencies)
+                                ? item.dependencies as string[]
+                                : []
+                              return (
+                                <li key={String(item.id || item.item_key)} className={`timeline-bar status-${st}`}>
+                                  <span className="plan-mark" aria-hidden>{PLAN_STATUS_MARK[st] || '○'}</span>
+                                  <span className="plan-content">{String(item.content || item.item_key || '')}</span>
+                                  {deps.length > 0 && (
+                                    <span className="plan-owner">← {deps.join(', ')}</span>
+                                  )}
+                                </li>
+                              )
+                            })}
+                          </ul>
+                        </div>
+                      ))}
+                      <p className="hint">依赖边 {planTimeline.edges.length} 条（只读）</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'run' && (
+            <div className="workspace-pane run-pane">
+              {goalId && (
+                <div className="trust-posture-row hint" style={{ marginBottom: 8 }}>
+                  <TrustPostureInline goalId={goalId} />
+                  {' · '}
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => {
+                      api.getEvidenceBundle(goalId).then((r) => {
+                        const dig = String(r.bundle?.digest || '').slice(0, 16)
+                        window.alert(
+                          r.verify?.ok
+                            ? `证据包校验通过 · digest ${dig}…`
+                            : `证据包校验失败 · ${JSON.stringify(r.verify || {})}`,
+                        )
+                      })
+                    }}
+                  >
+                    证据包
+                  </button>
+                  {' · '}
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => {
+                      api.undoTurn(goalId, true).then((r) => {
+                        if (!r.ok) {
+                          window.alert(r.preview || '无法撤回')
+                          return
+                        }
+                        if (window.confirm(`${r.preview || '确认撤回上一回合？'}\n\n应用撤回？`)) {
+                          api.undoTurn(goalId, false)
+                        }
+                      })
+                    }}
+                  >
+                    撤回上一回合
+                  </button>
+                </div>
+              )}
+
+              <div className="artifact-section-title">
+                <span>参与 Agent</span>
+                {agents.length > 0 && (
+                  <span className="agent-panel-count">
+                    {activeCount > 0 ? `${activeCount} 个活动` : `${agents.length} 个`}
+                  </span>
                 )}
               </div>
-            )}
-          </div>
-
-          {planTimeline && planTimeline.lanes.length > 0 && (
-            <div className="artifact-fold-section">
-              <button
-                type="button"
-                className={`artifact-fold-toggle ${timelineOpen ? 'open' : ''}`}
-                onClick={() => setTimelineOpen(!timelineOpen)}
-              >
-                <span>时间线{planTimeline.nodes.length ? `（${planTimeline.nodes.length}）` : ''}</span>
-                <span className="artifact-fold-arrow" aria-hidden>›</span>
-              </button>
-              {timelineOpen && (
-                <div className="artifact-fold-body">
-                  <div className="plan-timeline">
-                    {planTimeline.lanes.map(lane => (
-                      <div key={lane.owner} className="timeline-lane">
-                        <div className="timeline-lane-title">
-                          {String(lane.owner).startsWith('subagent') ? '子 Agent' : lane.owner === 'primary' ? 'Primary' : lane.owner}
+              {agents.length === 0 ? (
+                <div className="artifact-empty compact">
+                  <p>开始创建 App 后，这里会显示参与的 Agent。</p>
+                </div>
+              ) : (
+                <ul className="agent-roster">
+                  {agents.map(agent => (
+                    <li
+                      key={agent.id}
+                      className={`agent-roster-item activity-${agent.activity} ${agent.is_main ? 'is-main' : ''}`}
+                    >
+                      <div className={`agent-avatar activity-${agent.activity}`} aria-hidden>
+                        <span>{agentInitials(agent)}</span>
+                        <span className={`agent-status-badge activity-${agent.activity}`} />
+                      </div>
+                      <div className="agent-roster-body">
+                        <div className="agent-roster-head">
+                          <span className="agent-roster-name">{agent.name}</span>
+                          <span className={`agent-activity-chip activity-${agent.activity}`}>
+                            {ACTIVITY_LABEL[agent.activity]}
+                          </span>
                         </div>
-                        <ul className="timeline-bars">
-                          {lane.items.map((item) => {
-                            const status = String(item.status || 'pending').toLowerCase()
-                            const deps = Array.isArray(item.dependencies) ? item.dependencies as string[] : []
-                            return (
-                              <li key={String(item.id || item.item_key)} className={`timeline-bar status-${status}`}>
-                                <span className="plan-mark" aria-hidden>{PLAN_STATUS_MARK[status] || '○'}</span>
-                                <span className="plan-content">{String(item.content || item.item_key || '')}</span>
-                                {deps.length > 0 && (
-                                  <span className="plan-owner">← {deps.join(', ')}</span>
-                                )}
-                              </li>
-                            )
-                          })}
-                        </ul>
+                        <div className="agent-roster-meta">
+                          {agent.is_main ? 'Core' : agent.role_label}
+                          {agent.kind === 'hive' ? ' · Hive' : ''}
+                        </div>
+                        {agent.detail && (
+                          <p className="agent-roster-detail">{agent.detail}</p>
+                        )}
                       </div>
-                    ))}
-                    {planTimeline.edges.length > 0 && (
-                      <p className="hint">依赖边 {planTimeline.edges.length} 条（只读）</p>
-                    )}
-                  </div>
-                </div>
+                    </li>
+                  ))}
+                </ul>
               )}
-            </div>
-          )}
 
-          {activityFeed.length > 0 && (
-            <div className="artifact-fold-section">
-              <button
-                type="button"
-                className={`artifact-fold-toggle ${activityOpen ? 'open' : ''}`}
-                onClick={() => setActivityOpen(!activityOpen)}
-              >
+              <div className="artifact-section-title" style={{ marginTop: 16 }}>
                 <span>活动流</span>
-                <span className="artifact-fold-arrow" aria-hidden>›</span>
-              </button>
-              {activityOpen && (
-                <div className="artifact-fold-body">
-                  <ul className="activity-feed">
-                    {activityFeed.map((ev, idx) => {
-                      const tokens = [
-                        ev.turn != null ? `第 ${Number(ev.turn) + 1} 轮` : null,
-                        ev.tool ? `调用 ${ev.tool}` : null,
-                        (ev.input_tokens != null || ev.output_tokens != null)
-                          ? `累计 ${(Number(ev.input_tokens || 0) + Number(ev.output_tokens || 0)).toLocaleString()} tokens`
-                          : null,
-                        ev.cached_tokens != null && Number(ev.input_tokens || 0) > 0
-                          ? `cache ${Math.round((Number(ev.cached_tokens) / Number(ev.input_tokens)) * 100)}%`
-                          : null,
-                      ].filter(Boolean)
-                      return (
-                        <li key={idx}>
-                          <div className="activity-summary">{ev.summary || ev.type || 'event'}</div>
-                          {tokens.length > 0 && (
-                            <div className="activity-meta">{tokens.join(' · ')}</div>
-                          )}
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </div>
+              </div>
+              {activityFeed.length === 0 ? (
+                <div className="artifact-empty compact"><p>尚无活动事件。</p></div>
+              ) : (
+                <ul className="activity-feed">
+                  {activityFeed.map((ev, idx) => {
+                    const tokens = [
+                      ev.turn != null ? `第 ${Number(ev.turn) + 1} 轮` : null,
+                      ev.tool ? `调用 ${ev.tool}` : null,
+                      (ev.input_tokens != null || ev.output_tokens != null)
+                        ? `累计 ${(Number(ev.input_tokens || 0) + Number(ev.output_tokens || 0)).toLocaleString()} tokens`
+                        : null,
+                    ].filter(Boolean)
+                    return (
+                      <li key={idx}>
+                        <div className="activity-summary">{ev.summary || ev.type || 'event'}</div>
+                        {tokens.length > 0 && (
+                          <div className="activity-meta">{tokens.join(' · ')}</div>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
               )}
             </div>
           )}
 
-          {project && (
-            <div className="artifact-fold-section">
-              <button
-                type="button"
-                className={`artifact-fold-toggle ${sourceOpen ? 'open' : ''}`}
-                onClick={toggleSource}
-              >
-                <span>源码</span>
-                <span className="artifact-fold-arrow" aria-hidden>›</span>
-              </button>
-                  {sourceOpen && (
-                <div className="artifact-fold-body source-browser">
-                  {fileError && tree.length === 0 && (
-                    <div className="artifact-empty compact"><p>{fileError}</p></div>
-                  )}
-                  {!fileError && tree.length === 0 && (
-                    <div className="artifact-empty compact">
-                      <p>本轮未产生可浏览的源码文件（或快照尚未就绪）。</p>
-                    </div>
-                  )}
-                  {tree.length > 0 && (
-                    <div className="source-layout">
-                      <ul className="source-tree">
-                        {tree
-                          .filter(node => !!(node.path || node.name))
-                          .map(node => {
-                            const path = String(node.path || node.name || '')
-                            return (
-                              <li key={path}>
-                                <button
-                                  type="button"
-                                  className={selectedFile === path ? 'active' : ''}
-                                  onClick={() => void openFile(path)}
-                                >
-                                  {path}
-                                </button>
-                              </li>
-                            )
-                          })}
-                      </ul>
-                      <pre className="source-code">{fileContent || (selectedFile ? '加载中…' : '选择文件查看内容')}</pre>
-                    </div>
-                  )}
+          {tab === 'changes' && (
+            <div className="workspace-pane changes-pane source-browser">
+              {!project && (
+                <div className="artifact-empty"><p>选择 App 后可浏览源码改动。</p></div>
+              )}
+              {project && fileError && tree.length === 0 && (
+                <div className="artifact-empty compact"><p>{fileError}</p></div>
+              )}
+              {project && !fileError && tree.length === 0 && (
+                <div className="artifact-empty compact">
+                  <p>本轮未产生可浏览的源码文件（或快照尚未就绪）。</p>
                 </div>
+              )}
+              {tree.length > 0 && (
+                <>
+                  <div className="changes-meta">
+                    <span>{tree.length} 个文件</span>
+                    {selectedFile ? (
+                      <span className="changes-ext">{fileExtLabel(selectedFile)}</span>
+                    ) : (
+                      <span className="hint">点击左侧查看内容</span>
+                    )}
+                    <button type="button" className="linkish" onClick={() => void loadTree()}>
+                      刷新
+                    </button>
+                  </div>
+                  <div className="source-layout">
+                    <ul className="source-tree">
+                      {tree
+                        .filter(node => !!(node.path || node.name))
+                        .map(node => {
+                          const path = String(node.path || node.name || '')
+                          return (
+                            <li key={path}>
+                              <button
+                                type="button"
+                                className={selectedFile === path ? 'active' : ''}
+                                onClick={() => void openFile(path)}
+                                title={path}
+                              >
+                                <span className="source-file-name">{path.split('/').pop() || path}</span>
+                                <span className="source-file-path">{path}</span>
+                              </button>
+                            </li>
+                          )
+                        })}
+                    </ul>
+                    <pre className="source-code">{fileContent || (selectedFile ? '加载中…' : '选择文件查看内容')}</pre>
+                  </div>
+                </>
               )}
             </div>
           )}
 
-          {(hasPreview || (project && status?.goal)) && (
-            <div className="artifact-fold-section">
-              <button
-                type="button"
-                className={`artifact-fold-toggle ${artifactsOpen ? 'open' : ''}`}
-                onClick={() => setArtifactsOpen(!artifactsOpen)}
-              >
-                <span>产物与预览</span>
-                <span className="artifact-fold-arrow" aria-hidden>›</span>
-              </button>
-              {artifactsOpen && (
-                <div className="artifact-fold-body">
-                  {hasPreview && previewUrl && (
-                    <div className="artifact-preview-section">
-                      <div className="artifact-section-title">
-                        <span>应用预览</span>
-                        <span className="artifact-preview-badge">就绪</span>
-                      </div>
-                      <div className={`artifact-preview-frame ${previewExpanded ? 'expanded' : ''}`}>
-                        <iframe
-                          src={previewUrl}
-                          title="App Preview"
-                          className="artifact-preview-iframe"
-                          sandbox="allow-scripts allow-same-origin"
-                        />
-                      </div>
-                      <div className="artifact-preview-actions">
-                        <button
-                          className="artifact-btn"
-                          onClick={() => setPreviewExpanded(!previewExpanded)}
-                        >
-                          {previewExpanded ? '收起预览' : '展开预览'}
-                        </button>
-                        <a
-                          className="artifact-btn"
-                          href={previewUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          新窗口打开
-                        </a>
-                      </div>
-                    </div>
-                  )}
-
-                  {project && hasPreview && (
-                    <div className="artifact-download-section">
+          {tab === 'preview' && (
+            <div className="workspace-pane preview-pane">
+              {hasPreview && previewUrl ? (
+                <>
+                  <div className="artifact-section-title">
+                    <span>应用预览</span>
+                    <span className="artifact-preview-badge">就绪</span>
+                  </div>
+                  <div className={`artifact-preview-frame ${previewExpanded ? 'expanded' : ''}`}>
+                    <iframe
+                      src={previewUrl}
+                      title="App Preview"
+                      className="artifact-preview-iframe"
+                      sandbox="allow-scripts allow-same-origin"
+                    />
+                  </div>
+                  <div className="artifact-preview-actions">
+                    <button
+                      className="artifact-btn"
+                      onClick={() => setPreviewExpanded(!previewExpanded)}
+                    >
+                      {previewExpanded ? '收起预览' : '展开预览'}
+                    </button>
+                    <a
+                      className="artifact-btn"
+                      href={previewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      新窗口打开
+                    </a>
+                    {project && (
                       <button
                         className="artifact-btn primary"
                         onClick={() => api.downloadArtifact(project.id)}
                       >
-                        下载应用产出物
+                        下载产出物
                       </button>
-                    </div>
-                  )}
-
-                  {!hasPreview && status?.goal?.status === 'ACHIEVED' && (
-                    <div className="artifact-empty compact">
-                      <p>目标已达成，但尚未解析到预览地址。</p>
-                    </div>
-                  )}
-
-                  {!hasPreview && status?.goal?.status !== 'ACHIEVED' && (
-                    <div className="artifact-empty compact">
-                      <p>
-                        {(() => {
-                          const diag = status?.goal?.metadata?.diagnostic_delivery as
-                            | { preview?: { state?: string; reason?: string } }
-                            | undefined
-                          const stage = String(status?.goal?.metadata?.execution_stage || '')
-                          if (diag?.preview?.reason) return diag.preview.reason
-                          if (stage === 'DELIVERY_SOFT_PAUSE') {
-                            return '本轮未生成可运行 Preview；可查看已保存的未验证草稿源码。'
-                          }
-                          if (status?.preview?.failure_summary) {
-                            return `预览不可用：${status.preview.failure_summary}`
-                          }
-                          return '尚无预览。失败或暂停时不会在此承诺「稍后出现」。'
-                        })()}
-                      </p>
-                      {project && (
-                        <button
-                          type="button"
-                          className="artifact-btn"
-                          onClick={() => api.downloadArtifact(project.id)}
-                        >
-                          尝试下载当前产出
-                        </button>
-                      )}
-                    </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="artifact-empty">
+                  <p>
+                    {(() => {
+                      const diag = status?.goal?.metadata?.diagnostic_delivery as
+                        | { preview?: { state?: string; reason?: string } }
+                        | undefined
+                      const stage = String(status?.goal?.metadata?.execution_stage || '')
+                      if (diag?.preview?.reason) return diag.preview.reason
+                      if (stage === 'DELIVERY_SOFT_PAUSE') {
+                        return '本轮未生成可运行 Preview；可到「改动」查看草稿源码。'
+                      }
+                      if (status?.preview?.failure_summary) {
+                        return `预览不可用：${status.preview.failure_summary}`
+                      }
+                      if (status?.goal?.status === 'ACHIEVED') {
+                        return '目标已达成，但尚未解析到预览地址。'
+                      }
+                      return '尚无预览。产物就绪后会自动切换到此 Tab。'
+                    })()}
+                  </p>
+                  {project && (
+                    <button
+                      type="button"
+                      className="artifact-btn"
+                      onClick={() => api.downloadArtifact(project.id)}
+                    >
+                      尝试下载当前产出
+                    </button>
                   )}
                 </div>
               )}
             </div>
           )}
 
-          {project && (
-            <div className="artifact-fold-section">
-              <button
-                type="button"
-                className={`artifact-fold-toggle ${reviewOpen ? 'open' : ''}`}
-                onClick={toggleReview}
-              >
-                <span>审阅</span>
-                <span className="artifact-fold-arrow" aria-hidden>›</span>
-              </button>
-              {reviewOpen && (
-                <div className="artifact-fold-body">
-                  {reviewLoading && (
-                    <div className="artifact-empty compact"><p>正在加载审阅数据...</p></div>
+          {tab === 'review' && (
+            <div className="workspace-pane review-pane">
+              {!project && (
+                <div className="artifact-empty"><p>选择 App 后可审阅交付。</p></div>
+              )}
+              {project && reviewLoading && (
+                <div className="artifact-empty compact"><p>正在加载审阅数据...</p></div>
+              )}
+              {project && !reviewLoading && reviewError && (
+                <div className="artifact-empty compact"><p>暂无审阅数据（{reviewError}）</p></div>
+              )}
+              {project && !reviewLoading && !reviewError && review && (
+                <div className="review-section">
+                  {(budgetTurnsText || budgetTokensText) && (
+                    <div className="review-block">
+                      <div className="artifact-section-title"><span>预算摘要</span></div>
+                      <p className="review-budget">
+                        {[budgetTurnsText, budgetTokensText].filter(Boolean).join(' · ')}
+                      </p>
+                    </div>
                   )}
-                  {!reviewLoading && reviewError && (
-                    <div className="artifact-empty compact"><p>暂无审阅数据（{reviewError}）</p></div>
-                  )}
-                  {!reviewLoading && !reviewError && review && (
-                    <div className="review-section">
-                      {(budgetTurnsText || budgetTokensText) && (
-                        <div className="review-block">
-                          <div className="artifact-section-title"><span>预算摘要</span></div>
-                          <p className="review-budget">
-                            {[budgetTurnsText, budgetTokensText].filter(Boolean).join(' · ')}
-                          </p>
-                        </div>
-                      )}
-                      {review.plan != null && (
-                        <div className="review-block">
-                          <div className="artifact-section-title"><span>执行计划</span></div>
-                          {Array.isArray((review.plan as { items?: unknown }).items) ? (
-                            <ul className="plan-checklist">
-                              {((review.plan as { items: Record<string, unknown>[] }).items).map((item, idx) => (
-                                <li key={idx} className={`plan-item status-${String(item.status || 'pending')}`}>
-                                  <span className="plan-status">{String(item.status || 'pending')}</span>
-                                  <span className="plan-content">{String(item.content || item.title || item.item_key || '')}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          ) : (
-                            <pre className="review-pre">{JSON.stringify(review.plan, null, 2)}</pre>
-                          )}
-                        </div>
-                      )}
-                      {review.verification != null && (
-                        <div className="review-block">
-                          <div className="artifact-section-title"><span>验证结论</span></div>
-                          <p className="review-budget">
-                            {String(
-                              (review.verification as Record<string, unknown>).verdict
-                              || (review.verification as Record<string, unknown>).summary
-                              || '见详情',
-                            )}
-                          </p>
-                          <pre className="review-pre">{JSON.stringify(review.verification, null, 2)}</pre>
-                        </div>
-                      )}
-                      {Array.isArray(review.transcript) && review.transcript.length > 0 && (
-                        <div className="review-block">
-                          <div className="artifact-section-title"><span>执行摘要</span></div>
-                          <ul className="review-transcript">
-                            {review.transcript.slice(0, 20).map((item, idx) => (
-                              <li key={idx}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      {review.plan == null &&
-                        review.verification == null &&
-                        (!Array.isArray(review.transcript) || review.transcript.length === 0) &&
-                        !budgetTurnsText &&
-                        !budgetTokensText && (
-                        <div className="artifact-empty compact"><p>审阅数据为空。</p></div>
+                  {review.plan != null && (
+                    <div className="review-block">
+                      <div className="artifact-section-title"><span>执行计划</span></div>
+                      {Array.isArray((review.plan as { items?: unknown }).items) ? (
+                        <ul className="plan-checklist">
+                          {((review.plan as { items: Record<string, unknown>[] }).items).map((item, idx) => (
+                            <li key={idx} className={`plan-item status-${String(item.status || 'pending')}`}>
+                              <span className="plan-status">{String(item.status || 'pending')}</span>
+                              <span className="plan-content">{String(item.content || item.title || item.item_key || '')}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="hint">计划已记录（见高级 JSON）</p>
                       )}
                     </div>
+                  )}
+                  {review.verification != null && (
+                    <div className="review-block">
+                      <div className="artifact-section-title"><span>验证结论</span></div>
+                      <p className="review-budget">
+                        {String(
+                          (review.verification as Record<string, unknown>).verdict
+                          || (review.verification as Record<string, unknown>).summary
+                          || '见详情',
+                        )}
+                      </p>
+                    </div>
+                  )}
+                  {Array.isArray(review.transcript) && review.transcript.length > 0 && (
+                    <div className="review-block">
+                      <div className="artifact-section-title"><span>执行摘要</span></div>
+                      <ul className="review-transcript">
+                        {review.transcript.slice(0, 20).map((item, idx) => (
+                          <li key={idx}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="task-detail-toggle"
+                    onClick={() => setShowAdvancedJson(v => !v)}
+                  >
+                    {showAdvancedJson ? '收起高级 JSON' : '高级 JSON'}
+                  </button>
+                  {showAdvancedJson && (
+                    <pre className="review-pre">{JSON.stringify(review, null, 2)}</pre>
                   )}
                 </div>
               )}

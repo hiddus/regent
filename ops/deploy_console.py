@@ -237,8 +237,10 @@ test -n "$ASSET"
 echo "$ASSET" | grep -vq 'index-BvpzzeJ1' || { echo 'STALE_IMAGE_ASSET'; exit 1; }
 curl -sS --max-time 10 -o /tmp/console_app.js "http://127.0.0.1:8000/console/$ASSET"
 (grep -F agent-roster /tmp/console_app.js >/dev/null && echo VERIFY_agent-roster=yes) || echo VERIFY_agent-roster=no
-(grep -F '总是允许' /tmp/console_app.js >/dev/null && echo VERIFY_always_allow=yes) || echo VERIFY_always_allow=no
-(grep -F '参与 Agent' /tmp/console_app.js >/dev/null && echo VERIFY_cn_title=yes) || echo VERIFY_cn_title=no
+(grep -F '本会话允许' /tmp/console_app.js >/dev/null && echo VERIFY_session_allow=yes) || echo VERIFY_session_allow=no
+(grep -F 'workspace-tabs' /tmp/console_app.js >/dev/null && echo VERIFY_workspace_tabs=yes) || echo VERIFY_workspace_tabs=no
+(grep -F 'intervention-card' /tmp/console_app.js >/dev/null && echo VERIFY_intervention=yes) || echo VERIFY_intervention=no
+(grep -F '工作区' /tmp/console_app.js >/dev/null && echo VERIFY_cn_workspace=yes) || echo VERIFY_cn_workspace=no
 docker inspect regent-api --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' | grep console-dist && echo VERIFY_BIND=yes || echo VERIFY_BIND=no
 wc -c /tmp/console_app.js
 docker exec regent-api printenv REGENT_MODEL_NAME
@@ -250,9 +252,9 @@ docker exec regent-api printenv REGENT_MODEL_BASE_URL
     if code != 0 or "STALE_IMAGE_ASSET" in out or "VERIFY_BIND=no" in out:
         ssh.close()
         raise SystemExit("console deploy did not stick (stale asset, missing bind, or verify failed)")
-    if "VERIFY_agent-roster=no" in out and "VERIFY_always_allow=no" in out:
+    if "VERIFY_workspace_tabs=no" in out or "VERIFY_intervention=no" in out:
         ssh.close()
-        raise SystemExit("public /console/ missing expected UI markers")
+        raise SystemExit("public /console/ missing UX redesign markers (tabs/intervention)")
     if "ASSET=" in out and "ASSET=\n" in out.replace("\r\n", "\n"):
         # empty asset line
         ssh.close()

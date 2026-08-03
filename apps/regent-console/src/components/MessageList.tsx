@@ -7,6 +7,7 @@ import { ConfirmationCard } from './ConfirmationCard'
 import { RecoveryCard } from './RecoveryCard'
 import { TaskCard, type TaskActionOptions } from './TaskCard'
 import { ProgressNodeCard } from './ProgressNodeCard'
+import { ResultCard } from './ResultCard'
 
 interface MessageListProps {
   messages: Message[]
@@ -15,10 +16,13 @@ interface MessageListProps {
   /** Goal-level DiagnosticDelivery fallback when chat messages lack metadata. */
   goalDiagnostic?: DiagnosticDelivery | null
   executionStage?: string | null
+  agentLoopExit?: Record<string, unknown> | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
   onTaskAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
   onInspectSource?: () => void
+  onOpenPreview?: () => void
+  onOpenReview?: () => void
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -245,10 +249,13 @@ export function MessageList({
   goalStatus,
   goalDiagnostic,
   executionStage,
+  agentLoopExit,
   onConfirm,
   onSelectOption,
   onTaskAction,
   onInspectSource,
+  onOpenPreview,
+  onOpenReview,
 }: MessageListProps) {
   const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
   const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
@@ -269,14 +276,18 @@ export function MessageList({
     && !hasMessageRecovery
     && (executionStage === 'DELIVERY_SOFT_PAUSE' || !!goalDiagnostic.terminal_reason)
 
-  if (messages.length === 0 && !showPinnedRecovery) {
+  const exitKind = String(agentLoopExit?.exit_kind || '')
+  const resultBundle = (agentLoopExit?.result_bundle || null) as Record<string, unknown> | null
+  const showResultCard = exitKind === 'COMPLETE' || exitKind === 'STOP'
+
+  if (messages.length === 0 && !showPinnedRecovery && !showResultCard) {
     return (
       <section className="messages">
         <div className="stream">
           <div className="empty">
             <h1>创建你的第一个 App</h1>
             <p>
-              先描述产品想法。Core 会拆出拟议方案并按人步推进；只有推演不清时才请你从有限选项里拍板。
+              先描述产品想法。Core 会给出拟议方案与工作清单；需要时再请你从有限选项里拍板。随时可停止。
             </p>
           </div>
         </div>
@@ -338,6 +349,29 @@ export function MessageList({
                 onAction={(action, label) => {
                   if (currentProjectId) onSelectOption?.(currentProjectId, action, label)
                 }}
+              />
+            </div>
+          </article>
+        )}
+        {showResultCard && (
+          <article className="message assistant result-message">
+            <div className="avatar">R</div>
+            <div className="body">
+              <div className="meta">Regent</div>
+              <ResultCard
+                exitKind={exitKind}
+                summary={String(resultBundle?.summary || '')}
+                openItems={
+                  Array.isArray(resultBundle?.open_items)
+                    ? (resultBundle!.open_items as string[])
+                    : []
+                }
+                previewUrl={
+                  resultBundle?.preview_url ? String(resultBundle.preview_url) : null
+                }
+                stopReason={String(agentLoopExit?.stop_reason || '')}
+                onOpenPreview={onOpenPreview}
+                onOpenReview={onOpenReview}
               />
             </div>
           </article>

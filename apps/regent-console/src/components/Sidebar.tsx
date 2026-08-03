@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { Project } from '../lib/types'
-import type { NodeKey, NodeStatus } from '../lib/progressNodes'
-import { deriveLiveLabel, type LiveActivity } from '../lib/liveActivity'
+import type { PlanItem } from '../lib/types'
+import type { LiveActivity } from '../lib/liveActivity'
+import { deriveLiveLabel } from '../lib/liveActivity'
 
 const STAGE_LABELS: Record<string, string> = {
   NOT_STARTED: '准备开始',
@@ -46,7 +46,6 @@ const GENERATION_PROGRESS_LABELS: Record<string, string> = {
   waiting_human: '需要你确认',
 }
 
-/** Product-friendly status labels (shown in badge) */
 const GOAL_STATUS_LABELS: Record<string, string> = {
   DRAFT: '草稿',
   READY: '准备中',
@@ -60,29 +59,9 @@ const GOAL_STATUS_LABELS: Record<string, string> = {
   CANCELLED: '已取消',
 }
 
-/** Ordered stage keys for progress bar */
-const PROGRESS_STAGES: NodeKey[] = [
-  'understand', 'discover', 'require', 'capability', 'generate',
-  'build', 'preview', 'verify', 'milestone', 'outcome',
-]
-
-const STAGE_TITLES: Record<NodeKey, string> = {
-  understand: '理解',
-  discover: '调研',
-  require: '规划',
-  capability: '准备',
-  generate: '生成',
-  build: '检查',
-  preview: '预览',
-  verify: '验证',
-  milestone: '里程碑',
-  human: '确认',
-  outcome: '结果',
-}
-
 interface SidebarProps {
-  projects: Project[]
-  currentProject: Project | null
+  projects: import('../lib/types').Project[]
+  currentProject: import('../lib/types').Project | null
   onSelect: (id: string) => void
   onNew: () => void
   isOpen: boolean
@@ -144,12 +123,13 @@ interface StageBarProps {
     goal: { status: string; metadata: Record<string, unknown>; execution_stage?: { stage: string } } | null
     generation_progress?: string
   } | null
-  progressNodes?: { key: NodeKey; status: NodeStatus }[]
+  planItems?: PlanItem[]
   liveActivity?: LiveActivity
   onQuickAction: (text: string) => void
 }
 
-export function StageBar({ status, progressNodes, liveActivity, onQuickAction }: StageBarProps) {
+/** Slim top bar: stage micro-label + plan ratio + RunControls (Stop first-class). */
+export function StageBar({ status, planItems = [], liveActivity, onQuickAction }: StageBarProps) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
@@ -158,8 +138,10 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
 
   if (!status?.goal) {
     return (
-      <div className="stage-bar">
-        <span className="stage-badge">准备开始</span>
+      <div className="stage-bar-wrap">
+        <div className="stage-bar">
+          <span className="stage-badge">准备开始</span>
+        </div>
       </div>
     )
   }
@@ -180,7 +162,6 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
     now,
   )
 
-  const corrections = (meta.active_corrections as unknown[]) || []
   const liveSummary = liveActivity?.liveAction?.summary
   const actionAt = liveActivity?.liveAction?.updated_at
     ? Date.parse(liveActivity.liveAction.updated_at)
@@ -188,7 +169,6 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
   const actionElapsed = !Number.isNaN(actionAt)
     ? Math.max(0, Math.floor((now - actionAt) / 1000))
     : null
-  // Stale strip: goal already ACTIVE/approved but live_action still says waiting.
   const waitingLive =
     !!liveSummary &&
     (liveSummary.includes('等待你确认') || liveSummary.includes('需要你介入'))
@@ -202,11 +182,13 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
           : liveSummary
   const showElapsed = !(waitingLive && goal.status === 'ACTIVE') && genProgress !== 'queued'
 
-  // Compute progress from nodes
-  const completedCount = progressNodes
-    ? progressNodes.filter(n => n.status === 'done').length
-    : 0
-  const totalStages = PROGRESS_STAGES.length
+  const planDone = planItems.filter(i => {
+    const s = String(i.status || '').toLowerCase()
+    return s === 'completed' || s === 'cancelled'
+  }).length
+  const planTotal = planItems.length
+  const planInProgress = planItems.find(i => String(i.status || '').toLowerCase() === 'in_progress')
+
   const isActive = goal.status === 'ACTIVE' || goal.status === 'WAITING_HUMAN' || goal.status === 'PAUSED'
   const canContinue =
     goal.status === 'EXHAUSTED' ||
@@ -222,92 +204,92 @@ export function StageBar({ status, progressNodes, liveActivity, onQuickAction }:
     stage === 'DELIVERY_SOFT_PAUSE' ||
     !!meta.diagnostic_delivery
 
+  const showStop =
+    goal.status === 'ACTIVE' ||
+    goal.status === 'WAITING_HUMAN' ||
+    stage === 'GENERATING' ||
+    stage === 'DELIVERY_SOFT_PAUSE'
+
   return (
     <div className="stage-bar-wrap">
-    <div className="stage-bar">
-      <div className="stage-bar-left">
-        <span className={`stage-badge ${goal.status.toLowerCase()} ${live.tone === 'live' ? 'is-live' : ''}`}>
-          {(live.tone === 'live' || isActive) && <span className="live-pulse-dot" aria-hidden />}
-          {label}
-        </span>
-        {goal.status !== 'DRAFT' && (
-          <span className="stage-goal-status">{goalStatusLabel}</span>
-        )}
-        <span className={`stage-live tone-${live.tone}`} title="根据实时连接与最新进展判断系统是否仍在运行">
-          {live.text}
-        </span>
-        {corrections.length > 0 && (
-          <span className="stage-corrections">有 {corrections.length} 条修正</span>
-        )}
-      </div>
+      <div className="stage-bar">
+        <div className="stage-bar-left">
+          <span className={`stage-badge ${goal.status.toLowerCase()} ${live.tone === 'live' ? 'is-live' : ''}`}>
+            {(live.tone === 'live' || isActive) && <span className="live-pulse-dot" aria-hidden />}
+            {label}
+          </span>
+          {goal.status !== 'DRAFT' && (
+            <span className="stage-goal-status">{goalStatusLabel}</span>
+          )}
+          <span className={`stage-live tone-${live.tone}`} title="实时连接与进展">
+            {live.text}
+          </span>
+        </div>
 
-      {/* Progress bar */}
-      <div className="stage-progress" title={`${completedCount} / ${totalStages} 阶段已完成`}>
-        {PROGRESS_STAGES.map(key => {
-          const nodeState = progressNodes?.find(n => n.key === key)
-          const nodeStatus = nodeState?.status
-          let cls = 'stage-step-pending'
-          if (nodeStatus === 'done') cls = 'stage-step-done'
-          else if (nodeStatus === 'running') cls = 'stage-step-running'
-          else if (nodeStatus === 'failed') cls = 'stage-step-failed'
-          else if (nodeStatus === 'waiting') cls = 'stage-step-waiting'
-          return (
-            <div
-              key={key}
-              className={`stage-step ${cls}`}
-              title={STAGE_TITLES[key]}
-            />
-          )
-        })}
-      </div>
+        {planTotal > 0 ? (
+          <div
+            className="stage-plan-ratio"
+            title={planInProgress ? `进行中：${planInProgress.content || planInProgress.item_key}` : '清单进度'}
+          >
+            <div className="stage-plan-track">
+              <div
+                className="stage-plan-fill"
+                style={{ width: `${Math.round((planDone / planTotal) * 100)}%` }}
+              />
+            </div>
+            <span className="stage-plan-label">
+              清单 {planDone}/{planTotal}
+            </span>
+          </div>
+        ) : (
+          <div className="stage-plan-ratio muted">
+            <span className="stage-plan-label">清单尚未生成</span>
+          </div>
+        )}
 
-      <div className="quick-actions">
-        {(goal.status === 'ACTIVE' || stage === 'GENERATING' || stage === 'DELIVERY_SOFT_PAUSE') && (
-          <button className="qa-btn danger" onClick={() => onQuickAction('停止执行')}>停止</button>
-        )}
-        {goal.status === 'ACTIVE' && genProgress !== 'stalled' && (
-          <button className="qa-btn" onClick={() => onQuickAction('暂停执行')}>暂停</button>
-        )}
-        {goal.status === 'PAUSED' && (
-          <button className="qa-btn" onClick={() => onQuickAction('恢复执行')}>恢复</button>
-        )}
-        {goal.status === 'WAITING_HUMAN' && (
-          <>
-            <button className="qa-btn" onClick={() => onQuickAction('批准')}>批准</button>
-            <button className="qa-btn danger" onClick={() => onQuickAction('拒绝，需要修改')}>拒绝</button>
-          </>
-        )}
-        {canContinue && (
-          <button className="qa-btn" onClick={() => onQuickAction('继续尝试，请根据上次失败重新规划')}>
-            继续此目标
-          </button>
-        )}
+        <div className="quick-actions run-controls">
+          {showStop && (
+            <button className="qa-btn danger stop-btn" onClick={() => onQuickAction('停止执行')}>
+              停止
+            </button>
+          )}
+          {goal.status === 'ACTIVE' && genProgress !== 'stalled' && (
+            <button className="qa-btn" onClick={() => onQuickAction('暂停执行')}>暂停</button>
+          )}
+          {goal.status === 'PAUSED' && (
+            <button className="qa-btn" onClick={() => onQuickAction('恢复执行')}>恢复</button>
+          )}
+          {canContinue && (
+            <button className="qa-btn" onClick={() => onQuickAction('继续尝试，请根据上次失败重新规划')}>
+              继续此目标
+            </button>
+          )}
+        </div>
       </div>
-    </div>
-    {isActive && !hideRunningStrip && (
-      <div className={`core-live-strip tone-${live.tone}`}>
-        <span className="live-pulse-dot" aria-hidden />
-        <span className="core-live-text">
-          {stripSummary
-            ? `Core 正在：${stripSummary}`
-            : live.text.startsWith('Core：')
-              ? live.text
-              : `Core 正在执行 · ${label}`}
-        </span>
-        {showElapsed && actionElapsed != null && (
-          <span className="core-live-elapsed">{actionElapsed}s</span>
-        )}
-      </div>
-    )}
-    {hideRunningStrip && (
-      <div className="core-live-strip tone-idle">
-        <span className="core-live-text">
-          {genProgress === 'stalled'
-            ? '生成已停滞，可点「继续此目标」或补充方向'
-            : '自动修复已暂停；当前成果已保存，可查看源码或继续'}
-        </span>
-      </div>
-    )}
+      {isActive && !hideRunningStrip && (
+        <div className={`core-live-strip tone-${live.tone}`}>
+          <span className="live-pulse-dot" aria-hidden />
+          <span className="core-live-text">
+            {stripSummary
+              ? `Core 正在：${stripSummary}`
+              : live.text.startsWith('Core：')
+                ? live.text
+                : `Core 正在执行 · ${label}`}
+          </span>
+          {showElapsed && actionElapsed != null && (
+            <span className="core-live-elapsed">{actionElapsed}s</span>
+          )}
+        </div>
+      )}
+      {hideRunningStrip && (
+        <div className="core-live-strip tone-idle">
+          <span className="core-live-text">
+            {genProgress === 'stalled'
+              ? '生成已停滞，可点「继续此目标」或补充方向'
+              : '自动修复已暂停；当前成果已保存，可查看源码或继续'}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ProgressNode } from '../lib/progressNodes'
 import { NODE_STATUS_LABEL } from '../lib/progressNodes'
+import { ToolTrace } from './ToolTrace'
 
 interface ProgressNodeCardProps {
   node: ProgressNode
@@ -131,12 +132,7 @@ export function ProgressNodeCard({ node, liveMode = false }: ProgressNodeCardPro
             </ul>
           )}
           {mode === 'detail' && node.toolTrace && node.toolTrace.length > 0 && (
-            <div className="progress-node-tools">
-              <span className="tools-label">最近工具轨迹：</span>
-              {node.toolTrace.map((tool, i) => (
-                <span key={`${tool}-${i}`} className="tool-chip">{tool}</span>
-              ))}
-            </div>
+            <ToolTrace tools={node.toolTrace} defaultOpen={isLive} />
           )}
           {mode === 'detail' && node.updatedAt && (
             <span className="progress-node-time">{formatTime(node.updatedAt)}</span>

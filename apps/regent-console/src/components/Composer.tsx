@@ -1,16 +1,16 @@
 import { useState, useRef, useEffect } from 'react'
+import { api } from '../lib/api'
 
 interface ComposerProps {
   onSend: (text: string) => void
   onUpload: (file: File) => void
   disabled: boolean
-  /** User-action feedback — not overwritten by Core status. */
   userHint: string
   userHintError: boolean
-  /** Core live status (stage / live_action). */
   coreHint: string
   coreHintError: boolean
   goalStatus?: string | null
+  goalId?: string | null
 }
 
 export function Composer({
@@ -22,8 +22,13 @@ export function Composer({
   coreHint,
   coreHintError,
   goalStatus,
+  goalId,
 }: ComposerProps) {
   const [text, setText] = useState('')
+  const [sideOpen, setSideOpen] = useState(false)
+  const [sideQ, setSideQ] = useState('')
+  const [sideBusy, setSideBusy] = useState(false)
+  const [sideAnswer, setSideAnswer] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -33,6 +38,12 @@ export function Composer({
       textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + 'px'
     }
   }, [text])
+
+  useEffect(() => {
+    setSideAnswer(null)
+    setSideQ('')
+    setSideOpen(false)
+  }, [goalId])
 
   const handleSend = () => {
     const trimmed = text.trim()
@@ -48,8 +59,47 @@ export function Composer({
     }
   }
 
+  const askSide = async () => {
+    if (!goalId || !sideQ.trim()) return
+    setSideBusy(true)
+    try {
+      const r = await api.sideQuestion(goalId, sideQ.trim())
+      setSideAnswer(String(r.text || ''))
+      setSideQ('')
+    } catch (err) {
+      setSideAnswer((err as Error).message)
+    } finally {
+      setSideBusy(false)
+    }
+  }
+
   return (
     <div className="composer-wrap">
+      {sideOpen && goalId && (
+        <div className="side-question-panel">
+          <div className="side-question-row">
+            <input
+              value={sideQ}
+              onChange={e => setSideQ(e.target.value)}
+              placeholder="侧问（不改计划）"
+              disabled={sideBusy}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  void askSide()
+                }
+              }}
+            />
+            <button type="button" disabled={sideBusy || !sideQ.trim()} onClick={() => void askSide()}>
+              快问
+            </button>
+            <button type="button" className="side-close" onClick={() => setSideOpen(false)}>
+              收起
+            </button>
+          </div>
+          {sideAnswer ? <p className="hint side-answer">{sideAnswer}</p> : null}
+        </div>
+      )}
       <div className="composer">
         <textarea
           ref={textareaRef}
@@ -83,6 +133,16 @@ export function Composer({
                 e.target.value = ''
               }}
             />
+            {goalId && (
+              <button
+                type="button"
+                className={`side-ask-btn ${sideOpen ? 'active' : ''}`}
+                title="侧问（不改计划）"
+                onClick={() => setSideOpen(v => !v)}
+              >
+                快问
+              </button>
+            )}
             <div className="hint-stack">
               {userHint && (
                 <span className={`hint user-hint ${userHintError ? 'error' : ''}`}>{userHint}</span>

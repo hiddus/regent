@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { HandoffOption } from '../lib/types'
+import { InterventionCard } from './InterventionCard'
 
 interface ConfirmationEnvelope {
   action?: string
@@ -18,7 +19,6 @@ interface ConfirmationEnvelope {
   budget_summary?: string
   diagnostic_artifact_uri?: string
   recovery_options?: HandoffOption[]
-  /** O1 permission impact */
   paths?: string[]
   command_class?: string
   effect_class?: string
@@ -30,20 +30,15 @@ interface ConfirmationEnvelope {
   }
 }
 
-/** Extra decision metadata carried alongside the plain approve/deny signal. */
 export interface TaskActionOptions {
-  /** CD-3.5: "总是允许" — persist this action to session/goal decision policy. */
   always?: boolean
-  /** CD-3.2: id of the chosen handoff option (e.g. narrow_scope / keep_trying / stop). */
   optionId?: string
-  /** Human-readable reason to attach to the completion response. */
   reason?: string
 }
 
 interface TaskCardProps {
   task: Record<string, unknown>
   resolved?: boolean
-  /** Compact one-liner for superseded / historical cards — keeps the stream short. */
   compact?: boolean
   onAction: (taskId: string, approved: boolean, opts?: TaskActionOptions) => void
 }
@@ -78,7 +73,6 @@ function parseDueMs(dueAt?: string | null): number | null {
   return Number.isFinite(t) ? t : null
 }
 
-/** Map machine action / stage → what the human is authorizing. */
 function describePermit(task: Record<string, unknown>, confirmation: ConfirmationEnvelope) {
   const action = String(confirmation.action || task.task_type || '').toLowerCase()
   const stage = String(task.stage || '')
@@ -128,11 +122,39 @@ function describePermit(task: Record<string, unknown>, confirmation: Confirmatio
       why: confirmation.summary || '确认目标理解无误',
     }
   }
+  if (
+    action.includes('permission') ||
+    action.includes('tool') ||
+    joined.includes('write') ||
+    joined.includes('delete') ||
+    joined.includes('外发')
+  ) {
+    return {
+      who: 'Regent（本目标）',
+      what: confirmation.summary || '执行敏感工具操作',
+      why: '写删外发需要你的授权',
+    }
+  }
   return {
     who: 'Regent（本目标）',
     what: confirmation.summary || '继续执行被拦截的下一步',
     why: '需要你确认后才能继续',
   }
+}
+
+function isPermissionTask(task: Record<string, unknown>, confirmation: ConfirmationEnvelope): boolean {
+  const action = String(confirmation.action || task.task_type || '').toLowerCase()
+  const type = String(task.task_type || '').toLowerCase()
+  return (
+    action.includes('permission') ||
+    type.includes('permission') ||
+    action.includes('tool_permit') ||
+    type.includes('tool_permit') ||
+    !!confirmation.paths?.length ||
+    !!confirmation.impact?.paths?.length ||
+    !!confirmation.command_class ||
+    !!confirmation.impact?.command_class
+  )
 }
 
 export function TaskCard({
@@ -150,6 +172,7 @@ export function TaskCard({
   const confirmation = (task.confirmation || {}) as ConfirmationEnvelope
   const dueAt = typeof task.due_at === 'string' ? task.due_at : null
   const permit = describePermit(task, confirmation)
+  const asPermission = isPermissionTask(task, confirmation)
   const handoffOptions = useMemo(() => {
     const fromConfirmation = confirmation.handoff_options
     const fromRecovery = confirmation.recovery_options
@@ -207,9 +230,13 @@ export function TaskCard({
       (remainingSec === 0 && dueMs != null && taskStatus !== 'COMPLETED' && taskStatus !== 'CANCELLED')
     const label = isTimedOut ? '已过期' : '已处理'
     return (
-      <div className={`task-card task-card-compact risk-${(confirmation.risk_level || 'medium').toLowerCase()}`}>
-        <span className="task-compact-badge">{label}</span>
-        <span className="task-compact-text">{permit.what}</span>
+      <InterventionCard
+        askType={asPermission ? 'permission' : 'ask_user'}
+        title={permit.what}
+        badge={label}
+        compact
+        className={`task-card task-card-compact risk-${(confirmation.risk_level || 'medium').toLowerCase()}`}
+      >
         {isTimedOut && taskId ? (
           <button
             type="button"
@@ -222,30 +249,27 @@ export function TaskCard({
             继续此目标
           </button>
         ) : null}
-      </div>
+      </InterventionCard>
     )
   }
 
   return (
-    <div className={`task-card risk-${(confirmation.risk_level || 'medium').toLowerCase()}`}>
-      <div className="task-card-head">
-        <span className="task-risk-badge">{riskLabel(confirmation.risk_level)}</span>
-        {remainingSec != null && !confirmation.safety_invariant && timeoutSeconds !== 0 ? (
-          <span className="task-countdown-inline">
-            {defaultOnTimeout === 'deny'
-              ? `${remainingSec}s 后默认拒绝`
-              : defaultOnTimeout === 'allow'
-                ? `${remainingSec}s 后默认允许`
-                : '等待你的方向（超时不会自动拒绝）'}
-          </span>
-        ) : null}
-      </div>
+    <InterventionCard
+      askType={asPermission ? 'permission' : handoffOptions.length >= 2 ? 'ask_user' : 'permission'}
+      title={asPermission ? `需要授权：${permit.what}` : '需要你的方向'}
+      badge={riskLabel(confirmation.risk_level)}
+      className={`task-card risk-${(confirmation.risk_level || 'medium').toLowerCase()}`}
+    >
+      {remainingSec != null && !confirmation.safety_invariant && timeoutSeconds !== 0 ? (
+        <p className="task-countdown-inline">
+          {defaultOnTimeout === 'deny'
+            ? `${remainingSec}s 后默认拒绝`
+            : defaultOnTimeout === 'allow'
+              ? `${remainingSec}s 后默认允许`
+              : '等待你的方向（超时不会自动拒绝）'}
+        </p>
+      ) : null}
 
-      <h4 className="task-permit-title">
-        {(confirmation.risk_level || '').toLowerCase() === 'high'
-          ? '需要你授权'
-          : '需要你的方向'}
-      </h4>
       <dl className="task-permit">
         <div>
           <dt>授权给</dt>
@@ -300,8 +324,32 @@ export function TaskCard({
         </div>
       )}
 
-      {!effectivelyDone && taskId && (
-        <div className="task-actions">
+      {!effectivelyDone && taskId && handoffOptions.length >= 2 && (
+        <div className="intervention-actions task-handoff-options">
+          {handoffOptions.map(option => (
+            <button
+              key={option.id}
+              type="button"
+              className={`task-btn option option-${option.id}`}
+              onClick={() => {
+                setDone(true)
+                onAction(taskId, option.id !== 'stop', {
+                  optionId: option.id,
+                  reason: option.label,
+                })
+              }}
+            >
+              <span className="option-label">{option.label}</span>
+              {option.cost_hint ? (
+                <span className="fork-option-cost">代价：{option.cost_hint}</span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!effectivelyDone && taskId && handoffOptions.length < 2 && (
+        <div className="task-actions intervention-actions">
           <button
             className="task-btn approve"
             disabled={!!confirmation.safety_invariant}
@@ -310,18 +358,18 @@ export function TaskCard({
               onAction(taskId, true)
             }}
           >
-            允许
+            允许一次
           </button>
           {!confirmation.safety_invariant && (
             <button
               className="task-btn approve-always"
-              title="本目标内同类请求不再询问"
+              title="仅本会话内同类请求不再询问"
               onClick={() => {
                 setDone(true)
                 onAction(taskId, true, { always: true })
               }}
             >
-              总是允许
+              本会话允许
             </button>
           )}
           <button
@@ -342,33 +390,35 @@ export function TaskCard({
 
       {effectivelyDone && <p className="task-done">已处理</p>}
 
-      {!effectivelyDone && taskId && handoffOptions.length > 0 && (
+      {!effectivelyDone && taskId && handoffOptions.length >= 2 && (
         <div className="task-more-fold">
           <button
             type="button"
             className="task-detail-toggle"
             onClick={() => setShowMore(v => !v)}
           >
-            {showMore ? '收起其他选项' : '其他选项'}
+            {showMore ? '收起允许/拒绝' : '改用允许 / 拒绝'}
           </button>
           {showMore && (
-            <div className="task-handoff-options">
-              {handoffOptions.map(option => (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`task-btn option option-${option.id}`}
-                  onClick={() => {
-                    setDone(true)
-                    onAction(taskId, option.id !== 'stop', {
-                      optionId: option.id,
-                      reason: option.label,
-                    })
-                  }}
-                >
-                  <span className="option-label">{option.label}</span>
-                </button>
-              ))}
+            <div className="task-actions intervention-actions">
+              <button
+                className="task-btn approve"
+                onClick={() => {
+                  setDone(true)
+                  onAction(taskId, true)
+                }}
+              >
+                允许一次
+              </button>
+              <button
+                className="task-btn reject"
+                onClick={() => {
+                  setDone(true)
+                  onAction(taskId, false)
+                }}
+              >
+                拒绝
+              </button>
             </div>
           )}
         </div>
@@ -386,6 +436,6 @@ export function TaskCard({
           {showDetail && <pre className="task-detail-body">{detailText}</pre>}
         </div>
       )}
-    </div>
+    </InterventionCard>
   )
 }

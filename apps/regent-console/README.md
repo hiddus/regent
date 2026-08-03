@@ -1,75 +1,46 @@
 # Regent Console（Web 控制台）
 
-基于 **React 19 + Vite + TypeScript** 的前端控制台，对接 Regent Core 的 REST API，用于可视化目标/工作项执行、与 Agent 对话式交互、处理人工确认任务。
+基于 **React 19 + Vite + TypeScript** 的前端控制台，对接 Regent Core 的 REST API，用于可视化目标执行、对话式交互与人工闸门。
 
-## 功能
+## 功能（UX 重梳 2026-08-03）
 
-- 目标（Goal）/ 工作项（Work）看板与状态跟踪
-- 对话流（`Composer` / `MessageList`，SSE 流式）与进度节点（`ProgressNodeCard`）
-- 右侧面板（`ArtifactPanel`）：默认展示当前 Goal 的「参与 Agent」名册；产物与预览为可折叠次要区
-- 人工任务确认卡片（`ConfirmationCard`）
-- 侧边栏导航（`Sidebar`）、任务卡片（`TaskCard`）
-
-### 右侧 `ArtifactPanel`（参与 Agent）
-
-- 面板标题为 **参与 Agent**；主视图是当前 Goal 的 Agent 名册（活动态、主助手 / Core、Hive 部署等），不再以「汇总执行进度」作为默认主视图。
-- 名册数据：优先使用 Core 状态接口返回的 `status.agents`；若为空（旧 Core），由 `lib/agents.ts` 的 `deriveAgents` 根据 Goal 拓扑推导，并用 `live_action`（经 `lib/liveActivity.ts`）补主助手活动摘要。
-- 条目展示活动态标签（活动中 / 待命 / 等待确认等）、主助手与 Hive 角色元信息；有 `detail` 时显示一行说明。
-- **产物与预览** 为可折叠次要区：应用预览 iframe、下载产出物等；预览就绪时可自动展开该折叠区。
-
-### 对话流 `ProgressNodeCard`（动态详略）
-
-- 三档视图：`detail`（详情）/ `overview`（概览）/ `compressed`（压缩）。
-- Goal 仍在进行中（`liveMode`）且节点为 running/waiting 时，默认展开 **详情**；结束后默认 **概览**，可再点进 **压缩**。
-- 点击标题区循环切换详略（进行中在详情 ↔ 概览间切换；已结束后概览 → 压缩 → 详情 → 概览）。
-
-## 后端依赖状态（F-1 / F-7 已闭环）
-
-`src/lib/api.ts` 调用的后端端点均已在 `core/src/regent/api/main.py:266-294` 挂载：
-
-| 调用位置 | 端点 | 状态 |
-|---|---|---|
-| `src/lib/api.ts:81` | `POST /v1/human-tasks/{taskId}/complete` | ✅ 已挂载（`main.py:290`） |
-| `src/lib/api.ts:93` | `POST /v1/uploads` | ✅ 已挂载（`main.py:291`） |
-| `src/lib/api.ts:100` | `GET /v1/app-projects/{id}/delivery-review` | ✅ 已挂载（`api/app_projects.py:106`） |
-
-PRD §4.3.4「可审阅交付物」已由 CD-3 落地：`delivery-review` 返回 plan / transcript / verification / budget，前端入口见 `components/ArtifactPanel.tsx:124`。
-
-> 仍待完善：PRD §4.3.5「失败交人带答案」要求交人界面提供 2–3 个带代价估计的可执行选项，`ConfirmationCard` 目前尚未实现选项化。
+- **三轨构图**：App 列表 · 对话主叙述 · 工作区证据面
+- **工作区 Tab**：清单（默认）/ 运行（Agent 名册 + 活动流）/ 改动 / 预览 / 审阅
+- **顶栏**：阶段微标 + **清单完成比** + 运行控制（**停止一等**；批准/拒绝仅在对话卡）
+- **闸门卡片族** `InterventionCard`：计划批准 / 权限 / 问人 / 恢复
+- **结果卡** `ResultCard`：COMPLETE / STOP 一等可见
+- **工具轨迹** `ToolTrace`：默认折叠摘要
+- 对话流 SSE + 进度节点详略；Composer 含侧问（快问）
 
 ## 目录结构
 
 ```
 src/
-  App.tsx              # 入口组件
-  main.tsx             # 挂载入口
-  index.css            # 全局样式
-  components/          # UI 组件（见上）
+  App.tsx
+  main.tsx
+  index.css
+  components/
+    Sidebar.tsx          # App 轨 + StageBar（RunControls）
+    MessageList.tsx
+    Composer.tsx
+    ArtifactPanel.tsx    # 工作区 Tab
+    InterventionCard.tsx
+    ConfirmationCard.tsx
+    TaskCard.tsx
+    RecoveryCard.tsx
+    ResultCard.tsx
+    ProgressNodeCard.tsx
+    ToolTrace.tsx
   hooks/
-    useSSE.ts          # SSE 流式订阅
-    useWorkspace.ts    # 工作区状态
   lib/
-    api.ts             # API 封装
-    agents.ts          # 参与 Agent 名册推导与活动态
-    liveActivity.ts    # live_action / 连接态与相对时间文案
-    progressNodes.ts   # 进度节点模型
-    types.ts           # 共享类型
-apps/regent-console/
-  index.html           # HTML 模板
-  vite.config.ts       # Vite 配置
-  tsconfig.json        # TS 配置
-  nginx.conf           # 生产 Nginx 配置
-  Dockerfile           # 生产镜像（构建 dist/ 并由 Nginx 托管）
-  dist/                # 构建产物（gitignore）
 ```
+
+产品语义见仓库根 `Regent-PRD.md` §4.3；方案见 `docs/console-ux-redesign-2026-08-03.md`。
 
 ## 开发
 
 ```bash
 npm install
-npm run dev      # Vite 开发服务器
-npm run build    # tsc -b && vite build → dist/
-npm run preview  # 预览构建产物
+npm run dev
+npm run build
 ```
-
-生产部署由 `Dockerfile` + `nginx.conf` 负责，构建产物落入 `dist/`。
