@@ -48,6 +48,13 @@ function planStatusLabel(status: string): string {
   return '待办'
 }
 
+const PREVIEW_READY_STATUSES = new Set([
+  'PREVIEW_READY',
+  'PREVIEW_DEPLOYMENT_SUCCEEDED',
+  'PREVIEW_SUCCEEDED',
+  'SUCCEEDED',
+])
+
 function normalizePreviewUrl(ep: string | null | undefined): string | null {
   if (!ep) return null
   try {
