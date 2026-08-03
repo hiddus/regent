@@ -220,6 +220,60 @@ def create_app() -> FastAPI:
             "dead_letters_by_type": dl_by_type,
         }
 
+    @app.get("/v1/doctor", tags=["operations"])
+    async def doctor() -> dict[str, Any]:
+        """O4: ops self-check (distinct from liveness). Never prints secrets."""
+        from regent.application.doctor import run_doctor
+        from regent.application.extension_readiness import build_extension_readiness
+        from regent.application.workflow_presets import list_workflow_presets
+
+        db_ok = False
+        delivery_seeded: bool | None = None
+        try:
+            async with app.state.sessions() as session:
+                value = await session.scalar(text("SELECT 1"))
+                db_ok = value == 1
+                delivery_seeded = bool(
+                    await session.scalar(
+                        text(
+                            "SELECT 1 FROM capabilities WHERE name = 'delivery-review-v1' LIMIT 1"
+                        )
+                    )
+                )
+        except Exception:
+            db_ok = False
+            delivery_seeded = False
+        cfg = get_settings()
+        report = run_doctor(
+            db_ok=db_ok,
+            delivery_review_seeded=delivery_seeded,
+            canary_percent=float(getattr(cfg, "gq_agentic_canary_percent", 0) or 0),
+            settings_summary={
+                "delivery_product_gates_mode": getattr(
+                    cfg, "delivery_product_gates_mode", None
+                ),
+                "workspace_root_set": bool(getattr(cfg, "workspace_root", None)),
+            },
+        )
+        report["workflow_presets"] = list_workflow_presets()
+        report["extension_readiness"] = build_extension_readiness(
+            [
+                {
+                    "name": "delivery-review-v1",
+                    "certified": bool(delivery_seeded),
+                    "available": bool(delivery_seeded),
+                }
+            ]
+        )
+        return report
+
+    @app.get("/v1/workflow-presets", tags=["operations"])
+    async def workflow_presets() -> dict[str, Any]:
+        """O4: admitted named workflow stage presets."""
+        from regent.application.workflow_presets import list_workflow_presets
+
+        return {"ok": True, "presets": list_workflow_presets()}
+
     console_path = Path("/app/apps/regent-console/dist")
     if not console_path.exists():
         console_path = Path("/app/apps/regent-console")

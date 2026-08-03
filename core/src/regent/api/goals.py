@@ -484,6 +484,262 @@ async def set_goal_execution_mode(
     return {"ok": True, "goal_id": str(goal_id), "execution_mode": mode}
 
 
+class SideQuestionRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    actor: str = Field(default="user", max_length=255)
+
+
+class UndoTurnRequest(BaseModel):
+    actor: str = Field(default="user", max_length=255)
+    dry_run: bool = False
+
+
+class WorkflowPresetRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    actor: str = Field(default="user", max_length=255)
+
+
+@router.get("/{goal_id}/trust-posture")
+async def get_trust_posture(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """O1: read-only trust posture (sandbox × Ask/Act × quarantine)."""
+    from regent.application.trust_posture import build_trust_posture
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        meta = goal.metadata_json if isinstance(goal.metadata_json, dict) else {}
+        posture = build_trust_posture(meta)
+    return {"ok": True, "goal_id": str(goal_id), "posture": posture}
+
+
+@router.post("/{goal_id}/side-question")
+async def post_side_question(
+    goal_id: uuid.UUID, payload: SideQuestionRequest, request: Request
+) -> dict[str, Any]:
+    """O2: structurally isolated side question (no tools / no Work Plan mutation)."""
+    from sqlalchemy import select
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from regent.agent.events import RegentEvent, append_regent_event
+    from regent.application.side_question import run_side_question
+    from regent.infrastructure.models import (
+        ConversationMessageModel,
+        ConversationModel,
+        GoalModel,
+    )
+
+    async with request.app.state.sessions() as session, session.begin():
+        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        conversation = await session.scalar(
+            select(ConversationModel).where(ConversationModel.goal_id == goal_id)
+        )
+        messages: list[dict[str, Any]] = []
+        if conversation is not None:
+            rows = (
+                await session.scalars(
+                    select(ConversationMessageModel)
+                    .where(ConversationMessageModel.conversation_id == conversation.id)
+                    .order_by(ConversationMessageModel.ordinal.desc())
+                    .limit(24)
+                )
+            ).all()
+            messages = [
+                {"role": m.role, "content": m.content}
+                for m in reversed(list(rows))
+            ]
+        result = await run_side_question(
+            question=payload.question,
+            context_messages=messages,
+        )
+        meta = append_regent_event(
+            dict(goal.metadata_json or {}),
+            RegentEvent(
+                type="side_question",
+                summary="侧问（只读旁路）",
+                goal_id=str(goal_id),
+                payload={
+                    "ok": result.get("ok"),
+                    "mutated_work_plan": False,
+                    "tools_invoked": False,
+                },
+            ),
+        )
+        meta["last_side_question"] = {
+            "question": payload.question[:400],
+            "answer": str(result.get("text") or "")[:4000],
+            "context_summary": result.get("context_summary"),
+            "actor": payload.actor,
+        }
+        goal.metadata_json = meta
+        flag_modified(goal, "metadata_json")
+    return {"ok": True, "goal_id": str(goal_id), **result}
+
+
+@router.get("/{goal_id}/session-export")
+async def get_session_export(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """O2: redacted Markdown + manifest digest."""
+    from sqlalchemy import select
+
+    from regent.application.session_export import build_session_export
+    from regent.infrastructure.models import (
+        ConversationMessageModel,
+        ConversationModel,
+        GoalModel,
+    )
+
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        meta = goal.metadata_json if isinstance(goal.metadata_json, dict) else {}
+        conversation = await session.scalar(
+            select(ConversationModel).where(ConversationModel.goal_id == goal_id)
+        )
+        messages: list[dict[str, Any]] = []
+        if conversation is not None:
+            rows = (
+                await session.scalars(
+                    select(ConversationMessageModel)
+                    .where(ConversationMessageModel.conversation_id == conversation.id)
+                    .order_by(ConversationMessageModel.ordinal.asc())
+                    .limit(200)
+                )
+            ).all()
+            messages = [
+                {"role": m.role, "message_type": m.message_type, "content": m.content}
+                for m in rows
+            ]
+        export = build_session_export(
+            goal_id=str(goal_id),
+            metadata=meta,
+            conversation=messages,
+            project_id=str(goal.app_project_id) if goal.app_project_id else None,
+        )
+    return {"ok": True, **export}
+
+
+@router.post("/{goal_id}/undo-turn")
+async def undo_goal_turn(
+    goal_id: uuid.UUID, payload: UndoTurnRequest, request: Request
+) -> dict[str, Any]:
+    """O3: dry-run or apply Primary turn undo (fail closed on divergence)."""
+    from pathlib import Path
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from regent.agent.events import RegentEvent, append_regent_event
+    from regent.application.turn_checkpoint import apply_plan, format_turn_plan, plan_undo
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session, session.begin():
+        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        meta = dict(goal.metadata_json or {})
+        workspace = meta.get("workspace_root") or meta.get("sandbox_root")
+        if not workspace:
+            return {"ok": False, "error": "workspace_root missing on goal metadata"}
+        plan = plan_undo(meta, workspace_root=Path(str(workspace)))
+        preview = format_turn_plan(plan)
+        if payload.dry_run or not plan.get("ok"):
+            return {"ok": bool(plan.get("ok")), "dry_run": True, "plan": plan, "preview": preview}
+        meta, receipt = apply_plan(meta, plan, workspace_root=Path(str(workspace)))
+        meta = append_regent_event(
+            meta,
+            RegentEvent(
+                type="turn_undo",
+                summary=f"撤回回合 #{receipt.get('turn_index')}",
+                goal_id=str(goal_id),
+                payload=receipt,
+            ),
+        )
+        goal.metadata_json = meta
+        flag_modified(goal, "metadata_json")
+    return {"ok": True, "dry_run": False, "receipt": receipt, "preview": preview}
+
+
+@router.post("/{goal_id}/redo-turn")
+async def redo_goal_turn(
+    goal_id: uuid.UUID, payload: UndoTurnRequest, request: Request
+) -> dict[str, Any]:
+    """O3: redo previously undone Primary turn."""
+    from pathlib import Path
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from regent.agent.events import RegentEvent, append_regent_event
+    from regent.application.turn_checkpoint import apply_plan, format_turn_plan, plan_redo
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session, session.begin():
+        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        meta = dict(goal.metadata_json or {})
+        workspace = meta.get("workspace_root") or meta.get("sandbox_root")
+        if not workspace:
+            return {"ok": False, "error": "workspace_root missing on goal metadata"}
+        plan = plan_redo(meta, workspace_root=Path(str(workspace)))
+        preview = format_turn_plan(plan)
+        if payload.dry_run or not plan.get("ok"):
+            return {"ok": bool(plan.get("ok")), "dry_run": True, "plan": plan, "preview": preview}
+        meta, receipt = apply_plan(meta, plan, workspace_root=Path(str(workspace)))
+        meta = append_regent_event(
+            meta,
+            RegentEvent(
+                type="turn_undo",
+                summary=f"重做回合 #{receipt.get('turn_index')}",
+                goal_id=str(goal_id),
+                payload=receipt,
+            ),
+        )
+        goal.metadata_json = meta
+        flag_modified(goal, "metadata_json")
+    return {"ok": True, "dry_run": False, "receipt": receipt, "preview": preview}
+
+
+@router.get("/{goal_id}/evidence-bundle")
+async def get_evidence_bundle(goal_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """O4: portable COMPLETE/STOP evidence with digest."""
+    from regent.application.evidence_bundle import build_evidence_bundle, verify_evidence_bundle
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        meta = goal.metadata_json if isinstance(goal.metadata_json, dict) else {}
+        bundle = build_evidence_bundle(meta, goal_id=str(goal_id))
+    return {"ok": True, "bundle": bundle, "verify": verify_evidence_bundle(bundle)}
+
+
+@router.post("/{goal_id}/workflow-preset")
+async def set_workflow_preset(
+    goal_id: uuid.UUID, payload: WorkflowPresetRequest, request: Request
+) -> dict[str, Any]:
+    """O4: attach a named preset to Goal metadata (Work Plan hint)."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from regent.application.workflow_presets import apply_workflow_preset
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session, session.begin():
+        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        try:
+            meta = apply_workflow_preset(dict(goal.metadata_json or {}), payload.name)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        goal.metadata_json = meta
+        flag_modified(goal, "metadata_json")
+    return {"ok": True, "goal_id": str(goal_id), "preset": meta.get("workflow_preset")}
+
+
 @router.get("/{goal_id}/agents")
 async def get_goal_agents(goal_id: uuid.UUID, request: Request) -> list[dict[str, Any]]:
     """TRANSITIONAL: in-process subagent roster (+ optional metadata snapshot).

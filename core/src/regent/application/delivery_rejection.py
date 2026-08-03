@@ -42,7 +42,12 @@ class DeliveryRejection(DomainError):
 
 
 def reasons_from_exception(exc: BaseException) -> list[str]:
-    """Extract gap reasons from DeliveryRejection or legacy string exceptions."""
+    """Extract gap reasons from a typed DeliveryRejection.
+
+    Orchestrator recovery must branch on ``isinstance(exc, DeliveryRejection)``
+    (TS §13.8.3). Legacy substring parsing below is only a defensive fallback
+    for reason text extraction — never a routing contract.
+    """
     if isinstance(exc, DeliveryRejection):
         return list(exc.reasons)
     text = str(exc)
@@ -52,6 +57,4 @@ def reasons_from_exception(exc: BaseException) -> list[str]:
             for part in text.split("rejected non-deliverable surface:", 1)[-1].split(";")
             if part.strip()
         ][:12] or [text[:200]]
-    if "delivery-review-v1" in text:
-        return [text[:200]]
     return [text[:200]]

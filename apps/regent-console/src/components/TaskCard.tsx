@@ -18,6 +18,16 @@ interface ConfirmationEnvelope {
   budget_summary?: string
   diagnostic_artifact_uri?: string
   recovery_options?: HandoffOption[]
+  /** O1 permission impact */
+  paths?: string[]
+  command_class?: string
+  effect_class?: string
+  impact?: {
+    paths?: string[]
+    command_class?: string
+    effect_class?: string
+    command?: string | null
+  }
 }
 
 /** Extra decision metadata carried alongside the plain approve/deny signal. */
@@ -249,6 +259,25 @@ export function TaskCard({
           <dt>原因</dt>
           <dd>{permit.why}</dd>
         </div>
+        {(confirmation.paths?.length ||
+          confirmation.impact?.paths?.length ||
+          confirmation.command_class ||
+          confirmation.impact?.command_class) && (
+          <div>
+            <dt>影响面</dt>
+            <dd>
+              {confirmation.effect_class || confirmation.impact?.effect_class
+                ? `效果：${confirmation.effect_class || confirmation.impact?.effect_class}；`
+                : ''}
+              {confirmation.command_class || confirmation.impact?.command_class
+                ? `类别：${confirmation.command_class || confirmation.impact?.command_class}；`
+                : ''}
+              {(confirmation.paths || confirmation.impact?.paths || [])
+                .slice(0, 6)
+                .join(', ') || '（无路径）'}
+            </dd>
+          </div>
+        )}
       </dl>
 
       {(confirmation.primary_failure_code ||

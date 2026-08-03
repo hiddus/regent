@@ -25,6 +25,10 @@ RegentEventType = Literal[
     "agent_finished",
     "budget",
     "status",
+    "compact_boundary",
+    "side_question",
+    "turn_undo",
+    "progress_loop",
 ]
 
 META_EVENTS_KEY = "regent_events"

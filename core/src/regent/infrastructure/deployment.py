@@ -306,19 +306,8 @@ class StaticPreviewDeploymentProvider:
                 },
             )
         except DeliveryRejection:
-            # Typed delivery rejection — re-raise so the orchestrator can trigger recovery.
+            # TS §13.8.3: typed delivery rejection only — re-raise for orchestrator recovery.
             raise
-        except ValueError as exc:
-            # Re-raise delivery-review-v1 failures so the orchestrator can trigger recovery.
-            if "delivery-review-v1" in str(exc):
-                raise
-            if target_dir.exists():
-                shutil.rmtree(target_dir, ignore_errors=True)
-            result = DeploymentResult(
-                external_request_id=request.idempotency_key,
-                status="FAILED",
-                evidence={"provider": "static-preview", "error": str(exc)},
-            )
         except Exception as exc:
             if target_dir.exists():
                 shutil.rmtree(target_dir, ignore_errors=True)

@@ -1,7 +1,7 @@
 # Regent 产品定义与需求文档
 
 > 状态：CURRENT  
-> 日期：2026-08-01（吸收 M6 5% canary 开窗、交付缺口软暂停、prompt-cache 成本修复）  
+> 日期：2026-08-03（吸收 M6 5% canary 开窗、交付缺口软暂停、prompt-cache 成本修复；并登记 2026-08-02/03 迭代：混合控制平面 H0–H2、Session Work Plan W0–W4、控制台可观测性、Agent 内核 W4 收口、交付缺口恢复）  
 > 性质：权威执行基线（Owner 批准）  
 > 配套技术规范：[`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md)  
 > 测量框架：[`Regent-Measurement-Decision-Framework.md`](./Regent-Measurement-Decision-Framework.md)  
@@ -487,6 +487,8 @@ P2-7 受控生产发布 / P2-8 受监管自我改进 / P2-9 能力生态。
   - MAST 失败码生产接入（已定义 9 码，尚未接入生产分类路径）。
 
 > **更正（2026-08-01 代码核查）**：原列于此的 **P2-3 Impact Graph、P2-5 AgentEnvelope HMAC、G0 ExternalOperation 核心闭环** 经代码核查**均已实质实现并有单测**（见 `docs/registered-unimplemented-2026-07-30.md` 与 `core/src/regent/application/impact_graph_service.py` / `envelope_v1.py` / `external_operation_service.py`），已从本"未实现"清单移除。本节此前滞后于实现，以本次核查为准。
+
+> **迭代登记（2026-08-03 代码核查）**：2026-08-02/03 落地的混合控制平面 H0–H2（abort/permission/ask 工具/只读时间线）、Session Work Plan（W0–W4，Step-0 门禁 + 计划审批）、控制台可观测性（SSE + ProgressEvent）、Agent 内核 W4 收口（CJK token、质量门、live golden lane）、交付缺口恢复与诊断交付，均已接线生产路径；其产品语义以各决策笔记与执行计划为准（见 `docs/decision-note-*`、`docs/execution-plan-*` 2026-08-02/03）。本节"未实现"清单（P2-4 / P2-5 自适应 / GQ-4 / EO 跨 provider / SelfImprovementRun 门禁 / MAST 生产接入）维持不变。
 
 ---
 

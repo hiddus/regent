@@ -319,6 +319,7 @@ class WorkspaceToolkit:
         self.submit_summary: str = ""
         self.artifact_index: dict[str, dict[str, Any]] = {}
         self._command_sandbox = command_sandbox
+        self._turn_collector: Any | None = None
         self._allowed = allowed_commands_prefix or (
             "pip ",
             "python ",
@@ -406,8 +407,23 @@ class WorkspaceToolkit:
             return text[:max_chars] + f"\n...[truncated {len(text) - max_chars} chars]"
         return text
 
+    def bind_turn_collector(self, collector: Any | None) -> None:
+        """O3: optional TurnImageCollector for Primary undo pre-images."""
+        self._turn_collector = collector
+
+    def _capture_preimage(self, path: Path) -> None:
+        collector = self._turn_collector
+        if collector is None:
+            return
+        try:
+            collector.capture(path)
+        except Exception:
+            # Undo capture must never block the tool path.
+            pass
+
     def write_text(self, relative: str, content: str) -> str:
         path = self.resolve(relative)
+        self._capture_preimage(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         rel = path.relative_to(self.root).as_posix()
@@ -424,6 +440,7 @@ class WorkspaceToolkit:
         expected_sha256: str | None = None,
     ) -> str:
         path = self.resolve(relative)
+        self._capture_preimage(path)
         if not path.is_file():
             raise FileNotFoundError(relative)
         current = path.read_text(encoding="utf-8")

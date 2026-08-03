@@ -2,7 +2,7 @@
 
 Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。它从产品目标出发，获取证据、形成候选假设、修订需求、解析能力、生成应用、完成隔离构建与发布，并根据真实观测决定继续、修订或停止。
 
-## 当前状态（2026-08-01）
+## 当前状态（2026-08-03）
 
 - P0 已形成可运行闭环：目标、工作项、执行、审批、证据、观测、恢复与审计。
 - P1 已完成至 `0022`：GoalSpec 快照启动后由 Worker 持久化生成、检查并发布 Preview；对话可查询进度、失败可重试。
@@ -10,7 +10,11 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 - **生成策略**：代码默认仍为 `artifact-backed`；GQ-4（默认切 `agentic`）**未晋级**。生产已开 **M6 5% agentic canary**（`canary_gate=true`、`canary_percent=5`），见 [`docs/m6-canary-window-2026-08-01.json`](./docs/m6-canary-window-2026-08-01.json)；观察与窗末决策见 [`docs/m6-canary-watch-plan-2026-08-01.md`](./docs/m6-canary-watch-plan-2026-08-01.md)。成本/质量护栏未过前不扩 10%、不翻转默认策略。
 - **Prompt cache / token 成本**：agentic 上下文改为「稳定前缀 + 对话 + 易变后缀」，workspace 默认仅路径树；解析并累计 `cached_tokens`。计划：[`docs/token-cost-cache-fix-plan-2026-08-01.md`](./docs/token-cost-cache-fix-plan-2026-08-01.md)。
 - **交付缺口**：进度停滞与交付缺口优先自动续跑 / 软暂停（对话补充方向），**不**对缺口卡弹出「总是允许」；真审批仍限于发布、质量门、外部效应、Permit。
-- Agent 内核 M0–M5 工程接线已落地；M6 观察窗 ACTIVE。GQ-4 仍 PENDING。
+- Agent 内核 M0–M5 工程接线已落地，**W4 收口**（CJK token、质量门、live golden lane）；M6 观察窗 ACTIVE。GQ-4 仍 PENDING。
+- **混合控制平面 H0–H2（2026-08-03 落地）**：abort / permission / ask 工具 / result surface / 只读时间线，见 [`docs/decision-note-hybrid-h0-control-plane-2026-08-03.md`](./docs/decision-note-hybrid-h0-control-plane-2026-08-03.md) 与 [`docs/execution-plan-hybrid-control-experience-ops-2026-08-03.md`](./docs/execution-plan-hybrid-control-experience-ops-2026-08-03.md)。
+- **Session Work Plan（W0–W4，2026-08-03）**：Step-0 门禁 + 计划审批，见 [`docs/decision-note-session-work-plan-2026-08-03.md`](./docs/decision-note-session-work-plan-2026-08-03.md) 与 [`docs/execution-plan-session-work-plan-2026-08-03.md`](./docs/execution-plan-session-work-plan-2026-08-03.md)。
+- **控制台可观测性（2026-08-02）**：SSE 为主 + ProgressEvent + 活动 API，见 [`docs/console-observability-gap-2026-08-02.md`](./docs/console-observability-gap-2026-08-02.md)。
+- **交付缺口恢复 / 诊断交付（2026-08-02/03）**：A0 退出禁止静默续跑，见 [`docs/decision-note-delivery-machine-invariants-2026-08-02.md`](./docs/decision-note-delivery-machine-invariants-2026-08-02.md)。
 - 对齐审计 F-1…F-9 已闭环；N-3 entrypoint 已修复；DinD / uid / 路径映射等残留见下表。
 
 ### 已知阻断（更新于 2026-08-01）
@@ -41,6 +45,9 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 - [M6 Canary 观察窗](./docs/m6-canary-watch-plan-2026-08-01.md)（ACTIVE）
 - [Agent 内核可执行修复计划](./docs/agent-core-restoration-executable-plan-2026-08-01.md)
 - [Token / Prompt Cache 修复计划](./docs/token-cost-cache-fix-plan-2026-08-01.md)
+- [混合控制平面 H0–H2](./docs/decision-note-hybrid-h0-control-plane-2026-08-03.md)（2026-08-03）
+- [Session Work Plan W0–W4](./docs/execution-plan-session-work-plan-2026-08-03.md)（2026-08-03）
+- [控制台可观测性](./docs/console-observability-gap-2026-08-02.md)（2026-08-02）
 - [下一步 CD-6…12](./docs/conversational-delivery-next-plan-2026-07-31.md)
 - [CD-6 执行级工作包](./docs/cd6-execution-plan-2026-07-31.md)
 - [对话式交付 CD-0…5](./docs/conversational-delivery-plan-2026-07-31.md)

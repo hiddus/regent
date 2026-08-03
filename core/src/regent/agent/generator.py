@@ -161,6 +161,12 @@ class AgenticCodeGenerator:
                     "agent_abort_requested",
                     "execution_mode",
                     "agent_permission_always",
+                    "turn_checkpoint_log",
+                    "work_plan_progress_loop",
+                    "regent_events",
+                    "regent_quarantine",
+                    "quarantine_active",
+                    "workspace_root",
                 )
                 if k in acceptance
             }
@@ -265,6 +271,12 @@ class AgenticCodeGenerator:
                 run_smoke=run_smoke,
                 on_turn=_on_turn if on_progress else None,
                 on_event=_on_event if on_progress else None,
+            )
+            await _flush_goal_metadata_overlays(
+                self._sessions,
+                goal_uuid,
+                dict(plan.get("goal_metadata") or {}),
+                workspace_root=str(toolkit.root),
             )
         except UserAbortError as exc:
             draft_uri = sandbox.resolve().as_uri()
@@ -894,3 +906,50 @@ def _write_transcript_sidecar(sandbox: Path, transcript: list[Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+_GOAL_METADATA_OVERLAY_KEYS = (
+    "turn_checkpoint_log",
+    "work_plan_progress_loop",
+    "regent_events",
+    "regent_quarantine",
+    "quarantine_active",
+    "last_side_question",
+    "last_trust_posture",
+)
+
+
+async def _flush_goal_metadata_overlays(
+    sessions: async_sessionmaker[AsyncSession] | None,
+    goal_id: uuid.UUID | None,
+    overlays: dict[str, Any],
+    *,
+    workspace_root: str | None = None,
+) -> None:
+    """Persist O-axis overlays from the agent plan back onto Goal.metadata_json."""
+    if sessions is None or goal_id is None or not overlays:
+        return
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from regent.infrastructure.models import GoalModel
+
+    patch = {k: overlays[k] for k in _GOAL_METADATA_OVERLAY_KEYS if k in overlays}
+    if workspace_root:
+        patch["workspace_root"] = workspace_root
+    if not patch:
+        return
+    try:
+        async with sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                return
+            meta = dict(goal.metadata_json or {})
+            meta.update(patch)
+            goal.metadata_json = meta
+            flag_modified(goal, "metadata_json")
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "failed to flush goal metadata overlays",
+            extra={"goal_id": str(goal_id)},
+            exc_info=True,
+        )

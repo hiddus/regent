@@ -144,6 +144,41 @@ export const api = {
       mode,
     }),
 
+  getTrustPosture: (goalId: string) =>
+    request<{ ok: boolean; posture?: Record<string, unknown> }>(
+      `/v1/goals/${goalId}/trust-posture`,
+    ),
+
+  sideQuestion: (goalId: string, question: string, actor = ACTOR) =>
+    request<{
+      ok: boolean
+      text?: string
+      context_summary?: string
+      mutated_work_plan?: boolean
+      tools_invoked?: boolean
+    }>(`/v1/goals/${goalId}/side-question`, { question, actor }),
+
+  undoTurn: (goalId: string, dryRun = true, actor = ACTOR) =>
+    request<{
+      ok: boolean
+      dry_run?: boolean
+      preview?: string
+      plan?: Record<string, unknown>
+      receipt?: Record<string, unknown>
+    }>(`/v1/goals/${goalId}/undo-turn`, { actor, dry_run: dryRun }),
+
+  getEvidenceBundle: (goalId: string) =>
+    request<{ ok: boolean; bundle?: Record<string, unknown>; verify?: Record<string, unknown> }>(
+      `/v1/goals/${goalId}/evidence-bundle`,
+    ),
+
+  getSessionExport: (goalId: string) =>
+    request<{ ok: boolean; markdown?: string; manifest?: Record<string, unknown> }>(
+      `/v1/goals/${goalId}/session-export`,
+    ),
+
+  doctor: () => request<Record<string, unknown>>('/v1/doctor'),
+
   /** TRANSITIONAL: metadata ring buffers — not durable event truth. */
   getGoalActivity: (goalId: string) =>
     request<{

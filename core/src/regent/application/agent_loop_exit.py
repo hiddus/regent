@@ -15,6 +15,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 ExitKind = Literal["COMPLETE", "STOP", "ASK_HUMAN"]
+# CompleteBlocker / ExecutionOutcome declared with evaluate_complete_allowed (O0).
 
 META_EXIT_KEY = "agent_loop_exit"
 META_DOOM_STREAK = "agent_loop_doom_streak"
@@ -204,6 +205,199 @@ def detect_doom_loop(
         if not exit_row or exit_row.get("exit_kind") != "COMPLETE":
             return True, f"doom_loop:resumes_without_complete:{resumes}"
     return False, ""
+
+
+# --- O0: honest completion (oh-my-cli auto-achieve guard) -------------------
+
+CompleteBlocker = Literal[
+    "provider_failure",
+    "interruption",
+    "cancellation",
+    "budget_exhausted",
+    "stale_revision",
+    "soft_verify",
+    "progress_loop",
+    "unanswered_ask",
+    "unknown_outcome",
+]
+
+ExecutionOutcome = Literal[
+    "success",
+    "provider_failure",
+    "interrupted",
+    "cancelled",
+    "budget_exhausted",
+    "stale_revision",
+    "soft_verify",
+    "progress_loop",
+    "unanswered_ask",
+]
+
+_OUTCOME_TO_BLOCKER: dict[str, CompleteBlocker] = {
+    "provider_failure": "provider_failure",
+    "interrupted": "interruption",
+    "cancelled": "cancellation",
+    "budget_exhausted": "budget_exhausted",
+    "stale_revision": "stale_revision",
+    "soft_verify": "soft_verify",
+    "progress_loop": "progress_loop",
+    "unanswered_ask": "unanswered_ask",
+}
+
+_BLOCKER_REASONS: dict[CompleteBlocker, str] = {
+    "provider_failure": "Provider failed; COMPLETE blocked.",
+    "interruption": "Execution interrupted; COMPLETE blocked.",
+    "cancellation": "Execution cancelled; COMPLETE blocked.",
+    "budget_exhausted": "Budget exhausted; COMPLETE blocked.",
+    "stale_revision": "Goal revised during execution; COMPLETE blocked.",
+    "soft_verify": "Soft/product gate is not verified_pass; COMPLETE blocked (A0).",
+    "progress_loop": "No progress on the same work-plan item; COMPLETE blocked.",
+    "unanswered_ask": "Unanswered ASK_HUMAN still pending; COMPLETE blocked.",
+    "unknown_outcome": "Unknown outcome; COMPLETE blocked by default.",
+}
+
+
+def evaluate_complete_allowed(
+    outcome: ExecutionOutcome | str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """O0: pure guard — COMPLETE is allowed only on explicit success.
+
+    Soft verify, interrupt, budget, progress-loop, and unanswered asks never
+    auto-achieve. Aligns with oh-my-cli auto-achieve-guard + Regent A0.
+    """
+    meta = dict(metadata or {})
+    if has_unanswered_ask(meta):
+        outcome = "unanswered_ask"
+    raw = str(outcome or "unknown").strip().lower() or "unknown"
+    if raw in {"success", "ok", "verified_pass", "pass"}:
+        return {
+            "safe": True,
+            "outcome": "success",
+            "blocker": None,
+            "reason": "Execution completed successfully. COMPLETE is allowed.",
+        }
+    blocker = _OUTCOME_TO_BLOCKER.get(raw)
+    if blocker is None:
+        blocker = "unknown_outcome"
+        reason = _BLOCKER_REASONS["unknown_outcome"]
+    else:
+        reason = _BLOCKER_REASONS[blocker]
+    return {
+        "safe": False,
+        "outcome": raw,
+        "blocker": blocker,
+        "reason": reason,
+    }
+
+
+def assert_complete_allowed(
+    outcome: ExecutionOutcome | str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Raise ValueError when COMPLETE must not be stamped."""
+    verdict = evaluate_complete_allowed(outcome, metadata=metadata)
+    if not verdict["safe"]:
+        raise ValueError(f"complete_not_allowed:{verdict['blocker']}:{verdict['reason']}")
+
+
+# --- O0: progress-loop detector (same item_key) -----------------------------
+
+META_PROGRESS_LOOP = "work_plan_progress_loop"
+PROGRESS_LOOP_DEFAULT_THRESHOLD = 3
+
+
+def record_progress_attempt(
+    metadata: dict[str, Any],
+    *,
+    item_key: str,
+    threshold: int = PROGRESS_LOOP_DEFAULT_THRESHOLD,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Track consecutive attempts on the same work-plan item without advance.
+
+    Returns (updated_metadata, warning_dict).
+    """
+    meta = dict(metadata or {})
+    key = str(item_key or "").strip() or "_unknown"
+    state = dict(meta.get(META_PROGRESS_LOOP) or {})
+    current = str(state.get("item_key") or "")
+    attempts = int(state.get("attempts") or 0)
+    if key == current:
+        attempts += 1
+    else:
+        current = key
+        attempts = 1
+    loop_detected = attempts >= max(1, int(threshold))
+    warning = {
+        "loop_detected": loop_detected,
+        "stuck_item_key": current,
+        "attempt_count": attempts,
+        "threshold": int(threshold),
+        "message": (
+            f'No progress: item "{current}" attempted {attempts} times without advancing. '
+            "Consider a different approach, skip, or ASK_HUMAN."
+            if loop_detected
+            else f'Step "{current}" attempt {attempts}/{threshold}.'
+        ),
+    }
+    meta[META_PROGRESS_LOOP] = {
+        "item_key": current,
+        "attempts": attempts,
+        "threshold": int(threshold),
+        "loop_detected": loop_detected,
+        "updated_at": utc_now_iso(),
+    }
+    return meta, warning
+
+
+def advance_progress_item(metadata: dict[str, Any], *, item_key: str) -> dict[str, Any]:
+    """Reset streak when the plan advances to a different (or completed) item."""
+    meta = dict(metadata or {})
+    meta[META_PROGRESS_LOOP] = {
+        "item_key": str(item_key or "").strip(),
+        "attempts": 0,
+        "threshold": PROGRESS_LOOP_DEFAULT_THRESHOLD,
+        "loop_detected": False,
+        "updated_at": utc_now_iso(),
+    }
+    return meta
+
+
+def progress_loop_detected(metadata: dict[str, Any] | None) -> bool:
+    state = dict(dict(metadata or {}).get(META_PROGRESS_LOOP) or {})
+    return bool(state.get("loop_detected"))
+
+
+# --- O0/O2: corrupt quarantine ---------------------------------------------
+
+META_QUARANTINE = "regent_quarantine"
+
+
+def quarantine_payload(
+    metadata: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+    ref: str | None = None,
+    digest: str | None = None,
+) -> dict[str, Any]:
+    """Mark corrupt/partial state without deleting evidence (fail closed)."""
+    meta = dict(metadata or {})
+    rows = list(meta.get(META_QUARANTINE) or [])
+    rows.append(
+        {
+            "kind": str(kind)[:64],
+            "reason": str(reason)[:400],
+            "ref": (str(ref)[:200] if ref else None),
+            "digest": (str(digest)[:128] if digest else None),
+            "at": utc_now_iso(),
+        }
+    )
+    meta[META_QUARANTINE] = rows[-40:]
+    meta["quarantine_active"] = True
+    return meta
 
 
 def conversation_copy_for_exit(exit_payload: dict[str, Any]) -> tuple[str, str]:

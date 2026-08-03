@@ -2018,56 +2018,6 @@ class ExecutionOrchestrator:
                 raise
             logger.exception("generation failed", extra={"goal_id": str(goal_id)})
             raise
-        except ValueError as exc:
-            # Legacy fallback: DeliveryRejection producers now raise a typed
-            # DomainError subclass (caught above); this branch only remains
-            # for any stray bare ValueError still carrying the legacy string.
-            await self._record_generation_failure_memory(
-                goal_id=goal_id,
-                project_id=project_id,
-                generation_run_id=generation_run_id,
-                plan_id=generation_plan_id,
-                exc=exc,
-            )
-            if "delivery-review-v1" not in str(exc):
-                logger.exception("generation failed", extra={"goal_id": str(goal_id)})
-                raise
-            reasons = reasons_from_exception(exc)
-            draft_uri = getattr(exc, "draft_uri", None)
-            recovery = await DeliveryGapRecoveryService(self._sessions).recover(
-                goal_id=goal_id,
-                project_id=project_id,
-                requirement_revision_id=requirement_id,
-                capability_resolution_plan_id=resolution_plan_id,
-                actor=actor,
-                gap_reasons=reasons,
-                halt_context={
-                    "stage": "DELIVERY_REVIEW_REJECTED",
-                    "last_error": str(exc)[:400],
-                    "message": str(exc)[:400],
-                    "draft_uri": draft_uri,
-                },
-            )
-            if await self._apply_delivery_verdict(
-                recovery,
-                goal_id=goal_id,
-                project_id=project_id,
-                actor=actor,
-                recovered_log="delivery gap recovery scheduled",
-                stage_exhausted="DELIVERY_GAP_EXHAUSTED",
-                extra_exhausted={
-                    "gap_kind": recovery.gap_kind,
-                    "attempts": recovery.attempts,
-                    "gac": "GAC-D5",
-                },
-                append_conversation=False,
-            ):
-                return
-            logger.warning(
-                "delivery gap exhausted; refusing unreliable publish",
-                extra={"goal_id": str(goal_id), "message": recovery.message},
-            )
-            return
         except Exception as exc:
             await self._record_generation_failure_memory(
                 goal_id=goal_id,
@@ -2998,7 +2948,8 @@ class ExecutionOrchestrator:
             )
             result = await release_service.execute(deployment.id)
         except Exception as exc:
-            if isinstance(exc, DeliveryRejection) or "delivery-review-v1" in str(exc):
+            # TS §13.8.3: route delivery recovery only via typed DeliveryRejection.
+            if isinstance(exc, DeliveryRejection):
                 req_uuid: uuid.UUID | None = None
                 plan_uuid: uuid.UUID | None = None
                 async with self._sessions() as session:
@@ -4387,9 +4338,12 @@ class ExecutionOrchestrator:
 
         from regent.application.agent_loop_exit import (
             apply_exit_to_metadata,
+            build_ask_envelope,
             build_exit,
             build_result_bundle,
             conversation_copy_for_exit,
+            evaluate_complete_allowed,
+            progress_loop_detected,
         )
 
         async with self._sessions() as session, session.begin():
@@ -4397,20 +4351,43 @@ class ExecutionOrchestrator:
             if goal is None:
                 return
             meta = dict(goal.metadata_json or {})
-            exit_payload = build_exit(
-                exit_kind="COMPLETE",
-                stop_reason="verified_pass",
-                lease_id=generation_run_id,
-                session_id=meta.get("project_agent_session_id"),
-                epoch=meta.get("project_agent_session_epoch"),
-                result_bundle=build_result_bundle(
-                    summary=summary,
-                    preview_url=preview_url or meta.get("last_preview_endpoint"),
-                    artifact_uri=meta.get("last_good_draft_uri"),
-                    evidence_summary="verification passed for this lease",
-                    open_items=open_items or [],
-                ),
-            )
+            outcome = "progress_loop" if progress_loop_detected(meta) else "success"
+            verdict = evaluate_complete_allowed(outcome, metadata=meta)
+            if not verdict["safe"]:
+                # O0: never forge COMPLETE — degrade to ASK_HUMAN.
+                ask = build_ask_envelope(
+                    question=(
+                        "本轮未达诚实完成条件，需要你确认后再继续。"
+                        f"\n原因：{verdict['reason']}"
+                    ),
+                    why_blocked=str(verdict["reason"]),
+                    ask_type="complete_guard",
+                    gap_kind=str(verdict.get("blocker") or "complete_blocked"),
+                )
+                exit_payload = build_exit(
+                    exit_kind="ASK_HUMAN",
+                    stop_reason=f"complete_guard:{verdict.get('blocker')}",
+                    lease_id=generation_run_id,
+                    session_id=meta.get("project_agent_session_id"),
+                    epoch=meta.get("project_agent_session_epoch"),
+                    ask_envelope=ask,
+                    draft_uri=meta.get("last_good_draft_uri"),
+                )
+            else:
+                exit_payload = build_exit(
+                    exit_kind="COMPLETE",
+                    stop_reason="verified_pass",
+                    lease_id=generation_run_id,
+                    session_id=meta.get("project_agent_session_id"),
+                    epoch=meta.get("project_agent_session_epoch"),
+                    result_bundle=build_result_bundle(
+                        summary=summary,
+                        preview_url=preview_url or meta.get("last_preview_endpoint"),
+                        artifact_uri=meta.get("last_good_draft_uri"),
+                        evidence_summary="verification passed for this lease",
+                        open_items=open_items or [],
+                    ),
+                )
             meta = apply_exit_to_metadata(meta, exit_payload)
             # Clear soft-pause / ask markers after real COMPLETE.
             meta.pop("ops_soft_pause", None)

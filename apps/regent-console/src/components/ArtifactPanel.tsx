@@ -18,6 +18,66 @@ import {
 } from '../lib/agents'
 import { api } from '../lib/api'
 
+function TrustPostureInline({ goalId }: { goalId: string }) {
+  const [label, setLabel] = useState('姿态…')
+  useEffect(() => {
+    let cancelled = false
+    api.getTrustPosture(goalId).then((r) => {
+      if (cancelled || !r.posture) return
+      const level = String(r.posture.level || 'standard')
+      const mode = String(r.posture.execution_mode || 'ask')
+      const map: Record<string, string> = {
+        restricted: '受限',
+        standard: '标准',
+        elevated: '高信任',
+      }
+      setLabel(`姿态 · ${map[level] || level} · ${mode}`)
+    }).catch(() => {
+      if (!cancelled) setLabel('姿态 · 未知')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [goalId])
+  return <span title="Trust posture">{label}</span>
+}
+
+function SideQuestionInline({ goalId }: { goalId: string }) {
+  const [q, setQ] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [answer, setAnswer] = useState<string | null>(null)
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="侧问（不改计划）"
+          style={{ flex: 1, fontSize: 12 }}
+          disabled={busy}
+        />
+        <button
+          type="button"
+          disabled={busy || !q.trim()}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              const r = await api.sideQuestion(goalId, q.trim())
+              setAnswer(String(r.text || ''))
+              setQ('')
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          快问
+        </button>
+      </div>
+      {answer ? <p className="hint" style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>{answer}</p> : null}
+    </div>
+  )
+}
+
 interface ArtifactPanelProps {
   project: Project | null
   status: ProjectStatus | null
@@ -315,6 +375,50 @@ export function ArtifactPanel({
                     </span>
                   )}
                 </div>
+                {goalId && (
+                  <div className="trust-posture-row hint" style={{ marginBottom: 8 }}>
+                    <TrustPostureInline goalId={goalId} />
+                  </div>
+                )}
+                {goalId && (
+                  <div className="side-question-row" style={{ marginBottom: 8 }}>
+                    <SideQuestionInline goalId={goalId} />
+                  </div>
+                )}
+                {goalId && exitKind && (
+                  <div className="evidence-row hint" style={{ marginBottom: 8 }}>
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        api.getEvidenceBundle(goalId).then((r) => {
+                          const dig = String(r.bundle?.digest || '').slice(0, 16)
+                          window.alert(
+                            r.verify?.ok
+                              ? `证据包校验通过 · digest ${dig}…`
+                              : `证据包校验失败 · ${JSON.stringify(r.verify || {})}`,
+                          )
+                        })
+                      }}
+                    >导出/校验证据包</button>
+                    {' · '}
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        api.undoTurn(goalId, true).then((r) => {
+                          if (!r.ok) {
+                            window.alert(r.preview || '无法撤回')
+                            return
+                          }
+                          if (window.confirm(`${r.preview || '确认撤回上一回合？'}\n\n应用撤回？`)) {
+                            api.undoTurn(goalId, false)
+                          }
+                        })
+                      }}
+                    >撤回上一回合</button>
+                  </div>
+                )}
                 {exitKind === 'COMPLETE' && bundle && (
                   <div className="result-bundle">
                     <p className="result-summary">{String(bundle.summary || '本轮已完成')}</p>

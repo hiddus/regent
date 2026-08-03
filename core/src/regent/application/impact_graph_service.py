@@ -235,7 +235,12 @@ class ImpactGraphService:
         now: datetime | None = None,
         half_life_days: float = _HALF_LIFE_DAYS,
     ) -> float:
-        """Exponential confidence decay with configurable half-life."""
+        """Exponential confidence decay with configurable half-life.
+
+        Known limitation (TS §25): unit-tested only. Production MemoryService
+        retrieve paths still order by ``created_at`` and do not apply decay to
+        ranking or filtering. Do not treat this helper as live scoring.
+        """
         clock = now or datetime.now(UTC)
         created = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
         age_days = max(0.0, (clock - created).total_seconds() / 86400.0)

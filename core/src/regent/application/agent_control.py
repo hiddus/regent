@@ -145,11 +145,25 @@ def permission_ask_envelope(
     tool_name: str,
     args_preview: str = "",
     execution_mode: ExecutionMode = "ask",
+    arguments: dict[str, Any] | None = None,
+    impact: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from regent.application.trust_posture import permission_impact
+
     preview = (args_preview or "")[:200]
-    return build_ask_envelope(
-        question=f"是否允许执行工具 `{tool_name}`？\n{preview}".strip(),
-        why_blocked=f"execution_mode={execution_mode}；危险/写操作需人确认（OpenWork permission）。",
+    impact_row = impact or permission_impact(tool_name=tool_name, arguments=arguments)
+    paths = list(impact_row.get("paths") or [])
+    path_hint = ("；路径：" + ", ".join(paths[:4])) if paths else ""
+    cmd_class = impact_row.get("command_class") or ""
+    class_hint = f"；类别：{cmd_class}" if cmd_class else ""
+    envelope = build_ask_envelope(
+        question=(
+            f"是否允许执行工具 `{tool_name}`？{path_hint}{class_hint}\n{preview}"
+        ).strip(),
+        why_blocked=(
+            f"execution_mode={execution_mode}；危险/写操作需人确认"
+            f"（effect={impact_row.get('effect_class')}）。"
+        ),
         options=[
             {"id": "allow_once", "label": "允许一次"},
             {"id": "allow_always_session", "label": "本会话允许此类工具"},
@@ -159,6 +173,11 @@ def permission_ask_envelope(
         ask_type="permission",
         deny_consequence="拒绝后本轮 STOP，草稿保留。",
     )
+    envelope["impact"] = impact_row
+    envelope["paths"] = paths[:12]
+    envelope["command_class"] = impact_row.get("command_class")
+    envelope["effect_class"] = impact_row.get("effect_class")
+    return envelope
 
 
 class UserAbortError(RuntimeError):

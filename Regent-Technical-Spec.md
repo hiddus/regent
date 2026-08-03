@@ -475,7 +475,7 @@ LLM 仍只提出结构化 Command / Tool 调用；聚合状态转换由确定性
 #### 13.8.3 交付状态机与缺口恢复（2026-08-01 修订）
 
 - `application/delivery_state.py` 的 `decide_delivery_verdict` / `DeliveryState` **必须**被 `execution_orchestrator` 生产路径消费，并写入 `goal.metadata_json["delivery_state"]`。
-- 交付拒绝须使用类型化错误（建议 `DeliveryRejection`），携带 `gap_kind`、`reasons`、`draft_uri`；禁止仅依赖魔法字符串 `delivery-review-v1 rejected...` 作为唯一契约。
+- 交付拒绝须使用类型化错误（建议 `DeliveryRejection`），携带 `gap_kind`、`reasons`、`draft_uri`；禁止仅依赖魔法字符串 `delivery-review-v1 rejected...` 作为唯一契约。编排与部署消费方必须以 `isinstance(..., DeliveryRejection)` 路由恢复，不得再以异常文案子串作分支条件（2026-08-03 已收口）。
 - **能力阶梯自动续跑**：缺口恢复按 `REUSE→…→ACQUIRE` 等阶梯与 persona 预算推进；同 `gap_kind` 有硬顶，并受 `DELIVERY_GAP_AUTO_CONTINUE_MAX` 约束（见 `delivery_success_policy` / `delivery_gap_recovery`）。
 - **软暂停（非权限卡）**：阶梯或自动续跑预算耗尽后，写入 `execution_stage=DELIVERY_SOFT_PAUSE`（或等价）与用户可见对话提示，**不得**创建「总是允许」类 HumanTask。用户可通过对话补充方向后系统续跑。
 - **进度 watchdog**：`delivery_progress_watchdog` 对停滞 Goal 发出 warn / auto-nudge（续跑 `GoalExecutionRequested`），跳过真权限任务类型，**不** mint 交付缺口审批卡。
@@ -790,6 +790,7 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **交付状态机（CD-1，2026-07-31）**：decide_delivery_verdict **已接入** _apply_delivery_verdict；DeliveryRejection 类型化；goal_intent 早交人；AC1 门禁进 CI；其后叠加快暂停与 watchdog（见上）。
 - **下一步**：**ACTIVE = M6 观察窗**（[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)）：开窗后切片指标、真实闭环、窗末 HOLD/EXPAND_10/ROLLBACK；成本护栏未过前不扩流量、不开 GQ-4。CD-6…12 与 agent-core 计划继续作为工程参照，但**不以「禁止一切 canary」为当前生产状态描述**。
 - **API 挂载（F-1 修复）**：human_tasks / uploads / webhooks / reports / public_deploy 已在 `api/main.py` `include_router`。
+- **近期迭代（2026-08-02/03，登记于代码核查 2026-08-03）**：混合控制平面 H0–H2（`application/agent_control.py` / `agent_loop_exit.py` / `live_action.py`：abort/permission/ask 工具/只读时间线）、Session Work Plan W0–W4（`application/work_plan.py` / `project_agent_session.py`：Step-0 门禁 + 计划审批）、控制台可观测性（`agent/progress_event.py` + `api/events.py` SSE + ProgressEvent）、Agent 内核 W4 收口（`agent/subagent.py` / `skills.py` / `context_assembler.py` / `verification.py`）、交付缺口恢复与诊断交付（`delivery_gap_recovery.py` / `diagnostic_delivery.py` / `delivery_success_policy.py`）。均已接线生产路径；产品语义见 `docs/decision-note-*` 与 `docs/execution-plan-*` 2026-08-02/03。
 
 ### 已知非阻塞限制
 
@@ -799,6 +800,8 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 4. Eval Harness 已改为交付信号/Goal 证据评分。
 5. ~~PRD §7.1–7.3 隐私缺口~~ **已修复（2026-07-30）**。
 6. SSE LISTEN/NOTIFY、token 流式、DeliveryRecoveryCoordinator 抽离仍为体验/结构持续项。
+7. **Impact Graph `confidence_decay`（2026-08-03 登记）**：半衰期衰减已实现并有单测，但**未接入**生产 `MemoryService` 检索/打分路径（召回仍按 `created_at` 排序）。不得宣称记忆置信度衰减已在生产生效；接线须另开切片并先定 score vs 硬过滤契约。
+8. **oh-my-cli 吸收 O0–O4（2026-08-03 LANDED）**：假完成守卫 / 进度环 / trust posture / 侧问 / 回合 undo / 证据包 / doctor 已接线；Hive 级跨 worktree undo 与签名证据包仍为后续增强（见 `docs/oh-my-cli-absorption-analysis-2026-08-03.md`）。
 
 > 更正（2026-07-30）：Evidence Connector / StaticPreviewDeploymentProvider 已接线。
 

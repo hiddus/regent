@@ -171,6 +171,7 @@ class AgentRunner:
                 tool_name=tool_name,
                 args_preview=preview,
                 execution_mode=self._execution_mode,  # type: ignore[arg-type]
+                arguments=dict(arguments or {}),
             ),
         )
 
@@ -482,6 +483,16 @@ class AgentRunner:
             gaps=prior_gaps,
         )
         await self._seed_work_plan(plan)
+        # O3: bind turn pre-image collector for Primary undo (depth 0 only).
+        from regent.application.turn_checkpoint import (
+            TurnImageCollector,
+            append_checkpoint_to_metadata,
+            build_turn_checkpoint,
+        )
+
+        turn_collector = TurnImageCollector()
+        if self._subagent_depth == 0:
+            self._toolkit.bind_turn_collector(turn_collector)
         # I-C: seed conversation from Session checkpoint / prior transcript
         # (same AgentRunner — not a third loop).
         conversation: list[ChatMessage] = _seed_session_conversation(
@@ -577,6 +588,24 @@ class AgentRunner:
                         "detail": f"autoCompact chars={len(auto.summary)}",
                     },
                 )
+                # O2: also emit discriminant compact_boundary when goal plan carries metadata hook.
+                plan_meta = dict(plan.get("goal_metadata") or {})
+                if plan_meta is not None:
+                    from regent.agent.events import RegentEvent, append_regent_event
+
+                    plan["goal_metadata"] = append_regent_event(
+                        plan_meta,
+                        RegentEvent(
+                            type="compact_boundary",
+                            summary="上下文压缩边界",
+                            goal_id=str(self._goal_id) if self._goal_id else None,
+                            turn=turn,
+                            payload={
+                                "kind": "autoCompact",
+                                "summary_chars": len(auto.summary),
+                            },
+                        ),
+                    )
             elif auto.failed:
                 compact_events.append(
                     {
@@ -820,6 +849,46 @@ class AgentRunner:
                     )
                 )
                 conversation = micro_compact(conversation, keep_recent=8)
+
+            # O3: seal turn checkpoint when mutating tools touched files.
+            if self._subagent_depth == 0 and turn_collector.size() > 0:
+                cp = build_turn_checkpoint(
+                    turn_collector,
+                    workspace_root=self._toolkit.root,
+                    session_id=str(
+                        plan.get("project_agent_session_id")
+                        or self._goal_id
+                        or "session"
+                    ),
+                    turn_index=turn,
+                    message_count_before=max(0, len(conversation) - 2),
+                    message_count_after=len(conversation),
+                )
+                if cp is not None:
+                    plan_meta = dict(plan.get("goal_metadata") or {})
+                    plan["goal_metadata"] = append_checkpoint_to_metadata(plan_meta, cp)
+                turn_collector = TurnImageCollector()
+                self._toolkit.bind_turn_collector(turn_collector)
+
+            # O0: progress-loop streak on current blocked item.
+            from regent.application.agent_loop_exit import record_progress_attempt
+            from regent.application.work_plan import current_blocked_item_key
+
+            blocked = current_blocked_item_key(self._toolkit.todos)
+            if blocked:
+                plan_meta = dict(plan.get("goal_metadata") or {})
+                plan_meta, warning = record_progress_attempt(plan_meta, item_key=blocked)
+                plan["goal_metadata"] = plan_meta
+                if warning.get("loop_detected"):
+                    await _emit(
+                        on_event,
+                        {
+                            "type": "progress_loop",
+                            "turn": turn,
+                            "summary": "工作清单无进展",
+                            "detail": warning.get("message"),
+                        },
+                    )
 
             turn += 1
             turns_since_plan_update += 1

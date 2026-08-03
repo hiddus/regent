@@ -2,7 +2,7 @@
 
 | 项 | 来源 | 状态 |
 |---|---|---|
-| P2-3 Impact Graph（衰减 / 批量撤销 / 循环证据检测 / 重验证下游） | Spec §16 | **已实现**：`impact_graph_service.py` + `memory_impact_edges`（0037）+ MemoryService 接线 |
+| P2-3 Impact Graph（衰减 / 批量撤销 / 循环证据检测 / 重验证下游） | Spec §16 | **已实现（部分生效）**：`impact_graph_service.py` + `memory_impact_edges`（0037）+ MemoryService 接线（循环/级联撤销/`can_support_gate`）。**已知限制（TS §25 #7）**：`confidence_decay` 仅单测可达，未进生产检索/打分 |
 | P2-5 AgentEnvelope `correlation_id` + HMAC 签名 | Spec §17 | **已接线**：活跃路径 `agent_envelope` / `agent_mesh` 在配置 `REGENT_AAR1_ENVELOPE_HMAC_KEY` 时走 `envelope_v1` HMAC；无密钥时保留 digest 兼容 |
 | G0 ExternalOperation 完整闭环 | Spec §9 / §25 | **半落地（已推进）**：服务层 + 调度 EO + Worker `tick`（stale→RECONCILING）+ `resolve_reconciling_via_query`（Deployment durable probe / 超期 MANUAL_REVIEW）已挂；跨 provider 真实网络 query→resolve 全路径仍待后续合入 |
 | ReleaseCandidate 人工闸门 | Spec §25 | **已强制**：P1 预览链创建 `RELEASE_APPROVAL` HumanTask，默认 `require_release_human_approval=true`，不再 auto-approve |
