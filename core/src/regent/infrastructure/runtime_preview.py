@@ -9,14 +9,21 @@ readiness. Evidence carries profile_hash + process pid/port for promotion gates.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
+import subprocess
+import sys
 import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from regent.agent.runtime_profile_v1 import parse_runtime_profile_v1
+from regent.agent.runtime_profile_v1 import (
+    RuntimeProfileV1,
+    parse_runtime_profile_v1,
+    profile_by_name,
+)
 from regent.infrastructure.deployment import DeploymentRequest, DeploymentResult
 from regent.infrastructure.preview_process import PreviewProcessSupervisor
 
@@ -47,6 +54,136 @@ def _entry_exists(root: Path, entry_module: str) -> bool:
         return True
     pkg = root / dotted
     return pkg.is_dir() and (pkg / "__init__.py").is_file()
+
+
+def _default_runtime_profile(workspace: Path | None = None) -> RuntimeProfileV1:
+    """Ship-first fallback when plan omitted runtime_profile."""
+    blob = ""
+    if workspace is not None:
+        for rel in ("requirements.txt", "src/app.py", "app.py", "main.py"):
+            path = workspace / rel
+            if path.is_file():
+                try:
+                    blob += path.read_text(encoding="utf-8", errors="ignore")[:4000]
+                except OSError:
+                    pass
+    lower = blob.lower()
+    name = "fastapi-web-v1" if ("fastapi" in lower or "uvicorn" in lower) else "flask-web-v1"
+    profile = profile_by_name(name)
+    assert profile is not None
+    return profile
+
+
+def _normalize_flask_layout(workspace: Path) -> dict[str, Any]:
+    """Copy root templates/static into src/ when Flask package is src.app.
+
+    Soft drafts often put templates/ at repo root while ``Flask(__name__)`` with
+    ``__name__='src.app'`` resolves templates under ``src/templates``.
+    """
+    notes: list[str] = []
+    src = workspace / "src"
+    if not src.is_dir():
+        return {"changed": False, "notes": notes}
+    for name in ("templates", "static"):
+        root_side = workspace / name
+        src_side = src / name
+        if root_side.is_dir() and not src_side.exists():
+            shutil.copytree(root_side, src_side)
+            notes.append(f"copied {name}/ -> src/{name}/")
+    return {"changed": bool(notes), "notes": notes}
+
+
+def _runtime_packages(profile: RuntimeProfileV1 | None, requirements_text: str) -> list[str]:
+    """Lean runtime packages for preview — skip pytest/dev to avoid PyPI timeouts."""
+    shape = (profile.project_shape if profile else "") or ""
+    lower = requirements_text.lower()
+    if shape == "fastapi-web" or "fastapi" in lower or "uvicorn" in lower:
+        return ["fastapi", "uvicorn"]
+    # Default Flask web (golden path).
+    return ["Flask>=3.0.0"]
+
+
+def _ensure_preview_deps(workspace: Path, profile: RuntimeProfileV1 | None) -> dict[str, Any]:
+    """Install lean runtime deps into a workspace-local venv for preview."""
+    reqs = workspace / "requirements.txt"
+    req_text = ""
+    if reqs.is_file():
+        try:
+            req_text = reqs.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            req_text = ""
+    if not req_text.strip() and profile is None:
+        return {"skipped": True, "reason": "no_requirements"}
+    venv = workspace / ".preview-venv"
+    marker = venv / ".regent-ready"
+    if marker.is_file():
+        return {"skipped": True, "reason": "venv_ready", "venv": str(venv)}
+    steps: list[dict[str, Any]] = []
+    create = subprocess.run(
+        [sys.executable, "-m", "venv", str(venv)],
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    steps.append({"cmd": "venv", "code": create.returncode, "err": (create.stderr or "")[-400:]})
+    if create.returncode != 0:
+        return {"ok": False, "steps": steps}
+    if os.name == "nt":
+        pip = venv / "Scripts" / "pip.exe"
+        venv_bin = venv / "Scripts"
+        venv_python = venv / "Scripts" / "python.exe"
+    else:
+        pip = venv / "bin" / "pip"
+        venv_bin = venv / "bin"
+        venv_python = venv / "bin" / "python"
+    packages = _runtime_packages(profile, req_text)
+    argv = [
+        str(pip),
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--default-timeout=60",
+        *packages,
+    ]
+    install = None
+    for attempt in range(1, 4):
+        install = subprocess.run(
+            argv,
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=240,
+            check=False,
+            env={
+                **os.environ,
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "HOME": str(workspace / ".preview-home"),
+            },
+        )
+        steps.append(
+            {
+                "cmd": " ".join(argv),
+                "attempt": attempt,
+                "code": install.returncode,
+                "err": (install.stderr or "")[-600:],
+                "out": (install.stdout or "")[-300:],
+            }
+        )
+        if install.returncode == 0:
+            break
+    if install is None or install.returncode != 0:
+        return {"ok": False, "steps": steps, "venv_python": str(venv_python)}
+    marker.write_text("ok", encoding="utf-8")
+    return {
+        "ok": True,
+        "steps": steps,
+        "venv": str(venv),
+        "venv_bin": str(venv_bin),
+        "venv_python": str(venv_python),
+        "packages": packages,
+    }
 
 
 class RuntimePreviewDeploymentProvider:
@@ -80,14 +217,14 @@ class RuntimePreviewDeploymentProvider:
             or dict(request.success_criteria or {}).get("runtime_profile")
             or {}
         )
-        preview_type = profile.preview_type if profile else "static"
+        # Ship-first: default missing profile to runtime process, never static zip greenwash.
+        preview_type = profile.preview_type if profile else "runtime"
         if preview_type == "static" or preview_type == "none":
             result = await self._static.deploy(request)
             self._deployments[request.idempotency_key] = result
             return result
 
         deployment_id = str(uuid.uuid4())
-        profile_hash = profile.content_hash if profile else "none"
         target = self._root / "runtime" / deployment_id
         target.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +236,7 @@ class RuntimePreviewDeploymentProvider:
                 evidence={
                     "provider": "runtime-preview",
                     "preview_type": preview_type,
-                    "profile_hash": profile_hash,
+                    "profile_hash": profile.content_hash if profile else "none",
                     "error": "build artifact not found for runtime preview",
                     "failure_code": "PREVIEW_FAILED",
                 },
@@ -123,7 +260,7 @@ class RuntimePreviewDeploymentProvider:
                 evidence={
                     "provider": "runtime-preview",
                     "preview_type": preview_type,
-                    "profile_hash": profile_hash,
+                    "profile_hash": profile.content_hash if profile else "none",
                     "error": f"materialize failed: {exc}",
                     "failure_code": "PREVIEW_FAILED",
                 },
@@ -131,23 +268,38 @@ class RuntimePreviewDeploymentProvider:
             self._deployments[request.idempotency_key] = result
             return result
 
+        # Soft/agentic plans often omit runtime_profile; infer after materialize.
+        if profile is None or not str(profile.start_command or "").strip():
+            profile = _default_runtime_profile(target)
+            preview_type = profile.preview_type if profile else "runtime"
+
+        layout_fix = _normalize_flask_layout(target)
+
+        profile_hash = profile.content_hash if profile else "none"
         entry_module = (profile.entry_module if profile else "") or ""
         if entry_module and not _entry_exists(target, entry_module):
-            shutil.rmtree(target, ignore_errors=True)
-            result = DeploymentResult(
-                external_request_id=request.idempotency_key,
-                status="FAILED",
-                evidence={
-                    "provider": "runtime-preview",
-                    "preview_type": preview_type,
-                    "profile_hash": profile_hash,
-                    "entry_module": entry_module,
-                    "error": f"entry module missing: {entry_module}",
-                    "failure_code": "PREVIEW_FAILED",
-                },
-            )
-            self._deployments[request.idempotency_key] = result
-            return result
+            # Common soft-draft layouts: app.py at root instead of src/app.py
+            for alt in ("app.py", "src/app.py", "main.py", "src/main.py"):
+                if (target / alt).is_file():
+                    # Keep start_command from profile; entry check only gates missing files.
+                    entry_module = ""
+                    break
+            if entry_module and not _entry_exists(target, entry_module):
+                shutil.rmtree(target, ignore_errors=True)
+                result = DeploymentResult(
+                    external_request_id=request.idempotency_key,
+                    status="FAILED",
+                    evidence={
+                        "provider": "runtime-preview",
+                        "preview_type": preview_type,
+                        "profile_hash": profile_hash,
+                        "entry_module": entry_module,
+                        "error": f"entry module missing: {entry_module}",
+                        "failure_code": "PREVIEW_FAILED",
+                    },
+                )
+                self._deployments[request.idempotency_key] = result
+                return result
 
         start_command = (profile.start_command if profile else "") or ""
         if not start_command.strip():
@@ -183,17 +335,48 @@ class RuntimePreviewDeploymentProvider:
             "workspace_path": str(target),
             "start_command": start_command,
             "live_preview": True,
+            "layout_fix": layout_fix,
         }
         if self._base_url:
             evidence["materialized_browse_url"] = (
                 f"{self._base_url}/preview/runtime/{deployment_id}/"
             )
 
+        install_info = _ensure_preview_deps(target, profile)
+        evidence["deps"] = install_info
+        if install_info.get("ok") is False:
+            shutil.rmtree(target, ignore_errors=True)
+            result = DeploymentResult(
+                external_request_id=request.idempotency_key,
+                status="FAILED",
+                evidence={
+                    **evidence,
+                    "error": "preview dependency install failed",
+                    "failure_code": "PREVIEW_FAILED",
+                },
+            )
+            self._deployments[request.idempotency_key] = result
+            return result
+
+        start_env: dict[str, str] = {}
+        venv_bin = install_info.get("venv_bin")
+        if not venv_bin and install_info.get("venv"):
+            venv_path = Path(str(install_info["venv"]))
+            venv_bin = str(
+                venv_path / ("Scripts" if os.name == "nt" else "bin")
+            )
+        if venv_bin:
+            start_env["PATH"] = f"{venv_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            venv_python = Path(venv_bin) / ("python.exe" if os.name == "nt" else "python")
+            if venv_python.is_file() and start_command.strip().startswith("python "):
+                start_command = f"{venv_python} {start_command.strip()[7:]}"
+
         try:
             handle = self._supervisor.start(
                 deployment_id=deployment_id,
                 workspace=target,
                 start_command=start_command,
+                env=start_env or None,
             )
             routes = list(
                 (profile.readiness_routes if profile else ())
@@ -223,6 +406,14 @@ class RuntimePreviewDeploymentProvider:
                 )
                 self._deployments[request.idempotency_key] = result
                 return result
+            (target / ".regent-preview-port").write_text(str(handle.port), encoding="utf-8")
+            advertise = (
+                os.environ.get("REGENT_PREVIEW_ADVERTISE_HOST")
+                or os.environ.get("HOSTNAME")
+                or "127.0.0.1"
+            )
+            evidence["advertise_host"] = advertise
+            evidence["docker_endpoint"] = f"http://{advertise}:{handle.port}/"
         except Exception as exc:  # noqa: BLE001 — fail closed
             self._supervisor.stop(deployment_id)
             shutil.rmtree(target, ignore_errors=True)

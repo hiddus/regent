@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
+import os
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -33,6 +34,7 @@ from regent.api.reports import router as reports_router
 from regent.api.runtime_profiles import router as runtime_profiles_router
 from regent.api.scheduler import router as scheduler_router
 from regent.api.self_improvement import router as self_improvement_router
+from regent.api.harness_evolution import router as harness_evolution_router
 from regent.api.side_effects import router as side_effects_router
 from regent.api.tools import router as tools_router
 from regent.api.uploads import router as uploads_router
@@ -303,6 +305,122 @@ def create_app() -> FastAPI:
             },
         )
 
+    # Runtime proxy MUST be registered before /preview/{project_id}/... or
+    # FastAPI treats "runtime" as a UUID path param and returns 422.
+    @app.api_route(
+        "/preview/runtime/{deployment_id}/",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+        response_model=None,
+    )
+    @app.api_route(
+        "/preview/runtime/{deployment_id}/{path:path}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def preview_runtime_proxy(
+        request: Request, deployment_id: str, path: str = ""
+    ) -> Any:
+        """Reverse-proxy live runtime previews; rewrite root-absolute URLs."""
+        import httpx
+        from fastapi.responses import Response as FastAPIResponse
+
+        from regent.infrastructure.preview_path_rewrite import (
+            rewrite_location_header,
+            rewrite_preview_css,
+            rewrite_preview_html,
+        )
+
+        root = (Path(settings.workspace_root) / "previews" / "runtime" / deployment_id).resolve()
+        base = (Path(settings.workspace_root) / "previews" / "runtime").resolve()
+        if base not in root.parents and root != base:
+            raise HTTPException(status_code=404, detail="preview not found")
+        port_file = root / ".regent-preview-port"
+        if not port_file.is_file():
+            raise HTTPException(status_code=404, detail="preview process not registered")
+        try:
+            port = int(port_file.read_text(encoding="utf-8").strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="invalid preview port") from exc
+        suffix = path.lstrip("/") if path else ""
+        hosts = [
+            os.environ.get("REGENT_PREVIEW_ADVERTISE_HOST", "").strip(),
+            "regent-worker",
+            "regent-worker-2",
+            "regent-worker-3",
+            "127.0.0.1",
+        ]
+        body = await request.body()
+        forward_headers = {
+            key: value
+            for key, value in request.headers.items()
+            if key.lower()
+            not in {
+                "host",
+                "content-length",
+                "connection",
+                "transfer-encoding",
+            }
+        }
+        last_err = "unreachable"
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            for host in [h for h in hosts if h]:
+                url = f"http://{host}:{port}/{suffix}"
+                try:
+                    upstream = await client.request(
+                        request.method,
+                        url,
+                        content=body if body else None,
+                        headers=forward_headers,
+                    )
+                    media = (upstream.headers.get("content-type") or "").lower()
+                    content = upstream.content
+                    if "text/html" in media and content:
+                        try:
+                            text_html = content.decode(
+                                upstream.charset_encoding or "utf-8", errors="replace"
+                            )
+                        except Exception:  # noqa: BLE001
+                            text_html = content.decode("utf-8", errors="replace")
+                        text_html = rewrite_preview_html(
+                            text_html, deployment_id=deployment_id
+                        )
+                        content = text_html.encode("utf-8")
+                    elif "css" in media and content:
+                        try:
+                            text_css = content.decode(
+                                upstream.charset_encoding or "utf-8", errors="replace"
+                            )
+                        except Exception:  # noqa: BLE001
+                            text_css = content.decode("utf-8", errors="replace")
+                        text_css = rewrite_preview_css(
+                            text_css, deployment_id=deployment_id
+                        )
+                        content = text_css.encode("utf-8")
+                    out_headers = {
+                        "Content-Security-Policy": PREVIEW_CONTENT_SECURITY_POLICY,
+                        "X-Content-Type-Options": "nosniff",
+                        "Referrer-Policy": "no-referrer",
+                        "X-Regent-Preview-Upstream": host,
+                        "X-Regent-Preview-Path-Rewrite": "1",
+                    }
+                    location = upstream.headers.get("location")
+                    if location:
+                        out_headers["Location"] = rewrite_location_header(
+                            location, deployment_id=deployment_id
+                        )
+                    return FastAPIResponse(
+                        content=content,
+                        status_code=upstream.status_code,
+                        media_type=upstream.headers.get("content-type"),
+                        headers=out_headers,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_err = str(exc)
+                    continue
+        raise HTTPException(status_code=502, detail=f"preview upstream failed: {last_err}")
+
     @app.get("/preview/{project_id}/{release_id}/", include_in_schema=False)
     async def preview_index(project_id: uuid.UUID, release_id: uuid.UUID) -> FileResponse:
         return preview_file(project_id, release_id, "index.html")
@@ -333,6 +451,7 @@ def create_app() -> FastAPI:
     app.include_router(product_creation_router)
     app.include_router(side_effects_router)
     app.include_router(self_improvement_router)
+    app.include_router(harness_evolution_router)
     app.include_router(experiments_router)
     app.include_router(feedback_router)
     app.include_router(scheduler_router)

@@ -1,8 +1,11 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { DiagnosticDelivery, Message } from '../lib/types'
 import { buildTimeline, type ProgressNodeExtras } from '../lib/progressNodes'
 import { collapseRetryClusters } from '../lib/retryClusters'
+import { isQuietActive, latestMessageTimestamp } from '../lib/liveActivity'
+import type { LiveAction } from '../lib/liveActivity'
 import { ConfirmationCard } from './ConfirmationCard'
+import { QuietExecutionCard } from './QuietExecutionCard'
 import { RecoveryCard } from './RecoveryCard'
 import { TaskCard, type TaskActionOptions } from './TaskCard'
 import { ProgressNodeCard } from './ProgressNodeCard'
@@ -23,6 +26,8 @@ interface MessageListProps {
   goalDiagnostic?: DiagnosticDelivery | null
   executionStage?: string | null
   agentLoopExit?: Record<string, unknown> | null
+  generationProgress?: string | null
+  liveAction?: LiveAction | null
   toolEvents?: Record<string, unknown>[]
   liveTool?: string | null
   onConfirm: (projectId: string, goalId: string, hash: string) => void
@@ -32,6 +37,7 @@ interface MessageListProps {
   onOpenPreview?: () => void
   onOpenReview?: () => void
   onExampleSend?: (text: string) => void
+  onQuickAction?: (text: string) => void
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -276,6 +282,7 @@ function MessageItem({
             metadata={m.metadata}
             canConfirm={isAwaiting}
             needsUserFork={showForkActions}
+            docked={!!stickyGate && (isAwaiting || showForkActions)}
             onConfirm={() => {
               const pid = String(
                 m.metadata?.app_project_id || currentProjectId || '',
@@ -322,6 +329,8 @@ export function MessageList({
   goalDiagnostic,
   executionStage,
   agentLoopExit,
+  generationProgress = null,
+  liveAction = null,
   toolEvents = [],
   liveTool = null,
   onConfirm,
@@ -331,7 +340,14 @@ export function MessageList({
   onOpenPreview,
   onOpenReview,
   onExampleSend,
+  onQuickAction,
 }: MessageListProps) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15_000)
+    return () => clearInterval(id)
+  }, [])
+
   const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
   const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
 
@@ -359,6 +375,15 @@ export function MessageList({
   const exitKind = String(agentLoopExit?.exit_kind || '')
   const resultBundle = (agentLoopExit?.result_bundle || null) as Record<string, unknown> | null
   const showResultCard = exitKind === 'COMPLETE' || exitKind === 'STOP'
+
+  const executionQuiet = isQuietActive({
+    goalStatus,
+    generationProgress,
+    liveAction,
+    lastProgressAt: latestMessageTimestamp(messages),
+    now,
+  })
+  const showQuietGate = executionQuiet && !showPinnedRecovery && !showResultCard
 
   // Must run before any early return — hooks order must be stable.
   const timeline = useMemo(
@@ -408,7 +433,7 @@ export function MessageList({
     }
   })
 
-  // Sticky the last unresolved gate message in the stream.
+  // Sticky the last unresolved gate — keep it reachable without eating the viewport (cards stay slim).
   let stickyMessageId: string | null = null
   for (let i = timeline.length - 1; i >= 0; i -= 1) {
     const item = timeline[i]
@@ -451,13 +476,12 @@ export function MessageList({
             const preferCompressed =
               liveMode &&
               (item.node.status === 'done' || item.node.status === 'failed') &&
-              idx !== lastSettledNodeIdx &&
-              idx !== lastLiveNodeIdx
+              (executionQuiet || (idx !== lastSettledNodeIdx && idx !== lastLiveNodeIdx))
             return (
               <ProgressNodeCard
                 key={`node-${item.node.key}-${idx}`}
                 node={item.node}
-                liveMode={liveMode}
+                liveMode={liveMode && !executionQuiet}
                 preferCompressed={preferCompressed}
               />
             )
@@ -488,11 +512,23 @@ export function MessageList({
             />
           )
         })}
-        {showPinnedRecovery && goalDiagnostic && (
-          <article className="message assistant gate-sticky">
-            <div className="avatar">R</div>
+        {showQuietGate && (
+          <article className="message assistant gate-sticky gate-slim">
             <div className="body">
-              <div className="meta">Regent</div>
+              <QuietExecutionCard
+                lastProgressAt={latestMessageTimestamp(messages)}
+                now={now}
+                onContinue={() =>
+                  onQuickAction?.('继续尝试，请根据上次失败重新规划')
+                }
+                onStop={() => onQuickAction?.('停止执行')}
+              />
+            </div>
+          </article>
+        )}
+        {showPinnedRecovery && goalDiagnostic && (
+          <article className="message assistant gate-sticky gate-slim">
+            <div className="body">
               <RecoveryCard
                 delivery={goalDiagnostic}
                 summary={goalDiagnostic.summary}
@@ -517,6 +553,23 @@ export function MessageList({
                   Array.isArray(resultBundle?.open_items)
                     ? (resultBundle!.open_items as string[])
                     : []
+                }
+                artifacts={
+                  Array.isArray(resultBundle?.artifacts)
+                    ? (resultBundle!.artifacts as Array<{
+                        uri: string
+                        label?: string
+                        kind?: string
+                      }>)
+                    : resultBundle?.artifact_uri
+                      ? [
+                          {
+                            uri: String(resultBundle.artifact_uri),
+                            label: '主产物',
+                            kind: 'primary',
+                          },
+                        ]
+                      : []
                 }
                 previewUrl={
                   resultBundle?.preview_url ? String(resultBundle.preview_url) : null

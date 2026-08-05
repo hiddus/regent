@@ -74,14 +74,25 @@ class ContextAssembler:
             "Rules:\n"
             "- Step 0: before write_file/edit_file/run_command, call todo_write with a concrete checklist "
             "(usually ≥3 steps). Keep at most one in_progress; mark completed as you go.\n"
+            "- Before submit: every todo must be completed or cancelled; open items block delivery.\n"
             "- If requirements are unclear or a risky choice is needed, call ask_user_question "
             "(structured options) instead of guessing.\n"
             f"- HTTP app object MUST live at `{entry}` (Profile entry_module:entry_object).\n"
+            "- Smoke only the Profile/criteria declared routes (usually `/`). "
+            "Do NOT invent `/health` or `/ready` unless the Profile declares them.\n"
+            "- Preview must start a real HTTP process that serves the app; static zip alone is not enough "
+            "for flask/fastapi Goals.\n"
             "- Prefer persistence + empty states over fake placeholder users/cards.\n"
+            "- Visual quality is mandatory: designed CSS (layout, typography, color), `<main>`, "
+            "and working list→detail navigation. Browser-default unstyled pages fail product QA.\n"
+            "- Prefer relative href/src (no leading `/`) so Preview path-prefix proxy keeps CSS "
+            "and detail pages working.\n"
             "- Stay within planned_paths when possible; create supporting files as needed.\n"
             "- When done, ensure requirements.txt, README.md, and a working entrypoint exist.\n"
-            "- Do not claim success until you have verified the app can start.\n"
+            "- Do not claim success until you have verified the app can start AND the public "
+            "Preview URL loads styles + at least one content detail route.\n"
             "- Workspace context only lists paths; call read_file before editing unknown content.\n"
+            "- When RECENT FAILURES / failure envelopes appear, fix those exact errors before new features.\n"
         )
 
     def static_prefix_text(self) -> str:
@@ -259,6 +270,7 @@ class ContextAssembler:
         gap_reasons = list(acceptance.get("delivery_gap_reasons") or [])
         lessons = list(acceptance.get("failure_lessons") or [])
         constraints = list(acceptance.get("learned_constraints") or [])
+        envelopes = list(acceptance.get("failure_envelopes") or [])
         lines = ["══════ RECENT FAILURES ══════"]
         resume_brief = str(acceptance.get("session_resume_brief") or "").strip()
         if resume_brief:
@@ -279,6 +291,26 @@ class ContextAssembler:
         if constraints:
             lines.append("Learned constraints from prior failures:")
             lines.extend(f"  - {c}" for c in constraints[:12])
+        if envelopes:
+            lines.append("Build/preview/smoke failure envelopes (fix these first):")
+            for env in envelopes[-4:]:
+                if not isinstance(env, dict):
+                    continue
+                stage = env.get("stage") or env.get("failure_stage") or "?"
+                summary = (
+                    env.get("summary")
+                    or env.get("error")
+                    or env.get("message")
+                    or env.get("detail")
+                    or ""
+                )
+                lines.append(f"  - stage={stage}: {str(summary)[:400]}")
+                for key in ("stderr", "stdout", "log_tail", "evidence"):
+                    blob = env.get(key)
+                    if isinstance(blob, str) and blob.strip():
+                        lines.append(f"      {key}: {blob.strip()[:600]}")
+                    elif isinstance(blob, dict) and blob.get("error"):
+                        lines.append(f"      {key}.error: {str(blob.get('error'))[:400]}")
         if lessons:
             lines.append("Prior failure lessons (absorb before regenerating):")
             for lesson in lessons[-4:]:

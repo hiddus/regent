@@ -45,11 +45,27 @@
     },
     {
       "skill_id": "ui",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "title": "UI",
-      "description": "Minimal usable UI bound to real backend actions — not a demo poster.",
-      "applies_when": ["ui", "frontend", "template", "form", "page", "dashboard", "website", "页面", "表单", "看板", "地图", "前端"],
-      "gap_codes": ["STATIC_FAILED", "forbid-pure-static-backend", "SMOKE_FAILED", "presentation"]
+      "description": "Designed product UI with real actions, stylesheet substance, and clickable list→detail — not a browser-default dump.",
+      "applies_when": ["ui", "frontend", "template", "form", "page", "dashboard", "website", "页面", "表单", "看板", "地图", "前端", "样式", "详情"],
+      "gap_codes": ["STATIC_FAILED", "forbid-pure-static-backend", "SMOKE_FAILED", "presentation", "stylesheet-present", "stylesheet-substance", "styled-surface", "semantic-main", "preview-asset-reachability", "preview-internal-nav"]
+    },
+    {
+      "skill_id": "product",
+      "version": "1.0.0",
+      "title": "Product (PM)",
+      "description": "Goal attainment, information architecture, and operable product acceptance — not process-up alone.",
+      "applies_when": ["product", "运营", "活跃", "用户", "情报", "digest", "feed", "今日必读", "acceptance", "交付", "pm"],
+      "gap_codes": ["min-visible-text", "forbid-demo-shell", "forbid-demo-copy", "forbid-placeholder-content", "goal-semantic-alignment", "product-structure"]
+    },
+    {
+      "skill_id": "agent-optimization",
+      "version": "1.0.0",
+      "title": "Agent Optimization (Harness Evolution)",
+      "description": "PenguinHarness-style loop: evaluate product QA gaps, diagnose, edit LESSONS, keep only on strict improvement.",
+      "applies_when": ["self-evolution", "自进化", "harness", "optimize agent", "lesson", "benchmark"],
+      "gap_codes": ["PREVIEW_PRODUCT_QA_FAILED", "stylesheet-substance", "styled-surface", "preview-internal-nav"]
     },
     {
       "skill_id": "web-app-scaffold",

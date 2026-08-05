@@ -27,7 +27,7 @@ __all__ = [
 @dataclass(frozen=True, slots=True)
 class AgentBudget:
     max_turns: int = 40
-    max_tokens: int = 200_000
+    max_tokens: int = 400_000
     max_wall_seconds: int = 900
 
 

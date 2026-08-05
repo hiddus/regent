@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # DeepSeek V4 enables thinking by default; CoT shares max_tokens with content/tools.
     # Agent tool loops default to disabled to avoid empty finish_reason=length.
     model_thinking_mode: Literal["disabled", "enabled", "default"] = "disabled"
+    # Ship-first default: always agentic. artifact-backed is kill-switch fallback only.
     generation_strategy: Literal["artifact-backed", "agentic"] = "agentic"
     generation_strategy_kill_switch: bool = False
     generation_strategy_fallback: Literal["artifact-backed", "agentic"] = "artifact-backed"
@@ -58,7 +59,7 @@ class Settings(BaseSettings):
     delivery_batch_enabled: bool = False
     delivery_profile: Literal["aggressive", "balanced", "conservative"] = "balanced"
     agent_max_turns: int = Field(default=40, ge=1, le=200)
-    agent_max_tokens: int = Field(default=200_000, ge=1_000)
+    agent_max_tokens: int = Field(default=400_000, ge=1_000)
     agent_max_wall_seconds: int = Field(default=900, ge=30)
     agent_nested_repair_max: int = Field(default=4, ge=0, le=8)
     # M1: VerificationGap prefers Session chassis; A0 forbids silent auto-resume.

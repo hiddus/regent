@@ -132,9 +132,22 @@ Product fidelity is mandatory:
   send_from_directory / StaticFiles-only backends fail forbid-pure-static-backend.
   Never use http.server / SimpleHTTPRequestHandler.
 - Visual product quality is mandatory: include a real stylesheet (<style> and/or
-  styles.css) with intentional layout (max-width, spacing, typography, color, list/card
-  treatment). Bare default-browser black text + blue underlined links is a failed
-  delivery.
+  static/style.css) with ≥800 characters of intentional design — max-width container,
+  deliberate font stack (not Times/Arial-only), CSS variables/color tokens, spacing,
+  list/card treatment, and :hover. Bare default-browser black text + blue underlined
+  links is a failed delivery. Avoid generic AI-template looks (purple gradients,
+  cream+terracotta brochure, flat blue-gray system-font card dumps).
+- Information architecture for feed/digest/news Goals: brand masthead, highlighted
+  "今日必读" (or equivalent), category sections, list→HTML detail pages, and a working
+  refresh/control wired to a real backend route (e.g. POST /api/refresh).
+- Preview is served under a path prefix (/preview/runtime/<id>/). Prefer relative
+  asset and navigation URLs without a leading slash (static/style.css, item/123),
+  or set <base href> appropriately. Root-absolute href="/..." and src="/..." break
+  CSS and detail pages in Preview — treat that as a delivery failure.
+- Detail / item / article pages must be real routes that return HTML with substantial
+  visible body text and are reachable from list card titles (<a href>). Dead "#"
+  links or routes that 404 under Preview are not shippable. Live Preview QA requires
+  ≥80% of probed detail links to succeed for list products.
 - If acceptance_contract.delivery_policy is goal_attainment_retry, prior attempt failed
   review; fix the listed delivery_gap_reasons and do not emit another unreliable surface.
 

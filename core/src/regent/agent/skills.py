@@ -174,11 +174,17 @@ def load_skill_catalog(*, root: Path | None = None) -> list[SkillCatalogEntry]:
     return out
 
 
-def load_skill_manifest(skill_id: str, *, root: Path | None = None) -> SkillManifest:
+def load_skill_manifest(
+    skill_id: str,
+    *,
+    root: Path | None = None,
+    lessons_workspace: Path | None = None,
+) -> SkillManifest:
     """Stage-3: load full guidance for a selected skill.
 
     Prefer SKILL.json + GUIDANCE.md (legacy Regent). Fall back to agentskills
-    SKILL.md (frontmatter + body).
+    SKILL.md (frontmatter + body). When ``lessons_workspace`` is set, append
+    evolved LESSONS.md overlays (PenguinHarness-style harness state).
     """
     base = root or SKILLS_ROOT
     json_path = base / skill_id / "SKILL.json"
@@ -190,6 +196,7 @@ def load_skill_manifest(skill_id: str, *, root: Path | None = None) -> SkillMani
         # Optional SKILL.md body can append (agentskills dual-format packs).
         if md_path.is_file() and not guidance:
             _, guidance = _parse_simple_frontmatter(md_path.read_text(encoding="utf-8"))
+        guidance = _merge_lessons(guidance, skill_id, lessons_workspace)
         payload = {**raw, "guidance": guidance}
         digest = _hash_payload(payload)
         return SkillManifest(
@@ -206,6 +213,7 @@ def load_skill_manifest(skill_id: str, *, root: Path | None = None) -> SkillMani
     if md_path.is_file():
         meta, guidance = _parse_simple_frontmatter(md_path.read_text(encoding="utf-8"))
         sid = str(meta.get("name") or meta.get("skill_id") or skill_id)
+        guidance = _merge_lessons(guidance, sid, lessons_workspace)
         payload = {**meta, "guidance": guidance}
         digest = _hash_payload(payload)
         applies = meta.get("applies_when") or []
@@ -229,6 +237,31 @@ def load_skill_manifest(skill_id: str, *, root: Path | None = None) -> SkillMani
             content_hash=digest,
         )
     raise FileNotFoundError(f"skill not found: {skill_id}")
+
+
+def _merge_lessons(
+    guidance: str, skill_id: str, lessons_workspace: Path | None
+) -> str:
+    """Append evolved LESSONS.md when present under workspace harness-lessons/."""
+    if lessons_workspace is None:
+        return guidance
+    path = Path(lessons_workspace) / "harness-lessons" / skill_id / "LESSONS.md"
+    if not path.is_file():
+        # Also allow lessons_workspace to already be the harness-lessons root.
+        alt = Path(lessons_workspace) / skill_id / "LESSONS.md"
+        path = alt if alt.is_file() else path
+    if not path.is_file():
+        return guidance
+    lessons = path.read_text(encoding="utf-8").strip()
+    if not lessons:
+        return guidance
+    block = (
+        "\n\n## Evolved harness lessons (self-evolution)\n"
+        "These lessons were accepted only after strict score improvement. "
+        "Follow them; do not weaken product QA gates.\n\n"
+        f"{lessons}\n"
+    )
+    return (guidance or "") + block
 
 
 def list_builtin_skill_ids(*, root: Path | None = None) -> list[str]:
@@ -301,6 +334,8 @@ def select_skills_for_goal(
     *,
     enabled: bool = True,
     root: Path | None = None,
+    lessons_workspace: Path | None = None,
+    gap_codes: list[str] | None = None,
 ) -> list[SkillManifest]:
     """Lightweight keyword router with progressive disclosure (catalog → full load)."""
     if not enabled:
@@ -312,6 +347,12 @@ def select_skills_for_goal(
     for entry in catalog:
         if any(token.lower() in text or token in raw for token in entry.applies_when):
             chosen_ids.append(entry.skill_id)
+    # Route by open delivery / live-QA gap codes (PenguinHarness evaluate→skill).
+    for gap in gap_codes or []:
+        head = str(gap).split(":", 1)[-1].strip()
+        for entry in catalog:
+            if head in entry.gap_codes or str(gap) in entry.gap_codes:
+                chosen_ids.append(entry.skill_id)
     # English web shapes.
     if not chosen_ids and any(k in text for k in ("app", "web", "flask", "api", "site")):
         ids = {e.skill_id for e in catalog}
@@ -324,7 +365,7 @@ def select_skills_for_goal(
         or (has_cjk and len(raw.strip()) >= 4)
     ):
         ids = {e.skill_id for e in catalog}
-        for sid in ("runtime-contract", "web-app-scaffold", "persistence", "ui"):
+        for sid in ("runtime-contract", "web-app-scaffold", "persistence", "ui", "product"):
             if sid in ids:
                 chosen_ids.append(sid)
     # Deduplicate preserving order; load full guidance only now.
@@ -334,7 +375,11 @@ def select_skills_for_goal(
         if sid in seen:
             continue
         seen.add(sid)
-        chosen.append(load_skill_manifest(sid, root=root))
+        chosen.append(
+            load_skill_manifest(
+                sid, root=root, lessons_workspace=lessons_workspace
+            )
+        )
     return chosen
 
 

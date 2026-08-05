@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { PlanItem } from '../lib/types'
 import type { LiveActivity } from '../lib/liveActivity'
-import { deriveLiveLabel } from '../lib/liveActivity'
+import { deriveLiveLabel, isQuietActive } from '../lib/liveActivity'
 
 const STAGE_LABELS: Record<string, string> = {
   NOT_STARTED: '准备开始',
@@ -25,7 +25,9 @@ const STAGE_LABELS: Record<string, string> = {
   DISCOVERY_NO_SELECT_NEEDS_HUMAN: '调研未选定方案，需要你介入',
   RESEARCH_MORE: '正在深入调研...',
   RESEARCH_MORE_NEEDS_HUMAN: '调研取证不足，需要你介入',
-  PREVIEW_SUCCEEDED: '预览已就绪',
+  PREVIEW_SUCCEEDED: '预览可用（待产品验收）',
+  PREVIEW_PRODUCT_QA_FAILED: '产品面未达标，正在修复',
+  SMOKE_FAILED: '预览冒烟未通过',
   GATE_INSUFFICIENT_EVIDENCE: '需要更多数据',
   GATE_PASSED: '验证已通过',
   GATE_FAILED: '验证未通过，正在重试',
@@ -36,6 +38,20 @@ const STAGE_LABELS: Record<string, string> = {
   DELIVERY_SOFT_PAUSE: '自动修复已暂停',
   DELIVERED_FOR_REVIEW: '成果已交付审阅',
   FAILED: '遇到问题，正在处理',
+}
+
+function stageDisplayLabel(stage: string, meta: Record<string, unknown>): string {
+  if (stage === 'PREVIEW_SUCCEEDED') {
+    if (meta.product_surface_ready === true || meta.product_surface_ready === 'true') {
+      return meta.delivery_soft_pass === true || meta.delivery_soft_pass === 'true'
+        ? '产品面就绪（待验收）'
+        : '产品面就绪'
+    }
+    if (meta.delivery_soft_pass === true || meta.delivery_soft_pass === 'true') {
+      return '预览可用（待产品验收）'
+    }
+  }
+  return STAGE_LABELS[stage] || stage
 }
 
 const GENERATION_PROGRESS_LABELS: Record<string, string> = {
@@ -150,21 +166,32 @@ export function StageBar({ status, planItems = [], liveActivity, onQuickAction }
   const meta = goal.metadata || {}
   const stage = (meta.execution_stage as string) || goal.execution_stage?.stage || goal.status
   const genProgress = String(status.generation_progress || meta.generation_progress || '')
-  const label =
-    GENERATION_PROGRESS_LABELS[genProgress] ||
-    STAGE_LABELS[stage] ||
-    GOAL_STATUS_LABELS[goal.status] ||
-    stage
-  const goalStatusLabel = GOAL_STATUS_LABELS[goal.status] || goal.status
-  const live = deriveLiveLabel(
-    liveActivity ?? { connection: 'idle', lastProgressAt: null, lastHeartbeatAt: null, liveAction: null },
-    goal.status,
+  const activity =
+    liveActivity ?? {
+      connection: 'idle' as const,
+      lastProgressAt: null,
+      lastHeartbeatAt: null,
+      liveAction: null,
+    }
+  const quietActive = isQuietActive({
+    goalStatus: goal.status,
+    generationProgress: genProgress,
+    liveAction: activity.liveAction,
+    lastProgressAt: activity.lastProgressAt,
     now,
-  )
+  })
+  const label = quietActive
+    ? '执行暂无进展'
+    : GENERATION_PROGRESS_LABELS[genProgress] ||
+      stageDisplayLabel(stage, meta as Record<string, unknown>) ||
+      GOAL_STATUS_LABELS[goal.status] ||
+      stage
+  const goalStatusLabel = GOAL_STATUS_LABELS[goal.status] || goal.status
+  const live = deriveLiveLabel(activity, goal.status, now)
 
-  const liveSummary = liveActivity?.liveAction?.summary
-  const actionAt = liveActivity?.liveAction?.updated_at
-    ? Date.parse(liveActivity.liveAction.updated_at)
+  const liveSummary = activity.liveAction?.summary
+  const actionAt = activity.liveAction?.updated_at
+    ? Date.parse(activity.liveAction.updated_at)
     : NaN
   const actionElapsed = !Number.isNaN(actionAt)
     ? Math.max(0, Math.floor((now - actionAt) / 1000))
@@ -191,6 +218,7 @@ export function StageBar({ status, planItems = [], liveActivity, onQuickAction }
 
   const isActive = goal.status === 'ACTIVE' || goal.status === 'WAITING_HUMAN' || goal.status === 'PAUSED'
   const canContinue =
+    quietActive ||
     goal.status === 'EXHAUSTED' ||
     goal.status === 'BLOCKED' ||
     goal.status === 'FAILED' ||
@@ -199,6 +227,7 @@ export function StageBar({ status, planItems = [], liveActivity, onQuickAction }
     stage === 'DELIVERY_SOFT_PAUSE'
 
   const hideRunningStrip =
+    quietActive ||
     genProgress === 'needs_continue' ||
     genProgress === 'stalled' ||
     stage === 'DELIVERY_SOFT_PAUSE' ||
@@ -210,19 +239,30 @@ export function StageBar({ status, planItems = [], liveActivity, onQuickAction }
     stage === 'GENERATING' ||
     stage === 'DELIVERY_SOFT_PAUSE'
 
+  const showLivePulse = !quietActive && (live.tone === 'live' || (isActive && live.tone !== 'stale'))
+
   return (
     <div className="stage-bar-wrap">
       <div className="stage-bar">
         <div className="stage-bar-left">
-          <span className={`stage-badge ${goal.status.toLowerCase()} ${live.tone === 'live' ? 'is-live' : ''}`}>
-            {(live.tone === 'live' || isActive) && <span className="live-pulse-dot" aria-hidden />}
+          <span
+            className={[
+              'stage-badge',
+              goal.status.toLowerCase(),
+              live.tone === 'live' && !quietActive ? 'is-live' : '',
+              quietActive ? 'is-quiet' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
+            {showLivePulse && <span className="live-pulse-dot" aria-hidden />}
             {label}
           </span>
           {goal.status !== 'DRAFT' && (
             <span className="stage-goal-status">{goalStatusLabel}</span>
           )}
-          <span className={`stage-live tone-${live.tone}`} title="实时连接与进展">
-            {live.text}
+          <span className={`stage-live tone-${quietActive ? 'stale' : live.tone}`} title="实时连接与进展">
+            {quietActive ? '已开跑但暂无新进展，可继续或补充指令' : live.text}
           </span>
         </div>
 
@@ -243,7 +283,9 @@ export function StageBar({ status, planItems = [], liveActivity, onQuickAction }
           </div>
         ) : (
           <div className="stage-plan-ratio muted">
-            <span className="stage-plan-label">清单尚未生成</span>
+            <span className="stage-plan-label">
+              {quietActive ? '清单未生成 · 执行空转' : '清单尚未生成'}
+            </span>
           </div>
         )}
 
@@ -253,14 +295,17 @@ export function StageBar({ status, planItems = [], liveActivity, onQuickAction }
               停止
             </button>
           )}
-          {goal.status === 'ACTIVE' && genProgress !== 'stalled' && (
+          {goal.status === 'ACTIVE' && genProgress !== 'stalled' && !quietActive && (
             <button className="qa-btn" onClick={() => onQuickAction('暂停执行')}>暂停</button>
           )}
           {goal.status === 'PAUSED' && (
             <button className="qa-btn" onClick={() => onQuickAction('恢复执行')}>恢复</button>
           )}
           {canContinue && (
-            <button className="qa-btn" onClick={() => onQuickAction('继续尝试，请根据上次失败重新规划')}>
+            <button
+              className={`qa-btn${quietActive ? ' primary' : ''}`}
+              onClick={() => onQuickAction('继续尝试，请根据上次失败重新规划')}
+            >
               继续此目标
             </button>
           )}
@@ -282,11 +327,13 @@ export function StageBar({ status, planItems = [], liveActivity, onQuickAction }
         </div>
       )}
       {hideRunningStrip && (
-        <div className="core-live-strip tone-idle">
+        <div className={`core-live-strip tone-${quietActive ? 'stale' : 'idle'}`}>
           <span className="core-live-text">
-            {genProgress === 'stalled'
-              ? '生成已停滞，可点「继续此目标」或补充方向'
-              : '自动修复已暂停；当前成果已保存，可查看源码或继续'}
+            {quietActive
+              ? '执行已开跑但暂无新进展；可点「继续此目标」，或在对话里补充方向'
+              : genProgress === 'stalled'
+                ? '生成已停滞，可点「继续此目标」或补充方向'
+                : '自动修复已暂停；当前成果已保存，可查看源码或继续'}
           </span>
         </div>
       )}

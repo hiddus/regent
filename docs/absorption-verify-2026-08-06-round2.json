@@ -1,0 +1,12 @@
+{
+  "verify_ok": true,
+  "goal_id": "dff5d0ad-97fc-4202-b99e-fe44ce1e7151",
+  "project_id": "3e7f2d96-a42d-4fbe-b0dc-e9e98f2ebe21",
+  "final": {
+    "status": "ACTIVE",
+    "stage": "PREVIEW_SUCCEEDED",
+    "preview_url": "http://118.31.171.159:8000/preview/runtime/7259a4fc-ac43-40ba-a8b3-aaec041589e1/",
+    "preview_ready": "true",
+    "n_corr": 2
+  }
+}

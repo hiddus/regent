@@ -17,6 +17,7 @@ import {
   deriveAgents,
 } from '../lib/agents'
 import { api } from '../lib/api'
+import { isQuietActive, latestMessageTimestamp } from '../lib/liveActivity'
 import { ResultCard } from './ResultCard'
 
 export type WorkspaceTab = 'plan' | 'run' | 'changes' | 'preview' | 'review'
@@ -440,9 +441,23 @@ export function ArtifactPanel({
                   exitKind="COMPLETE"
                   summary={String(bundle.summary || '本轮已完成')}
                   openItems={Array.isArray(bundle.open_items) ? (bundle.open_items as string[]) : []}
+                  artifacts={
+                    Array.isArray(bundle.artifacts)
+                      ? (bundle.artifacts as Array<{ uri: string; label?: string; kind?: string }>)
+                      : bundle.artifact_uri
+                        ? [
+                            {
+                              uri: String(bundle.artifact_uri),
+                              label: '主产物',
+                              kind: 'primary',
+                            },
+                          ]
+                        : []
+                  }
                   previewUrl={bundle.preview_url ? String(bundle.preview_url) : previewUrl}
                   onOpenPreview={() => setTab('preview')}
                   onOpenReview={() => setTab('review')}
+                  onOpenArtifacts={() => setTab('changes')}
                 />
               )}
               {exitKind === 'STOP' && (
@@ -455,7 +470,21 @@ export function ArtifactPanel({
 
               {planItems.length === 0 ? (
                 <div className="artifact-empty">
-                  <p>尚未生成工作清单 — Agent 规划中…</p>
+                  <p>
+                    {isQuietActive({
+                      goalStatus: status?.goal?.status,
+                      generationProgress: String(
+                        status?.generation_progress ||
+                          (status?.goal?.metadata as Record<string, unknown> | undefined)
+                            ?.generation_progress ||
+                          '',
+                      ),
+                      liveAction,
+                      lastProgressAt: latestMessageTimestamp(messages),
+                    })
+                      ? '尚未生成工作清单 — 执行已开跑但暂无进展（可在对话里点「继续此目标」或补充指令）'
+                      : '尚未生成工作清单 — Agent 规划中…'}
+                  </p>
                 </div>
               ) : (
                 <ul className="plan-checklist">

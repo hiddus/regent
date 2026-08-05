@@ -5,6 +5,8 @@ export type AskType = 'plan_approve' | 'permission' | 'ask_user' | 'recovery'
 interface InterventionCardProps {
   askType: AskType
   title: string
+  /** Override chip text (e.g. settled plan that no longer needs approval). */
+  chip?: string
   badge?: string
   children: ReactNode
   compact?: boolean
@@ -22,6 +24,7 @@ const ASK_LABEL: Record<AskType, string> = {
 export function InterventionCard({
   askType,
   title,
+  chip,
   badge,
   children,
   compact = false,
@@ -40,7 +43,7 @@ export function InterventionCard({
       data-ask-type={askType}
     >
       <div className="intervention-card-head">
-        <span className="intervention-ask-chip">{ASK_LABEL[askType]}</span>
+        <span className="intervention-ask-chip">{chip ?? ASK_LABEL[askType]}</span>
         {badge ? <span className="intervention-badge">{badge}</span> : null}
         <h3 className="intervention-title">{title}</h3>
       </div>

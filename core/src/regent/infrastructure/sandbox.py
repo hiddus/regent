@@ -294,11 +294,22 @@ class DockerSandboxDriver:
         evidence.write_text(
             json.dumps({"status": "UNKNOWN", "exit_code": exit_code}), encoding="utf-8"
         )
+        # Ship-first: Docker UNKNOWN often leaves only unknown.json; keep the
+        # input source.zip as a deployable preview artifact so soft gates can
+        # still start a runtime process from the generated workspace.
+        source_zip = operation / "input" / "source.zip"
+        artifact_uri = None
+        artifact_hash = None
+        if source_zip.is_file() and zipfile.is_zipfile(source_zip):
+            artifact_uri = source_zip.resolve().as_uri()
+            artifact_hash = hashlib.sha256(source_zip.read_bytes()).hexdigest()
         return SandboxBuildResult(
             external_request_id=operation_id,
             status="UNKNOWN",
             evidence_artifact_uri=evidence.resolve().as_uri(),
             evidence_hash=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            build_artifact_uri=artifact_uri,
+            build_artifact_hash=artifact_hash,
         )
 
 
@@ -418,17 +429,15 @@ class LocalSandboxDriver:
                 json.dumps(evidence_data, sort_keys=True), encoding="utf-8"
             )
 
+            # Keep app-source.zip even on FAILED so soft-gates preview can still
+            # materialize the generated workspace (ship-first).
             result = SandboxBuildResult(
                 external_request_id=operation_id,
                 status=status,
                 evidence_artifact_uri=evidence.resolve().as_uri(),
                 evidence_hash=hashlib.sha256(evidence.read_bytes()).hexdigest(),
-                build_artifact_uri=artifact.resolve().as_uri()
-                if status == "PASSED"
-                else None,
-                build_artifact_hash=hashlib.sha256(artifact.read_bytes()).hexdigest()
-                if status == "PASSED"
-                else None,
+                build_artifact_uri=artifact.resolve().as_uri(),
+                build_artifact_hash=hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 checks=checks,
             )
         except Exception as exc:

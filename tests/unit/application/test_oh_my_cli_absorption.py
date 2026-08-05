@@ -36,6 +36,9 @@ def test_evaluate_complete_blocks_soft_and_progress() -> None:
     assert evaluate_complete_allowed("success")["safe"] is True
     assert evaluate_complete_allowed("soft_verify")["safe"] is False
     assert evaluate_complete_allowed("budget_exhausted")["blocker"] == "budget_exhausted"
+    blocked = evaluate_complete_allowed("success", open_items=["wire smoke route"])
+    assert blocked["safe"] is False
+    assert blocked["blocker"] == "open_work_plan"
     meta = apply_exit_to_metadata(
         {},
         build_exit(
@@ -53,6 +56,11 @@ def test_progress_loop_detector() -> None:
         meta, warning = record_progress_attempt(meta, item_key="item-a", threshold=3)
     assert warning["loop_detected"] is True
     assert progress_loop_detected(meta) is True
+    # Default threshold is higher (scaffolding room); explicit 3 still trips.
+    meta2: dict = {}
+    for _ in range(3):
+        meta2, warning2 = record_progress_attempt(meta2, item_key="item-b")
+    assert warning2["loop_detected"] is False
 
 
 def test_permission_impact_and_envelope() -> None:

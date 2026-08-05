@@ -727,6 +727,17 @@ class WorkspaceToolkit:
                     ),
                 )
             if call.name == "submit":
+                from regent.config import get_settings
+                from regent.application.work_plan import open_plan_item_contents
+
+                if bool(getattr(get_settings(), "agent_work_plan_required", True)):
+                    open_items = open_plan_item_contents(self.todos)
+                    if open_items:
+                        preview = "; ".join(open_items[:5])
+                        return (
+                            "ERROR: cannot submit while work-plan items are still open. "
+                            f"Finish or cancel them first: {preview}"
+                        )
                 self.submitted = True
                 self.submit_summary = str(call.arguments.get("summary") or "")
                 return json.dumps(
@@ -735,4 +746,17 @@ class WorkspaceToolkit:
                 )
             return f"unknown tool: {call.name}"
         except Exception as exc:  # noqa: BLE001 — tool errors become model-visible results
+            # Control-plane exits must bubble to AgentRunner/generator (ASK/STOP),
+            # never be stringified back into the model turn.
+            from regent.application.agent_control import (
+                AskUserRequiredError,
+                ToolPermissionRequiredError,
+                UserAbortError,
+            )
+
+            if isinstance(
+                exc,
+                (AskUserRequiredError, ToolPermissionRequiredError, UserAbortError),
+            ):
+                raise
             return f"ERROR: {type(exc).__name__}: {exc}"

@@ -180,8 +180,32 @@ export function useWorkspace() {
     else if (stage === 'RESEARCH_MORE' || stage === 'DISCOVERY_NO_SELECT') {
       showCoreHint('正在继续调研 / 取证...')
     }
-    else if (s?.preview?.status === 'PREVIEW_READY' || meta.last_preview_endpoint) {
-      showCoreHint('预览已就绪')
+    else if (stage === 'PREVIEW_PRODUCT_QA_FAILED' || stage === 'SMOKE_FAILED') {
+      const items = Array.isArray(meta.open_items) ? meta.open_items.slice(0, 3).join(', ') : ''
+      showCoreHint(
+        items
+          ? `产品面未达标：${items}`
+          : '产品面未达标，正在修复 — 不是已上线',
+        true,
+      )
+    }
+    else if (meta.product_surface_ready === true || meta.product_surface_ready === 'true') {
+      showCoreHint(
+        meta.delivery_soft_pass === true || meta.delivery_soft_pass === 'true'
+          ? '产品面就绪（待验收）'
+          : '产品面就绪',
+      )
+    }
+    else if (
+      stage === 'PREVIEW_SUCCEEDED' ||
+      s?.preview?.status === 'PREVIEW_READY' ||
+      meta.last_preview_endpoint
+    ) {
+      showCoreHint(
+        meta.delivery_soft_pass === true || meta.delivery_soft_pass === 'true'
+          ? '预览可用（待产品验收）'
+          : '预览可用（待产品验收）',
+      )
     }
     else if (s?.preview?.status === 'FAILED') {
       showCoreHint(s.preview.failure_summary || '生成失败', true)

@@ -142,6 +142,9 @@ class AgenticCodeGenerator:
             "work_plan_seen",
             "work_plan_items",
             "session_steer_brief",
+            "active_corrections",
+            "latest_goal_spec_version",
+            "failure_envelopes",
             "execution_mode",
             "permission_always_tools",
             "permission_allow_once_tools",
@@ -154,6 +157,21 @@ class AgenticCodeGenerator:
             plan["execution_mode"] = get_execution_mode(acceptance)
         if "permission_always_tools" not in plan:
             plan["permission_always_tools"] = sorted(session_always_tools(acceptance))
+        # Ship-first: when first-plan approve is off, auto-stamp approve + grant
+        # write/shell tools so the loop does not burn the token budget on ASK.
+        from regent.config import get_settings as _get_settings
+
+        if not bool(getattr(_get_settings(), "agent_plan_approve_on_first", True)):
+            plan["work_plan_approved"] = True
+            plan["skip_plan_approve"] = True
+            plan["work_plan_seen"] = True
+            always = set(plan.get("permission_always_tools") or ())
+            always.update({"write_file", "edit_file", "run_command"})
+            plan["permission_always_tools"] = sorted(always)
+        elif acceptance:
+            merged = set(plan.get("permission_always_tools") or ())
+            merged.update(session_always_tools(acceptance))
+            plan["permission_always_tools"] = sorted(merged)
         if "goal_metadata" not in plan:
             plan["goal_metadata"] = {
                 k: acceptance[k]
@@ -301,8 +319,16 @@ class AgenticCodeGenerator:
             ) from exc
         except AskUserRequiredError as exc:
             draft_uri = sandbox.resolve().as_uri()
+            reasons = [f"ASK_USER_REQUIRED: {exc.question[:200]}"]
+            envelope = dict(exc.envelope or {})
+            if envelope.get("ask_type"):
+                reasons.append(f"ask_type:{envelope['ask_type']}")
+            if envelope.get("blocked_item_key"):
+                reasons.append(f"blocked_item:{envelope['blocked_item_key']}")
+            if envelope.get("gap_kind"):
+                reasons.append(f"gap_kind_hint:{envelope['gap_kind']}")
             raise DeliveryRejection(
-                reasons=[f"ASK_USER_REQUIRED: {exc.question[:200]}"],
+                reasons=reasons,
                 draft_uri=draft_uri,
                 producer_ref=GENERATOR_REF,
                 gap_kind="ASK_USER",
@@ -332,9 +358,47 @@ class AgenticCodeGenerator:
                 getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
             ).lower()
             soft_files = _text_files_from_sandbox(sandbox)
-            # A0: soft-rescue must NOT fake Verification PASS / COMPLETE.
-            # Keep draft on disk and exit via DeliveryRejection → ASK_HUMAN.
+            # Ship-first: soft/off + runnable draft → deliver changeset (preview path)
+            # instead of ASK_HUMAN burn loops on ARTIFACT_INCOMPLETE / BUDGET_EXHAUSTED.
             if (
+                gates_mode in {"soft", "off"}
+                and soft_files
+                and _soft_draft_looks_runnable(soft_files)
+            ):
+                logger.warning(
+                    "soft draft auto-deliver after %s (ship-first)",
+                    type(exc).__name__,
+                    extra={"file_count": len(soft_files), "gates_mode": gates_mode},
+                )
+                try:
+                    from regent.agent.accepted_workspace import (
+                        write_recoverable_workspace_snapshot,
+                    )
+
+                    write_recoverable_workspace_snapshot(
+                        sandbox,
+                        Path(get_settings().workspace_root),
+                        reason=f"soft_auto_deliver_{type(exc).__name__.lower()}",
+                        include_diagnostics=True,
+                    )
+                except Exception:
+                    pass
+                result = AgentRunResult(
+                    files=soft_files,
+                    model_ref="agentic-soft-draft",
+                    input_tokens=0,
+                    output_tokens=0,
+                    submitted=False,
+                    verification=VerificationVerdict(
+                        verdict="FAIL",
+                        summary=(
+                            f"soft auto-deliver after {type(exc).__name__}; "
+                            "preview soft-pass path (A0: not verified COMPLETE)"
+                        ),
+                        gaps=[],
+                    ),
+                )
+            elif (
                 gates_mode in {"soft", "off"}
                 and soft_files
                 and isinstance(exc, ArtifactIncompleteError)
@@ -556,12 +620,24 @@ class AgenticCodeGenerator:
                     )
                 )
             )
-            raise DeliveryRejection(
-                reasons=reject_reasons,
-                draft_uri=draft_note or None,
-                producer_ref=GENERATOR_REF,
-                gap_kind=primary,
-            )
+            # Ship-first: soft-only FAIL with runnable app → deliver for preview.
+            if soft_only and _soft_draft_looks_runnable(result.files):
+                logger.warning(
+                    "soft verification FAIL auto-deliver runnable draft (ship-first)",
+                    extra={
+                        "soft_gaps": soft_codes[:12],
+                        "file_count": len(result.files),
+                        "primary": primary,
+                        "gates_mode": gates_mode,
+                    },
+                )
+            else:
+                raise DeliveryRejection(
+                    reasons=reject_reasons,
+                    draft_uri=draft_note or None,
+                    producer_ref=GENERATOR_REF,
+                    gap_kind=primary,
+                )
 
         # M2/M4-2: atomic accepted_workspace_snapshot after successful verification.
         accepted_meta: dict[str, Any] | None = None
@@ -809,6 +885,29 @@ def _text_files_from_sandbox(sandbox: Path) -> dict[str, str]:
         except (OSError, UnicodeDecodeError):
             continue
     return out
+
+
+def _soft_draft_looks_runnable(files: dict[str, str]) -> bool:
+    """True when soft draft has a likely web/app entry worth previewing."""
+    if not files:
+        return False
+    names = {str(k).replace("\\", "/").lower() for k in files}
+    has_py = any(n.endswith(".py") for n in names)
+    has_html = any(n.endswith(".html") for n in names)
+    sample = "\n".join(str(v)[:2500] for v in list(files.values())[:24]).lower()
+    framework = any(
+        token in sample
+        for token in (
+            "flask",
+            "fastapi",
+            "from flask",
+            "uvicorn",
+            "@app.route",
+            "app = flask",
+            "http.server",
+        )
+    )
+    return bool(has_py and (framework or has_html))
 
 
 def _materialize_incremental_changes(

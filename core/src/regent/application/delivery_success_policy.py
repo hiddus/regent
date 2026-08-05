@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 # Gaps that remain fail-closed even for SMALL / soft-pass ACHIEVE.
+# Product/UX surface gaps are blocking: process-up alone must not ACHIEVE.
 BLOCKING_DELIVERY_GAP_CODES: frozenset[str] = frozenset(
     {
         "forbid-unrendered-templates",
@@ -17,6 +18,18 @@ BLOCKING_DELIVERY_GAP_CODES: frozenset[str] = frozenset(
         "ARTIFACT_INCOMPLETE",
         "index-html",
         "empty-changeset",
+        # Presentation / product surface (PM+UX): no browser-default dumps.
+        "stylesheet-present",
+        "stylesheet-substance",
+        "styled-surface",
+        "semantic-main",
+        "product-structure",
+        "min-visible-text",
+        # Live Preview QA through the public browse URL (Tech).
+        "preview-asset-reachability",
+        "preview-internal-nav",
+        "preview-home-reachable",
+        "preview-browse-url",
     }
 )
 
@@ -47,9 +60,9 @@ def partition_delivery_gap_codes(codes: list[str]) -> tuple[list[str], list[str]
 # Same gap_kind may only auto-escalate this many times before a soft reset / pause.
 SAME_GAP_KIND_HARD_CAP = 3
 
-# After hard-cap / ladder exhaust: auto-reset and continue this many times, then
-# soft-pause (conversation note only — never a permission TaskCard).
-DELIVERY_GAP_AUTO_CONTINUE_MAX = 2
+# Ship-first: no silent AUTO_CONTINUE without new lessons. Cap=0 → hard-cap /
+# ladder-exhaust goes straight to soft-pause / ASK, never empty burn cycles.
+DELIVERY_GAP_AUTO_CONTINUE_MAX = 0
 
 # Absolute ceiling across gap_kind flips. Auto-continue must NOT reset this —
 # otherwise alternating presentation/product_surface burns forever.
@@ -105,7 +118,7 @@ def verification_allows_achieve(
     if not small or not has_preview:
         return False, verdict or "MISSING"
     codes = _gap_codes(payload)
-    if any(code in BLOCKING_DELIVERY_GAP_CODES for code in codes):
+    if any(is_blocking_delivery_gap_code(code) for code in codes):
         return False, "blocking_gaps"
     # Preview exists and no hard blockers → treat as delivered-for-review success.
     return True, "soft_pass_preview"

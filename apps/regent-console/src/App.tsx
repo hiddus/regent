@@ -280,6 +280,10 @@ export default function App() {
           }
           toolEvents={ws.toolEvents}
           liveTool={ws.liveActivity.liveAction?.tool || null}
+          generationProgress={
+            String(ws.status?.generation_progress || '') || null
+          }
+          liveAction={ws.liveActivity.liveAction}
           onConfirm={handleConfirm}
           onSelectOption={handleSelectOption}
           onTaskAction={handleTaskAction}
@@ -287,6 +291,7 @@ export default function App() {
           onOpenPreview={() => openWorkspace('preview')}
           onOpenReview={() => openWorkspace('review')}
           onExampleSend={(text) => { void handleSend(text) }}
+          onQuickAction={handleQuickAction}
         />
         <div ref={messagesEndRef} />
         <Composer

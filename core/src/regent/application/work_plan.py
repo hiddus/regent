@@ -44,15 +44,19 @@ def is_trivial_work(plan: dict[str, Any] | None, user_or_goal_text: str = "") ->
 
 
 def has_active_plan_items(todos: Sequence[dict[str, Any]] | None) -> bool:
+    """True if Step 0 was done this lease (any pending/in_progress/completed item)."""
     if not todos:
         return False
     for item in todos:
         status = str(item.get("status") or "pending").lower()
-        if status in {"pending", "in_progress"}:
+        if status in {"pending", "in_progress", "completed"}:
             return True
-        if status == "completed":
-            return True  # already planned this lease
     return False
+
+
+def has_open_plan_items(todos: Sequence[dict[str, Any]] | None) -> bool:
+    """True when checklist still has unfinished work (blocks submit/COMPLETE)."""
+    return bool(open_plan_item_contents(todos))
 
 
 def open_plan_item_contents(items: Sequence[dict[str, Any]] | None) -> list[str]:

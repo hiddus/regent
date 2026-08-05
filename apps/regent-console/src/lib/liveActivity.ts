@@ -146,3 +146,39 @@ export function latestMessageTimestamp(messages: { created_at?: string }[]): num
   }
   return max > 0 ? max : null
 }
+
+/** Grace before treating ACTIVE+idle as "quiet / looks stuck". */
+export const QUIET_ACTIVE_MS = 90_000
+
+/**
+ * ACTIVE but generation idle and no fresh live_action — the UI used to keep
+ * saying "Core 正在执行 / Agent 规划中", which feels frozen.
+ */
+export function isQuietActive(input: {
+  goalStatus?: string | null
+  generationProgress?: string | null
+  liveAction?: LiveAction | null
+  lastProgressAt?: number | null
+  now?: number
+  graceMs?: number
+}): boolean {
+  if (input.goalStatus !== 'ACTIVE') return false
+  const gen = String(input.generationProgress || '')
+  // Explicit gen states already have their own StageBar copy / actions.
+  if (gen && gen !== 'idle') return false
+
+  const now = input.now ?? Date.now()
+  const grace = input.graceMs ?? QUIET_ACTIVE_MS
+  const actionAt = input.liveAction?.updated_at
+    ? Date.parse(input.liveAction.updated_at)
+    : NaN
+  const actionFresh = !Number.isNaN(actionAt) && now - actionAt < 90_000
+  if (input.liveAction?.summary && actionFresh) return false
+
+  const progressAge =
+    input.lastProgressAt == null
+      ? Number.POSITIVE_INFINITY
+      : now - input.lastProgressAt
+  return progressAge >= grace
+}
+

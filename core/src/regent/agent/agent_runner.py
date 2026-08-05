@@ -456,9 +456,21 @@ class AgentRunner:
 
         skill_refs: list[dict[str, Any]] = []
         if self._skills_enabled:
+            from regent.config import get_settings as _gs_skills
+
+            settings = _gs_skills()
+            lessons_ws = Path(getattr(settings, "workspace_root", "") or "")
+            prior_gap_codes = [
+                str(g.get("code") or g.get("id") or g)
+                if isinstance(g, dict)
+                else str(g)
+                for g in (prior_gaps or [])
+            ]
             skills = select_skills_for_goal(
                 str(plan.get("goal_anchor_text") or ""),
                 enabled=True,
+                lessons_workspace=lessons_ws if lessons_ws.is_dir() else None,
+                gap_codes=prior_gap_codes,
             )
             skill_refs = [s.as_dict() for s in skills]
             if skills:
@@ -870,25 +882,75 @@ class AgentRunner:
                 turn_collector = TurnImageCollector()
                 self._toolkit.bind_turn_collector(turn_collector)
 
-            # O0: progress-loop streak on current blocked item.
-            from regent.application.agent_loop_exit import record_progress_attempt
+            # O0: progress-loop — only count turns with no real progress on the
+            # blocked item (no mutating write success, no todo advance). Then ASK.
+            from regent.application.agent_control import AskUserRequiredError
+            from regent.application.agent_loop_exit import (
+                advance_progress_item,
+                build_ask_envelope,
+                record_progress_attempt,
+            )
             from regent.application.work_plan import current_blocked_item_key
 
             blocked = current_blocked_item_key(self._toolkit.todos)
             if blocked:
                 plan_meta = dict(plan.get("goal_metadata") or {})
-                plan_meta, warning = record_progress_attempt(plan_meta, item_key=blocked)
-                plan["goal_metadata"] = plan_meta
-                if warning.get("loop_detected"):
-                    await _emit(
-                        on_event,
-                        {
-                            "type": "progress_loop",
-                            "turn": turn,
-                            "summary": "工作清单无进展",
-                            "detail": warning.get("message"),
-                        },
+                wrote = bool(getattr(self._toolkit, "recent_writes", None))
+                # recent_writes accumulates across turns — track per-turn delta.
+                writes_before = int(plan_meta.get("_progress_writes_mark") or 0)
+                writes_now = len(list(self._toolkit.recent_writes or []))
+                plan_meta["_progress_writes_mark"] = writes_now
+                mutated_this_turn = writes_now > writes_before
+                # Do not start the no-progress clock until the agent has written
+                # at least once this Session run (avoids ASK during scaffolding).
+                ever_wrote = writes_now > 0 or bool(plan_meta.get("_progress_ever_wrote"))
+                if writes_now > 0:
+                    plan_meta["_progress_ever_wrote"] = True
+                if mutated_this_turn:
+                    plan_meta = advance_progress_item(plan_meta, item_key=blocked)
+                    plan["goal_metadata"] = plan_meta
+                elif not ever_wrote:
+                    # Still scaffolding — keep streak cold.
+                    plan_meta = advance_progress_item(plan_meta, item_key=blocked)
+                    plan["goal_metadata"] = plan_meta
+                else:
+                    plan_meta, warning = record_progress_attempt(
+                        plan_meta, item_key=blocked
                     )
+                    plan["goal_metadata"] = plan_meta
+                    if warning.get("loop_detected"):
+                        detail = str(warning.get("message") or "工作清单无进展")
+                        await _emit(
+                            on_event,
+                            {
+                                "type": "progress_loop",
+                                "turn": turn,
+                                "summary": "工作清单无进展",
+                                "detail": detail,
+                            },
+                        )
+                        envelope = build_ask_envelope(
+                            question=(
+                                f"清单项「{blocked}」连续无进展"
+                                f"（{warning.get('attempt_count')} 次无写盘/无推进）。"
+                                "请换方向、跳过该项，或补充约束后继续。"
+                            ),
+                            why_blocked=detail[:400],
+                            ask_type="progress_loop",
+                            gap_kind="PROGRESS_LOOP",
+                            options=[
+                                {"id": "continue_fix", "label": "换思路继续修"},
+                                {"id": "skip_item", "label": "跳过该项并改计划"},
+                                {"id": "stop", "label": "停止本轮"},
+                            ],
+                            suggested="continue_fix",
+                            blocked_item_key=blocked,
+                        )
+                        raise AskUserRequiredError(
+                            envelope["question"],
+                            options=list(envelope.get("options") or []),
+                            envelope=envelope,
+                        )
 
             turn += 1
             turns_since_plan_update += 1
@@ -1153,20 +1215,82 @@ def _seed_session_conversation(
                 ),
             ),
         )
-    # H1.4 mid-run steering notes (CORRECT / user redirect).
+    # H1.4 mid-run steering notes (CORRECT / user redirect). Goals evolve
+    # through many corrections — inject the full progressive stack, not only
+    # the latest brief.
+    corrections = (
+        plan.get("active_corrections")
+        or acceptance.get("active_corrections")
+        or []
+    )
+    correction_lines: list[str] = []
+    if isinstance(corrections, list):
+        for row in corrections[-8:]:
+            if not isinstance(row, dict):
+                continue
+            target = str(row.get("target") or "other")
+            detail = str(row.get("detail") or row.get("original_message") or "").strip()
+            if detail:
+                correction_lines.append(f"- [{target}] {detail[:400]}")
     steer = str(
         plan.get("session_steer_brief")
         or acceptance.get("session_steer_brief")
         or ""
     ).strip()
-    if steer:
+    if correction_lines or steer:
+        body_parts = [
+            "[Human steering — Goal is evolving; apply BEFORE next writes]",
+            "The Goal is not a one-shot brief. It will be corrected and redirected "
+            "many times in this Session. Honor all accumulated corrections and the "
+            "latest steering note. Update the work plan when scope changed; do not "
+            "treat the original prompt as frozen forever.",
+        ]
+        spec_ver = (
+            plan.get("latest_goal_spec_version")
+            or acceptance.get("latest_goal_spec_version")
+            or ""
+        )
+        if spec_ver:
+            body_parts.append(f"Current GoalSpec version: {spec_ver}")
+        if correction_lines:
+            body_parts.append("Accumulated corrections (oldest→newest):")
+            body_parts.extend(correction_lines)
+        if steer:
+            body_parts.append(f"Latest steering:\n{steer[:1200]}")
         seeded.append(
             ChatMessage(
                 role="user",
-                content=(
-                    f"[Human steering — apply before next writes]\n{steer[:1200]}\n"
-                    "Update the work plan if scope changed; do not ignore this correction."
-                ),
+                content="\n".join(body_parts),
             )
         )
+    # L0: surface build/smoke/preview failure envelopes as user turns (not only
+    # system RECENT FAILURES), so the model treats them as actionable feedback.
+    envelopes = (
+        plan.get("failure_envelopes")
+        or acceptance.get("failure_envelopes")
+        or []
+    )
+    if isinstance(envelopes, list) and envelopes:
+        lines = [
+            "[Prior run failures — fix these before new features]",
+            "The Goal may have evolved since these failures; still repair the "
+            "concrete errors below, then re-check the latest steering.",
+        ]
+        for env in envelopes[-4:]:
+            if not isinstance(env, dict):
+                continue
+            stage = env.get("stage") or env.get("failure_stage") or "?"
+            summary = (
+                env.get("summary")
+                or env.get("error")
+                or env.get("message")
+                or env.get("detail")
+                or ""
+            )
+            lines.append(f"- stage={stage}: {str(summary)[:500]}")
+            for key in ("stderr", "stdout", "log_tail"):
+                blob = env.get(key)
+                if isinstance(blob, str) and blob.strip():
+                    lines.append(f"  {key}: {blob.strip()[:800]}")
+        seeded.append(ChatMessage(role="user", content="\n".join(lines)[:6_000]))
     return seeded

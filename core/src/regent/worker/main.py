@@ -148,6 +148,21 @@ class Worker:
                                 logger.info("stale delivery progress", extra=stale_stats)
                         except Exception:
                             logger.exception("stale delivery progress tick failed")
+                        try:
+                            from regent.application.delivery_progress_watchdog import (
+                                reclaim_generating_zombies,
+                            )
+
+                            zombie_stats = await reclaim_generating_zombies(self.sessions)
+                            if zombie_stats.get("stale_runs_failed") or zombie_stats.get(
+                                "zombie_goals_failed"
+                            ):
+                                logger.info(
+                                    "zombie reclaim",
+                                    extra=zombie_stats,
+                                )
+                        except Exception:
+                            logger.exception("zombie reclaim tick failed")
                     self._next_reconciliation = monotonic() + self._reconciliation_interval
                 if (
                     self._privacy_retention is not None

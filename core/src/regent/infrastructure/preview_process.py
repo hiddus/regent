@@ -45,6 +45,7 @@ class PreviewProcessHandle:
     command: str
     process: subprocess.Popen[str]
     started_at: float
+    log_path: Path | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +56,7 @@ class PreviewProcessHandle:
             "pid": self.process.pid,
             "started_at": self.started_at,
             "alive": self.process.poll() is None,
+            "log_path": str(self.log_path) if self.log_path else None,
         }
 
 
@@ -63,6 +65,7 @@ class PreviewProcessSupervisor:
 
     def __init__(self) -> None:
         self._handles: dict[str, PreviewProcessHandle] = {}
+        self._log_files: dict[str, Any] = {}
 
     def start(
         self,
@@ -76,19 +79,29 @@ class PreviewProcessSupervisor:
         self.stop(deployment_id)
         port = int(port or pick_free_port())
         command = rewrite_start_command(start_command, port=port)
+        # Cross-container reachability (API proxy / other workers on docker net).
+        if re.search(r"--host\s+\S+", command):
+            command = re.sub(r"--host\s+\S+", "--host 0.0.0.0", command)
+        elif "flask" in command or "uvicorn" in command:
+            command = f"{command} --host 0.0.0.0"
         proc_env = os.environ.copy()
         proc_env.update(env or {})
         proc_env["REGENT_PREVIEW_PORT"] = str(port)
         proc_env["PORT"] = str(port)
-        # Avoid flask debug reloader forking.
+        # Avoid flask debug reloader forking. Do NOT set WERKZEUG_RUN_MAIN —
+        # that puts Werkzeug into reloader-child mode and crashes with
+        # KeyError: WERKZEUG_SERVER_FD when no parent reloader exists.
         proc_env.setdefault("FLASK_DEBUG", "0")
-        proc_env.setdefault("WERKZEUG_RUN_MAIN", "true")
+        proc_env.pop("WERKZEUG_RUN_MAIN", None)
+        proc_env.pop("WERKZEUG_SERVER_FD", None)
+        log_path = workspace / ".regent-preview.log"
+        log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 — kept open for process lifetime
         popen_kwargs: dict[str, Any] = {
             "cwd": str(workspace),
             "env": proc_env,
             "shell": True,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stdout": log_fh,
+            "stderr": subprocess.STDOUT,
             "text": True,
         }
         if os.name == "nt":
@@ -104,7 +117,10 @@ class PreviewProcessSupervisor:
             command=command,
             process=process,
             started_at=time.time(),
+            log_path=log_path,
         )
+        # Retain open log fd on supervisor so GC does not close it.
+        self._log_files[deployment_id] = log_fh
         self._handles[deployment_id] = handle
         return handle
 
@@ -119,10 +135,18 @@ class PreviewProcessSupervisor:
         last_error = "not_started"
         while time.time() < deadline:
             if handle.process.poll() is not None:
+                log_tail = ""
+                try:
+                    log_file = handle.workspace / ".regent-preview.log"
+                    if log_file.is_file():
+                        log_tail = log_file.read_text(encoding="utf-8", errors="replace")[-800:]
+                except OSError:
+                    pass
                 return {
                     "ready": False,
                     "error": f"process exited early code={handle.process.returncode}",
                     "port": handle.port,
+                    "log_tail": log_tail,
                 }
             try:
                 with socket.create_connection(("127.0.0.1", handle.port), timeout=0.4):
@@ -163,6 +187,12 @@ class PreviewProcessSupervisor:
 
     def stop(self, deployment_id: str) -> None:
         handle = self._handles.pop(deployment_id, None)
+        log_fh = self._log_files.pop(deployment_id, None)
+        if log_fh is not None:
+            try:
+                log_fh.close()
+            except Exception:  # noqa: BLE001
+                pass
         if handle is None:
             return
         if handle.process.poll() is not None:

@@ -156,7 +156,9 @@ def test_m2_routes_no_unconditional_health() -> None:
     fa = profile_by_name("fastapi-web-v1")
     assert fa is not None
     routes2 = _routes_from_profile_and_criteria(fa, {})
-    assert "/health" in routes2
+    # Ship-first: do not implicitly probe /health for fastapi either.
+    assert "/health" not in routes2
+    assert "/" in routes2
 
 
 def test_m2_certified_profiles_exist() -> None:

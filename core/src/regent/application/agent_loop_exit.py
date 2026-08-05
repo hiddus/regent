@@ -35,14 +35,35 @@ def build_result_bundle(
     summary: str,
     preview_url: str | None = None,
     artifact_uri: str | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
     evidence_summary: str | None = None,
     change_points: list[str] | None = None,
     open_items: list[str] | None = None,
 ) -> dict[str, Any]:
+    artifact_rows: list[dict[str, Any]] = []
+    for row in list(artifacts or [])[:12]:
+        if not isinstance(row, dict):
+            continue
+        uri = str(row.get("uri") or row.get("artifact_uri") or "").strip()
+        if not uri:
+            continue
+        artifact_rows.append(
+            {
+                "uri": uri[:500],
+                "label": str(row.get("label") or row.get("name") or uri)[:120],
+                "kind": str(row.get("kind") or row.get("type") or "artifact")[:64],
+            }
+        )
+    if artifact_uri and not any(r["uri"] == artifact_uri for r in artifact_rows):
+        artifact_rows.insert(
+            0,
+            {"uri": str(artifact_uri)[:500], "label": "主产物", "kind": "primary"},
+        )
     return {
         "summary": (summary or "")[:500],
         "preview_url": preview_url,
         "artifact_uri": artifact_uri,
+        "artifacts": artifact_rows,
         "evidence_summary": (evidence_summary or "")[:800] or None,
         "change_points": list(change_points or [])[:5],
         "open_items": list(open_items or [])[:12],
@@ -59,12 +80,13 @@ def build_ask_envelope(
     ask_type: str = "delivery_gap",
     gap_kind: str | None = None,
     gap_reasons: list[str] | None = None,
+    blocked_item_key: str | None = None,
 ) -> dict[str, Any]:
     opts = options or [
         {"id": "continue_fix", "label": "继续修复（补充方向后同 Session 续跑）"},
         {"id": "stop", "label": "停止本轮"},
     ]
-    return {
+    envelope: dict[str, Any] = {
         "ask_type": ask_type,
         "question": (question or "")[:800],
         "why_blocked": (why_blocked or "")[:400],
@@ -79,6 +101,9 @@ def build_ask_envelope(
         "answer": None,
         "answered_at": None,
     }
+    if blocked_item_key:
+        envelope["blocked_item_key"] = str(blocked_item_key)[:200]
+    return envelope
 
 
 def build_exit(
@@ -218,6 +243,7 @@ CompleteBlocker = Literal[
     "soft_verify",
     "progress_loop",
     "unanswered_ask",
+    "open_work_plan",
     "unknown_outcome",
 ]
 
@@ -231,6 +257,7 @@ ExecutionOutcome = Literal[
     "soft_verify",
     "progress_loop",
     "unanswered_ask",
+    "open_work_plan",
 ]
 
 _OUTCOME_TO_BLOCKER: dict[str, CompleteBlocker] = {
@@ -242,6 +269,7 @@ _OUTCOME_TO_BLOCKER: dict[str, CompleteBlocker] = {
     "soft_verify": "soft_verify",
     "progress_loop": "progress_loop",
     "unanswered_ask": "unanswered_ask",
+    "open_work_plan": "open_work_plan",
 }
 
 _BLOCKER_REASONS: dict[CompleteBlocker, str] = {
@@ -253,6 +281,7 @@ _BLOCKER_REASONS: dict[CompleteBlocker, str] = {
     "soft_verify": "Soft/product gate is not verified_pass; COMPLETE blocked (A0).",
     "progress_loop": "No progress on the same work-plan item; COMPLETE blocked.",
     "unanswered_ask": "Unanswered ASK_HUMAN still pending; COMPLETE blocked.",
+    "open_work_plan": "Work plan still has open items; COMPLETE blocked (ship-first).",
     "unknown_outcome": "Unknown outcome; COMPLETE blocked by default.",
 }
 
@@ -261,13 +290,29 @@ def evaluate_complete_allowed(
     outcome: ExecutionOutcome | str,
     *,
     metadata: dict[str, Any] | None = None,
+    open_items: list[str] | None = None,
 ) -> dict[str, Any]:
     """O0: pure guard — COMPLETE is allowed only on explicit success.
 
-    Soft verify, interrupt, budget, progress-loop, and unanswered asks never
-    auto-achieve. Aligns with oh-my-cli auto-achieve-guard + Regent A0.
+    Soft verify, interrupt, budget, progress-loop, unanswered asks, and open
+    work-plan items never auto-achieve.
     """
     meta = dict(metadata or {})
+    remaining = [str(x).strip() for x in (open_items or []) if str(x).strip()]
+    if not remaining:
+        remaining = [
+            str(x).strip()
+            for x in list(meta.get("open_work_plan_items") or [])
+            if str(x).strip()
+        ]
+    if remaining:
+        preview = "；".join(remaining[:5])
+        return {
+            "safe": False,
+            "outcome": "open_work_plan",
+            "blocker": "open_work_plan",
+            "reason": f"清单仍有未完成项，禁止 COMPLETE：{preview}",
+        }
     if has_unanswered_ask(meta):
         outcome = "unanswered_ask"
     raw = str(outcome or "unknown").strip().lower() or "unknown"
@@ -306,7 +351,9 @@ def assert_complete_allowed(
 # --- O0: progress-loop detector (same item_key) -----------------------------
 
 META_PROGRESS_LOOP = "work_plan_progress_loop"
-PROGRESS_LOOP_DEFAULT_THRESHOLD = 3
+# Turns without mutating writes before ASK. Planning/todo turns are normal —
+# production golden Goals need room to scaffold before the first write_file.
+PROGRESS_LOOP_DEFAULT_THRESHOLD = 10
 
 
 def record_progress_attempt(

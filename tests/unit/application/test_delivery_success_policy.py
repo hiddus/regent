@@ -60,6 +60,27 @@ def test_blocking_gap_still_blocks() -> None:
     assert reason == "blocking_gaps"
 
 
+def test_stylesheet_gap_blocks_soft_pass_achieve() -> None:
+    ok, reason = verification_allows_achieve(
+        {"verdict": "FAIL", "gaps": ["stylesheet-present"]},
+        goal_scale="SMALL",
+        has_preview=True,
+    )
+    assert ok is False
+    assert reason == "blocking_gaps"
+
+
+def test_preview_nav_gap_blocks_soft_pass_achieve() -> None:
+    ok, reason = verification_allows_achieve(
+        {"verdict": "FAIL", "gaps": ["preview-internal-nav"]},
+        goal_scale="SMALL",
+        has_preview=True,
+    )
+    assert ok is False
+    assert reason == "blocking_gaps"
+
+
 def test_same_gap_kind_cap_constant() -> None:
     assert SAME_GAP_KIND_HARD_CAP == 3
-    assert DELIVERY_GAP_AUTO_CONTINUE_MAX == 2
+    # Ship-first: no empty AUTO_CONTINUE burn cycles.
+    assert DELIVERY_GAP_AUTO_CONTINUE_MAX == 0

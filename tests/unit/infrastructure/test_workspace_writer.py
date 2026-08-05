@@ -97,6 +97,33 @@ def test_immutable_snapshot_rejects_different_manifest(tmp_path: Path) -> None:
         )
 
 
+def test_create_on_existing_base_replaces_even_with_stale_hash(tmp_path: Path) -> None:
+    """MODIFY / Goal revision: CREATE against copied base must not WorkspaceConflict."""
+    old_bytes = b"old"
+    new_bytes = b"new-after-correct"
+    first, first_content = change("app.py", old_bytes)
+    store = {**first_content, "memory://app-new": new_bytes}
+    writer = WorkspaceWriter(tmp_path, store.__getitem__)
+    base = writer.apply(
+        "base", FileChangeSet(changes=[first], generator_ref="g", prompt_version="v1")
+    )
+    item = FileChange(
+        relative_path="app.py",
+        operation=FileOperation.CREATE,
+        content_artifact_uri="memory://app-new",
+        content_hash=hashlib.sha256(new_bytes).hexdigest(),
+        # Stale hash from a prior snapshot — must not cancel the Goal.
+        expected_previous_hash=hashlib.sha256(b"not-what-is-on-disk").hexdigest(),
+        rationale="regen",
+    )
+    commit = writer.apply(
+        "rev-2",
+        FileChangeSet(changes=[item], generator_ref="g", prompt_version="v1"),
+        base_workspace=base.workspace_path,
+    )
+    assert (commit.workspace_path / "app.py").read_bytes() == new_bytes
+
+
 def test_symlink_in_base_is_rejected_when_supported(tmp_path: Path) -> None:
     root = tmp_path / "root"
     base = root / "base"

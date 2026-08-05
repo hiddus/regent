@@ -36,10 +36,32 @@ class ProductHypothesisProposal(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
-    estimated_cost: dict[str, int | float | str] = Field(default_factory=dict)
+    estimated_cost: dict[str, Any] = Field(default_factory=dict)
     estimated_time: str = Field(min_length=1)
     reversibility: str = Field(min_length=1)
     claims: list[EvidenceClaim] = Field(min_length=1)
+
+    @field_validator("estimated_cost", mode="before")
+    @classmethod
+    def _coerce_estimated_cost(cls, value: Any) -> dict[str, Any]:
+        """Models often emit nested lists/objects under cost keys; keep dict soft."""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return {"raw": str(value)}
+        out: dict[str, Any] = {}
+        for key, raw in value.items():
+            k = str(key)
+            if isinstance(raw, (int, float, str, bool)):
+                out[k] = raw
+            elif raw is None:
+                continue
+            else:
+                try:
+                    out[k] = json.dumps(raw, ensure_ascii=False)
+                except TypeError:
+                    out[k] = str(raw)
+        return out
 
 
 class HypothesisDecisionValue(StrEnum):

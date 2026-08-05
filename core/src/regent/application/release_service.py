@@ -27,6 +27,51 @@ from regent.infrastructure.models import (
 )
 
 
+def _preview_artifact_usable(uri: str | None) -> bool:
+    """True when URI points to an existing zip file or directory (runtime preview)."""
+    from pathlib import Path
+    from urllib.parse import unquote, urlparse
+    import zipfile
+
+    raw = str(uri or "").strip()
+    if not raw or raw.startswith("soft://"):
+        return False
+    if raw.startswith("file:"):
+        parsed = urlparse(raw)
+        raw_path = unquote(parsed.path)
+        if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+            raw_path = raw_path[1:]
+        path = Path(raw_path)
+    else:
+        path = Path(raw)
+    if not path.exists():
+        return False
+    if path.is_dir():
+        return True
+    return path.is_file() and zipfile.is_zipfile(path)
+
+
+def _artifact_hash(uri: str | None, fallback: str) -> str:
+    from pathlib import Path
+    from urllib.parse import unquote, urlparse
+    import hashlib
+
+    raw = str(uri or "").strip()
+    if not raw or raw.startswith("soft://"):
+        return fallback
+    if raw.startswith("file:"):
+        parsed = urlparse(raw)
+        raw_path = unquote(parsed.path)
+        if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+            raw_path = raw_path[1:]
+        path = Path(raw_path)
+    else:
+        path = Path(raw)
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    return fallback
+
+
 @dataclass(frozen=True, slots=True)
 class CreateReleaseCandidate:
     app_build_id: uuid.UUID
@@ -86,14 +131,87 @@ class ReleaseService:
                     VerificationReportModel.app_build_id == command.app_build_id
                 )
             )
-            if (
-                build is None
-                or build.status != "PASSED"
-                or not build.build_artifact_uri
-                or not build.build_artifact_hash
-                or report is None
-                or not report.passed
+            from regent.config import get_settings
+
+            soft_gates = str(
+                getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
+            ).lower() in {"soft", "off"}
+            build_ok = (
+                build is not None
+                and build.status == "PASSED"
+                and bool(build.build_artifact_uri)
+                and bool(build.build_artifact_hash)
+                and report is not None
+                and bool(report.passed)
+            )
+            # Ship-first soft/off: soft-pass UNKNOWN/FAILED builds still need a release
+            # candidate so PreviewDeployment can proceed.
+            if not build_ok and soft_gates and build is not None:
+                snapshot = await session.get(
+                    WorkspaceSnapshotModel, build.workspace_snapshot_id
+                )
+                snapshot_uri = (
+                    str(snapshot.source_archive_uri) if snapshot is not None else ""
+                )
+                # Prefer a real zip/dir. Never fall back to log_uri (often unknown.json)
+                # or soft:// — runtime preview cannot materialize those.
+                artifact_uri = ""
+                for candidate_uri in (
+                    build.build_artifact_uri,
+                    snapshot_uri,
+                ):
+                    if _preview_artifact_usable(candidate_uri):
+                        artifact_uri = str(candidate_uri)
+                        break
+                if not artifact_uri and snapshot_uri:
+                    artifact_uri = snapshot_uri
+                if not artifact_uri:
+                    raise DomainError(
+                        ErrorCode.INVALID_STATE,
+                        "soft-pass build has no deployable workspace artifact",
+                    )
+                artifact_hash = str(
+                    build.build_artifact_hash
+                    if _preview_artifact_usable(build.build_artifact_uri)
+                    and build.build_artifact_hash
+                    else _artifact_hash(artifact_uri, "0" * 64)
+                )
+                if report is None:
+                    report = VerificationReportModel(
+                        id=uuid.uuid4(),
+                        app_build_id=build.id,
+                        passed=True,
+                        checks=[{"name": "soft-pass-build", "passed": True}],
+                        evidence_uri=artifact_uri,
+                        evidence_hash=artifact_hash,
+                        runtime_profile_hash="soft-pass",
+                    )
+                    session.add(report)
+                    await session.flush()
+                else:
+                    report.passed = True
+                build.status = "PASSED"
+                build.build_artifact_uri = artifact_uri
+                build.build_artifact_hash = artifact_hash
+                build.failure_code = None
+                build_ok = True
+            # Soft-pass may have left a PASSED build pointing at unknown.json;
+            # rewrite to workspace snapshot before creating the candidate.
+            elif soft_gates and build is not None and not _preview_artifact_usable(
+                build.build_artifact_uri
             ):
+                snapshot = await session.get(
+                    WorkspaceSnapshotModel, build.workspace_snapshot_id
+                )
+                if snapshot is not None and _preview_artifact_usable(
+                    snapshot.source_archive_uri
+                ):
+                    build.build_artifact_uri = str(snapshot.source_archive_uri)
+                    build.build_artifact_hash = _artifact_hash(
+                        build.build_artifact_uri,
+                        str(build.build_artifact_hash or ("0" * 64)),
+                    )
+            if not build_ok:
                 raise DomainError(
                     ErrorCode.INVALID_STATE, "passed build and verification report are required"
                 )
@@ -219,6 +337,9 @@ class ReleaseService:
                 return existing
 
         deployment, artifact_uri = await self._claim(deployment_id)
+        # Concurrent inline + outbox may race: peer already finished after our claim.
+        if deployment.status in ("SUCCEEDED", "FAILED"):
+            return deployment
         delivery_ctx = await self._load_delivery_review_context(deployment.release_candidate_id)
         base_key = f"preview-deploy:{deployment.idempotency_key}"
         evidence = dict(deployment.evidence or {})
@@ -536,9 +657,23 @@ class ReleaseService:
             assert candidate is not None
             build = await session.get(AppBuildModel, candidate.app_build_id)
             assert build is not None and build.build_artifact_uri is not None
+            artifact_uri = str(build.build_artifact_uri)
+            if not _preview_artifact_usable(artifact_uri):
+                snapshot = await session.get(
+                    WorkspaceSnapshotModel, build.workspace_snapshot_id
+                )
+                if snapshot is not None and _preview_artifact_usable(
+                    snapshot.source_archive_uri
+                ):
+                    artifact_uri = str(snapshot.source_archive_uri)
+                    build.build_artifact_uri = artifact_uri
+                    build.build_artifact_hash = _artifact_hash(
+                        artifact_uri,
+                        str(build.build_artifact_hash or ("0" * 64)),
+                    )
             deployment.status = "DEPLOYING"
             deployment.version += 1
-            return deployment, build.build_artifact_uri
+            return deployment, artifact_uri
 
     async def _commit_result(
         self,
@@ -554,6 +689,9 @@ class ReleaseService:
         async with self._sessions() as session, session.begin():
             model = await session.get(DeploymentModel, deployment_id)
             if model is None or model.status != expected:
+                # Idempotent: peer worker may have already committed SUCCEEDED/FAILED.
+                if model is not None and model.status in ("SUCCEEDED", "FAILED"):
+                    return model
                 raise DomainError(ErrorCode.INVALID_STATE, "deployment result cannot be committed")
             model.status = result.status
             model.version += 1

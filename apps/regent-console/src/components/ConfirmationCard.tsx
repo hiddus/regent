@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { InterventionCard } from './InterventionCard'
 
 interface ForkOption {
@@ -11,6 +12,8 @@ interface ConfirmationCardProps {
   metadata: Record<string, unknown>
   canConfirm: boolean
   needsUserFork?: boolean
+  /** Sticky dock: start collapsed so the card does not dominate the viewport. */
+  docked?: boolean
   onConfirm: () => void
   onSelectOption?: (optionId: string, label: string) => void
 }
@@ -73,6 +76,7 @@ export function ConfirmationCard({
   metadata,
   canConfirm,
   needsUserFork = false,
+  docked = false,
   onConfirm,
   onSelectOption,
 }: ConfirmationCardProps) {
@@ -92,84 +96,127 @@ export function ConfirmationCard({
     plan.fork_options || metadata.pending_fork_options || u.fork_options,
   )
   const showFork = needsUserFork && forkOptions.length >= 2
+  const settled = !showFork && !canConfirm
+  const appName = (plan.app_name as string) || (u.app_name as string) || '待定'
+  const firstDeliverable =
+    (plan.first_deliverable as string) || (u.first_deliverable as string) || ''
+  const summaryBits = [appName, firstDeliverable].filter(Boolean)
+  const hasDetails =
+    !!((plan.problem as string) || (u.problem as string)) ||
+    !!((plan.target_users as string) || (u.target_users as string)) ||
+    steps.length > 0 ||
+    criteria.length > 0 ||
+    unknowns.length > 0 ||
+    constraintList.length > 0
+
+  // Docked / settled: stay slim; awaiting confirm expands more readily but still collapses details by default when docked.
+  const [expanded, setExpanded] = useState(!docked && canConfirm)
 
   return (
     <InterventionCard
       askType={showFork ? 'ask_user' : 'plan_approve'}
-      title={showFork ? '需要你辅助决断的方向' : '请确认本轮计划'}
-      className="confirm-card"
+      chip={settled ? '进行中方案' : undefined}
+      title={
+        showFork
+          ? '需要你辅助决断的方向'
+          : canConfirm
+            ? '请确认本轮计划'
+            : '本轮采用的方案'
+      }
+      badge={settled ? '已开跑' : undefined}
+      compact={docked && !expanded && !showFork}
+      className={[
+        'confirm-card',
+        settled ? 'is-settled' : '',
+        docked ? 'is-docked' : '',
+        expanded ? 'is-expanded' : 'is-collapsed',
+      ]
+        .filter(Boolean)
+        .join(' ')}
     >
-      <dl className="facts">
-        <dt>App 名称</dt>
-        <dd>{(plan.app_name as string) || (u.app_name as string) || '待定'}</dd>
-        <dt>目标用户</dt>
-        <dd>{(plan.target_users as string) || (u.target_users as string) || '待定'}</dd>
-        <dt>解决问题</dt>
-        <dd>{(plan.problem as string) || (u.problem as string) || '待定'}</dd>
-        <dt>首轮交付</dt>
-        <dd>
-          {(plan.first_deliverable as string) || (u.first_deliverable as string) || '待定'}
-        </dd>
+      <p className="confirm-summary">{summaryBits.join(' · ')}</p>
 
-        {steps.length > 0 && (
-          <>
-            <dt>拟议步骤</dt>
-            <dd>
-              <ol className="plan-steps">
-                {steps.map((step, i) => (
-                  <li key={i}>{step}</li>
-                ))}
-              </ol>
-            </dd>
-          </>
-        )}
+      {hasDetails && (
+        <button
+          type="button"
+          className="confirm-expand-btn"
+          onClick={() => setExpanded(v => !v)}
+        >
+          {expanded ? '收起详情' : '展开方案详情'}
+        </button>
+      )}
 
-        {criteria.length > 0 && (
-          <>
-            <dt>成功标准</dt>
-            <dd>
-              <ul className="criteria-list">
-                {criteria.map(([k, v]) => (
-                  <li key={k}>
-                    <span className="criteria-check">✓</span>
-                    <span>{v || k}</span>
-                  </li>
-                ))}
-              </ul>
-            </dd>
-          </>
-        )}
+      {expanded && (
+        <dl className="facts">
+          <dt>App 名称</dt>
+          <dd>{appName}</dd>
+          <dt>目标用户</dt>
+          <dd>{(plan.target_users as string) || (u.target_users as string) || '待定'}</dd>
+          <dt>解决问题</dt>
+          <dd>{(plan.problem as string) || (u.problem as string) || '待定'}</dd>
+          <dt>首轮交付</dt>
+          <dd>{firstDeliverable || '待定'}</dd>
 
-        {unknowns.length > 0 && (
-          <>
-            <dt>未知项</dt>
-            <dd>
-              <ul className="plan-unknowns">
-                {unknowns.map((q, i) => (
-                  <li key={i}>{q}</li>
-                ))}
-              </ul>
-            </dd>
-          </>
-        )}
+          {steps.length > 0 && (
+            <>
+              <dt>拟议步骤</dt>
+              <dd>
+                <ol className="plan-steps">
+                  {steps.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ol>
+              </dd>
+            </>
+          )}
 
-        {constraintList.length > 0 && (
-          <>
-            <dt>明确约束</dt>
-            <dd>
-              <ul className="constraint-tags">
-                {constraintList.map((c, i) => (
-                  <li key={i} className="constraint-tag">{c}</li>
-                ))}
-              </ul>
-            </dd>
-          </>
-        )}
-      </dl>
+          {criteria.length > 0 && (
+            <>
+              <dt>成功标准</dt>
+              <dd>
+                <ul className="criteria-list">
+                  {criteria.map(([k, v]) => (
+                    <li key={k}>
+                      <span className="criteria-check">✓</span>
+                      <span>{v || k}</span>
+                    </li>
+                  ))}
+                </ul>
+              </dd>
+            </>
+          )}
+
+          {unknowns.length > 0 && (
+            <>
+              <dt>未知项</dt>
+              <dd>
+                <ul className="plan-unknowns">
+                  {unknowns.map((q, i) => (
+                    <li key={i}>{q}</li>
+                  ))}
+                </ul>
+              </dd>
+            </>
+          )}
+
+          {constraintList.length > 0 && (
+            <>
+              <dt>明确约束</dt>
+              <dd>
+                <ul className="constraint-tags">
+                  {constraintList.map((c, i) => (
+                    <li key={i} className="constraint-tag">{c}</li>
+                  ))}
+                </ul>
+              </dd>
+            </>
+          )}
+        </dl>
+      )}
 
       {showFork ? (
         <div className="fork-options intervention-actions">
-          <p className="fork-lead">请选择一个方向继续（2–4 项）：</p>
+          <p className="fork-lead">请选择一个方向继续：</p>
           {forkOptions.map(opt => (
             <button
               key={opt.id}
@@ -178,10 +225,10 @@ export function ConfirmationCard({
               onClick={() => onSelectOption?.(opt.id, opt.label)}
             >
               <span className="fork-option-label">{opt.label}</span>
-              {opt.description ? (
+              {expanded && opt.description ? (
                 <span className="fork-option-desc">{opt.description}</span>
               ) : null}
-              {opt.cost_hint ? (
+              {expanded && opt.cost_hint ? (
                 <span className="fork-option-cost">代价：{opt.cost_hint}</span>
               ) : null}
             </button>
@@ -193,10 +240,8 @@ export function ConfirmationCard({
             批准并继续
           </button>
         </div>
-      ) : (
-        <p className="confirm-note">
-          Core 已按当前方案开始探索；目标会随证据和你的补充持续变清晰。
-        </p>
+      ) : docked ? null : (
+        <p className="confirm-note">已开跑，可随时在输入框补充修正。</p>
       )}
     </InterventionCard>
   )

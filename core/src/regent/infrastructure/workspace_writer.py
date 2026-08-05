@@ -78,12 +78,24 @@ class WorkspaceWriter:
                 self._reject_parent_links(stage, destination)
                 if change.operation is FileOperation.CREATE:
                     if destination.exists():
-                        raise WorkspaceConflictError(
-                            f"CREATE target exists: {change.relative_path}"
+                        # Regen / MODIFY / Goal revision often re-emits CREATE for
+                        # files already present in a copied base workspace. Always
+                        # treat as REPLACE against on-disk bytes (ship-first).
+                        # Stale expected_previous_hash must not cancel the Goal —
+                        # the write content_hash is verified by _write itself.
+                        self._write(
+                            destination,
+                            change.content_artifact_uri,
+                            change.content_hash,
+                            change.mode,
                         )
-                    self._write(
-                        destination, change.content_artifact_uri, change.content_hash, change.mode
-                    )
+                    else:
+                        self._write(
+                            destination,
+                            change.content_artifact_uri,
+                            change.content_hash,
+                            change.mode,
+                        )
                 elif change.operation is FileOperation.REPLACE:
                     self._verify_previous(destination, change.expected_previous_hash)
                     self._write(

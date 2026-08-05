@@ -120,7 +120,9 @@ const STAGES: StageDef[] = [
     events: {
       PREVIEW_READY: { status: 'done', conclusion: '预览环境已就绪，可以体验' },
       PREVIEW_DEPLOYMENT_SUCCEEDED: { status: 'done', conclusion: '预览已发布，可以查看' },
-      PREVIEW_SUCCEEDED: { status: 'done', conclusion: '预览链路已完成' },
+      PREVIEW_SUCCEEDED: { status: 'done', conclusion: '预览可用（待产品验收）' },
+      PREVIEW_PRODUCT_QA_FAILED: { status: 'failed', conclusion: '产品面未达标（样式/详情等），正在修复' },
+      SMOKE_FAILED: { status: 'failed', conclusion: '预览冒烟未通过，拒绝软通过' },
     },
   },
   {
@@ -134,6 +136,7 @@ const STAGES: StageDef[] = [
       VERIFICATION_REQUIRED: { status: 'waiting', conclusion: '需要你确认是否满意当前结果' },
       ITERATION_REVISE_STARTED: { status: 'running', conclusion: '正在根据反馈优化方案' },
       GATE_CAPABILITY_REORGANIZED: { status: 'running', conclusion: '验证未通过，正在重组能力并重试' },
+      PREVIEW_PRODUCT_QA_FAILED: { status: 'failed', conclusion: '产品面 QA 未通过，需继续迭代' },
     },
   },
   {

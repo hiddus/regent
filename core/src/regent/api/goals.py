@@ -396,14 +396,32 @@ class ExecutionModeRequest(BaseModel):
 
 @router.post("/{goal_id}/abort")
 async def abort_goal_run(goal_id: uuid.UUID, payload: AbortGoalRequest, request: Request) -> dict[str, Any]:
-    """H0.1: request mid-run abort → STOP with draft on next agent turn check."""
+    """H0.1: mid-run abort — collaborative flag + hard-stop pending work.
+
+    1) Stamp abort metadata so in-process AgentRunner raises UserAbortError.
+    2) Fail pending/dispatching GenerationRunRequested outbox rows for this goal.
+    3) Fail/cancel GENERATING generation_runs tied to this goal.
+    4) Revoke open ExecutionPermit rows bound to this goal (best-effort).
+    """
+    from sqlalchemy import func, select, update
     from sqlalchemy.orm.attributes import flag_modified
 
     from regent.agent.events import RegentEvent, append_regent_event
     from regent.application.agent_control import apply_abort_to_goal_metadata
     from regent.application.agent_loop_exit import apply_exit_to_metadata, build_exit
     from regent.application.live_action import merge_live_action_into_metadata
-    from regent.infrastructure.models import GoalModel
+    from regent.infrastructure.models import (
+        ExecutionPermitModel,
+        GenerationPlanModel,
+        GenerationRunModel,
+        GoalModel,
+        OutboxEventModel,
+        RequirementRevisionModel,
+    )
+
+    cancelled_outbox = 0
+    failed_runs = 0
+    revoked_permits = 0
 
     async with request.app.state.sessions() as session, session.begin():
         goal = await session.get(GoalModel, goal_id, with_for_update=True)
@@ -440,9 +458,87 @@ async def abort_goal_run(goal_id: uuid.UUID, payload: AbortGoalRequest, request:
             stage="DELIVERY_SOFT_PAUSE",
             event_type="AGENT_LOOP_STOP",
         )
+        meta["ops_soft_pause"] = {
+            "at": meta.get("agent_abort_requested", {}).get("at")
+            if isinstance(meta.get("agent_abort_requested"), dict)
+            else None,
+            "reason": "user_abort",
+            "actor": payload.actor,
+        }
+        meta["execution_stage"] = "DELIVERY_SOFT_PAUSE"
         goal.metadata_json = meta
         flag_modified(goal, "metadata_json")
-    return {"ok": True, "goal_id": str(goal_id), "abort": True}
+
+        # Hard-stop: fail queued generation requests so workers do not keep burning.
+        outbox_result = await session.execute(
+            update(OutboxEventModel)
+            .where(
+                OutboxEventModel.aggregate_id == goal_id,
+                OutboxEventModel.event_type == "GenerationRunRequested",
+                OutboxEventModel.status.in_(("PENDING", "DISPATCHING")),
+            )
+            .values(
+                status="FAILED",
+                last_error=f"user_abort:{payload.reason or 'user_abort'}",
+            )
+        )
+        cancelled_outbox = int(outbox_result.rowcount or 0)
+
+        plan_ids = list(
+            (
+                await session.execute(
+                    select(GenerationPlanModel.id)
+                    .join(
+                        RequirementRevisionModel,
+                        RequirementRevisionModel.id
+                        == GenerationPlanModel.requirement_revision_id,
+                    )
+                    .where(RequirementRevisionModel.goal_id == goal_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if plan_ids:
+            run_result = await session.execute(
+                update(GenerationRunModel)
+                .where(
+                    GenerationRunModel.plan_id.in_(plan_ids),
+                    GenerationRunModel.status.in_(
+                        ("REQUESTED", "PLANNING", "GENERATING", "VALIDATING")
+                    ),
+                )
+                .values(
+                    status="FAILED",
+                    failure_code="USER_ABORT",
+                )
+            )
+            failed_runs = int(run_result.rowcount or 0)
+
+        permit_result = await session.execute(
+            update(ExecutionPermitModel)
+            .where(
+                ExecutionPermitModel.goal_id == goal_id,
+                ExecutionPermitModel.status.in_(
+                    ("REQUESTED", "APPROVED", "CLAIMED")
+                ),
+            )
+            .values(
+                status="REVOKED",
+                revoked_at=func.now(),
+                decision_reason=f"user_abort:{payload.reason or 'user_abort'}",
+            )
+        )
+        revoked_permits = int(permit_result.rowcount or 0)
+
+    return {
+        "ok": True,
+        "goal_id": str(goal_id),
+        "abort": True,
+        "cancelled_outbox": cancelled_outbox,
+        "failed_runs": failed_runs,
+        "revoked_permits": revoked_permits,
+    }
 
 
 @router.get("/{goal_id}/agent-loop-exit")
@@ -551,9 +647,28 @@ async def post_side_question(
                 {"role": m.role, "content": m.content}
                 for m in reversed(list(rows))
             ]
+        # Wire real provider — structural isolation still forbids tools/writers.
+        async def _answer(provider_messages: list[dict[str, Any]]) -> str:
+            from regent.config import get_settings
+            from regent.model.chat import ChatMessage
+
+            provider = build_model_provider(get_settings())
+            chat_msgs = [
+                ChatMessage(
+                    role=str(m.get("role") or "user"),  # type: ignore[arg-type]
+                    content=str(m.get("content") or ""),
+                )
+                for m in provider_messages
+                if isinstance(m, dict)
+            ]
+            # No tools — side path must never receive a tool schema.
+            response = await provider.chat(messages=chat_msgs, tools=None, temperature=0)
+            return str(response.content or "").strip()
+
         result = await run_side_question(
             question=payload.question,
             context_messages=messages,
+            answerer=_answer,
         )
         meta = append_regent_event(
             dict(goal.metadata_json or {}),

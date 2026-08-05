@@ -1,0 +1,31 @@
+{
+  "skill_id": "product",
+  "version": "1.0.0",
+  "title": "Product (PM)",
+  "description": "Goal attainment, information architecture, and operable product acceptance — not process-up alone.",
+  "applies_when": [
+    "product",
+    "运营",
+    "活跃",
+    "用户",
+    "情报",
+    "digest",
+    "feed",
+    "今日必读",
+    "acceptance",
+    "交付",
+    "pm"
+  ],
+  "gap_codes": [
+    "min-visible-text",
+    "forbid-demo-shell",
+    "forbid-demo-copy",
+    "forbid-placeholder-content",
+    "goal-semantic-alignment",
+    "product-structure"
+  ],
+  "anti_examples": [
+    "Welcome stub with no product journey",
+    "Fake demo cards presented as live data"
+  ]
+}

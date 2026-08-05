@@ -1,0 +1,30 @@
+{
+  "verified_at": "2026-08-06",
+  "principle": "no canary/gates; real Goal run + CORRECT evolution",
+  "goal_id": "44549a25-46b0-4183-8936-d8d4ce2bccca",
+  "project_id": "2e87aba2-b73e-4781-9c6e-bb75b65082c6",
+  "results": {
+    "first_preview_http_200": true,
+    "first_preview_url": "http://118.31.171.159:8000/preview/runtime/9554c82d-fc44-47d7-a2e7-e98259c31031/",
+    "correct_recorded": true,
+    "n_corrections": 2,
+    "after_correct_preview_ready": true,
+    "after_correct_preview_url": "http://118.31.171.159:8000/preview/runtime/cb33a5b5-7d23-43f5-aab2-4874eb0e469f/",
+    "after_probe": {
+      "ok": true,
+      "status": 200,
+      "has_time": true,
+      "has_correct": true,
+      "has_dark_heuristic": false
+    },
+    "verify_ok": true
+  },
+  "landed_fixes_from_observed_failures": [
+    "progress_loop → ASK_HUMAN with blocked_item_key",
+    "progress_loop: ignore scaffolding turns; threshold=10; reset on human resume/CORRECT",
+    "side-question wired to real model provider (no tools)",
+    "failure envelopes seeded as user messages",
+    "CREATE-on-existing soft REPLACE (MODIFY/revision)",
+    "smoke probes public preview URL when endpoint is loopback"
+  ]
+}

@@ -359,7 +359,10 @@ class AppGuidanceService:
     def _system_prompt(self, context: dict[str, Any], history: list[dict[str, Any]]) -> str:
         goal_status = context.get("goal", {}).get("status", "UNKNOWN")
         stage_info = context.get("goal", {}).get("execution_stage", {})
-        stage = stage_info.get("stage", "UNKNOWN") if isinstance(stage_info, dict) else "UNKNOWN"
+        if isinstance(stage_info, dict):
+            stage = str(stage_info.get("stage") or "UNKNOWN")
+        else:
+            stage = str(stage_info or "UNKNOWN")
         stage_label = _STAGE_LABELS.get(stage, stage)
         pending_tasks = context.get("pending_human_tasks", [])
         active_corrections = context.get("active_corrections", [])
@@ -396,18 +399,24 @@ class AppGuidanceService:
             "",
             "Command types:",
             "- QUERY: user asks about status, progress, or details. Answer informatively.",
-            "- MODIFY: user wants to significantly change objectives/users/problem/deliverable. Creates and starts a new goal revision without a confirmation gate.",
+            "- MODIFY: user wants to significantly change objectives/users/problem/deliverable. "
+            "Creates and starts a new goal revision (Goal is not one-shot — revisions are normal). "
+            "No confirmation gate.",
             "- CONTINUE: user says 'go ahead', 'continue', 'proceed'. Starts or retries execution.",
             "- PAUSE: user says 'pause', 'stop', 'wait', 'hold'. Temporarily halts execution.",
             "- RESUME: user says 'resume', 'continue after pause', 'go'. Resumes a paused goal.",
             "- CORRECT: user gives a specific mid-execution correction (e.g. 'use REST not GraphQL', "
-            "'add dark mode', 'change API format to JSON', 'add error handling'). "
-            "This creates a newer GoalSpec snapshot so later stages use the correction. "
+            "'add dark mode', 'change API format to JSON', 'add error handling', 'make it prettier'). "
+            "Goals evolve through many CORRECT turns — treat each as a durable GoalSpec snapshot + "
+            "steering brief that must interrupt the current lease and resume with the new direction. "
             "Set correction_target and correction_detail fields.",
             "- APPROVE: user says 'approve', 'looks good', 'accept', 'yes'. Approves pending gate/human task.",
             "- REJECT: user says 'reject', 'no', 'wrong', 'this is not right'. Rejects pending gate, triggers revision.",
             "- SELECT_OPTION: user chose a pending fork option; set selected_option_id.",
             "",
+            "Goal lifecycle note: the user's first message is only the starting Goal. "
+            "Expect repeated CORRECT and occasional MODIFY; never tell the user they must "
+            "recreate the project to change direction.",
             "For CORRECT, always set correction_target (one of: requirements, design, api, constraints, behavior, other) "
             "and correction_detail (the specific change requested).",
             "For MODIFY, return a complete revised proposal using supplied context and the user's message.",
@@ -1105,7 +1114,10 @@ class AppGuidanceService:
         context = await self._context(project_id)
         goal = context["goal"]
         stage_info = goal.get("execution_stage", {})
-        stage = stage_info.get("stage", goal["status"]) if isinstance(stage_info, dict) else goal["status"]
+        if isinstance(stage_info, dict):
+            stage = str(stage_info.get("stage") or goal["status"])
+        else:
+            stage = str(stage_info or goal["status"])
         stage_label = _STAGE_LABELS.get(stage, stage)
         work = context.get("work_states", {})
         pending = context.get("pending_human_tasks", [])
@@ -1144,11 +1156,11 @@ class AppGuidanceService:
         context = await self._context(project_id)
         goal_status = str(context["goal"]["status"])
         stage_info = context["goal"].get("execution_stage", {"stage": goal_status})
-        stage = (
-            stage_info.get("stage", goal_status)
-            if isinstance(stage_info, dict)
-            else goal_status
-        )
+        if isinstance(stage_info, dict):
+            stage = str(stage_info.get("stage") or goal_status)
+        else:
+            # _context may return a bare stage string (not {"stage": ...}).
+            stage = str(stage_info or goal_status)
         goal_id = uuid.UUID(str(context["goal"]["id"]))
         needs_gap_resume = await self._goal_needs_delivery_gap_resume(goal_id)
         # Soft-pause (ACTIVE+DELIVERY_SOFT_PAUSE) or halted gap states: new direction → resume.
@@ -1157,6 +1169,7 @@ class AppGuidanceService:
             needs_gap_resume
             and goal_status in {
                 "WAITING_HUMAN",
+                "ACTIVE",
                 "PAUSED",
                 "EXHAUSTED",
                 "FAILED",
@@ -1590,6 +1603,11 @@ class AppGuidanceService:
             # H1.4: durable steering brief for next AgentRunner seed.
             metadata["session_steer_brief"] = str(detail)[:1200]
             metadata["session_steer_at"] = datetime.now(timezone.utc).isoformat()
+            # Correction is intentional progress — clear progress-loop streak.
+            from regent.application.agent_loop_exit import META_PROGRESS_LOOP
+
+            metadata.pop(META_PROGRESS_LOOP, None)
+            metadata.pop("_progress_writes_mark", None)
             from regent.application.work_plan import looks_like_replan_request
 
             if looks_like_replan_request(message) or looks_like_replan_request(detail):
@@ -1658,7 +1676,7 @@ class AppGuidanceService:
             ordinal = await self._next_ordinal(session, conversation.id)
             user_msg = await self._persist_message_pair(
                 session, conversation.id, ordinal, message, actor,
-                f"已记录修正: [{target}] {detail}\n修正将在下一个执行步骤中生效。",
+                f"已记录修正: [{target}] {detail}\n正在中断当前执行并以最新目标方向续跑。",
                 "CORRECTION_APPLIED",
                 {
                     "command_id": str(command_id),
@@ -1666,6 +1684,8 @@ class AppGuidanceService:
                     "correction_target": target,
                     "correction_detail": detail,
                     "total_corrections": len(corrections),
+                    "goal_evolving": True,
+                    "spec_version": next_spec.version,
                 },
             )
             cid = await self._persist_command(
@@ -1674,7 +1694,47 @@ class AppGuidanceService:
             )
             command_id = cid
 
-        response = f"已记录修正: [{target}] {detail}"
+        # Interrupt in-flight lease so steering is not deferred to a vague "next step".
+        # resume_after_human clears the abort flag before requeueing.
+        from regent.application.agent_control import apply_abort_to_goal_metadata
+
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is not None and goal.status == "ACTIVE":
+                meta = apply_abort_to_goal_metadata(
+                    dict(goal.metadata_json or {}),
+                    str(goal_id),
+                    actor=actor,
+                    reason="goal_corrected",
+                )
+                meta["goal_revision_pending_resume"] = True
+                meta["goal_revision_reason"] = "correct"
+                goal.metadata_json = meta
+                flag_modified(goal, "metadata_json")
+
+        # Always try to resume same Session with the new GoalSpec + steer brief.
+        resume_note = ""
+        try:
+            from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
+
+            await self._ensure_project_agent_session_on_goal(
+                project_id=project_id, goal_id=goal_id, actor=actor
+            )
+            recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+                human_message=f"[Goal corrected] {detail}",
+                option_id="continue_fix",
+            )
+            if recovery.recovered:
+                resume_note = f" 已按最新修正续跑（{recovery.method}）。"
+            elif recovery.message:
+                resume_note = f" 修正已落盘；续跑：{recovery.message}"
+        except Exception as exc:  # noqa: BLE001 — correction must still succeed
+            resume_note = f" 修正已落盘；自动续跑暂未触发（{type(exc).__name__}）。"
+
+        response = f"已记录修正: [{target}] {detail}.{resume_note}"
         return GuidanceReceipt(command_id, "CORRECT", None, False, response)
 
     async def _handle_approve(
@@ -1713,60 +1773,110 @@ class AppGuidanceService:
                         "recovered": True,
                     },
                 )
-            # If goal is WAITING_HUMAN but no HumanTask records, try transitioning
+            # No HumanTask: still resume soft-pause / plan_approve ASK (ACTIVE+DELIVERY_SOFT_PAUSE)
+            # or WAITING_HUMAN gaps that never got a task row.
             goal_status = str(context["goal"]["status"])
-            if goal_status == "WAITING_HUMAN":
-                # Check resume need BEFORE transition (flags still intact).
-                needs_gap_resume = await self._goal_needs_delivery_gap_resume(goal_id)
-                goal_version = int(context["goal"].get("version", 0))
+            needs_gap_resume = await self._goal_needs_delivery_gap_resume(goal_id)
+            meta = dict((context.get("goal") or {}).get("metadata") or {})
+            pending_ask = dict(meta.get("pending_agent_loop_ask") or {})
+            ask_type = str(pending_ask.get("ask_type") or "")
+            gap_kind = str(meta.get("delivery_gap_kind") or "")
+            soft_plan_approve = (
+                needs_gap_resume
+                or ask_type == "plan_approve"
+                or gap_kind == "PLAN_APPROVE"
+                or "approve_plan" in (message or "").lower()
+            )
+            if soft_plan_approve and goal_status in {
+                "WAITING_HUMAN",
+                "ACTIVE",
+                "PAUSED",
+                "EXHAUSTED",
+                "FAILED",
+                "BLOCKED",
+            }:
+                if goal_status == "WAITING_HUMAN":
+                    goal_version = int(context["goal"].get("version", 0))
+                    try:
+                        await TransitionService(self._sessions).transition_goal(
+                            TransitionContext(
+                                aggregate_id=goal_id,
+                                expected_version=goal_version,
+                                actor=actor,
+                                correlation_id=uuid.uuid4(),
+                            ),
+                            GoalCommand.HUMAN_RESOLVED,
+                        )
+                    except DomainError as exc:
+                        response = f"批准失败: {exc.message}"
+                        return await self._persist_simple(
+                            project_id, message, actor, interpretation, model, response
+                        )
                 try:
-                    await TransitionService(self._sessions).transition_goal(
-                        TransitionContext(
-                            aggregate_id=goal_id,
-                            expected_version=goal_version,
-                            actor=actor,
-                            correlation_id=uuid.uuid4(),
-                        ),
-                        GoalCommand.HUMAN_RESOLVED,
+                    await self._ensure_project_agent_session_on_goal(
+                        project_id=project_id, goal_id=goal_id, actor=actor
                     )
                 except DomainError as exc:
-                    response = f"批准失败: {exc.message}"
-                    return await self._persist_simple(
-                        project_id, message, actor, interpretation, model, response
-                    )
-                # Delivery-gap exhaust: must replan + regenerate, not empty ACTIVE.
-                if needs_gap_resume:
-                    recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
-                        goal_id=goal_id,
-                        project_id=project_id,
-                        actor=actor,
-                        human_message=message,
-                    )
-                    if recovery.recovered:
-                        response = (
-                            "已批准。正在重新规划并继续生成交付物"
-                            f"（恢复阶梯第 {recovery.attempts} 次，方法 {recovery.method}）。"
-                        )
-                    else:
-                        response = (
-                            "已批准并尝试恢复执行，但未能自动重开交付恢复："
-                            f"{recovery.message}"
-                        )
                     return await self._persist_simple(
                         project_id,
                         message,
                         actor,
                         interpretation,
                         model,
-                        response,
-                        assistant_type="APPROVE_RESULT",
-                        assistant_metadata={
-                            "approved": True,
-                            "delivery_gap_resume": True,
-                            "recovered": recovery.recovered,
-                            "method": recovery.method,
-                        },
+                        f"无法续跑同一 Agent Session：{exc.message}",
                     )
+                msg_l = (message or "").lower()
+                option_id = None
+                for cand in (
+                    "approve_plan",
+                    "allow_always_session",
+                    "allow_once",
+                    "deny",
+                    "stop",
+                    "continue_fix",
+                    "revise_plan",
+                ):
+                    if f"option:{cand}" in msg_l or cand in msg_l:
+                        option_id = cand
+                        break
+                if option_id is None and ask_type == "plan_approve":
+                    option_id = "approve_plan"
+                if option_id is None and ask_type == "permission":
+                    option_id = str(pending_ask.get("suggested") or "allow_once")
+                recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    actor=actor,
+                    human_message=message,
+                    option_id=option_id,
+                )
+                if recovery.recovered:
+                    response = (
+                        "已批准计划。正在同一 Agent Session 继续执行"
+                        f"（{recovery.method}）。"
+                    )
+                else:
+                    response = (
+                        "已批准并尝试恢复执行，但未能自动续跑："
+                        f"{recovery.message or 'unknown'}"
+                    )
+                return await self._persist_simple(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    model,
+                    response,
+                    assistant_type="APPROVE_RESULT",
+                    assistant_metadata={
+                        "approved": True,
+                        "delivery_gap_resume": True,
+                        "recovered": recovery.recovered,
+                        "method": recovery.method,
+                        "plan_approve": ask_type == "plan_approve" or gap_kind == "PLAN_APPROVE",
+                    },
+                )
+            if goal_status == "WAITING_HUMAN":
                 # Empty resume: still clear stuck "等待你确认" live_action strip.
                 from regent.application.live_action import set_goal_live_action
 
@@ -1811,6 +1921,78 @@ class AppGuidanceService:
                 )
             except DomainError:
                 pass  # Task completed even if transition fails
+
+        # AGENT_LOOP_ASK (plan_approve / permission soft-pause): complete alone does not resume.
+        if task_type == "AGENT_LOOP_ASK":
+            try:
+                await self._ensure_project_agent_session_on_goal(
+                    project_id=project_id, goal_id=goal_id, actor=actor
+                )
+            except DomainError as exc:
+                return await self._persist_simple(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    model,
+                    f"已关闭确认卡，但无法续跑 Session：{exc.message}",
+                    assistant_type="APPROVE_RESULT",
+                )
+            meta = dict((context.get("goal") or {}).get("metadata") or {})
+            pending_ask = dict(meta.get("pending_agent_loop_ask") or {})
+            msg_l = (message or "").lower()
+            option_id = None
+            for cand in (
+                "approve_plan",
+                "allow_always_session",
+                "allow_once",
+                "deny",
+                "stop",
+                "continue_fix",
+                "revise_plan",
+            ):
+                if f"option:{cand}" in msg_l or cand in msg_l:
+                    option_id = cand
+                    break
+            ask_type = str(pending_ask.get("ask_type") or "")
+            if option_id is None and ask_type == "plan_approve":
+                option_id = "approve_plan"
+            if option_id is None and ask_type == "permission":
+                option_id = str(pending_ask.get("suggested") or "allow_once")
+            if option_id is None:
+                option_id = str(pending_ask.get("suggested") or "approve_plan")
+            recovery = await DeliveryGapRecoveryService(self._sessions).resume_after_human(
+                goal_id=goal_id,
+                project_id=project_id,
+                actor=actor,
+                human_message=message,
+                option_id=option_id,
+            )
+            response = (
+                "已批准。正在同一 Agent Session 继续执行"
+                f"（{recovery.method}）。"
+                if recovery.recovered
+                else (
+                    f"已批准确认卡，但续跑未成功：{recovery.message or 'unknown'}"
+                )
+            )
+            return await self._persist_simple(
+                project_id,
+                message,
+                actor,
+                interpretation,
+                model,
+                response,
+                assistant_type="APPROVE_RESULT",
+                assistant_metadata={
+                    "approved": True,
+                    "task_id": str(task_id),
+                    "task_type": task_type,
+                    "delivery_gap_resume": True,
+                    "recovered": recovery.recovered,
+                    "method": recovery.method,
+                },
+            )
 
         # DELIVERY_GAP_INTERVENE: HumanTaskService.complete emits DeliveryGapHumanApproved
         # which resumes the ladder; keep chat copy honest about replan.

@@ -138,6 +138,7 @@ from regent.infrastructure.models import (
     CapabilityResolutionPlanModel,
     ConversationMessageModel,
     ConversationModel,
+    DeploymentModel,
     DiscoveryRoundModel,
     EvidenceModel,
     GenerationPlanModel,
@@ -1576,6 +1577,14 @@ class ExecutionOrchestrator:
                     acceptance_contract["session_steer_brief"] = str(
                         gmeta.get("session_steer_brief")
                     )[:1200]
+                if isinstance(gmeta.get("active_corrections"), list):
+                    acceptance_contract["active_corrections"] = list(
+                        gmeta.get("active_corrections") or []
+                    )[-12:]
+                if gmeta.get("latest_goal_spec_version") is not None:
+                    acceptance_contract["latest_goal_spec_version"] = gmeta.get(
+                        "latest_goal_spec_version"
+                    )
                 if gmeta.get("work_plan_replan_requested"):
                     acceptance_contract["work_plan_approved"] = False
                     acceptance_contract.pop("skip_plan_approve", None)
@@ -2390,81 +2399,101 @@ class ExecutionOrchestrator:
                 "build did not pass",
                 extra={"build_id": str(result_build.id), "status": result_build.status},
             )
-            failure_reason = await self._summarize_build_failure(result_build.id)
-            try:
-                from regent.application.failure_envelope import (
-                    FailureEnvelopeService,
-                    RecordFailureCommand,
-                )
+            from regent.config import get_settings as _gs
 
-                await FailureEnvelopeService(self._sessions).record_failure(
-                    RecordFailureCommand(
+            gates_mode = str(
+                getattr(_gs(), "delivery_product_gates_mode", "soft") or "soft"
+            ).lower()
+            # Ship-first soft/off: do not trap on Docker sandbox UNKNOWN (e.g. exit 125).
+            # Continue to preview; delivery review still soft-gates product surface.
+            if gates_mode in {"soft", "off"} and str(result_build.status) in {
+                "UNKNOWN",
+                "FAILED",
+            }:
+                logger.warning(
+                    "soft-pass build failure → continue to AppBuildPassed (ship-first)",
+                    extra={
+                        "build_id": str(result_build.id),
+                        "status": result_build.status,
+                        "gates_mode": gates_mode,
+                    },
+                )
+            else:
+                failure_reason = await self._summarize_build_failure(result_build.id)
+                try:
+                    from regent.application.failure_envelope import (
+                        FailureEnvelopeService,
+                        RecordFailureCommand,
+                    )
+
+                    await FailureEnvelopeService(self._sessions).record_failure(
+                        RecordFailureCommand(
+                            goal_id=goal_id,
+                            stage="build",
+                            error_code=str(result_build.failure_code or "BUILD_FAILED"),
+                            error_summary=failure_reason,
+                            generation_run_id=None,
+                            workspace_snapshot_id=snapshot_id,
+                            evidence_payload={
+                                "build_id": str(result_build.id),
+                                "status": result_build.status,
+                            },
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "failure envelope record skipped for build",
+                        extra={"goal_id": str(goal_id)},
+                        exc_info=True,
+                    )
+                await self._halt_goal_stage(
+                    goal_id,
+                    project_id,
+                    stage="BUILD_FAILED",
+                    message=f"应用构建未通过验证：{failure_reason}",
+                    terminal=None,
+                    actor=actor,
+                    event_type="ATTAINMENT_RECOVERY_STARTED",
+                    extra={
+                        "build_id": str(result_build.id),
+                        "status": result_build.status,
+                        "log_uri": result_build.log_uri or "",
+                        "failure_code": result_build.failure_code or "",
+                    },
+                )
+                # Prefer regenerating over leaving the console stuck on "正在构建".
+                req_uuid, plan_uuid = await self._resolve_generation_ids(goal_id)
+                if req_uuid is not None and plan_uuid is not None:
+                    recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                         goal_id=goal_id,
-                        stage="build",
-                        error_code=str(result_build.failure_code or "BUILD_FAILED"),
-                        error_summary=failure_reason,
-                        generation_run_id=None,
-                        workspace_snapshot_id=snapshot_id,
-                        evidence_payload={
+                        project_id=project_id,
+                        requirement_revision_id=req_uuid,
+                        capability_resolution_plan_id=plan_uuid,
+                        actor=actor,
+                        gap_reasons=[f"build-verification: {failure_reason}"],
+                        halt_context={
+                            "stage": "BUILD_FAILED",
+                            "message": f"应用构建未通过验证：{failure_reason}",
+                            "last_error": failure_reason[:400],
                             "build_id": str(result_build.id),
                             "status": result_build.status,
                         },
                     )
-                )
-            except Exception:
-                logger.warning(
-                    "failure envelope record skipped for build",
-                    extra={"goal_id": str(goal_id)},
-                    exc_info=True,
-                )
-            await self._halt_goal_stage(
-                goal_id,
-                project_id,
-                stage="BUILD_FAILED",
-                message=f"应用构建未通过验证：{failure_reason}",
-                terminal=None,
-                actor=actor,
-                event_type="ATTAINMENT_RECOVERY_STARTED",
-                extra={
-                    "build_id": str(result_build.id),
-                    "status": result_build.status,
-                    "log_uri": result_build.log_uri or "",
-                    "failure_code": result_build.failure_code or "",
-                },
-            )
-            # Prefer regenerating over leaving the console stuck on "正在构建".
-            req_uuid, plan_uuid = await self._resolve_generation_ids(goal_id)
-            if req_uuid is not None and plan_uuid is not None:
-                recovery = await DeliveryGapRecoveryService(self._sessions).recover(
-                    goal_id=goal_id,
-                    project_id=project_id,
-                    requirement_revision_id=req_uuid,
-                    capability_resolution_plan_id=plan_uuid,
-                    actor=actor,
-                    gap_reasons=[f"build-verification: {failure_reason}"],
-                    halt_context={
-                        "stage": "BUILD_FAILED",
-                        "message": f"应用构建未通过验证：{failure_reason}",
-                        "last_error": failure_reason[:400],
-                        "build_id": str(result_build.id),
-                        "status": result_build.status,
-                    },
-                )
-                if await self._apply_delivery_verdict(
-                    recovery,
-                    goal_id=goal_id,
-                    project_id=project_id,
-                    actor=actor,
-                    recovered_log="build failure recovery scheduled",
-                    stage_exhausted="BUILD_DELIVERY_GAP_EXHAUSTED",
-                    extra_exhausted={
-                        "gap_kind": recovery.gap_kind,
-                        "attempts": recovery.attempts,
-                        "build_id": str(result_build.id),
-                    },
-                ):
-                    return
-            return
+                    if await self._apply_delivery_verdict(
+                        recovery,
+                        goal_id=goal_id,
+                        project_id=project_id,
+                        actor=actor,
+                        recovered_log="build failure recovery scheduled",
+                        stage_exhausted="BUILD_DELIVERY_GAP_EXHAUSTED",
+                        extra_exhausted={
+                            "gap_kind": recovery.gap_kind,
+                            "attempts": recovery.attempts,
+                            "build_id": str(result_build.id),
+                        },
+                    ):
+                        return
+                return
 
         # Write AppBuildPassed
         async with self._sessions() as session, session.begin():
@@ -2561,7 +2590,15 @@ class ExecutionOrchestrator:
                 force_human = bool(meta.get("force_release_human"))
 
         # SMALL preview is low-risk: auto-approve unless operator forces human gate.
-        auto_approve_small = goal_scale == "SMALL" and not force_human
+        # Ship-first soft/off: also auto-approve so Preview is not blocked on chat.
+        from regent.config import get_settings as _gs
+
+        gates_mode = str(
+            getattr(_gs(), "delivery_product_gates_mode", "soft") or "soft"
+        ).lower()
+        auto_approve_small = (
+            (goal_scale == "SMALL" or gates_mode in {"soft", "off"}) and not force_human
+        )
 
         work_id, run_id = await self._ensure_work_and_run_for_goal(
             goal_id, purpose="preview-deployment", actor=actor
@@ -2643,7 +2680,8 @@ class ExecutionOrchestrator:
                     )
 
         if auto_approve_small:
-            # Complete the human task so RELEASE_APPROVAL_COMPLETED resumes deploy.
+            # Complete human task first so release_service.approve() can proceed.
+            # execute() is idempotent if ReleaseApprovalCompleted outbox races us.
             await human_tasks.complete(
                 task_id,
                 assigned_to="regent-core:auto-release",
@@ -2661,6 +2699,25 @@ class ExecutionOrchestrator:
                     "task_id": str(task_id),
                 },
             )
+            try:
+                await self._execute_approved_preview_deployment(
+                    {
+                        "goal_id": str(goal_id),
+                        "app_project_id": str(project_id),
+                        "release_candidate_id": str(candidate.id),
+                        "actor": "regent-core:auto-release",
+                        "idempotency_key": idempotency_key or f"auto-release-{candidate.id}",
+                        "correlation_id": correlation_id,
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "auto-release inline preview deploy failed",
+                    extra={
+                        "goal_id": str(goal_id),
+                        "release_candidate_id": str(candidate.id),
+                    },
+                )
             return
 
         release_prompt = (
@@ -3127,6 +3184,165 @@ class ExecutionOrchestrator:
     # R7+R8: PreviewDeploymentSucceeded -> smoke test + auto-bind metrics
     # ---------------------------------------------------------------------------
 
+    async def _resolve_public_preview_url(
+        self, deployment_id: uuid.UUID, endpoint: str
+    ) -> str:
+        public_url = endpoint
+        async with self._sessions() as session:
+            dep = await session.get(DeploymentModel, deployment_id)
+            if dep is not None:
+                ev = dict(dep.evidence or {})
+                public_url = str(ev.get("materialized_browse_url") or endpoint)
+        return public_url
+
+    async def _enforce_live_preview_product_qa(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        deployment_id: uuid.UUID,
+        endpoint: str,
+    ) -> tuple[bool, Any, str]:
+        """Run Live Preview QA before any PREVIEW_SUCCEEDED / product_surface_ready.
+
+        Returns (passed, qa_result_or_none, public_url). On failure, stamps
+        PREVIEW_PRODUCT_QA_FAILED and returns passed=False.
+        """
+        from regent.application.live_preview_qa import run_live_preview_qa
+
+        public_url = await self._resolve_public_preview_url(deployment_id, endpoint)
+        if not public_url.startswith(("http://", "https://")):
+            # Fabricate a failed QA-shaped object via a real call for consistency.
+            qa = await run_live_preview_qa(public_url or "")
+        else:
+            qa = await run_live_preview_qa(public_url)
+        if qa.passed:
+            return True, qa, public_url
+
+        logger.warning(
+            "live preview product QA failed — refusing preview success",
+            extra={
+                "goal_id": str(goal_id),
+                "deployment_id": str(deployment_id),
+                "preview_url": public_url,
+                "gaps": qa.failed_gap_codes(),
+            },
+        )
+        try:
+            from regent.application.failure_envelope import (
+                FailureEnvelopeService,
+                RecordFailureCommand,
+            )
+
+            await FailureEnvelopeService(self._sessions).record_failure(
+                RecordFailureCommand(
+                    goal_id=goal_id,
+                    stage="preview_product_qa",
+                    error_code="PREVIEW_PRODUCT_QA_FAILED",
+                    error_summary=qa.summary or "; ".join(qa.failed_gap_codes()[:6]),
+                    evidence_payload=qa.as_dict(),
+                )
+            )
+        except Exception:
+            logger.warning(
+                "failure envelope record skipped for preview QA",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+        async with self._sessions() as session, session.begin():
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is not None:
+                metadata = dict(goal.metadata_json or {})
+                metadata["execution_stage"] = "PREVIEW_PRODUCT_QA_FAILED"
+                metadata["last_gate_status"] = "PRODUCT_QA_FAILED"
+                metadata["last_deployment_id"] = str(deployment_id)
+                metadata["last_preview_endpoint"] = endpoint
+                metadata["preview_url"] = public_url
+                metadata["preview_ready"] = False
+                metadata["product_surface_ready"] = False
+                metadata["preview_mode"] = "runtime"
+                metadata["delivery_soft_pass"] = False
+                metadata["live_preview_qa"] = qa.as_dict()
+                metadata["open_items"] = [
+                    f"preview_qa:{code}" for code in qa.failed_gap_codes()[:8]
+                ]
+                goal.metadata_json = metadata
+            await self._append_conversation_event(
+                session,
+                project_id,
+                "PREVIEW_PRODUCT_QA_FAILED",
+                (
+                    "预览进程已起，但产品面未达标"
+                    f"（样式/详情导航等）：{'; '.join(qa.failed_gap_codes()[:6])}"
+                ),
+                {
+                    "goal_id": str(goal_id),
+                    "deployment_id": str(deployment_id),
+                    "preview_url": public_url,
+                    "qa": qa.as_dict(),
+                },
+            )
+        # PenguinHarness-style: evolve skill LESSONS from the failure Trace.
+        await self._maybe_evolve_harness_from_qa(
+            goal_id=goal_id,
+            gaps=qa.failed_gap_codes(),
+            preview_url=public_url,
+            goal_context=f"deployment={deployment_id} preview_qa_failed",
+        )
+        return False, qa, public_url
+
+    async def _maybe_evolve_harness_from_qa(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        gaps: list[str],
+        preview_url: str,
+        goal_context: str = "",
+    ) -> None:
+        """PenguinHarness-style: product QA failure → evolve skill LESSONS (best-effort)."""
+        if not gaps:
+            return
+        try:
+            from pathlib import Path
+
+            from regent.application.harness_evolution import HarnessEvolutionService
+            from regent.config import get_settings
+            from regent.model.factory import build_model_provider
+
+            settings = get_settings()
+            svc = HarnessEvolutionService(
+                build_model_provider(settings),
+                workspace_root=Path(settings.workspace_root),
+            )
+            receipt = await svc.evolve_from_gaps(
+                gaps=list(gaps)[:16],
+                actor="regent-core:harness-evolution",
+                goal_context=goal_context[:4000],
+                preview_url=preview_url or None,
+            )
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                if goal is not None:
+                    metadata = dict(goal.metadata_json or {})
+                    metadata["harness_evolution"] = receipt.as_dict()
+                    goal.metadata_json = metadata
+            logger.info(
+                "harness evolution from product QA",
+                extra={
+                    "goal_id": str(goal_id),
+                    "status": receipt.status,
+                    "skill_id": receipt.skill_id,
+                    "baseline_score": receipt.baseline_score,
+                    "candidate_score": receipt.candidate_score,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "harness evolution skipped",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+
     async def handle_preview_deployment_succeeded(self, payload: dict[str, Any]) -> None:
         """Run smoke test, bind metrics, evaluate gate, converge Goal (GAC-A1/A2/A3)."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
@@ -3148,12 +3364,31 @@ class ExecutionOrchestrator:
         smoke_service = DeploymentSmokeTestService(
             self._sessions, journey_runner=BrowserJourneyRunner()
         )
+        # Observed: runtime binds 127.0.0.1:<port> on the worker host; API/smoke
+        # containers cannot reach that loopback. Probe the public preview URL.
+        smoke_endpoint = endpoint
+        try:
+            public_for_smoke = await self._resolve_public_preview_url(
+                deployment_id, endpoint
+            )
+            if public_for_smoke.startswith(("http://", "https://")) and (
+                "127.0.0.1" in str(endpoint)
+                or "localhost" in str(endpoint)
+                or not str(endpoint).startswith(("http://", "https://"))
+            ):
+                smoke_endpoint = public_for_smoke
+        except Exception:
+            logger.warning(
+                "public preview URL resolve for smoke skipped",
+                extra={"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
+                exc_info=True,
+            )
         smoke_result = await smoke_service.run_smoke_test(
-            goal_id, deployment_id, endpoint, actor=actor
+            goal_id, deployment_id, smoke_endpoint, actor=actor
         )
         if not smoke_result.passed:
             logger.warning(
-                "smoke test failed",
+                "smoke test failed — hard-stop (no soft-pass)",
                 extra={
                     "goal_id": str(goal_id),
                     "deployment_id": str(deployment_id),
@@ -3185,6 +3420,30 @@ class ExecutionOrchestrator:
                     extra={"goal_id": str(goal_id)},
                     exc_info=True,
                 )
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                if goal is not None:
+                    metadata = dict(goal.metadata_json or {})
+                    metadata["execution_stage"] = "SMOKE_FAILED"
+                    metadata["preview_ready"] = False
+                    metadata["product_surface_ready"] = False
+                    metadata["delivery_soft_pass"] = False
+                    metadata["open_items"] = [
+                        f"smoke:{e}" for e in list(smoke_result.errors or [])[:6]
+                    ]
+                    goal.metadata_json = metadata
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "SMOKE_FAILED",
+                    "预览冒烟未通过，拒绝软通过。",
+                    {
+                        "goal_id": str(goal_id),
+                        "deployment_id": str(deployment_id),
+                        "errors": list(smoke_result.errors or [])[:12],
+                    },
+                )
+            return
 
         loop_service = IterationLoopService(self._sessions)
         feedback = FeedbackService(self._sessions)
@@ -3196,6 +3455,90 @@ class ExecutionOrchestrator:
             gate = await feedback.evaluate(goal_id, deployment_id, actor=actor)
             decision = None
             if gate.status == "INSUFFICIENT_EVIDENCE":
+                from regent.config import get_settings as _gs_gate
+
+                gates_mode = str(
+                    getattr(_gs_gate(), "delivery_product_gates_mode", "soft") or "soft"
+                ).lower()
+                # Soft/off: require live product QA; process-up alone is not ready.
+                if gates_mode in {"soft", "off"} and endpoint:
+                    qa_ok, qa, public_url = await self._enforce_live_preview_product_qa(
+                        goal_id=goal_id,
+                        project_id=project_id,
+                        deployment_id=deployment_id,
+                        endpoint=endpoint,
+                    )
+                    if not qa_ok:
+                        # Ship-first: do not leave the Goal parked on QA fail —
+                        # feed gaps back and resume the same Session to repair.
+                        try:
+                            reasons = [
+                                f"PREVIEW_PRODUCT_QA_FAILED: {code}"
+                                for code in (qa.failed_gap_codes() if qa else [])[:8]
+                            ] or ["PREVIEW_PRODUCT_QA_FAILED"]
+                            await self._recover_or_wait_after_deploy_gap(
+                                goal_id,
+                                project_id,
+                                actor=actor,
+                                stage="PREVIEW_PRODUCT_QA_FAILED",
+                                message=(
+                                    "预览已起但产品面 QA 未达标，回会话继续修："
+                                    + "; ".join(reasons[:4])
+                                ),
+                                gap_reasons=reasons,
+                                extra={
+                                    "preview_url": public_url,
+                                    "deployment_id": str(deployment_id),
+                                    "error": (qa.summary if qa else "")[:400],
+                                },
+                            )
+                        except Exception:
+                            logger.warning(
+                                "preview product QA recovery skipped",
+                                extra={"goal_id": str(goal_id)},
+                                exc_info=True,
+                            )
+                        return
+
+                    async with self._sessions() as session, session.begin():
+                        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                        if goal is not None:
+                            metadata = dict(goal.metadata_json or {})
+                            metadata["execution_stage"] = "PREVIEW_SUCCEEDED"
+                            metadata["last_gate_status"] = "SOFT_PASS_INSUFFICIENT"
+                            metadata["last_deployment_id"] = str(deployment_id)
+                            metadata["last_preview_endpoint"] = endpoint
+                            metadata["preview_url"] = public_url
+                            metadata["preview_ready"] = True
+                            metadata["product_surface_ready"] = True
+                            metadata["preview_mode"] = "runtime"
+                            metadata["delivery_soft_pass"] = True
+                            metadata["live_preview_qa"] = qa.as_dict() if qa else {}
+                            goal.metadata_json = metadata
+                        await self._append_conversation_event(
+                            session,
+                            project_id,
+                            "PREVIEW_SUCCEEDED",
+                            f"产品面就绪（QA 通过，仍待产品验收）：{public_url}",
+                            {
+                                "goal_id": str(goal_id),
+                                "deployment_id": str(deployment_id),
+                                "endpoint": endpoint,
+                                "preview_url": public_url,
+                                "product_surface_ready": True,
+                                "delivery_soft_pass": True,
+                            },
+                        )
+                    logger.info(
+                        "soft-pass insufficient gate → preview ready (product QA ok)",
+                        extra={
+                            "goal_id": str(goal_id),
+                            "deployment_id": str(deployment_id),
+                            "preview_url": public_url,
+                        },
+                    )
+                    return
+
                 # GAC-C2: schedule durable timeout → EXHAUST if still waiting.
                 timers = DurableTimerService(self._sessions)
                 due_at = datetime.now(UTC) + timedelta(minutes=30)
@@ -3275,6 +3618,17 @@ class ExecutionOrchestrator:
                     CreateIterationDecision(gate_evaluation_id=gate.id, actor=actor)
                 )
 
+            # Gate PASSED/FAILED decision path: still require Live QA before
+            # advertising PREVIEW_SUCCEEDED / product_surface_ready.
+            qa_ok, qa, public_url = await self._enforce_live_preview_product_qa(
+                goal_id=goal_id,
+                project_id=project_id,
+                deployment_id=deployment_id,
+                endpoint=endpoint or "",
+            )
+            if not qa_ok:
+                return
+
             async with self._sessions() as session, session.begin():
                 goal = await session.get(GoalModel, goal_id, with_for_update=True)
                 if goal is not None:
@@ -3285,6 +3639,10 @@ class ExecutionOrchestrator:
                     metadata["last_gate_status"] = gate.status
                     metadata["last_deployment_id"] = str(deployment_id)
                     metadata["last_preview_endpoint"] = endpoint
+                    metadata["preview_url"] = public_url
+                    metadata["preview_ready"] = True
+                    metadata["product_surface_ready"] = True
+                    metadata["live_preview_qa"] = qa.as_dict() if qa else {}
                     metadata["last_iteration_decision"] = decision.decision
                     goal.metadata_json = metadata
                     expected_version = goal.version
@@ -3297,12 +3655,14 @@ class ExecutionOrchestrator:
                     session,
                     project_id,
                     "ITERATION_DECISION",
-                    f"质量评估完成，决策：{decision.decision}。",
+                    f"质量评估完成，决策：{decision.decision}（产品面 QA 已通过）。",
                     {
                         "goal_id": str(goal_id),
                         "decision": decision.decision,
                         "gate_status": gate.status,
                         "decision_id": str(decision.id),
+                        "product_surface_ready": True,
+                        "preview_url": public_url,
                     },
                 )
             if old_timer:
@@ -3394,11 +3754,19 @@ class ExecutionOrchestrator:
             )
         except DomainError as exc:
             if "no metric definitions" in str(exc):
-                # No metrics bound yet; treat as PASSED for P1 chain convergence.
+                # No metrics bound yet — still require Live product QA.
                 logger.warning(
                     "feedback evaluation skipped: no metric definitions",
                     extra={"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
                 )
+                qa_ok, qa, public_url = await self._enforce_live_preview_product_qa(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    deployment_id=deployment_id,
+                    endpoint=endpoint or "",
+                )
+                if not qa_ok:
+                    return
                 expected_version = 0
                 correlation_id = uuid.uuid4()
                 async with self._sessions() as session, session.begin():
@@ -3409,6 +3777,10 @@ class ExecutionOrchestrator:
                         metadata["last_gate_status"] = "PASSED"
                         metadata["last_deployment_id"] = str(deployment_id)
                         metadata["last_preview_endpoint"] = endpoint
+                        metadata["preview_url"] = public_url
+                        metadata["preview_ready"] = True
+                        metadata["product_surface_ready"] = True
+                        metadata["live_preview_qa"] = qa.as_dict() if qa else {}
                         goal.metadata_json = metadata
                         expected_version = goal.version
                         correlation_id = goal.correlation_id
@@ -3416,11 +3788,13 @@ class ExecutionOrchestrator:
                         session,
                         project_id,
                         "PREVIEW_SUCCEEDED",
-                        f"Preview deployment succeeded (no metrics, auto-advancing): {endpoint}",
+                        f"产品面就绪（无 metrics，QA 通过）：{public_url}",
                         {
                             "goal_id": str(goal_id),
                             "deployment_id": str(deployment_id),
                             "endpoint": endpoint,
+                            "preview_url": public_url,
+                            "product_surface_ready": True,
                         },
                     )
                 # Advance milestone or ACHIEVE just like CONTINUE path.
@@ -3791,6 +4165,16 @@ class ExecutionOrchestrator:
                 goal_scale=goal_scale,
                 has_preview=has_preview,
             )
+            # Soft ACHIEVE also requires Live product QA to have passed.
+            product_ready = metadata.get("product_surface_ready") in (True, "true", "1")
+            live_qa = dict(metadata.get("live_preview_qa") or {})
+            if (
+                allow_achieve
+                and achieve_reason == "soft_pass_preview"
+                and not (product_ready and live_qa.get("passed") is True)
+            ):
+                allow_achieve = False
+                achieve_reason = "product_surface_not_ready"
             if not allow_achieve:
                 metadata["execution_stage"] = "WAITING_HUMAN_VERIFICATION"
                 metadata["awaiting_verification"] = True
@@ -3817,7 +4201,7 @@ class ExecutionOrchestrator:
                 if achieve_reason == "soft_pass_preview":
                     metadata["delivery_state"] = DeliveryState.DELIVERED_FOR_REVIEW.value
                     metadata["delivery_soft_pass"] = True
-                    # A0: soft ACHIEVE is not verified_pass COMPLETE.
+                    # Soft ACHIEVE = delivered for review, not verified COMPLETE.
                     from regent.application.agent_loop_exit import (
                         apply_exit_to_metadata,
                         build_exit,
@@ -3832,9 +4216,12 @@ class ExecutionOrchestrator:
                             session_id=metadata.get("project_agent_session_id"),
                             epoch=metadata.get("project_agent_session_epoch"),
                             result_bundle=build_result_bundle(
-                                summary="预览软通过（非完整验证 COMPLETE）",
-                                preview_url=metadata.get("last_preview_endpoint"),
-                                open_items=["soft_pass_preview: 完整产品门未强制"],
+                                summary="产品面 QA 通过，已交付审阅（非完整验收 COMPLETE）",
+                                preview_url=metadata.get("preview_url")
+                                or metadata.get("last_preview_endpoint"),
+                                open_items=[
+                                    "soft_pass_preview: awaiting human product acceptance"
+                                ],
                             ),
                         ),
                     )
@@ -4352,7 +4739,11 @@ class ExecutionOrchestrator:
                 return
             meta = dict(goal.metadata_json or {})
             outcome = "progress_loop" if progress_loop_detected(meta) else "success"
-            verdict = evaluate_complete_allowed(outcome, metadata=meta)
+            verdict = evaluate_complete_allowed(
+                outcome,
+                metadata=meta,
+                open_items=open_items,
+            )
             if not verdict["safe"]:
                 # O0: never forge COMPLETE — degrade to ASK_HUMAN.
                 ask = build_ask_envelope(

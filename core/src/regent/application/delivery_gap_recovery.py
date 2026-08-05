@@ -105,6 +105,10 @@ _PRESENTATION_MARKERS = (
     "product-structure",
     "forbid-demo-shell",
     "semantic-main",
+    "preview-asset-reachability",
+    "preview-internal-nav",
+    "preview-home-reachable",
+    "preview-product-qa",
 )
 _EVIDENCE_MARKERS = (
     "observed-entries-rendered",
@@ -760,16 +764,31 @@ class DeliveryGapRecoveryService:
                 ask = permission_ask_envelope(tool_name=tool_name, args_preview=preview)
             elif gap_kind == "ASK_USER":
                 question = "Agent 需要你确认后再继续。"
+                ask_type = "ask_user"
+                blocked_item: str | None = None
                 for r in reasons:
                     text = str(r)
                     if text.startswith("ASK_USER_REQUIRED:"):
                         question = text.split(":", 1)[-1].strip() or question
-                        break
+                    elif text.startswith("ask_type:"):
+                        ask_type = text.split(":", 1)[-1].strip() or ask_type
+                    elif text.startswith("blocked_item:"):
+                        blocked_item = text.split(":", 1)[-1].strip() or None
                 ask = build_ask_envelope(
                     question=question[:800],
-                    why_blocked="Agent 调用了 ask_user_question。",
-                    ask_type="ask_user",
+                    why_blocked=(
+                        "同一步无进展，需要你改方向或确认。"
+                        if ask_type == "progress_loop"
+                        else "Agent 调用了 ask_user_question。"
+                    ),
+                    ask_type=ask_type,
+                    gap_kind="PROGRESS_LOOP" if ask_type == "progress_loop" else "ASK_USER",
+                    blocked_item_key=blocked_item,
                 )
+                if blocked_item and "卡在清单项" not in str(ask.get("question") or ""):
+                    ask["question"] = (
+                        f"{ask.get('question') or ''}\n（卡在清单项: {blocked_item}）"
+                    )[:800]
             else:
                 why = (
                     f"交付验证未通过（{gap_kind}）。"
@@ -1531,6 +1550,8 @@ class DeliveryGapRecoveryService:
 
                     metadata = grant_session_always(metadata, "write_file")
                     metadata = grant_session_always(metadata, "edit_file")
+                    # Ship-first: approved plan typically includes install/test/smoke shell steps.
+                    metadata = grant_session_always(metadata, "run_command")
             # H0 Permission grants (session-scoped always / once via metadata for next lease).
             if ask_type == "permission" or str(metadata.get("delivery_gap_kind") or "") == "TOOL_PERMISSION":
                 from regent.application.agent_control import grant_session_always
@@ -1548,6 +1569,32 @@ class DeliveryGapRecoveryService:
                     metadata["permission_allow_once_tools"] = once[:32]
                 elif effective_option == "deny":
                     metadata["permission_denied_at"] = datetime.now(UTC).isoformat()
+            # Progress-loop / PROGRESS_LOOP: human answer resets streak so resume
+            # does not immediately re-ASK on the same counter.
+            from regent.application.agent_loop_exit import (
+                META_PROGRESS_LOOP,
+                advance_progress_item,
+            )
+
+            gap_kind_now = str(metadata.get("delivery_gap_kind") or "")
+            if (
+                ask_type == "progress_loop"
+                or gap_kind_now in {"PROGRESS_LOOP", "ASK_USER"}
+                or META_PROGRESS_LOOP in metadata
+            ):
+                blocked = str(
+                    pending_ask_before.get("blocked_item_key")
+                    or (pending_ask.get("blocked_item_key") if pending_ask else "")
+                    or ""
+                ).strip()
+                if blocked:
+                    metadata = advance_progress_item(metadata, item_key=blocked)
+                else:
+                    metadata.pop(META_PROGRESS_LOOP, None)
+                if effective_option == "skip_item":
+                    metadata["work_plan_approved"] = False
+                    metadata["work_plan_replan_requested"] = True
+                    metadata.pop("skip_plan_approve", None)
             metadata.pop("agent_abort_requested", None)
             from regent.application.agent_control import clear_abort
 

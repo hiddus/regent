@@ -1,9 +1,20 @@
 {
   "skill_id": "ui",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "title": "UI",
-  "description": "Minimal usable UI bound to real backend actions — not a demo poster.",
-  "applies_when": ["ui", "frontend", "template", "form", "page", "dashboard", "website", "页面", "表单", "看板", "地图", "前端"],
-  "anti_examples": ["static marketing page with no wired actions"],
-  "gap_codes": ["STATIC_FAILED", "forbid-pure-static-backend", "SMOKE_FAILED", "presentation"]
+  "description": "Designed product UI with real actions, stylesheet substance, and clickable list→detail — not a browser-default dump.",
+  "applies_when": ["ui", "frontend", "template", "form", "page", "dashboard", "website", "页面", "表单", "看板", "地图", "前端", "样式", "详情"],
+  "anti_examples": ["static marketing page with no wired actions", "blue link dump without CSS substance"],
+  "gap_codes": [
+    "STATIC_FAILED",
+    "forbid-pure-static-backend",
+    "SMOKE_FAILED",
+    "presentation",
+    "stylesheet-present",
+    "stylesheet-substance",
+    "styled-surface",
+    "semantic-main",
+    "preview-asset-reachability",
+    "preview-internal-nav"
+  ]
 }
