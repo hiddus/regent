@@ -321,7 +321,9 @@ class AppGuidanceService:
                 summary=f"已确认 {answered_count} 项边界",
                 correction_target="requirements",
                 correction_detail=message,
-                explicit_constraints={"boundary_answers": answer_map},
+                explicit_constraints={
+                    "boundary_answers_json": json.dumps(answer_map, ensure_ascii=False)
+                },
                 unknowns=[
                     str(item.get("question") if isinstance(item, dict) else item)
                     for item in remaining
