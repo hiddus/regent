@@ -1,16 +1,37 @@
 # Regent
 
-Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。它从产品目标出发，获取证据、形成候选假设、修订需求、解析能力、生成应用、完成隔离构建与发布，并根据真实观测决定继续、修订或停止。
+## 目标启动治理（2026-08-13）
 
-## 当前状态（2026-08-03）
+Regent 现在将项目可行性分析作为正式执行的前置硬门，同时保留目标锁定后的“边跑边修”：
+
+1. Goal 发布后保持 `DRAFT`，通过多轮对话确认价值、验收标准、范围、依赖、权限、风险、预算和候选路径。
+2. 可行性结论统一为 `FEASIBLE`、`REVISION_REQUIRED` 或 `NOT_FEASIBLE`。
+3. 只有至少完成两轮澄清、关键未知项已解决、结论为 `FEASIBLE`，并由 Goal Owner 确认当前 GoalSpec 版本和哈希后，目标才能锁定为 `FROZEN`。
+4. 未通过可行性闸门时，只允许预算内追问、只读检查、估算、设计推演和明确授权的隔离验证；禁止业务代码生成、Workspace 写入、正式 Worker、生产写入和外部触达。
+5. 每个 Goal 必须设置正数预算上限。欠费响应不重试；结构化输出只允许一次有界修复，且不会把完整错误输出重新灌入上下文。
+6. 正式锁定后允许持续执行和修正；目标、范围、数据、权限、预算或不可逆影响发生重大变化时，必须退回重新确认。
+
+控制台已增加“边界确认 → 可行性分析 → 目标锁定 → 正式执行”阶段导航，并仅在可行性、澄清轮次和未知项同时满足要求时显示锁定执行入口。
+
+详细规则见 [`docs/decision-note-minimum-start-continuous-correction-budget-stop-2026-08-13.md`](./docs/decision-note-minimum-start-continuous-correction-budget-stop-2026-08-13.md)。
+
+**Regent 是围绕经营目标持续工作的智能体团队。**它连接业务数据，主动发现机会、执行获授权的行动，并根据真实经营结果持续调整。
+
+当前商业切入点是**互联网产品增长经营**：先围绕一个明确增长指标，在 6–8 周付费试点内完成经营体检、机会发现、低风险实验、结果验证和周期复盘。应用生成是团队可调用的能力，不是 Regent 本身。
+
+需要明确区分：Regent 3.0 的愿景是能够长期自主探索、组织和进化的智能体经营团队；当前已经具备的是受治理的目标执行、应用生成、验证、预览发布和初步观测/决策闭环。持续在线经营学习、自由拓扑的生产权限继承，以及景区、智慧城市等完整行业经营能力仍在建设中，不作为当前销售承诺。
+
+首期客户获得：一份 Goal Charter、一个目标与护栏指标、限定数据和行动权限、预算封顶、每周经营报告，以及试点结束时可审计的扩大、修订、停止或移交建议。定价建议采用“接入与目标设计费 + 团队服务费 + 超额资源实耗 + 可选的可归因结果奖金”，不按 Agent 数量收费。
+
+## 当前状态（2026-08-10）
 
 - P0 已形成可运行闭环：目标、工作项、执行、审批、证据、观测、恢复与审计。
 - P1 已完成至 `0022`：GoalSpec 快照启动后由 Worker 持久化生成、检查并发布 Preview；对话可查询进度、失败可重试。
   - 主链路采用**快照启动 + 事后纠偏**，见 [`docs/decision-note-auto-start-journey-2026-07-31.md`](./docs/decision-note-auto-start-journey-2026-07-31.md)。
-- **生成策略**：代码默认仍为 `artifact-backed`；GQ-4（默认切 `agentic`）**未晋级**。生产已开 **M6 5% agentic canary**（`canary_gate=true`、`canary_percent=5`），见 [`docs/m6-canary-window-2026-08-01.json`](./docs/m6-canary-window-2026-08-01.json)；观察与窗末决策见 [`docs/m6-canary-watch-plan-2026-08-01.md`](./docs/m6-canary-watch-plan-2026-08-01.md)。成本/质量护栏未过前不扩 10%、不翻转默认策略。
+- **生成策略事实源**：代码默认是 `agentic`，默认 canary 为 `0%`；部署环境可以覆盖。`/health/ready` 与 `/v1/health` 返回不含密钥的 `runtime_profile`，文档不再把历史观察窗当作当前生产事实。
 - **Prompt cache / token 成本**：agentic 上下文改为「稳定前缀 + 对话 + 易变后缀」，workspace 默认仅路径树；解析并累计 `cached_tokens`。计划：[`docs/token-cost-cache-fix-plan-2026-08-01.md`](./docs/token-cost-cache-fix-plan-2026-08-01.md)。
 - **交付缺口**：进度停滞与交付缺口优先自动续跑 / 软暂停（对话补充方向），**不**对缺口卡弹出「总是允许」；真审批仍限于发布、质量门、外部效应、Permit。
-- Agent 内核 M0–M5 工程接线已落地，**W4 收口**（CJK token、质量门、live golden lane）；M6 观察窗 ACTIVE。GQ-4 仍 PENDING。
+- Agent 内核 M0–M5 工程接线已落地，**W4 收口**（CJK token、质量门、live golden lane）；M6 观察窗 **CLAMPED_PENDING_QUALIFICATION**（canary off；watch **HALTED**；下一步须 **Offline Qual**；见 `docs/m6-canary-window-2026-08-01.json`）。GQ-4 仍 PENDING。
 - **混合控制平面 H0–H2（2026-08-03 落地）**：abort / permission / ask 工具 / result surface / 只读时间线，见 [`docs/decision-note-hybrid-h0-control-plane-2026-08-03.md`](./docs/decision-note-hybrid-h0-control-plane-2026-08-03.md) 与 [`docs/execution-plan-hybrid-control-experience-ops-2026-08-03.md`](./docs/execution-plan-hybrid-control-experience-ops-2026-08-03.md)。
 - **Session Work Plan（W0–W4，2026-08-03）**：Step-0 门禁 + 计划审批，见 [`docs/decision-note-session-work-plan-2026-08-03.md`](./docs/decision-note-session-work-plan-2026-08-03.md) 与 [`docs/execution-plan-session-work-plan-2026-08-03.md`](./docs/execution-plan-session-work-plan-2026-08-03.md)。
 - **控制台可观测性（2026-08-02）**：SSE 为主 + ProgressEvent + 活动 API，见 [`docs/console-observability-gap-2026-08-02.md`](./docs/console-observability-gap-2026-08-02.md)。
@@ -42,7 +63,7 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 - [技术架构与实施规范](./Regent-Technical-Spec.md)（CURRENT；§21 双列 API 对照）
 - [测量与决策框架](./Regent-Measurement-Decision-Framework.md)（CURRENT）
 - [交付计划](./Regent-Plan.md)（ACTIVE，**唯一编码执行清单**）
-- [M6 Canary 观察窗](./docs/m6-canary-watch-plan-2026-08-01.md)（ACTIVE）
+- [M6 Canary 观察窗](./docs/m6-canary-watch-plan-2026-08-01.md)（HALTED_PENDING_QUALIFICATION）
 - [Agent 内核可执行修复计划](./docs/agent-core-restoration-executable-plan-2026-08-01.md)
 - [Token / Prompt Cache 修复计划](./docs/token-cost-cache-fix-plan-2026-08-01.md)
 - [混合控制平面 H0–H2](./docs/decision-note-hybrid-h0-control-plane-2026-08-03.md)（2026-08-03）
@@ -51,7 +72,7 @@ Regent 是一个可治理、可审计、可恢复的自主产品生成 Core。�
 - [下一步 CD-6…12](./docs/conversational-delivery-next-plan-2026-07-31.md)
 - [CD-6 执行级工作包](./docs/cd6-execution-plan-2026-07-31.md)
 - [对话式交付 CD-0…5](./docs/conversational-delivery-plan-2026-07-31.md)
-- [永久定义（唯一规范源）](./docs/definitions/REGENT-DEFINITION-1.0.txt)（FROZEN）
+- [永久定义（唯一规范源）](./docs/definitions/REGENT-DEFINITION-3.0.txt)（FROZEN）
 - [部署（两套路径）](./docs/deployment.md)
 - [文档索引](./docs/README.md)
 

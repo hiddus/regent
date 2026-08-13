@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 from regent.application.app_project_service import AppProjectService
 from regent.application.delivery_review_api import DeliveryReviewQueryService
-from regent.application.goal_execution_service import GoalExecutionService
 from regent.config import get_settings
 from regent.model.factory import build_model_provider
 
@@ -28,6 +27,7 @@ ServiceDep = Annotated[AppProjectService, Depends(service)]
 class CreateAppDraftBody(BaseModel):
     idea: str = Field(min_length=1, max_length=20_000)
     actor: str = Field(min_length=1, max_length=255)
+    budget_limit: float = Field(gt=0)
 
 
 class ConfirmAppBody(BaseModel):
@@ -75,25 +75,14 @@ class ConfirmAppResponse(BaseModel):
 async def create_app_draft(
     payload: CreateAppDraftBody, projects: ServiceDep, request: Request
 ) -> AppDraftResponse:
-    receipt = await projects.create_draft(idea=payload.idea, actor=payload.actor)
-    auto_started = False
-    # run-think-learn L2: when model cannot self-consistently deduce a path,
-    # wait for user fork selection before auto-start (human as auxiliary).
-    if not receipt.needs_user_fork:
-        started = await GoalExecutionService(request.app.state.sessions).start(
-            receipt.goal.id,
-            actor=payload.actor,
-            idempotency_key=f"auto-start:{receipt.goal.id}",
-        )
-        auto_started = True
-        goal_status = started.status
-    else:
-        goal_status = receipt.goal.status
+    receipt = await projects.create_draft(
+        idea=payload.idea, actor=payload.actor, budget_limit=payload.budget_limit
+    )
     return AppDraftResponse(
         project=project_response(receipt.project),
         conversation_id=receipt.conversation.id,
         goal_id=receipt.goal.id,
-        goal_status=goal_status,
+        goal_status=receipt.goal.status,
         goal_spec_id=receipt.spec.id,
         goal_spec_version=receipt.spec.version,
         goal_spec_status=receipt.spec.status,
@@ -102,7 +91,7 @@ async def create_app_draft(
         model=receipt.model,
         plan=dict(receipt.runtime_plan or {}),
         needs_user_fork=bool(receipt.needs_user_fork),
-        auto_started=auto_started,
+        auto_started=False,
     )
 
 

@@ -57,64 +57,30 @@ class GoalExecutionService:
                     ErrorCode.INVALID_STATE,
                     "goal awaits user fork selection before start",
                 )
+            try:
+                budget_limit = float(meta.get("budget_limit"))
+            except (TypeError, ValueError):
+                budget_limit = 0.0
+            if budget_limit <= 0:
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED,
+                    "goal requires a positive budget_limit before start",
+                )
+            if not bool(meta.get("execution_boundary_locked")):
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED,
+                    "goal boundary and feasibility must be confirmed before start",
+                )
+            if (
+                spec.status != "FROZEN"
+                or not spec.confirmed_by
+                or meta.get("locked_spec_hash") != spec.content_hash
+                or int(meta.get("locked_spec_version") or 0) != spec.version
+            ):
+                raise DomainError(ErrorCode.POLICY_DENIED, "confirmed GoalSpec lock mismatch")
             auto_prepared = False
             if goal.status == "DRAFT":
-                if spec.status != "DRAFT" or project.status not in {"DRAFT", "ACTIVE"}:
-                    raise DomainError(
-                        ErrorCode.INVALID_STATE,
-                        "draft goal context is inconsistent",
-                    )
-                # This freezes an execution snapshot, not the user's intent forever.
-                # Unknowns remain discovery inputs and later guidance can create a
-                # newer GoalSpec version.
-                now = datetime.now(UTC)
-                spec.status = "FROZEN"
-                spec.confirmed_by = "regent-core:auto-snapshot"
-                spec.confirmed_at = now
-                project.status = "ACTIVE"
-                goal.status = "READY"
-                goal.version += 1
-                goal.metadata_json = {
-                    **goal.metadata_json,
-                    "goal_clarity_state": (
-                        "EXPLORING" if spec.unknowns else "PROVISIONAL"
-                    ),
-                    "confirmation_required": False,
-                    "execution_spec_version": spec.version,
-                }
-                snapshot_payload = {
-                    "app_project_id": str(project.id),
-                    "goal_spec_id": str(spec.id),
-                    "goal_spec_version": spec.version,
-                    "content_hash": spec.content_hash,
-                    "snapshot_by": actor,
-                    "confirmation_required": False,
-                    "unknown_count": len(spec.unknowns),
-                }
-                session.add_all(
-                    (
-                        AuditRecordModel(
-                            id=uuid.uuid4(),
-                            aggregate_type="goal",
-                            aggregate_id=goal.id,
-                            aggregate_version=goal.version,
-                            action="SNAPSHOT_GOAL_SPEC_FOR_EXECUTION",
-                            actor=actor,
-                            payload=snapshot_payload,
-                            correlation_id=goal.correlation_id,
-                        ),
-                        OutboxEventModel(
-                            id=uuid.uuid4(),
-                            event_type="GoalSpecFrozen",
-                            aggregate_type="goal",
-                            aggregate_id=goal.id,
-                            aggregate_version=goal.version,
-                            payload=snapshot_payload,
-                            correlation_id=goal.correlation_id,
-                        ),
-                    )
-                )
-                auto_prepared = True
+                raise DomainError(ErrorCode.POLICY_DENIED, "draft goal cannot start before confirmation")
             metadata = dict(goal.metadata_json)
             current_key = metadata.get("execution_idempotency_key")
             current_stage = str(metadata.get("execution_stage", "NOT_STARTED"))

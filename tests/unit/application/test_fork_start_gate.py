@@ -66,6 +66,7 @@ async def _seed_fork_draft(
                     created_by="tester",
                     correlation_id=uuid.uuid4(),
                     metadata_json={
+                        "budget_limit": 10.0,
                         "needs_user_fork": needs_user_fork,
                         "pending_fork_options": options if needs_user_fork else [],
                         "runtime_plan": {
@@ -112,7 +113,7 @@ async def test_start_refuses_while_needs_user_fork(
 
 
 @pytest.mark.asyncio
-async def test_select_option_clears_fork_and_starts(
+async def test_select_option_clears_fork_but_does_not_start_before_confirmation(
     db_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     project_id, goal_id = await _seed_fork_draft(db_sessions, needs_user_fork=True)
@@ -139,7 +140,7 @@ async def test_select_option_clears_fork_and_starts(
         assert meta.get("needs_user_fork") is False
         assert meta.get("pending_fork_options") == []
         assert (meta.get("selected_fork") or {}).get("id") == "a"
-        assert goal.status == "ACTIVE"
+        assert goal.status == "DRAFT"
         latest = await session.scalar(
             select(GoalSpecModel)
             .where(GoalSpecModel.goal_id == goal_id)
@@ -147,5 +148,51 @@ async def test_select_option_clears_fork_and_starts(
             .limit(1)
         )
         assert latest is not None
-        assert latest.status == "FROZEN"
+        assert latest.status == "DRAFT"
         assert latest.explicit_constraints.get("selected_fork_id") == "a"
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_goal_without_budget_limit(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    _, goal_id = await _seed_fork_draft(db_sessions, needs_user_fork=False)
+    async with db_sessions() as session, session.begin():
+        goal = await session.get(GoalModel, goal_id, with_for_update=True)
+        assert goal is not None
+        goal.metadata_json = {
+            key: value for key, value in dict(goal.metadata_json or {}).items()
+            if key != "budget_limit"
+        }
+    with pytest.raises(DomainError) as exc:
+        await GoalExecutionService(db_sessions).start(
+            goal_id, actor="tester", idempotency_key=f"no-budget:{goal_id}"
+        )
+    assert exc.value.code == ErrorCode.POLICY_DENIED
+    assert "budget_limit" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_core_cannot_auto_confirm_draft_start(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    _, goal_id = await _seed_fork_draft(db_sessions, needs_user_fork=False)
+    with pytest.raises(DomainError) as exc:
+        await GoalExecutionService(db_sessions).start(
+            goal_id, actor="regent-core:auto-snapshot", idempotency_key=f"auto:{goal_id}"
+        )
+    assert exc.value.code == ErrorCode.POLICY_DENIED
+    assert "confirmed" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_unlocked_boundary_even_with_budget(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    _, goal_id = await _seed_fork_draft(db_sessions, needs_user_fork=False)
+    with pytest.raises(DomainError) as exc:
+        await GoalExecutionService(db_sessions).start(
+            goal_id, actor="tester", idempotency_key=f"unlocked:{goal_id}"
+        )
+    assert exc.value.code == ErrorCode.POLICY_DENIED
+    assert "confirmed" in str(exc.value)

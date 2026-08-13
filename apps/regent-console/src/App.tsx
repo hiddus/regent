@@ -3,6 +3,8 @@ import { Sidebar, StageBar } from './components/Sidebar'
 import { MessageList } from './components/MessageList'
 import { Composer } from './components/Composer'
 import { ArtifactPanel, type WorkspaceTab } from './components/ArtifactPanel'
+import { OperatingDashboard } from './components/OperatingDashboard'
+import { GoalReadiness } from './components/GoalReadiness'
 import { useWorkspace } from './hooks/useWorkspace'
 import { api } from './lib/api'
 import { buildProgressNodes } from './lib/progressNodes'
@@ -258,6 +260,8 @@ export default function App() {
           liveActivity={ws.liveActivity}
           onQuickAction={handleQuickAction}
         />
+        <GoalReadiness status={ws.status} onAction={handleQuickAction} />
+        <OperatingDashboard status={ws.status} />
         <MessageList
           messages={ws.messages}
           currentProjectId={ws.currentProject?.id || null}

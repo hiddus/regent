@@ -7,17 +7,19 @@ def source(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_draft_creation_auto_starts_without_confirmation_route() -> None:
+def test_draft_creation_waits_for_explicit_start() -> None:
     routes = source("api/app_projects.py")
-    assert "GoalExecutionService(request.app.state.sessions).start" in routes
-    assert 'idempotency_key=f"auto-start:{receipt.goal.id}"' in routes
+    assert "GoalExecutionService(request.app.state.sessions).start" not in routes
+    assert "auto_started=False" in routes
 
 
-def test_execution_auto_snapshots_draft_and_preserves_unknowns() -> None:
+def test_explicit_start_freezes_draft_and_preserves_unknowns() -> None:
     service = source("application/goal_execution_service.py")
     assert 'if goal.status == "DRAFT"' in service
     assert 'action="SNAPSHOT_GOAL_SPEC_FOR_EXECUTION"' in service
-    assert '"confirmation_required": False' in service
+    assert "spec.confirmed_by = actor" in service
+    assert '"explicit_user_start": True' in service
+    assert 'meta.get("budget_limit")' in service
     assert '"EXPLORING" if spec.unknowns else "PROVISIONAL"' in service
 
 

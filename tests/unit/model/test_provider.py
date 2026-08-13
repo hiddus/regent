@@ -74,6 +74,55 @@ async def test_openai_compatible_provider_retries_schema_validation_errors() -> 
     messages = requests[1]["messages"]
     assert isinstance(messages, list)
     assert "Validation errors" in messages[-1]["content"]
+    assert all(message.get("role") != "assistant" for message in messages)
+
+
+async def test_generate_structured_defaults_to_one_bounded_repair() -> None:
+    hits = {"n": 0}
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"wrong":"shape"}'}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="test-model",
+            client=client,
+        )
+        with pytest.raises(ModelOutputError):
+            await provider.generate_structured(
+                system_prompt="Return JSON", user_prompt="answer", response_model=Answer
+            )
+
+    assert hits["n"] == 2
+
+
+async def test_payment_required_is_never_retried() -> None:
+    hits = {"n": 0}
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        return httpx.Response(402, text="payment required")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="test-model",
+            max_http_retries=3,
+            client=client,
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await provider.generate_structured(
+                system_prompt="Return JSON", user_prompt="answer", response_model=Answer
+            )
+
+    assert hits["n"] == 1
 
 
 async def test_openai_compatible_provider_rejects_invalid_output() -> None:

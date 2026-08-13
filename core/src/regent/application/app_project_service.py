@@ -1,6 +1,7 @@
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -40,6 +41,10 @@ class ProductUnderstanding(BaseModel):
     proposed_steps: list[str] = Field(default_factory=list)
     deduction_clear: bool = True
     fork_options: list[ForkOptionUnderstanding] = Field(default_factory=list)
+    feasibility_verdict: Literal[
+        "FEASIBLE", "REVISION_REQUIRED", "NOT_FEASIBLE"
+    ] = "REVISION_REQUIRED"
+    feasibility_reasons: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +76,9 @@ class AppProjectService:
         self._sessions = sessions
         self._provider = provider
 
-    async def create_draft(self, *, idea: str, actor: str) -> AppProjectDraftReceipt:
+    async def create_draft(
+        self, *, idea: str, actor: str, budget_limit: float
+    ) -> AppProjectDraftReceipt:
         from regent.application.goal_runtime_plan import build_runtime_plan
 
         response = await self._provider.generate_structured(
@@ -148,6 +155,11 @@ class AppProjectService:
                 "runtime_plan": runtime_plan,
                 "needs_user_fork": needs_user_fork,
                 "pending_fork_options": runtime_plan.get("fork_options") or [],
+                "budget_limit": float(budget_limit),
+                "clarification_rounds": 0,
+                "feasibility_verdict": understanding.feasibility_verdict.upper(),
+                "feasibility_reasons": list(understanding.feasibility_reasons),
+                "execution_boundary_locked": False,
             },
         )
         spec = GoalSpecModel(
@@ -265,6 +277,16 @@ class AppProjectService:
                 raise DomainError(ErrorCode.NOT_FOUND, "goal spec not found")
             if spec.content_hash != expected_spec_hash:
                 raise DomainError(ErrorCode.VERSION_CONFLICT, "goal proposal changed")
+            metadata = dict(goal.metadata_json or {})
+            if int(metadata.get("clarification_rounds") or 0) < 2:
+                raise DomainError(ErrorCode.POLICY_DENIED, "two clarification rounds required")
+            if list(spec.unknowns or []):
+                raise DomainError(ErrorCode.POLICY_DENIED, "goal boundary has unresolved questions")
+            if str(metadata.get("feasibility_verdict") or "").upper() != "FEASIBLE":
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED,
+                    "feasibility analysis must be FEASIBLE",
+                )
             if spec.status == "FROZEN" and goal.status in {"READY", "ACTIVE"}:
                 return ConfirmAppProjectReceipt(project, goal, spec)
             if (
@@ -291,6 +313,13 @@ class AppProjectService:
             project.status = "ACTIVE"
             goal.status = "READY"
             goal.version = 1
+            goal.metadata_json = {
+                **metadata,
+                "execution_boundary_locked": True,
+                "locked_spec_hash": spec.content_hash,
+                "locked_spec_version": spec.version,
+                "locked_by": actor,
+            }
             payload = {
                 "app_project_id": str(project.id),
                 "goal_spec_id": str(spec.id),

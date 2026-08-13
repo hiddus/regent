@@ -14,7 +14,7 @@ ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 # M1-2: retryable HTTP statuses; 400/401/403 never retry.
 _RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
-_NO_RETRY_STATUS = frozenset({400, 401, 403})
+_NO_RETRY_STATUS = frozenset({400, 401, 402, 403})
 
 
 class ModelConfigurationError(RuntimeError):
@@ -100,7 +100,7 @@ class OpenAICompatibleProvider:
         api_key: str,
         model: str,
         timeout_seconds: float = 180,
-        max_structured_attempts: int = 3,
+        max_structured_attempts: int = 2,
         max_output_tokens: int | None = 8192,
         max_http_retries: int = 3,
         retry_deadline_seconds: float | None = None,
@@ -214,12 +214,10 @@ class OpenAICompatibleProvider:
                         model=model_name,
                     )
                 if attempt + 1 < self._max_structured_attempts:
-                    messages.extend(
-                        (
-                            {"role": "assistant", "content": str(content)},
-                            {"role": "user", "content": correction},
-                        )
-                    )
+                    # Do not feed the complete failed response back into the
+                    # context. Large malformed outputs used to multiply prompt
+                    # cost on every repair attempt without adding information.
+                    messages.append({"role": "user", "content": correction})
             assert last_error is not None
             raise last_error
         finally:

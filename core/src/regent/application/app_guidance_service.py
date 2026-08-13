@@ -57,6 +57,10 @@ _AGENT_ROLE_LABELS: dict[str, str] = {
     "pm": "产品",
     "dev": "开发",
     "qa": "质检",
+    "product": "产品",
+    "tech": "技术",
+    "test": "测试",
+    "ux": "体验",
     "coordinator": "协调",
     "reviewer": "审查",
 }
@@ -128,6 +132,10 @@ class GuidanceInterpretation(BaseModel):
     explicit_constraints: dict[str, str | int | float | bool] | None = None
     non_goals: list[str] | None = None
     unknowns: list[str] | None = None
+    feasibility_verdict: Literal[
+        "FEASIBLE", "REVISION_REQUIRED", "NOT_FEASIBLE"
+    ] | None = None
+    feasibility_reasons: list[str] | None = None
     # CORRECT fields
     correction_target: str | None = Field(
         default=None,
@@ -517,11 +525,15 @@ class AppGuidanceService:
                 # P1 durable path stores the live preview on goal metadata, not
                 # app_preview_releases. Surface it so the console artifact panel
                 # can show the deliverable after ACHIEVE.
-                endpoint = metadata.get("last_preview_endpoint")
+                # Prefer path-prefixed public browse URL over worker-local 127.0.0.1:port.
+                endpoint = (
+                    metadata.get("preview_url")
+                    or metadata.get("last_preview_endpoint")
+                )
                 if isinstance(endpoint, str) and endpoint.strip():
                     preview_payload = {
                         "id": None,
-                        "status": "PREVIEW_READY",
+                        "status": "PREVIEW_READY" if metadata.get("preview_ready") else "PREVIEW_AVAILABLE",
                         "endpoint": endpoint.strip(),
                         "failure_code": None,
                         "failure_summary": None,
@@ -1668,6 +1680,12 @@ class AppGuidanceService:
             )
             session.add(next_spec)
             metadata["goal_clarity_state"] = "EXPLORING" if unknowns else "CLARIFIED"
+            metadata["clarification_rounds"] = int(metadata.get("clarification_rounds") or 0) + 1
+            if interpretation.feasibility_verdict is not None:
+                metadata["feasibility_verdict"] = interpretation.feasibility_verdict
+            if interpretation.feasibility_reasons is not None:
+                metadata["feasibility_reasons"] = list(interpretation.feasibility_reasons)
+            metadata["execution_boundary_locked"] = False
             metadata["latest_goal_spec_version"] = next_spec.version
             goal.metadata_json = metadata
             flag_modified(goal, "metadata_json")
@@ -2657,7 +2675,6 @@ class AppGuidanceService:
 
             goal.metadata_json = metadata
             flag_modified(goal, "metadata_json")
-            should_start = goal.status == "DRAFT"
 
             conversation = await self._conversation(session, project_id)
             ordinal = await self._next_ordinal(session, conversation.id)
@@ -2688,12 +2705,6 @@ class AppGuidanceService:
             )
             command_id = cid
 
-        if should_start:
-            await GoalExecutionService(self._sessions).start(
-                goal_id,
-                actor=actor,
-                idempotency_key=f"fork-start:{goal_id}:{chosen.get('id')}",
-            )
         return GuidanceReceipt(
             command_id,
             "SELECT_OPTION",

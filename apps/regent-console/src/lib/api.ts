@@ -14,6 +14,9 @@ import type {
 } from './types'
 
 const ACTOR = 'trial-user'
+// Trial Console requests are intentionally capped. A caller that needs a
+// different ceiling must make that budget decision explicitly.
+const TRIAL_GOAL_BUDGET_LIMIT = 1
 
 async function request<T>(path: string, body?: unknown, method?: string): Promise<T> {
   const res = await fetch(path, {
@@ -54,7 +57,11 @@ export const api = {
     }),
 
   createDraft: (idea: string) =>
-    request<DraftResult>('/v1/app-projects/drafts', { idea, actor: ACTOR }),
+    request<DraftResult>('/v1/app-projects/drafts', {
+      idea,
+      actor: ACTOR,
+      budget_limit: TRIAL_GOAL_BUDGET_LIMIT,
+    }),
 
   guidance: (projectId: string, message: string) =>
     request<GuidanceResult>(`/v1/app-projects/${projectId}/guidance`, {
