@@ -1810,6 +1810,23 @@ class AppGuidanceService:
             )
             command_id = cid
 
+        if goal_status == "DRAFT":
+            remaining_questions = [
+                str(item.get("question") if isinstance(item, dict) else item).strip()
+                for item in unknowns
+                if str(item.get("question") if isinstance(item, dict) else item).strip()
+            ]
+            if remaining_questions:
+                response = "已记录本轮回答。下一轮请回答：\n"
+                response += "\n".join(
+                    f"{index}. {question}"
+                    for index, question in enumerate(remaining_questions[:3], 1)
+                )
+                response += "\n请按编号回复；不确定可直接写“不确定”。"
+            else:
+                response = "已记录全部边界回答。可行性条件已满足，请确认锁定当前目标版本后再开始执行。"
+            return GuidanceReceipt(command_id, "CORRECT", None, False, response)
+
         # Interrupt in-flight lease so steering is not deferred to a vague "next step".
         # resume_after_human clears the abort flag before requeueing.
         from regent.application.agent_control import apply_abort_to_goal_metadata
