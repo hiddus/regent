@@ -92,6 +92,7 @@ export function ConfirmationCard({
     criteria.length || readiness.unknowns.length || constraints.length,
   )
   const [expanded, setExpanded] = useState(!docked && canConfirm)
+  const nextQuestions = readiness.unknowns.slice(0, 3)
 
   return (
     <InterventionCard
@@ -104,6 +105,20 @@ export function ConfirmationCard({
     >
       <p className="confirm-summary">{[appName, firstDeliverable].filter(Boolean).join(' · ')}</p>
       {!settled && <p className="confirm-note">{VERDICT_COPY[readiness.verdict].lead}。已完成 {readiness.rounds}/2 轮边界确认。</p>}
+
+      {!settled && !showFork && !mayStart && (
+        <div className="clarification-prompt">
+          <strong>请直接在下方输入框回答：</strong>
+          {nextQuestions.length > 0 ? (
+            <ol>
+              {nextQuestions.map((question, index) => <li key={index}>{question}</li>)}
+            </ol>
+          ) : (
+            <p>请说明本期最小交付物、如何验收，以及明确不做什么。</p>
+          )}
+          <p className="confirm-note">可以按“1. ……；2. ……；3. ……”回复。不确定的项目直接写“不确定”，Regent 会继续缩小问题。</p>
+        </div>
+      )}
 
       {hasDetails && (
         <button type="button" className="confirm-expand-btn" onClick={() => setExpanded(v => !v)}>
@@ -144,7 +159,7 @@ export function ConfirmationCard({
       ) : settled ? (
         docked ? null : <p className="confirm-note">目标已锁定。执行中可继续补充和修正。</p>
       ) : (
-        <p className="confirm-note">请继续回复待确认边界；只有可行性通过且关键未知项清零后，才会出现启动按钮。</p>
+        <p className="confirm-note">回答上面的问题后，Regent 会更新边界并继续下一轮；只有可行性通过且关键未知项清零后，才会出现启动确认。</p>
       )}
     </InterventionCard>
   )

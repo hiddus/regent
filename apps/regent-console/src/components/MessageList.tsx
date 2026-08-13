@@ -132,7 +132,7 @@ function MessageItem({
     goalId ? movingGoals.has(goalId) : movingGoals.has('*'),
   )
   const isAwaiting =
-    m.message_type === 'APP_CONFIRMATION_REQUIRED' &&
+    (m.message_type === 'APP_CONFIRMATION_REQUIRED' || m.message_type === 'GOAL_PLAN_PROPOSED') &&
     !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))
   const showForkActions =
     needsUserFork && !forkResolved && m.message_type === 'GOAL_PLAN_PROPOSED'
@@ -450,7 +450,7 @@ export function MessageList({
       m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
       m.message_type === 'GOAL_PLAN_PROPOSED'
     const awaiting =
-      (m.message_type === 'APP_CONFIRMATION_REQUIRED' &&
+      ((m.message_type === 'APP_CONFIRMATION_REQUIRED' || m.message_type === 'GOAL_PLAN_PROPOSED') &&
         !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))) ||
       (Boolean(m.metadata?.needs_user_fork) &&
         m.message_type === 'GOAL_PLAN_PROPOSED' &&
