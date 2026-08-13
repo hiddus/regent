@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 import asyncio
 import os
+import sys
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -655,4 +656,14 @@ app = create_app()
 
 
 def run() -> None:
-    uvicorn.run("regent.api.main:app", host="0.0.0.0", port=8000)
+    # psycopg async connections are incompatible with Windows' default
+    # ProactorEventLoop. Uvicorn's auto loop otherwise selects it before the
+    # application can reach PostgreSQL.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    uvicorn.run(
+        "regent.api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        loop="asyncio",
+    )

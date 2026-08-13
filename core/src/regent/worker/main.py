@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import socket
+import sys
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -447,4 +448,6 @@ async def run_async() -> None:
 
 def run() -> None:
     logging.basicConfig(level=get_settings().log_level)
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(run_async())

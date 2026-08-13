@@ -301,6 +301,7 @@ async def record_delivery_role_reviews(
 
     bindings: dict[str, DeliveryRoleBinding] = {}
     org_version_id: uuid.UUID | None = None
+    binding_reload_required = False
     async with sessions() as session, session.begin():
         goal = await session.get(GoalModel, goal_id)
         if goal is None:
@@ -327,11 +328,17 @@ async def record_delivery_role_reviews(
                     extra={"goal_id": str(goal_id)},
                     exc_info=True,
                 )
-                bindings = await load_delivery_role_bindings(
-                    session,
-                    goal_id=goal_id,
-                    organization_version_id=org_version_id,
-                )
+                # The failed flush may have invalidated this transaction. Do
+                # not issue another query through the closed context manager.
+                binding_reload_required = True
+
+    if binding_reload_required and org_version_id is not None:
+        async with sessions() as session:
+            bindings = await load_delivery_role_bindings(
+                session,
+                goal_id=goal_id,
+                organization_version_id=org_version_id,
+            )
 
     # Separate transactions: AgentTaskService methods open their own sessions.
     tasks = AgentTaskService(sessions)

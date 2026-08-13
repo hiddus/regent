@@ -268,10 +268,10 @@ async def run_delivery_role_swarm(
             product_gaps: list[str] = []
             product_findings: list[str] = []
             product_art: dict[str, Any] = {"thin_samples": []}
-            if len(home_text) < home_min:
+            if len(home_text) < min_home_visible:
                 product_gaps.append("delivery-product-outline")
                 product_findings.append(
-                    f"home visible text {len(home_text)} < {home_min} (outline/shell)"
+                    f"home visible text {len(home_text)} < {min_home_visible} (outline/shell)"
                 )
             if is_catalog:
                 thin_countries = 0
@@ -499,10 +499,10 @@ async def run_delivery_role_swarm(
                         ux_findings.append(str(check.get("detail") or name)[:200])
                     else:
                         ux_findings.append(f"{name} ok")
-            if len(home_text) < home_min:
+            if len(home_text) < min_home_visible:
                 ux_gaps.append("delivery-ux-surface")
                 ux_findings.append(
-                    f"home copy too thin for IA ({len(home_text)} chars, min={home_min})"
+                    f"home copy too thin for IA ({len(home_text)} chars, min={min_home_visible})"
                 )
             if is_catalog:
                 st, body, _ = await _fetch(
