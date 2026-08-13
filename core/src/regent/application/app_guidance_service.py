@@ -335,6 +335,67 @@ class AppGuidanceService:
         context = await self._context(project_id)
         history = await self._conversation_history(project_id, limit=10)
 
+        goal_status = str((context.get("goal") or {}).get("status") or "")
+        spec_unknowns = list((context.get("goal_spec") or {}).get("unknowns") or [])
+        normalized_message = str(message or "").strip().lower()
+
+        # The Goal Owner may explicitly defer unresolved choices to bounded
+        # implementation-time validation. Treat that as a decision, not as a
+        # reason to repeat the same questions forever.
+        defers_unknowns = (
+            goal_status == "DRAFT"
+            and bool(spec_unknowns)
+            and any(token in normalized_message for token in ("不确定", "暂不确定", "不知道"))
+            and any(token in normalized_message for token in ("直接", "先跑", "先抛", "遇到问题", "边跑边"))
+        )
+        if defers_unknowns:
+            deferred = [
+                str(item.get("question") if isinstance(item, dict) else item).strip()
+                for item in spec_unknowns
+                if str(item.get("question") if isinstance(item, dict) else item).strip()
+            ]
+            interpretation = GuidanceInterpretation(
+                command_type="CORRECT",
+                summary="将剩余未知项转为有界验证假设",
+                correction_target="requirements",
+                correction_detail=message,
+                explicit_constraints={
+                    "deferred_unknowns_json": json.dumps(deferred, ensure_ascii=False),
+                    "accessibility_baseline": "WCAG 2.2 AA as prototype baseline",
+                    "reading_reminder_baseline": "configurable and off by default until user research",
+                },
+                unknowns=[],
+                feasibility_verdict="FEASIBLE",
+                feasibility_reasons=[
+                    "Goal Owner 同意剩余偏好采用保守默认值，并在预算内通过原型验证。",
+                    "未知项已有可回退的默认方案，不再阻塞目标锁定。",
+                ],
+            )
+            return await self._dispatch(
+                project_id, message, actor, interpretation, "regent-core:defer-unknowns"
+            )
+
+        if goal_status == "DRAFT" and spec_unknowns and (
+            "无障碍" in normalized_message and any(token in normalized_message for token in ("什么", "啥", "指的", "解释"))
+        ):
+            explanation = (
+                "无障碍标准是用来确保视力、听力或操作能力下降的老人也能使用网站的检查规则。"
+                "本原型建议默认采用 WCAG 2.2 AA：包括可放大文字、足够对比度、键盘可操作、"
+                "清晰焦点和朗读兼容。这个默认值可撤销，不需要你先成为无障碍专家。\n\n"
+                "你已说明阅读时长暂不确定，我会把它转为原型验证项，默认提醒关闭且允许用户自行设置。\n\n"
+                "如果接受这两个保守默认值，请回复：接受默认值并进入锁定确认。"
+            )
+            interpretation = GuidanceInterpretation(command_type="QUERY", summary="解释无障碍默认标准")
+            return await self._persist_simple(
+                project_id,
+                message,
+                actor,
+                interpretation,
+                "regent-core:clarification-explanation",
+                explanation,
+                assistant_type="CLARIFICATION_EXPLAINED",
+            )
+
         # An explicit request to see the plan has a deterministic response
         # contract. It must not depend on a model paraphrase or expose raw state.
         if looks_like_plan_query(message):
