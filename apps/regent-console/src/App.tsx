@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { MessageList } from './components/MessageList'
 import { Composer } from './components/Composer'
+import { ArtifactPanel } from './components/ArtifactPanel'
 import { useWorkspace } from './hooks/useWorkspace'
 import { api } from './lib/api'
 import type { DiagnosticDelivery } from './lib/types'
@@ -10,6 +11,7 @@ export default function App() {
   const ws = useWorkspace()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sending, setSending] = useState(false)
+  const [projectViewOpen, setProjectViewOpen] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
   const lastMessageId = ws.messages.length > 0 ? ws.messages[ws.messages.length - 1].id : null
@@ -207,6 +209,13 @@ export default function App() {
         <header className="top">
           <button className="mobile-menu" onClick={() => setSidebarOpen(!sidebarOpen)}>☰</button>
           <div className="title">{title}</div>
+          <button
+            type="button"
+            className={`top-workspace-btn ${projectViewOpen ? 'active' : ''}`}
+            onClick={() => setProjectViewOpen(open => !open)}
+          >
+            项目查看
+          </button>
         </header>
         <MessageList
           messages={ws.messages}
@@ -252,6 +261,19 @@ export default function App() {
           goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
         />
       </main>
+      <ArtifactPanel
+        isOpen={projectViewOpen}
+        onToggle={() => setProjectViewOpen(open => !open)}
+        project={ws.currentProject}
+        status={ws.status}
+        messages={ws.messages}
+        liveAction={ws.liveActivity.liveAction}
+        toolEvents={ws.toolEvents}
+        planItems={ws.planItems}
+        planTimeline={ws.planTimeline}
+        activity={ws.activity}
+        runtimeAgents={ws.runtimeAgents}
+      />
     </div>
   )
 }

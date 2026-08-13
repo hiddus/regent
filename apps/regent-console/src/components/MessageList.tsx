@@ -99,6 +99,25 @@ function looksLikeRawJson(text: string): boolean {
   return (t.startsWith('{') && t.includes('"')) || (t.startsWith('[') && t.includes('{'))
 }
 
+function PlanSummary({ metadata }: { metadata: Record<string, unknown> }) {
+  const understanding = (metadata.understanding || {}) as Record<string, unknown>
+  const plan = (metadata.plan || {}) as Record<string, unknown>
+  const stepsRaw = plan.steps || plan.items || plan.milestones
+  const steps = Array.isArray(stepsRaw) ? stepsRaw.slice(0, 6) : []
+  const goal = String(understanding.first_deliverable || understanding.problem || '').trim()
+  const unknowns = Array.isArray(understanding.unknowns) ? understanding.unknowns.map(String) : []
+  if (!goal && steps.length === 0 && unknowns.length === 0) return null
+  return <section className="message-plan-summary" aria-label="目标与计划摘要">
+    <div className="message-plan-heading"><strong>目标与计划</strong><span>请在对话中补充或确认</span></div>
+    {goal && <div className="message-plan-goal"><small>首个可验收结果</small><p>{goal}</p></div>}
+    {steps.length > 0 && <ol>{steps.map((item, index) => {
+      const row = item as Record<string, unknown>
+      return <li key={index}>{String(row.title || row.content || row.name || item)}</li>
+    })}</ol>}
+    {unknowns.length > 0 && <div className="message-plan-unknown"><strong>仍需确认</strong><span>{unknowns.join('；')}</span></div>}
+  </section>
+}
+
 function MessageItem({
   m,
   movingGoals,
@@ -249,6 +268,8 @@ function MessageItem({
                 : '方案如下，可随时在输入框补充修正'}
           </LeadLine>
         )}
+
+        {isConfirmation && <PlanSummary metadata={m.metadata || {}} />}
 
         {showMarkdown && (
           <MarkdownBody

@@ -71,6 +71,69 @@ _DONE_TASK_STATUSES = frozenset({"SUCCEEDED", "CANCELLED"})
 _FAILED_TASK_STATUSES = frozenset({"FAILED_RETRYABLE", "FAILED_TERMINAL", "TIMED_OUT", "UNKNOWN"})
 _ACTIVE_DEPLOY_STATUSES = frozenset({"OPERATING", "DEPLOYED", "UPGRADING"})
 
+_PLAN_REQUEST_PATTERNS = (
+    r"(?:给|看|展示|说|讲|列|输出).{0,6}(?:计划|方案|步骤)",
+    r"(?:计划|方案|步骤).{0,6}(?:是什么|有哪些|怎么做|如何做)",
+    r"\b(?:show|give|review|explain|what(?:'s| is))\b.{0,20}\b(?:plan|roadmap|steps)\b",
+)
+
+
+def looks_like_plan_query(message: str) -> bool:
+    """Deterministically route explicit plan requests; do not spend a model call on intent guessing."""
+    text = str(message or "").strip().lower()
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _PLAN_REQUEST_PATTERNS)
+
+
+def build_reviewable_plan_response(context: dict[str, Any]) -> str:
+    """Stable user-facing plan contract; excludes raw runtime state and model narration."""
+    goal = dict(context.get("goal") or {})
+    metadata = dict(goal.get("metadata") or {})
+    spec = dict(context.get("goal_spec") or {})
+    runtime_plan = dict(metadata.get("runtime_plan") or {})
+
+    objective = str(goal.get("objective") or "待确认")
+    assumptions = [
+        value for value in (
+            f"目标用户：{metadata.get('target_users')}" if metadata.get("target_users") else "",
+            f"要解决的问题：{metadata.get('problem')}" if metadata.get("problem") else "",
+            f"首轮交付：{metadata.get('first_deliverable')}" if metadata.get("first_deliverable") else "",
+        ) if value
+    ] or ["尚无可安全采用的假设，需要继续澄清。"]
+    raw_steps = runtime_plan.get("proposed_steps") or runtime_plan.get("steps") or []
+    steps = [str(item).strip() for item in raw_steps if str(item).strip()]
+    if not steps:
+        steps = ["确认目标边界与非目标", "完成可行性分析", "锁定目标后实施并验证交付物"]
+    criteria_raw = dict(spec.get("success_criteria") or {})
+    criteria = [str(value or key).strip() for key, value in criteria_raw.items() if str(value or key).strip()]
+    if not criteria:
+        criteria = ["待补充可观察、可复现的验收标准。"]
+    unknowns = []
+    for item in list(spec.get("unknowns") or []):
+        value = item.get("question") if isinstance(item, dict) else item
+        if str(value or "").strip():
+            unknowns.append(str(value).strip())
+    if not unknowns:
+        unknowns = ["当前没有未解决的关键边界。"]
+    budget = metadata.get("budget_limit")
+    stop_conditions = ["达到预算上限立即停止", "出现欠费或不可恢复错误立即停止", "重大边界变化先重新确认"]
+    rounds = int(metadata.get("clarification_rounds") or 0)
+    verdict = str(metadata.get("feasibility_verdict") or "REVISION_REQUIRED").upper()
+    ready = verdict == "FEASIBLE" and rounds >= 2 and not list(spec.get("unknowns") or [])
+    next_action = "请确认锁定当前目标版本；确认后才开始执行。" if ready else "请先回答“待确认”中的问题；可行性通过前不会开始执行。"
+
+    def section(title: str, items: list[str]) -> str:
+        return f"## {title}\n" + "\n".join(f"- {item}" for item in items)
+
+    return "\n\n".join([
+        section("目标", [objective]),
+        section("当前假设", assumptions),
+        "## 步骤\n" + "\n".join(f"{index}. {step}" for index, step in enumerate(steps, 1)),
+        section("验收标准", criteria),
+        section("待确认", unknowns),
+        section("预算与停止条件", [f"本项目预算上限：{budget}" if budget is not None else "预算上限尚未设置。", *stop_conditions]),
+        section("下一动作", [next_action]),
+    ])
+
 
 # ---------------------------------------------------------------------------
 # Stage labels for human-friendly display
@@ -272,6 +335,24 @@ class AppGuidanceService:
         context = await self._context(project_id)
         history = await self._conversation_history(project_id, limit=10)
 
+        # An explicit request to see the plan has a deterministic response
+        # contract. It must not depend on a model paraphrase or expose raw state.
+        if looks_like_plan_query(message):
+            interpretation = GuidanceInterpretation(
+                command_type="QUERY",
+                summary="查看当前可审阅计划",
+            )
+            return await self._persist_simple(
+                project_id,
+                message,
+                actor,
+                interpretation,
+                "regent-core:plan-contract",
+                build_reviewable_plan_response(context),
+                assistant_type="PLAN_REVIEW",
+                assistant_metadata={"response_contract": "reviewable-plan/v1"},
+            )
+
         # L2: pending fork — match option id/label before LLM (deterministic).
         goal_meta = dict((context.get("goal") or {}).get("metadata") or {})
         if goal_meta.get("needs_user_fork"):
@@ -447,7 +528,9 @@ class AppGuidanceService:
         parts.extend([
             "",
             "Command types:",
-            "- QUERY: user asks about status, progress, or details. Answer informatively.",
+            "- QUERY: user asks about status, progress, details, or the plan. Explicit plan requests "
+            "must return a reviewable plan (goal, assumptions, steps, acceptance, open questions, "
+            "budget/stop conditions, next action), never echo the user or expose internal state.",
             "- MODIFY: user wants to significantly change objectives/users/problem/deliverable. "
             "Creates and starts a new goal revision (Goal is not one-shot — revisions are normal). "
             "No confirmation gate.",

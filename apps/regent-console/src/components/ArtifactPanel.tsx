@@ -55,11 +55,10 @@ const PLAN_STATUS_MARK: Record<string, string> = {
 }
 
 const TABS: { id: WorkspaceTab; label: string }[] = [
-  { id: 'plan', label: '清单' },
-  { id: 'run', label: '运行' },
-  { id: 'changes', label: '改动' },
-  { id: 'preview', label: '预览' },
-  { id: 'review', label: '审阅' },
+  { id: 'plan', label: '计划' },
+  { id: 'changes', label: '中间产物' },
+  { id: 'preview', label: '交付物' },
+  { id: 'review', label: '验证' },
 ]
 
 function planStatusLabel(status: string): string {
@@ -268,8 +267,7 @@ export function ArtifactPanel({
   const exit = (status?.goal?.metadata?.agent_loop_exit || null) as Record<string, unknown> | null
   const bundle = (exit?.result_bundle || null) as Record<string, unknown> | null
   const exitKind = String(exit?.exit_kind || '')
-  const goalId = status?.goal?.id
-  const mode = String(status?.goal?.metadata?.execution_mode || 'ask')
+  const goalId = status?.goal?.id || ''
 
   // Default to plan when items appear; auto-switch preview once per project.
   useEffect(() => {
@@ -399,7 +397,7 @@ export function ArtifactPanel({
       <aside className={`artifact-panel workspace-panel ${isOpen ? 'open' : ''}`}>
         <div className="workspace-sheet-handle" aria-hidden />
         <div className="artifact-panel-header">
-          <h3>工作区</h3>
+          <div><h3>项目查看</h3><small>只读 · 所有操作请在对话中完成</small></div>
           <button className="close-btn" onClick={onToggle} aria-label="关闭面板">×</button>
         </div>
 
@@ -428,35 +426,7 @@ export function ArtifactPanel({
         <div className="artifact-panel-content workspace-tab-body">
           {tab === 'plan' && (
             <div className="workspace-pane plan-pane">
-              {goalId && (
-                <div className="plan-mode-row">
-                  <span className="mode-toggle">
-                    <button
-                      type="button"
-                      className={mode === 'ask' ? 'active' : ''}
-                      onClick={() => {
-                        void api.setExecutionMode(goalId, 'ask').then(() => onModeChanged?.())
-                      }}
-                    >
-                      Ask
-                    </button>
-                    <button
-                      type="button"
-                      className={mode === 'act' ? 'active' : ''}
-                      onClick={() => {
-                        if (window.confirm('Act 模式：已批清单内可连跑；删除/外发仍会询问。确定？')) {
-                          void api.setExecutionMode(goalId, 'act').then(() => onModeChanged?.())
-                        }
-                      }}
-                    >
-                      Act
-                    </button>
-                  </span>
-                  <span className="hint">
-                    {mode === 'act' ? '清单内连跑 · 删除仍询问' : '逐步确认 · 默认更安全'}
-                  </span>
-                </div>
-              )}
+              <p className="readonly-note">此处同步展示已形成的计划，不会从侧栏启动或修改执行。</p>
 
               {exitKind === 'COMPLETE' && bundle && (
                 <ResultCard
@@ -589,7 +559,8 @@ export function ArtifactPanel({
             </div>
           )}
 
-          {tab === 'run' && (
+          {/* Legacy run controls intentionally stay out of the read-only viewer. */}
+          {false && tab === 'run' && goalId && (
             <div className="workspace-pane run-pane">
               {goalId && (
                 <div className="trust-posture-row hint" style={{ marginBottom: 8 }}>
