@@ -1135,8 +1135,28 @@ class AppGuidanceService:
         pending = context.get("pending_human_tasks", [])
         corrections = context.get("active_corrections", [])
 
+        def clarification_prompt() -> str:
+            raw = context.get("goal_spec", {}).get("unknowns", [])
+            questions: list[str] = []
+            for item in raw:
+                value = item.get("question") if isinstance(item, dict) else item
+                if str(value or "").strip():
+                    questions.append(str(value).strip())
+            if not questions:
+                questions = [
+                    "本期最小交付物具体包含什么？",
+                    "你将用什么可观察结果判断它通过验收？",
+                    "本期明确不做什么？",
+                ]
+            lines = ["\n现在请你回答以下问题："]
+            lines.extend(f"{index}. {question}" for index, question in enumerate(questions[:3], 1))
+            lines.append("请按“1. ……；2. ……；3. ……”回复；不确定的项目可直接写“不确定”。")
+            return "\n".join(lines)
+
         parts = [interpretation.summary]
         parts.append(f"\n当前状态: {goal['status']} | 阶段: {stage_label}")
+        if str(goal["status"]) == "DRAFT":
+            parts.append(clarification_prompt())
         if work:
             parts.append(f"工作项: {work}")
         if pending:
@@ -1174,6 +1194,27 @@ class AppGuidanceService:
             # _context may return a bare stage string (not {"stage": ...}).
             stage = str(stage_info or goal_status)
         goal_id = uuid.UUID(str(context["goal"]["id"]))
+        if goal_status == "DRAFT":
+            raw = context.get("goal_spec", {}).get("unknowns", [])
+            questions: list[str] = []
+            for item in raw:
+                value = item.get("question") if isinstance(item, dict) else item
+                if str(value or "").strip():
+                    questions.append(str(value).strip())
+            if not questions:
+                questions = [
+                    "本期最小交付物具体包含什么？",
+                    "你将用什么可观察结果判断它通过验收？",
+                    "本期明确不做什么？",
+                ]
+            response = "目标还不能开始，因为边界和可行性尚未确认。\n现在请你回答：\n"
+            response += "\n".join(
+                f"{index}. {question}" for index, question in enumerate(questions[:3], 1)
+            )
+            response += "\n请按编号回复；不确定的项目可直接写“不确定”，我会继续缩小问题。"
+            return await self._persist_simple(
+                project_id, message, actor, interpretation, model, response
+            )
         needs_gap_resume = await self._goal_needs_delivery_gap_resume(goal_id)
         # Soft-pause (ACTIVE+DELIVERY_SOFT_PAUSE) or halted gap states: new direction → resume.
         # Do not intercept a healthy ACTIVE run that still has stale unrelated flags.
@@ -1472,6 +1513,21 @@ class AppGuidanceService:
         async with self._sessions() as session, session.begin():
             conversation = await self._conversation(session, project_id)
             ordinal = await self._next_ordinal(session, conversation.id)
+            remaining = [
+                str(item.get("question") if isinstance(item, dict) else item).strip()
+                for item in list(next_spec.unknowns or [])
+                if str(item.get("question") if isinstance(item, dict) else item).strip()
+            ] if next_spec is not None else []
+            next_prompt = ""
+            if goal.status == "DRAFT":
+                questions = remaining[:3] or [
+                    "本期最小交付物具体包含什么？",
+                    "你将用什么可观察结果判断它通过验收？",
+                    "本期明确不做什么？",
+                ]
+                next_prompt = "\n下一步请回答：\n" + "\n".join(
+                    f"{index}. {question}" for index, question in enumerate(questions, 1)
+                ) + "\n请按编号回复；不确定的项目可直接写“不确定”。"
             user_msg = await self._persist_message_pair(
                 session, conversation.id, ordinal, message, actor,
                 response, "PAUSE_RESULT",
@@ -1626,6 +1682,7 @@ class AppGuidanceService:
                 metadata["work_plan_approved"] = False
                 metadata.pop("skip_plan_approve", None)
                 metadata["work_plan_replan_requested"] = True
+            next_spec: GoalSpecModel | None = None
             latest_spec = await session.scalar(
                 select(GoalSpecModel)
                 .where(GoalSpecModel.goal_id == goal_id)
@@ -2685,7 +2742,7 @@ class AppGuidanceService:
                 ordinal,
                 message,
                 actor,
-                f"已记录你的选择：{label}。将按该方向继续推进。",
+                f"已记录你的选择：{label}。该选择只确定交互方向，不会直接开工。{next_prompt}",
                 "FORK_SELECTED",
                 {
                     "command_id": str(command_id),
