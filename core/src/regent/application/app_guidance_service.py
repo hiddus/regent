@@ -331,7 +331,10 @@ class AppGuidanceService:
     # Main entry point
     # ------------------------------------------------------------------
 
-    async def guide(self, project_id: uuid.UUID, *, message: str, actor: str) -> GuidanceReceipt:
+    async def guide(
+        self, project_id: uuid.UUID, *, message: str, actor: str,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> GuidanceReceipt:
         context = await self._context(project_id)
         history = await self._conversation_history(project_id, limit=10)
 
@@ -403,6 +406,8 @@ class AppGuidanceService:
                 command_type="QUERY",
                 summary="查看当前可审阅计划",
             )
+            if on_progress is not None:
+                await on_progress("applying")
             return await self._persist_simple(
                 project_id,
                 message,
@@ -499,6 +504,8 @@ class AppGuidanceService:
         if resumed is not None:
             return resumed
 
+        if on_progress is not None:
+            await on_progress("applying")
         receipt = await self._dispatch(project_id, message, actor, interpretation, generated.model)
 
         # CD-4.1: bounded multi-step loop. A single user message can trigger a

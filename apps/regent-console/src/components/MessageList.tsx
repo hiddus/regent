@@ -38,6 +38,8 @@ interface MessageListProps {
   onOpenReview?: () => void
   onExampleSend?: (text: string) => void
   onQuickAction?: (text: string) => void
+  pendingSend?: { text: string; startedAt: number; state: 'processing' | 'failed'; error?: string } | null
+  onRetryPending?: () => void
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -362,6 +364,8 @@ export function MessageList({
   onOpenReview,
   onExampleSend,
   onQuickAction,
+  pendingSend = null,
+  onRetryPending,
 }: MessageListProps) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -610,6 +614,7 @@ export function MessageList({
             </div>
           </article>
         )}
+        {pendingSend && <article className="message assistant pending-response" aria-live="polite"><div className="avatar">R</div><div className="body"><div className="meta">Regent</div><div className={`pending-response-card ${pendingSend.state}`}><span className="pending-dot"/><div><strong>{pendingSend.state === 'failed' ? '发送失败' : '服务器正在处理…'}</strong><p>{pendingSend.state === 'failed' ? (pendingSend.error || '未能提交，请重试。') : (liveAction?.summary || '已收到你的消息，等待最新进度。')}</p><small>{Math.max(0, Math.floor((now - pendingSend.startedAt) / 1000))} 秒</small></div>{pendingSend.state === 'failed' && <button type="button" onClick={onRetryPending}>重试</button>}</div></div></article>}
       </div>
     </section>
   )

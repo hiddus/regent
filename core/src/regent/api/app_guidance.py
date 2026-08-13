@@ -31,12 +31,31 @@ async def guide_app(
     project_id: uuid.UUID,
     payload: GuideAppBody,
     guidance: ServiceDep,
+    request: Request,
 ) -> GuidanceReceipt:
-    return await guidance.guide(
-        project_id,
-        message=payload.message,
-        actor=payload.actor,
-    )
+    request_id = str(uuid.uuid4())
+    registry = request.app.state.transient_progress
+    pid = str(project_id)
+    await registry.publish(pid, request_id, "received")
+    await registry.publish(pid, request_id, "interpreting")
+    try:
+        async def progress(stage: str) -> None:
+            await registry.publish(pid, request_id, stage)
+
+        receipt = await guidance.guide(
+            project_id,
+            message=payload.message,
+            actor=payload.actor,
+            on_progress=progress,
+        )
+        await registry.publish(pid, request_id, "finalizing")
+        await registry.publish(pid, request_id, "final", terminal=True)
+        return receipt
+    except Exception as exc:
+        await registry.publish(
+            pid, request_id, "error", terminal=True, error=type(exc).__name__
+        )
+        raise
 
 
 @router.get("/{project_id}/status", response_model=dict[str, Any])

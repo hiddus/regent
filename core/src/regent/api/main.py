@@ -81,11 +81,13 @@ def _host_health_payload(workspace_root: str) -> dict[str, Any]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    from regent.api.transient_progress import TransientProgressRegistry
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(settings)
         app.state.sessions = create_session_factory(engine)
+        app.state.transient_progress = TransientProgressRegistry()
         # Migration may not have applied yet; fail open at boot, fail-closed at use.
         with suppress(Exception):
             await RuntimeProfileService(app.state.sessions).seed_bootstrap()

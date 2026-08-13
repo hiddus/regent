@@ -11,6 +11,7 @@ export default function App() {
   const ws = useWorkspace()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sending, setSending] = useState(false)
+  const [pendingSend, setPendingSend] = useState<{ text: string; startedAt: number; state: 'processing' | 'failed'; error?: string } | null>(null)
   const [projectViewOpen, setProjectViewOpen] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
@@ -41,6 +42,9 @@ export default function App() {
   }, [ws])
 
   const handleSend = useCallback(async (text: string) => {
+    const ordinal = ws.messages.reduce((max, m) => Math.max(max, m.ordinal || 0), 0) + 0.5
+    ws.setMessages(prev => [...prev, { id: `optimistic-${crypto.randomUUID()}`, conversation_id: ws.currentConv?.id || 'pending', ordinal, role: 'USER', message_type: 'TEXT', content: text, metadata: { optimistic: true }, created_by: 'trial-user', created_at: new Date().toISOString() }])
+    setPendingSend({ text, startedAt: Date.now(), state: 'processing' })
     setSending(true)
     try {
       if (!ws.currentConv) {
@@ -78,7 +82,9 @@ export default function App() {
         else ws.showHint('')
         if (ws.currentProject) await ws.loadStatus(ws.currentProject.id)
       }
+      setPendingSend(null)
     } catch (e) {
+      setPendingSend(prev => prev ? { ...prev, state: 'failed', error: (e as Error).message } : prev)
       ws.showHint((e as Error).message, true)
     } finally {
       setSending(false)
@@ -248,6 +254,8 @@ export default function App() {
           onTaskAction={handleTaskAction}
           onExampleSend={(text) => { void handleSend(text) }}
           onQuickAction={handleQuickAction}
+          pendingSend={pendingSend}
+          onRetryPending={() => { if (pendingSend) { const text = pendingSend.text; ws.setMessages(prev => prev.filter(m => !m.metadata?.optimistic)); setPendingSend(null); void handleSend(text) } }}
         />
         <div ref={messagesEndRef} />
         <Composer

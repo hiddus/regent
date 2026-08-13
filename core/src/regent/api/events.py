@@ -153,6 +153,7 @@ async def event_stream(
         last_ordinal = 0
         last_status_fingerprint: str | None = None
         last_regent_event_count = 0
+        last_transient_sequence = 0
         pid = uuid.UUID(project_id) if project_id else None
         poll_backoff = _ADAPTIVE_POLL_MIN
 
@@ -189,6 +190,14 @@ async def event_stream(
                     if ord_val > last_ordinal:
                         last_ordinal = ord_val
 
+            transient: list[dict[str, Any]] = []
+            registry = getattr(request.app.state, "transient_progress", None)
+            if registry is not None and pid is not None:
+                transient = await registry.since(str(pid), last_transient_sequence)
+                for item in transient:
+                    last_transient_sequence = max(last_transient_sequence, int(item["sequence"]))
+                    yield f"data: {json.dumps({'type': 'guidance_progress', 'data': item}, ensure_ascii=False)}\n\n"
+
             yield (
                 "data: "
                 + json.dumps(
@@ -196,7 +205,7 @@ async def event_stream(
                         "type": "heartbeat",
                         "data": {
                             "server_time": datetime.now(timezone.utc).isoformat(),
-                            "has_changes": bool(changes),
+                            "has_changes": bool(changes or transient),
                             "live_action": live_action,
                         },
                     },
