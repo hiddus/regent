@@ -1,33 +1,18 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
-import { Sidebar, StageBar } from './components/Sidebar'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import { Sidebar } from './components/Sidebar'
 import { MessageList } from './components/MessageList'
 import { Composer } from './components/Composer'
-import { ArtifactPanel, type WorkspaceTab } from './components/ArtifactPanel'
-import { OperatingDashboard } from './components/OperatingDashboard'
-import { GoalReadiness } from './components/GoalReadiness'
 import { useWorkspace } from './hooks/useWorkspace'
 import { api } from './lib/api'
-import { buildProgressNodes } from './lib/progressNodes'
 import type { DiagnosticDelivery } from './lib/types'
 
 export default function App() {
   const ws = useWorkspace()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sending, setSending] = useState(false)
-  const [artifactPanelOpen, setArtifactPanelOpen] = useState(true)
-  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('plan')
-  const [highlightItemKey, setHighlightItemKey] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
   const lastMessageId = ws.messages.length > 0 ? ws.messages[ws.messages.length - 1].id : null
-
-  const progressNodes = useMemo(
-    () => buildProgressNodes(ws.messages, {
-      toolEvents: ws.toolEvents,
-      liveTool: ws.liveActivity.liveAction?.tool,
-    }),
-    [ws.messages, ws.toolEvents, ws.liveActivity.liveAction?.tool],
-  )
 
   useEffect(() => {
     const el = document.querySelector('.messages') as HTMLElement | null
@@ -44,22 +29,6 @@ export default function App() {
     if (!stickToBottomRef.current) return
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [ws.messages.length, lastMessageId])
-
-  useEffect(() => {
-    setWorkspaceTab('plan')
-    setHighlightItemKey(null)
-  }, [ws.currentProject?.id])
-
-  // Highlight blocked plan item when waiting human with blocked_item_key in metadata.
-  useEffect(() => {
-    const meta = (ws.status?.goal?.metadata || {}) as Record<string, unknown>
-    const blocked = String(meta.blocked_item_key || meta.ask_blocked_item_key || '')
-    if (blocked && ws.status?.goal?.status === 'WAITING_HUMAN') {
-      setHighlightItemKey(blocked)
-      setWorkspaceTab('plan')
-      setArtifactPanelOpen(true)
-    }
-  }, [ws.status?.goal?.metadata, ws.status?.goal?.status])
 
   const handleNew = useCallback(() => {
     ws.setCurrentProject(null)
@@ -213,11 +182,6 @@ export default function App() {
     }
   }, [ws])
 
-  const openWorkspace = useCallback((tab?: WorkspaceTab) => {
-    setArtifactPanelOpen(true)
-    if (tab) setWorkspaceTab(tab)
-  }, [])
-
   const title = ws.currentProject
     ? ws.currentProject.name
     : '新任务'
@@ -243,25 +207,7 @@ export default function App() {
         <header className="top">
           <button className="mobile-menu" onClick={() => setSidebarOpen(!sidebarOpen)}>☰</button>
           <div className="title">{title}</div>
-          <button
-            type="button"
-            className={`top-workspace-btn ${artifactPanelOpen ? 'active' : ''}`}
-            onClick={() => {
-              if (artifactPanelOpen) setArtifactPanelOpen(false)
-              else openWorkspace(workspaceTab || 'plan')
-            }}
-          >
-            工作区
-          </button>
         </header>
-        <StageBar
-          status={ws.status}
-          planItems={ws.planItems}
-          liveActivity={ws.liveActivity}
-          onQuickAction={handleQuickAction}
-        />
-        <GoalReadiness status={ws.status} onAction={handleQuickAction} />
-        <OperatingDashboard status={ws.status} />
         <MessageList
           messages={ws.messages}
           currentProjectId={ws.currentProject?.id || null}
@@ -291,9 +237,6 @@ export default function App() {
           onConfirm={handleConfirm}
           onSelectOption={handleSelectOption}
           onTaskAction={handleTaskAction}
-          onInspectSource={() => openWorkspace('changes')}
-          onOpenPreview={() => openWorkspace('preview')}
-          onOpenReview={() => openWorkspace('review')}
           onExampleSend={(text) => { void handleSend(text) }}
           onQuickAction={handleQuickAction}
         />
@@ -307,34 +250,8 @@ export default function App() {
           coreHint={ws.coreHint}
           coreHintError={ws.coreHintError}
           goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
-          goalId={ws.status?.goal?.id || null}
         />
       </main>
-      <ArtifactPanel
-        isOpen={artifactPanelOpen}
-        onToggle={() => setArtifactPanelOpen(!artifactPanelOpen)}
-        project={ws.currentProject}
-        status={ws.status}
-        messages={ws.messages}
-        liveAction={ws.liveActivity.liveAction}
-        toolEvents={ws.toolEvents}
-        planItems={ws.planItems}
-        planTimeline={ws.planTimeline}
-        activity={ws.activity}
-        runtimeAgents={ws.runtimeAgents}
-        activeTab={workspaceTab}
-        onTabChange={setWorkspaceTab}
-        highlightItemKey={highlightItemKey}
-        onSelectPlanItem={(key) => {
-          setHighlightItemKey(key)
-          setWorkspaceTab('plan')
-          const el = document.querySelector(`[data-item-key="${CSS.escape(key)}"]`)
-          el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-        }}
-        onModeChanged={() => {
-          if (ws.currentProject) void ws.loadStatus(ws.currentProject.id)
-        }}
-      />
     </div>
   )
 }
