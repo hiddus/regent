@@ -7,6 +7,7 @@ Generation, Build, and Preview Deployment via the Outbox event chain.
 import hashlib
 import json
 import logging
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1280,6 +1281,23 @@ class ExecutionOrchestrator:
                         ErrorCode.INVALID_STATE,
                         "goal is soft-paused; refusing generation until new direction",
                     )
+                # Host guard: refuse generation when disk/mem/load are critical.
+                try:
+                    from regent.config import get_settings
+                    from regent.infrastructure.host_resources import host_blocks_work
+
+                    _hs = get_settings()
+                    if _hs.host_guard_enabled:
+                        _blocked, _why = host_blocks_work(_hs.workspace_root)
+                        if _blocked:
+                            raise DomainError(
+                                ErrorCode.INVALID_STATE,
+                                f"host unhealthy — refusing generation: {_why}",
+                            )
+                except DomainError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    pass
             spec = await session.scalar(
                 select(GoalSpecModel)
                 .where(GoalSpecModel.goal_id == goal_id)
@@ -1460,6 +1478,15 @@ class ExecutionOrchestrator:
         )[:12]
         if prior_gaps and "delivery_gap_reasons" not in acceptance_contract:
             acceptance_contract["delivery_gap_reasons"] = prior_gaps
+        qa_failures = list(goal_meta.get("live_preview_qa_failures") or [])[:8]
+        if qa_failures:
+            acceptance_contract["live_preview_qa_failures"] = qa_failures
+            # Keep plan digest shifting when the same abstract code repeats with
+            # different concrete URL details.
+            architecture_summary = (
+                f"{architecture_summary}\n\nLive preview QA failures to absorb first:\n"
+                + "\n".join(f"- {item}" for item in qa_failures)
+            )
         draft_uri = str(goal_meta.get("last_good_draft_uri") or "").strip()
         if draft_uri:
             acceptance_contract["last_good_draft_uri"] = draft_uri
@@ -1705,9 +1732,18 @@ class ExecutionOrchestrator:
             )
             generation_run_id = run.id
             generation_plan_id = run.plan_id
-            # Certified hive: durable PM→Dev→QA AgentTasks for this generation run.
+            # Certified hive: offer + claim/execute durable PM→Dev→QA around agentic gen.
+            hive_handle = None
             try:
+                from regent.application.generation_hive_executor import (
+                    begin_generation_hive,
+                    complete_generation_hive_dev,
+                    heartbeat_generation_hive_dev,
+                    run_generation_hive_qa,
+                )
                 from regent.application.hive_runtime import maybe_offer_generation_hive_chain
+                from regent.config import get_settings as _hive_settings
+                from regent.model.factory import build_model_provider
 
                 hive_chain = await maybe_offer_generation_hive_chain(
                     self._sessions,
@@ -1725,12 +1761,26 @@ class ExecutionOrchestrator:
                             "qa_task_id": str(hive_chain.qa_task.id),
                         },
                     )
+                    goal_input = ""
+                    async with self._sessions() as _gs:
+                        _g = await _gs.get(GoalModel, goal_id)
+                        goal_input = str((_g.original_input if _g else "") or "")
+                    hive_handle = await begin_generation_hive(
+                        self._sessions,
+                        provider=build_model_provider(_hive_settings()),
+                        goal_id=goal_id,
+                        generation_run_id=run.id,
+                        chain=hive_chain,
+                        actor=actor,
+                        goal_input=goal_input,
+                    )
             except Exception:
                 logger.warning(
-                    "hive AgentTask offer skipped (non-fatal)",
+                    "hive AgentTask offer/begin skipped (non-fatal)",
                     extra={"goal_id": str(goal_id)},
                     exc_info=True,
                 )
+                hive_handle = None
             if run.status == "COMPLETED":
                 async with self._sessions() as session:
                     snapshot = await session.scalar(
@@ -1749,6 +1799,11 @@ class ExecutionOrchestrator:
                 async def _on_generation_progress(progress: object) -> None:
                     from regent.agent.progress_event import ProgressEvent, coerce_progress
 
+                    if hive_handle is not None:
+                        try:
+                            await heartbeat_generation_hive_dev(hive_handle)
+                        except Exception:
+                            pass
                     event = (
                         progress
                         if isinstance(progress, ProgressEvent)
@@ -1858,11 +1913,43 @@ class ExecutionOrchestrator:
                         exc_info=True,
                     )
                 base_workspace = await self._resolve_revise_base_workspace(goal_id)
-                snapshot = await gen_service.execute(
-                    run.id,
-                    base_workspace=base_workspace,
-                    on_progress=_on_generation_progress,
-                )
+                gen_ok = False
+                snapshot = None
+                try:
+                    snapshot = await gen_service.execute(
+                        run.id,
+                        base_workspace=base_workspace,
+                        on_progress=_on_generation_progress,
+                    )
+                    gen_ok = True
+                finally:
+                    if hive_handle is not None:
+                        await complete_generation_hive_dev(hive_handle, ok=gen_ok)
+                        if gen_ok and snapshot is not None:
+                            try:
+                                from regent.config import get_settings as _qa_settings
+                                from regent.model.factory import build_model_provider
+
+                                goal_input = ""
+                                async with self._sessions() as _gs:
+                                    _g = await _gs.get(GoalModel, goal_id)
+                                    goal_input = str((_g.original_input if _g else "") or "")
+                                await run_generation_hive_qa(
+                                    hive_handle,
+                                    sessions=self._sessions,
+                                    provider=build_model_provider(_qa_settings()),
+                                    goal_input=goal_input,
+                                    generation_summary=self._hive_generation_summary(
+                                        run_id=run.id,
+                                        snapshot=snapshot,
+                                    ),
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "generation hive QA wrap-up failed",
+                                    extra={"goal_id": str(goal_id)},
+                                    exc_info=True,
+                                )
                 await self._remember_generation_attempt(
                     goal_id,
                     generation_run_id=run.id,
@@ -2110,11 +2197,11 @@ class ExecutionOrchestrator:
                     extra={"goal_id": str(goal_id), "total_cost": status.total_cost},
                 )
         except Exception:
-            logger.warning(
-                "budget ledger cost recording failed (non-fatal)",
+            logger.exception(
+                "budget ledger cost recording failed; refusing fail-open execution",
                 extra={"goal_id": str(goal_id), "run_id": str(run_id)},
-                exc_info=True,
             )
+            raise
 
     # ---------------------------------------------------------------------------
     # V3 Compliance Gate
@@ -3216,7 +3303,194 @@ class ExecutionOrchestrator:
             qa = await run_live_preview_qa(public_url or "")
         else:
             qa = await run_live_preview_qa(public_url)
-        if qa.passed:
+
+        # Product+Tech Hive live content review (authoritative for content; overturns
+        # structure-only Hive QA that accepted from file paths alone).
+        live_review: dict[str, Any] | None = None
+        live_overturn = False
+        swarm_result: dict[str, Any] | None = None
+        swarm_overturn = False
+        try:
+            from regent.application.generation_hive_executor import (
+                run_hive_live_content_review,
+            )
+            from regent.config import get_settings as _live_settings
+            from regent.model.factory import build_model_provider
+
+            goal_input = ""
+            async with self._sessions() as _gs:
+                _g = await _gs.get(GoalModel, goal_id)
+                goal_input = str((_g.original_input if _g else "") or "")
+            live_review = await run_hive_live_content_review(
+                self._sessions,
+                provider=build_model_provider(_live_settings()),
+                goal_id=goal_id,
+                goal_input=goal_input,
+                preview_url=public_url,
+                live_qa=qa.as_dict(),
+            )
+            if qa.passed and not bool((live_review or {}).get("accepted")):
+                live_overturn = True
+                logger.warning(
+                    "hive live content review rejected despite mechanical QA pass",
+                    extra={"goal_id": str(goal_id), "review": live_review},
+                )
+        except Exception as live_exc:
+            # Fail closed: missing module / provider must not soft-pass content.
+            live_overturn = True
+            live_review = {
+                "accepted": False,
+                "score": 0.0,
+                "reason": f"live content review unavailable: {type(live_exc).__name__}: {live_exc}"[
+                    :400
+                ],
+                "gaps": ["hive-live-content-review"],
+                "source": "fail_closed_exception",
+            }
+            logger.warning(
+                "hive live content review failed closed",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+
+        # Product / Tech / Test / UX / Ops Delivery Role Swarm — hard gate beyond Hive.
+        try:
+            from regent.application.delivery_framework_fix import framework_fix_plan
+            from regent.application.delivery_role_swarm import run_delivery_role_swarm
+
+            goal_input_swarm = ""
+            async with self._sessions() as _gs2:
+                _g2 = await _gs2.get(GoalModel, goal_id)
+                goal_input_swarm = str((_g2.original_input if _g2 else "") or "")
+            swarm = await run_delivery_role_swarm(
+                public_url,
+                live_qa=qa.as_dict(),
+                goal_input=goal_input_swarm,
+                metadata=dict((_g2.metadata_json if _g2 else {}) or {}),
+            )
+            swarm_result = swarm.as_dict()
+            # Durable AgentTasks + follow-up roster for failed roles.
+            try:
+                from regent.application.delivery_role_runtime import (
+                    evolve_failed_delivery_roles,
+                    record_delivery_role_reviews,
+                )
+                from regent.config import get_settings as _dr_settings
+                from regent.model.factory import build_model_provider
+
+                attempt = 1
+                prev_required: list[str] = []
+                async with self._sessions() as _gs3:
+                    _g3 = await _gs3.get(GoalModel, goal_id)
+                    prev = ((_g3.metadata_json or {}) if _g3 else {}).get(
+                        "delivery_role_followup"
+                    ) or {}
+                    attempt = int(prev.get("attempt") or 0) + 1
+                    prev_required = [
+                        str(r)
+                        for r in list(prev.get("required_roles") or [])
+                        if str(r).strip()
+                    ]
+                # Continuous follow-up: previously failed roles must appear and pass.
+                if prev_required:
+                    by_role = {r.role_id: r for r in swarm.roles}
+                    missing = [r for r in prev_required if r not in by_role]
+                    still_fail = [
+                        r
+                        for r in prev_required
+                        if r in by_role and not by_role[r].accepted
+                    ]
+                    if missing or still_fail:
+                        swarm_result["followup_reverify"] = {
+                            "required_roles": prev_required,
+                            "missing_roles": missing,
+                            "still_failing": still_fail,
+                            "passed": False,
+                        }
+                        swarm_overturn = True
+                    else:
+                        swarm_result["followup_reverify"] = {
+                            "required_roles": prev_required,
+                            "passed": True,
+                        }
+                durable = await record_delivery_role_reviews(
+                    self._sessions,
+                    goal_id=goal_id,
+                    preview_url=public_url,
+                    swarm_result=swarm_result,
+                    attempt=attempt,
+                )
+                swarm_result["durable_tasks"] = durable
+                if not swarm.accepted:
+                    _settings = _dr_settings()
+                    evolutions = await evolve_failed_delivery_roles(
+                        self._sessions,
+                        goal_id=goal_id,
+                        swarm_result=swarm_result,
+                        preview_url=public_url,
+                        workspace_root=_settings.workspace_root,
+                        provider=build_model_provider(_settings),
+                    )
+                    swarm_result["role_evolutions"] = evolutions
+            except Exception:
+                logger.warning(
+                    "delivery role durable record/evolve failed",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id, with_for_update=True)
+                if goal is not None:
+                    meta = dict(goal.metadata_json or {})
+                    meta["delivery_role_swarm"] = swarm_result
+                    meta["delivery_agents_defined"] = swarm_result.get("agents_defined")
+                    if not meta.get("delivery_framework_plan"):
+                        meta["delivery_framework_plan"] = framework_fix_plan(
+                            goal_input=goal_input_swarm,
+                            metadata=meta,
+                        )
+                    goal.metadata_json = meta
+                    flag_modified(goal, "metadata_json")
+            if not swarm.accepted:
+                swarm_overturn = True
+                logger.warning(
+                    "delivery role swarm rejected preview",
+                    extra={
+                        "goal_id": str(goal_id),
+                        "gaps": swarm.gaps,
+                        "roles": [
+                            {"role": r.role_id, "ok": r.accepted}
+                            for r in swarm.roles
+                        ],
+                    },
+                )
+        except Exception as swarm_exc:
+            # Fail closed: Delivery Agents are mandatory for Regent-complete delivery.
+            swarm_overturn = True
+            swarm_result = {
+                "accepted": False,
+                "score": 0.0,
+                "reason": (
+                    "Delivery Role Swarm unavailable — Product/Tech/Test/UX must run. "
+                    f"{type(swarm_exc).__name__}: {swarm_exc}"
+                )[:500],
+                "gaps": [
+                    "delivery-product-outline",
+                    "delivery-tech-api",
+                    "delivery-test-scenarios",
+                    "delivery-ux-surface",
+                    "delivery-ops-host",
+                ],
+                "roles": [],
+                "source": "fail_closed_exception",
+            }
+            logger.warning(
+                "delivery role swarm failed closed",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
+
+        if qa.passed and not live_overturn and not swarm_overturn:
             return True, qa, public_url
 
         logger.warning(
@@ -3256,15 +3530,68 @@ class ExecutionOrchestrator:
                 metadata["execution_stage"] = "PREVIEW_PRODUCT_QA_FAILED"
                 metadata["last_gate_status"] = "PRODUCT_QA_FAILED"
                 metadata["last_deployment_id"] = str(deployment_id)
-                metadata["last_preview_endpoint"] = endpoint
-                metadata["preview_url"] = public_url
+                # Console iframe must use the path-prefixed public URL, not the
+                # worker-local 127.0.0.1:port endpoint.
+                metadata["last_preview_endpoint"] = public_url or endpoint
+                metadata["preview_url"] = public_url or endpoint
                 metadata["preview_ready"] = False
                 metadata["product_surface_ready"] = False
                 metadata["preview_mode"] = "runtime"
                 metadata["delivery_soft_pass"] = False
                 metadata["live_preview_qa"] = qa.as_dict()
+                metadata["live_preview_qa_failures"] = qa.concrete_failure_reasons()[:8]
+                if live_overturn and live_review:
+                    overturn_reason = str(
+                        live_review.get("reason") or "hive live content rejected"
+                    )[:240]
+                    fails = list(metadata.get("live_preview_qa_failures") or [])
+                    fails.insert(0, f"hive-live-content-review: {overturn_reason}")
+                    for gap in list(live_review.get("gaps") or [])[:4]:
+                        token = str(gap).strip()
+                        if token and token not in fails:
+                            fails.append(token)
+                    metadata["live_preview_qa_failures"] = fails[:8]
+                    metadata["hive_live_content_review"] = live_review
+                if swarm_overturn and swarm_result:
+                    metadata["delivery_role_swarm"] = swarm_result
+                    metadata["delivery_agents_defined"] = swarm_result.get(
+                        "agents_defined"
+                    )
+                    fails = list(metadata.get("live_preview_qa_failures") or [])
+                    fails.insert(
+                        0,
+                        "delivery-role-swarm: "
+                        + str(swarm_result.get("reason") or "rejected")[:200],
+                    )
+                    for gap in list(swarm_result.get("gaps") or [])[:6]:
+                        token = str(gap).strip()
+                        if token and token not in fails:
+                            fails.append(token)
+                    metadata["live_preview_qa_failures"] = fails[:10]
+                # Force next Session to confront the exact broken URLs, not CSS fluff.
+                failures = metadata["live_preview_qa_failures"]
+                if failures:
+                    metadata["session_steer_brief"] = (
+                        "【必须优先吸收的预览 QA 失败 — 禁止重复】\n"
+                        + "\n".join(f"- {item}" for item in failures[:6])
+                        + "\n先修路由/href/种子数据与内容深度使上述项通过，再考虑样式。"
+                        "\n产品/技术/测试/体验/运维 Delivery Role Swarm 必须全部通过；禁止大纲壳交付。"
+                    )[:4000]
                 metadata["open_items"] = [
-                    f"preview_qa:{code}" for code in qa.failed_gap_codes()[:8]
+                    f"preview_qa:{code}"
+                    for code in (
+                        qa.failed_gap_codes()
+                        + (
+                            ["hive-live-content-review"]
+                            if live_overturn
+                            else []
+                        )
+                        + (
+                            list(swarm_result.get("gaps") or [])[:4]
+                            if swarm_overturn and swarm_result
+                            else []
+                        )
+                    )[:8]
                 ]
                 goal.metadata_json = metadata
             await self._append_conversation_event(
@@ -3283,9 +3610,26 @@ class ExecutionOrchestrator:
                 },
             )
         # PenguinHarness-style: evolve skill LESSONS from the failure Trace.
+        evolve_gaps = list(qa.failed_gap_codes())
+        if live_overturn:
+            evolve_gaps = list(
+                dict.fromkeys(
+                    evolve_gaps
+                    + list((live_review or {}).get("gaps") or [])
+                    + ["hive-live-content-review", "preview-content-depth"]
+                )
+            )
+        if swarm_overturn and swarm_result:
+            evolve_gaps = list(
+                dict.fromkeys(
+                    evolve_gaps
+                    + list(swarm_result.get("gaps") or [])
+                    + ["delivery-role-swarm", "delivery-product-outline"]
+                )
+            )
         await self._maybe_evolve_harness_from_qa(
             goal_id=goal_id,
-            gaps=qa.failed_gap_codes(),
+            gaps=evolve_gaps,
             preview_url=public_url,
             goal_context=f"deployment={deployment_id} preview_qa_failed",
         )
@@ -3470,12 +3814,26 @@ class ExecutionOrchestrator:
                     )
                     if not qa_ok:
                         # Ship-first: do not leave the Goal parked on QA fail —
-                        # feed gaps back and resume the same Session to repair.
+                        # feed concrete check details back and resume Session.
                         try:
-                            reasons = [
-                                f"PREVIEW_PRODUCT_QA_FAILED: {code}"
-                                for code in (qa.failed_gap_codes() if qa else [])[:8]
-                            ] or ["PREVIEW_PRODUCT_QA_FAILED"]
+                            concrete = (
+                                list(qa.concrete_failure_reasons()) if qa is not None else []
+                            )
+                            reasons = (
+                                [
+                                    f"PREVIEW_PRODUCT_QA_FAILED: {item}"
+                                    for item in concrete[:8]
+                                ]
+                                if concrete
+                                else [
+                                    f"PREVIEW_PRODUCT_QA_FAILED: {code}"
+                                    for code in (qa.failed_gap_codes() if qa else [])[:8]
+                                ]
+                                or ["PREVIEW_PRODUCT_QA_FAILED"]
+                            )
+                            detail_blob = "; ".join(concrete[:4]) if concrete else (
+                                (qa.summary if qa else "")[:400]
+                            )
                             await self._recover_or_wait_after_deploy_gap(
                                 goal_id,
                                 project_id,
@@ -3489,7 +3847,8 @@ class ExecutionOrchestrator:
                                 extra={
                                     "preview_url": public_url,
                                     "deployment_id": str(deployment_id),
-                                    "error": (qa.summary if qa else "")[:400],
+                                    "error": detail_blob[:800],
+                                    "live_preview_qa_failures": concrete[:8],
                                 },
                             )
                         except Exception:
@@ -3507,7 +3866,7 @@ class ExecutionOrchestrator:
                             metadata["execution_stage"] = "PREVIEW_SUCCEEDED"
                             metadata["last_gate_status"] = "SOFT_PASS_INSUFFICIENT"
                             metadata["last_deployment_id"] = str(deployment_id)
-                            metadata["last_preview_endpoint"] = endpoint
+                            metadata["last_preview_endpoint"] = public_url or endpoint
                             metadata["preview_url"] = public_url
                             metadata["preview_ready"] = True
                             metadata["product_surface_ready"] = True
@@ -3562,7 +3921,7 @@ class ExecutionOrchestrator:
                         metadata["execution_stage"] = "GATE_INSUFFICIENT_EVIDENCE"
                         metadata["last_gate_status"] = gate.status
                         metadata["last_deployment_id"] = str(deployment_id)
-                        metadata["last_preview_endpoint"] = endpoint
+                        metadata["last_preview_endpoint"] = public_url or endpoint
                         metadata["gate_insufficient_since"] = datetime.now(UTC).isoformat()
                         metadata["gate_insufficient_timer_id"] = str(timer_id)
                         goal.metadata_json = metadata
@@ -3638,7 +3997,7 @@ class ExecutionOrchestrator:
                     metadata["execution_stage"] = "PREVIEW_SUCCEEDED"
                     metadata["last_gate_status"] = gate.status
                     metadata["last_deployment_id"] = str(deployment_id)
-                    metadata["last_preview_endpoint"] = endpoint
+                    metadata["last_preview_endpoint"] = public_url or endpoint
                     metadata["preview_url"] = public_url
                     metadata["preview_ready"] = True
                     metadata["product_surface_ready"] = True
@@ -3776,7 +4135,7 @@ class ExecutionOrchestrator:
                         metadata["execution_stage"] = "PREVIEW_SUCCEEDED"
                         metadata["last_gate_status"] = "PASSED"
                         metadata["last_deployment_id"] = str(deployment_id)
-                        metadata["last_preview_endpoint"] = endpoint
+                        metadata["last_preview_endpoint"] = public_url or endpoint
                         metadata["preview_url"] = public_url
                         metadata["preview_ready"] = True
                         metadata["product_surface_ready"] = True
@@ -4693,6 +5052,72 @@ class ExecutionOrchestrator:
                     "halt terminal transition skipped",
                     extra={"goal_id": str(goal_id), "command": terminal.value},
                 )
+
+    @staticmethod
+    def _hive_generation_summary(*, run_id: uuid.UUID, snapshot: Any) -> str:
+        """Build evidence-rich summary for independent Hive QA (not just file_count)."""
+        file_count = getattr(snapshot, "file_count", None)
+        locator = str(getattr(snapshot, "workspace_locator", "") or "")
+        manifest_uri = str(getattr(snapshot, "manifest_uri", "") or "")
+        paths: list[str] = []
+        root: Path | None = None
+        if locator:
+            try:
+                root = Path(locator)
+                if root.is_dir():
+                    for path in sorted(root.rglob("*")):
+                        if path.is_file():
+                            rel = path.relative_to(root).as_posix()
+                            if "__pycache__" in rel or rel.endswith(".pyc"):
+                                continue
+                            paths.append(rel)
+                            if len(paths) >= 80:
+                                break
+            except Exception:
+                root = None
+        # Fallback: parse workspace from file:// manifest parent.
+        if not paths and manifest_uri.startswith("file:"):
+            try:
+                from urllib.parse import urlparse, unquote
+
+                parsed = urlparse(manifest_uri)
+                man = Path(unquote(parsed.path))
+                # Windows file:///C:/... → path starts with /
+                if os.name == "nt" and str(man).startswith("/") and len(str(man)) > 2:
+                    man = Path(str(man)[1:])
+                if man.is_file():
+                    data = json.loads(man.read_text(encoding="utf-8"))
+                    files = data.get("files") or data.get("entries") or []
+                    for item in files:
+                        if isinstance(item, str):
+                            paths.append(item)
+                        elif isinstance(item, dict):
+                            rel = item.get("path") or item.get("relative_path")
+                            if rel:
+                                paths.append(str(rel))
+                        if len(paths) >= 80:
+                            break
+            except Exception:
+                pass
+        markers = {
+            "has_app_py": any(p == "app.py" or p.endswith("/app.py") for p in paths),
+            "has_templates": any(p.startswith("templates/") for p in paths),
+            "has_static": any(p.startswith("static/") for p in paths),
+            "has_agents_or_models": any(
+                "agent" in p.lower() or "model" in p.lower() or "store" in p.lower()
+                for p in paths
+            ),
+        }
+        return json.dumps(
+            {
+                "generation_run_id": str(run_id),
+                "file_count": file_count,
+                "workspace_locator": locator[:240],
+                "paths": paths[:80],
+                "markers": markers,
+            },
+            ensure_ascii=False,
+        )
 
     async def _open_work_plan_items(self, goal_id: uuid.UUID) -> list[str]:
         """W2: COMPLETE result_bundle lists unfinished plan items (Q3)."""

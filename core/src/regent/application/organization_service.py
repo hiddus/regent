@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +17,8 @@ from regent.infrastructure.models import (
     OrganizationModel,
     WorkModel,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # V3 Utility Function  U(O_t | G, C, V, R_t, S_t)
@@ -333,7 +336,7 @@ class OrganizationService:
             acceptance_criteria={
                 "gap_kind": gap_kind,
                 "method": method,
-                "definition": "REGENT-DEFINITION-1.0 ATTRIBUTE_3/4",
+                "definition": "REGENT-DEFINITION-3.0 ATTRIBUTE_2/4",
             },
             dependency_ids=[],
             priority=10,
@@ -667,8 +670,9 @@ class OrganizationService:
         Legacy mutable strategy/rationale are projections of the active Version only.
         Dual-write / fail-open legacy selection is not used.
 
-        When ``REGENT_AAR1_CERTIFIED_HIVE=true`` and capabilities admit
-        ``pm-dev-independent-qa-v1``, that certified fixed template is preferred.
+        When ``REGENT_AAR1_CERTIFIED_HIVE`` is enabled (product default) and
+        capabilities admit ``pm-dev-independent-qa-v1``, that certified fixed
+        template is preferred. Per-goal ``force_single_agent`` opts out.
         Adaptive free-form topology remains ROLLOUT_NOT_ALLOWED.
         """
         from regent.application.aar1_contract import (
@@ -676,12 +680,12 @@ class OrganizationService:
             certified_hive_preferred,
             is_certified_hive_topology,
         )
+        from regent.application.hive_policy import force_single_agent
         from regent.application.hive_runtime import materialize_hive_topology
         from regent.application.organization_engine import OrganizationEngine
         from regent.config import get_settings
 
         settings = get_settings()
-        preferred = certified_hive_preferred(enabled=settings.aar1_certified_hive)
 
         organization_id = uuid.uuid4()
         version_id = uuid.uuid4()
@@ -720,7 +724,15 @@ class OrganizationService:
             from regent.application.task_features import TaskFeatures
 
             goal_obj_for_features = await session.get(GoalModel, goal_id)
-            goal_meta = dict((goal_obj_for_features.metadata_json if goal_obj_for_features else {}) or {})
+            goal_meta = dict(
+                (goal_obj_for_features.metadata_json if goal_obj_for_features else {})
+                or {}
+            )
+            preferred = (
+                None
+                if force_single_agent(goal_meta)
+                else certified_hive_preferred(enabled=settings.aar1_certified_hive)
+            )
             measured_baseline = goal_meta.get("single_agent_baseline_success_rate")
             work_count = len(works)
             task_features = TaskFeatures(
@@ -734,9 +746,10 @@ class OrganizationService:
                     if any(w.metadata_json.get("depends_on") for w in works)
                     else 0.2
                 ),
-                # Unknown baseline fails closed to the single-agent champion.
+                # Unknown baseline stays open so certified multi-agent is not
+                # R1-pruned by default; measured rates still apply when present.
                 single_agent_baseline_success_rate=(
-                    float(measured_baseline) if measured_baseline is not None else 1.0
+                    float(measured_baseline) if measured_baseline is not None else 0.0
                 ),
                 independent_verification_required=True,
                 estimated_parallelism_ceiling=(min(1.0, work_count / 3.0) if work_count > 1 else 0.0),
@@ -817,6 +830,32 @@ class OrganizationService:
                             ),
                         )
                     )
+
+            # Companion delivery-roles-v1: Product/Tech/Test/UX/Ops self-supplement.
+            try:
+                from regent.application.delivery_role_runtime import (
+                    materialize_delivery_roles,
+                )
+
+                goal_for_roles = await session.get(GoalModel, goal_id)
+                await materialize_delivery_roles(
+                    session,
+                    goal_id=goal_id,
+                    organization_version_id=org.current_version_id,
+                    goal_input=str(
+                        (goal_for_roles.original_input if goal_for_roles else "") or ""
+                    ),
+                    metadata=dict(
+                        (goal_for_roles.metadata_json if goal_for_roles else {}) or {}
+                    ),
+                )
+                org.max_agents = max(int(org.max_agents or 0), 8)
+            except Exception:
+                logger.warning(
+                    "delivery role materialize skipped during organize",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
 
             goal_obj = await session.get(GoalModel, goal_id)
             if goal_obj is not None:

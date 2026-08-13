@@ -194,6 +194,7 @@ class AgenticCodeGenerator:
         goal_uuid = _maybe_uuid(plan.get("goal_id"))
         runtime_run_uuid = _maybe_uuid(plan.get("run_id"))
         if self._sessions is not None and goal_uuid is not None:
+            from regent.application.budget_ledger import BudgetLedger
             from regent.application.context_artifact import ContextArtifactService
             from regent.application.execution_plan import ExecutionPlanService
 
@@ -201,15 +202,31 @@ class AgenticCodeGenerator:
                 self._sessions, artifact_root=self._artifacts.root
             )
             execution_plans = ExecutionPlanService(self._sessions)
+            budget_ledger = BudgetLedger(self._sessions)
+        else:
+            budget_ledger = None
         context_window = 128_000
+        max_subagent_depth = 3
+        model_max_output_tokens = 8192
+        model_input_cost_per_million = 0.0
+        model_output_cost_per_million = 0.0
+        price_book_version = "model-price-book-v1"
         try:
             from regent.config import get_settings
 
-            context_window = int(get_settings().agent_context_window_tokens)
+            _settings = get_settings()
+            context_window = int(_settings.agent_context_window_tokens)
+            max_subagent_depth = int(_settings.max_subagent_depth)
+            model_max_output_tokens = int(_settings.model_max_output_tokens or 8192)
+            model_input_cost_per_million = float(_settings.model_input_cost_per_million)
+            model_output_cost_per_million = float(_settings.model_output_cost_per_million)
+            price_book_version = str(_settings.model_price_book_version)
         except Exception:
             context_window = int(plan.get("context_window_tokens") or 128_000)
         if plan.get("context_window_tokens"):
             context_window = int(plan["context_window_tokens"])
+        if plan.get("max_subagent_depth") is not None:
+            max_subagent_depth = int(plan["max_subagent_depth"])
         runner = AgentRunner(
             self._provider,
             toolkit,
@@ -225,6 +242,12 @@ class AgenticCodeGenerator:
             skills_enabled=bool(plan.get("skills_enabled", True)),
             execution_mode=str(plan.get("execution_mode") or "ask"),
             permission_always_tools=set(plan.get("permission_always_tools") or ()),
+            max_subagent_depth=max_subagent_depth,
+            budget_ledger=budget_ledger,
+            model_max_output_tokens=model_max_output_tokens,
+            model_input_cost_per_million=model_input_cost_per_million,
+            model_output_cost_per_million=model_output_cost_per_million,
+            price_book_version=price_book_version,
         )
 
         from regent.agent.progress_event import ProgressEvent
@@ -478,6 +501,25 @@ class AgenticCodeGenerator:
                     message="agent did not submit a complete artifact",
                 ) from exc
         except (ModelTruncatedError, ToolCallInvalidError) as exc:
+            # Persist whatever turns we have before fail-closed — otherwise FAILED
+            # runs leave agent_transcripts empty and ops cannot diagnose TOOL_CALL_INVALID.
+            partial = getattr(exc, "transcript", None)
+            if partial is None and "result" in locals():
+                partial = getattr(result, "transcript", None)
+            if partial:
+                try:
+                    _write_transcript_sidecar(sandbox, partial)
+                    generation_run_id = plan.get("generation_run_id")
+                    if generation_run_id:
+                        await self._transcripts.persist(
+                            generation_run_id=uuid.UUID(str(generation_run_id)),
+                            turns=partial,
+                        )
+                except Exception:
+                    logger.exception(
+                        "partial transcript persist failed after model tool error",
+                        extra={"sandbox": str(sandbox)},
+                    )
             code = getattr(exc, "failure_code", "UNKNOWN")
             raise DeliveryRejection(
                 reasons=[f"{code}: {exc}"],

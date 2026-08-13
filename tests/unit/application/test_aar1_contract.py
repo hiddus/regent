@@ -103,7 +103,8 @@ class TestM5StopLegacyWrites:
         # Fresh settings instance (bypass lru cache of get_settings)
         s = Settings(_env_file=None)
         assert s.aar1_phase == "contract"
-        assert s.aar1_certified_hive is False
+        assert s.aar1_certified_hive is True
+        assert s.max_subagent_depth == 3
 
     def test_certified_hive_helpers(self) -> None:
         from regent.application.aar1_contract import (

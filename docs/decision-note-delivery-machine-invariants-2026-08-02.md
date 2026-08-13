@@ -3,7 +3,7 @@
 **日期**：2026-08-02  
 **状态**：DRAFT（运作哲学已由方向注记裁定；I-* 全文待按人步切片修订后，再议是否 ACCEPTED）  
 **方向已定**：[`direction-note-run-think-learn-2026-08-02.md`](direction-note-run-think-learn-2026-08-02.md)（模型主理 · 人辅助 · 边跑边学 · 无退出门哲学）  
-**规范身份源**：[`definitions/REGENT-DEFINITION-1.0.txt`](definitions/REGENT-DEFINITION-1.0.txt)（FROZEN，本文只引用不改写）  
+**规范身份源**：[`definitions/REGENT-DEFINITION-3.0.txt`](definitions/REGENT-DEFINITION-3.0.txt)（FROZEN，本文只引用不改写；本文成稿时的身份源是已被取代的 `REGENT-DEFINITION-1.0`，文中 `DEFINITION ATTR_*` 编号按 1.0 读，对应 3.0 属性见 [`definitions/README.md`](definitions/README.md)）  
 **相关**：[`decision-note-auto-start-journey-2026-07-31.md`](decision-note-auto-start-journey-2026-07-31.md)（C1 ACCEPTED）、[`agent-core-vs-claudecode-audit-2026-08-02.md`](agent-core-vs-claudecode-audit-2026-08-02.md)、[`console-observability-gap-2026-08-02.md`](console-observability-gap-2026-08-02.md)、[`regent-repair-plan-from-claudecode-2026-08-02.md`](regent-repair-plan-from-claudecode-2026-08-02.md)
 
 ---
@@ -54,7 +54,7 @@
 | I-12 | 同轨迹预算化 repair；禁冷启动递归自修 | `repair_policy`；`agent_runner` | 验证失败就 `self.run()` 新开世界 |
 | I-13 | Accepted Snapshot + 晋升哈希；REVISE 从 accepted | `accepted_workspace.py` | 失败草稿当成功基线 |
 | I-14 | 生成策略资格阶梯 + kill switch + in-flight 冻结 | `generation_strategy_policy` | 默认宣称 agentic；飞行中换生成器 |
-| I-15 | 组织是手段；默认强单 Agent | PRD §10 / DEFINITION ATTR_4 | 默认自由多 Agent / 自适应拓扑 |
+| I-15 | 组织是手段；**生产默认**强单 Agent，沙箱内候选拓扑默认开放 | PRD §10 / DEFINITION 3.0 ATTR_4+7 | 未经 Gate 就把自由多 Agent / 自适应拓扑设为**生产默认或扩大现实权限**（成稿时本行写作"默认自由多 Agent / 自适应拓扑"即违规，已按定义 3.0 修订：沙箱候选试验不在禁止范围内） |
 | I-16 | 子代理侧链：父上下文只收 summary+artifact+usage | `subagent.py` `sidechain_omitted` | 把子对话全文灌回父上下文 |
 | I-17 | Prompt 布局：volatile 在 conversation 后（前缀缓存） | `context_assembler.py` | 每轮把 workspace 全文塞进稳定前缀 |
 | I-18 | Core ≠ Generated App | DEFINITION ATTR_5 | 把业务场景反向固化进 Core |
@@ -127,7 +127,7 @@ See docs/decision-note-delivery-machine-invariants-2026-08-02.md §3.
 ## 5. 不做（本注记范围）
 
 - 不在本注记内实现 events 表 / RegentEvent / 流式 / AgentTool  
-- 不修改 FROZEN 的 `REGENT-DEFINITION-1.0.txt` 正文  
+- 不修改 FROZEN 的定义正文（成稿时为 `REGENT-DEFINITION-1.0.txt`，现行为 `REGENT-DEFINITION-3.0.txt`）  
 - 不开启 canary、不宣称 GQ-4 / 默认 agentic  
 
 ---

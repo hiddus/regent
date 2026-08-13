@@ -46,10 +46,10 @@
 | Agent 内核 | **2,518 行 / 13 文件** | `core/src/regent/agent/` |
 | 模型层 | **368 行**，单一 OpenAI 兼容 provider | `core/src/regent/model/` |
 | 能力池 | 3 个 bootstrap 能力，**从未接入 tool schema** | `capabilities/` |
-| Agent 默认状态 | `generation_strategy="artifact-backed"`、canary=0、gate=False | `config.py:33-39` |
-| 多 Agent 默认状态 | `aar1_certified_hive=False`、`delivery_batch_enabled=False` | `config.py:40,66` |
+| Agent 默认状态 | `generation_strategy="agentic"`、canary=0、gate=False；`artifact-backed` 为 kill-switch / scaffold fallback | `config.py` |
+| 多 Agent 默认状态 | `aar1_certified_hive=True`（per-goal `force_single_agent` 可退出）、`delivery_batch_enabled=False` | `config.py` |
 
-> **agentic 分支默认关闭。** 2,518 行 Agent 在生产上只跑了 4 个 goal，全部失败。
+> **口径更正（2026-08-11）**：Settings **代码默认**已是 `agentic`（非「分支默认关闭」）；生产 canary 仍为 0% / gate=false。成稿时「只跑了 4 个 goal、全部失败」是历史诊断切片，不得读成当前默认策略仍是 artifact-backed。
 
 ---
 

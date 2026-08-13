@@ -4,6 +4,8 @@
   "status": "PASSED",
   "decided_at": "2026-07-27T22:45:00+08:00",
   "definition_id": "REGENT-DEFINITION-1.0",
+  "superseded_by_definition": "REGENT-DEFINITION-3.0",
+  "definition_note": "Historical gate signed under DEFINITION-1.0; current coding/product authority is REGENT-DEFINITION-3.0. Do not treat this record as the live definition body.",
   "scope": "AAR-1 Foundation M1-M6 (Contract)",
   "parent_gate": "docs/AAR1CodingReadinessDecisionRecord.json",
   "authorization": {

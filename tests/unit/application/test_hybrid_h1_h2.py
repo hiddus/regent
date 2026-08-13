@@ -36,9 +36,13 @@ def test_replan_keywords() -> None:
     assert not looks_like_replan_request("继续修复 typo")
 
 
-def test_hive_opt_in_not_coding_default() -> None:
-    assert coding_default_is_primary({})
-    assert coding_default_is_primary({"goal_kind": "coding"})
+def test_multi_agent_is_product_default() -> None:
+    assert not coding_default_is_primary({})
+    assert not coding_default_is_primary({"goal_kind": "coding"})
     assert not coding_default_is_primary({"goal_kind": "scenic"})
+    assert hive_opt_in_allowed({})
     assert hive_opt_in_allowed({"hive_enabled": True})
+    assert coding_default_is_primary({"force_single_agent": True})
+    assert coding_default_is_primary({"hive_enabled": False})
+    assert not hive_opt_in_allowed({"force_single_agent": True})
     assert get_goal_kind({"goal_kind": "city"}) == "city"

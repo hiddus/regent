@@ -14,7 +14,7 @@
 | 功能域 | PRD/Tech-Spec 声称 | README 声称 | 代码实测（2026-08-03） | 判定 |
 |---|---|---|---|---|
 | P0 全链路（Goal/Work/Run/Outbox/Artifact/Evidence/Audit） | 已完成 | 已运行闭环 | CSV 基线通过（前次陈述，本轮无回归） | ✅ 一致 |
-| GQ-0~GQ-4 生成策略控制流 | 已实现但默认不可启用 | 同 | `generator_factory.py` / `generation_strategy_*.py` 仍被调用；`config.py` 默认 `artifact-backed`、`canary_gate=False`、`canary_percent=0` | ✅ 一致 |
+| GQ-0~GQ-4 生成策略控制流 | 已实现；代码默认 agentic；canary 关闭 | 同 | `generator_factory.py` / `generation_strategy_*.py` 仍被调用；`config.py` 代码默认 `agentic`、`canary_gate=False`、`canary_percent=0`；`artifact-backed`=kill-switch/scaffold fallback | ✅ 一致（2026-08-11 更正：成稿时曾写默认 artifact-backed） |
 | 5 个 API router 挂载 | F-1 已修复 | 已挂载 | `api/main.py:266-294` 含 `human_tasks/uploads/webhooks/reports/public_deploy` | ✅ 一致 |
 | 交付状态机 decide_delivery_verdict | 已接线（CD-1） | 已落地 | `delivery_state.py` 仍被 `execution_orchestrator.py` 真实调用；handler 在 `app_projects.py:106` | ⚠️ 主链一致；**魔法字符串兜底仍残留**（见 §3-B） |
 | **P2-3 Impact Graph** | 2026-08-01 已从「未实现」移除 | 未提 | `impact_graph_service.py:61/140/181/231` 环检测/级联/批量撤销/衰减；`memory_service.py:20,86` 接线；`models.py:1710` | ✅ 一致（前次修正成立） |

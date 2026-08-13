@@ -36,6 +36,9 @@ from regent.infrastructure.evidence_sources import (
     GoalIntentEvidenceConnector,
 )
 from regent.infrastructure.product_surface_capability import ensure_product_surface_capability
+from regent.infrastructure.environment_heal_capability import (
+    ensure_environment_heal_capability,
+)
 from regent.infrastructure.sandbox import (
     DockerDependencyMaterializer,
     DockerSandboxDriver,
@@ -87,6 +90,9 @@ class Worker:
         self._privacy_retention = None
         self._privacy_retention_interval = 3600.0
         self._next_privacy_retention = 0.0
+        self._host_guard_interval = 60.0
+        self._next_host_guard = 0.0
+        self._host_guard_enabled = True
         if sessions is not None:
             from regent.application.reconciliation_worker import ReconciliationWorker
             from regent.config import get_settings
@@ -96,6 +102,8 @@ class Worker:
             self._reconciliation_interval = settings.reconciliation_interval_seconds
             self._privacy_retention = sessions
             self._privacy_retention_interval = settings.privacy_retention_interval_seconds
+            self._host_guard_enabled = bool(settings.host_guard_enabled)
+            self._host_guard_interval = float(settings.host_guard_interval_seconds)
 
     async def serve(self) -> None:
         lease = await self.leases.acquire(
@@ -182,6 +190,31 @@ class Worker:
                     self._next_privacy_retention = (
                         monotonic() + self._privacy_retention_interval
                     )
+                if self._host_guard_enabled and monotonic() >= self._next_host_guard:
+                    try:
+                        from regent.application.host_guard import tick_host_resource_guard
+                        from regent.config import get_settings
+
+                        hs = get_settings()
+                        host_stats = await tick_host_resource_guard(
+                            self.sessions,
+                            workspace_root=hs.workspace_root,
+                            disk_percent_max=hs.host_disk_percent_max,
+                            mem_percent_max=hs.host_mem_percent_max,
+                            load1_per_cpu_max=hs.host_load1_per_cpu_max,
+                            prune_keep_newest=hs.host_prune_preview_keep,
+                            prune_disk_percent=hs.host_prune_disk_percent,
+                            prune_mem_percent=hs.host_prune_mem_percent,
+                            reap_processes=hs.host_reap_preview_processes,
+                        )
+                        decision = (host_stats.get("decision") or {})
+                        if decision.get("unhealthy") or (decision.get("pruned") or {}).get(
+                            "removed_count"
+                        ):
+                            logger.warning("host resource guard tick", extra=host_stats)
+                    except Exception:
+                        logger.exception("host resource guard tick failed")
+                    self._next_host_guard = monotonic() + self._host_guard_interval
                 await self.dispatcher.dispatch_once(self.worker_id)
                 if monotonic() >= next_heartbeat:
                     lease = await self.leases.heartbeat(lease)
@@ -392,6 +425,11 @@ async def run_async() -> None:
         logger.info("seeded product-surface-v1 capability")
     except Exception:
         logger.exception("failed to seed product-surface-v1 capability")
+    try:
+        await ensure_environment_heal_capability(sessions)
+        logger.info("seeded environment-heal-v1 capability")
+    except Exception:
+        logger.exception("failed to seed environment-heal-v1 capability")
     try:
         n = await RuntimeProfileService(sessions).seed_bootstrap()
         logger.info("seeded runtime profiles", extra={"count": n})

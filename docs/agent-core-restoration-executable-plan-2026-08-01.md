@@ -1,6 +1,6 @@
 # Agent 内核可执行修复计划（复审收敛版，2026-08-01）
 
-> 状态：ACTIVE（M0–M5 工程接线已落地；**M6 5% agentic canary 已开窗** 2026-08-01，默认仍 artifact-backed；出口 Gate / 真实用户闭环仍待观察）。
+> 状态：ACTIVE（M0–M5 工程接线已落地；**M6 窗 CLAMPED_PENDING_QUALIFICATION**，watch 计划 HALTED；代码默认 `generation_strategy=agentic`，canary gate=false / percent=0；出口 Gate / 真实用户闭环仍待 Offline Qual）。
 > 输入：`agent-core-restoration-plan-2026-08-01.md`、其 review patch、当前源码、PRD、Technical Spec 与 GQ-3 生产报告。
 > 目标：先恢复一条可运行、可修复、可预览、可增量迭代的强单 Agent 交付闭环，再决定是否恢复 Skills 扩展、GQ-4 和多 Agent 投资。
 >
@@ -11,8 +11,8 @@
 > - M3 同轨迹 repair、glob/grep/edit_file/read_artifact、repair_policy、compact 保留失败
 > - M4 RuntimePreview 路由、晋级 hash 门、TaskCard primary_failure/recovery
 > - M5 三 Skill + 路由 + 消融报告骨架
-> - 默认 generation_strategy 仍为 artifact-backed；GQ-4 关闭
-> - M6：5% agentic canary 已开窗（见 `docs/m6-canary-window-2026-08-01.json`）；出口 Gate 未宣称达标
+> - 代码默认 `generation_strategy=agentic`；`artifact-backed` 为 kill-switch / scaffold fallback；GQ-4 关闭
+> - M6：曾开 5% agentic canary，现已 **CLAMPED**（`docs/m6-canary-window-2026-08-01.json`）；开窗样本不得作晋级证据；出口 Gate 未宣称达标
 
 ## 1. 复审结论
 
@@ -31,7 +31,7 @@
 
 - 不新增 Hive、自适应组织、组织指标、GQ 推广或新的治理模块。
 - 不删除治理代码，不做跨域重构；只允许修复阻断单 Agent 闭环的接线。
-- `generation_strategy` 继续默认 `artifact-backed`；agentic 只用于隔离的评测任务。
+- 代码默认 `generation_strategy=agentic`；`artifact-backed` 仅作 kill-switch / 显式 scaffold fallback；禁止扩 canary / 宣称 GQ-4，直至 Offline Qual 出口。
 - 禁止把宿主 Docker socket 挂入持有模型密钥或数据库凭据的 worker。
 
 ### 2.2 唯一产品成功定义
@@ -130,14 +130,16 @@
 
 ### M6：受控 Canary 与产品闭环（至少 1 周观察）
 
+> **现状（2026-08-11）**：窗记录 `CLAMPED_PENDING_QUALIFICATION`；watch 计划 **HALTED**；须先 Offline Qual，禁止扩流。下列为原计划步骤，不得读成「当前已开 5% ACTIVE」。
+
 目标：证明修复对真实用户任务有效，而非只对 fixtures 有效。
 
-- 先 5% agentic canary，最多扩大到 10%；同模型、同任务分层、同总预算、同 Profile。
-- 严重安全事件、发布错误或成本/P95 超护栏立即回退到 artifact-backed。
+- 资格阶梯出口后，再开小比例（如 5%）agentic canary，最多扩大到 10%；同模型、同任务分层、同总预算、同 Profile。
+- 严重安全事件、发布错误或成本/P95 超护栏立即 kill-switch / 回落 artifact-backed。
 - nightly 运行真实模型到真实 sandbox/Preview 的端到端测试；提交级 CI 使用录制回放，避免外部模型抖动成为唯一门禁。
 - 至少完成一条真实闭环：1 个真实 Goal、3 位真实用户、1 条可归因反馈、1 次基于 last-good 的增量 REVISE。
 
-出口 Gate：`preview_ready_rate ≥ 60%`、`first_runnable_rate ≥ 50%`、`human_intervention_rate ≤ 0.3`、`mean_repair_rounds ≤ 2.5`，且至少一条真实闭环成立。GQ-4 是否重开需单独 DecisionRecord；这些指标不能自动触发默认切换。
+出口 Gate：`preview_ready_rate ≥ 60%`、`first_runnable_rate ≥ 50%`、`human_intervention_rate ≤ 0.3`、`mean_repair_rounds ≤ 2.5`，且至少一条真实闭环成立。GQ-4 是否正式晋级需单独 DecisionRecord；这些指标不能自动触发宣称「已晋级」。
 
 ## 5. 测试与验收矩阵
 

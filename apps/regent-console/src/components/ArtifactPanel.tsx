@@ -101,16 +101,38 @@ const PREVIEW_READY_STATUSES = new Set([
   'SUCCEEDED',
 ])
 
+function ensurePreviewTrailingSlash(url: string): string {
+  // Runtime preview root must end with `/` so relative hrefs resolve under the
+  // deployment prefix (and so CSP-backed <base href> matches the document path).
+  try {
+    const u = new URL(url, location.origin)
+    if (/\/preview\/runtime\/[^/]+$/i.test(u.pathname)) {
+      u.pathname = `${u.pathname}/`
+      return u.toString()
+    }
+  } catch {
+    /* keep original */
+  }
+  return url
+}
+
 function normalizePreviewUrl(ep: string | null | undefined): string | null {
   if (!ep) return null
   try {
     const u = new URL(ep, location.origin)
+    // Worker-local preview ports are not reachable from the browser. Only
+    // path-prefixed /preview/... URLs (or same-origin API hosts) are usable.
     if (u.hostname === 'regent-api' || u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
-      return location.origin + u.pathname + u.search + u.hash
+      if (u.pathname.startsWith('/preview/')) {
+        return ensurePreviewTrailingSlash(location.origin + u.pathname + u.search + u.hash)
+      }
+      return null
     }
-    return u.toString()
+    return ensurePreviewTrailingSlash(u.toString())
   } catch {
-    return String(ep).replace('http://regent-api:8000', location.origin)
+    const s = String(ep).replace('http://regent-api:8000', location.origin)
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/i.test(s)) return null
+    return ensurePreviewTrailingSlash(s)
   }
 }
 
@@ -749,7 +771,7 @@ export function ArtifactPanel({
                       src={previewUrl}
                       title="App Preview"
                       className="artifact-preview-iframe"
-                      sandbox="allow-scripts allow-same-origin"
+                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
                     />
                   </div>
                   <div className="artifact-preview-actions">

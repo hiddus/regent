@@ -5,7 +5,7 @@
 > 执行：[`agentic-qualification-executable-plan-2026-08-01.md`](./agentic-qualification-executable-plan-2026-08-01.md)  
 > 前置：`docs/m6-canary-window-2026-08-01.json`（开窗记录保留；**扩流禁止**；建议 clamp 至 Qual 出口）  
 > 开窗时刻：`2026-08-01T14:38:33+00:00`（历史；不计入新晋级样本）  
-> 约束：默认策略保持 `artifact-backed`（FALLBACK_ONLY）；GQ-4 关闭；禁止用本窗宣称 M6/GQ-4 达标
+> 约束：窗期曾 clamp 至 FALLBACK；**现行代码默认** `generation_strategy=agentic`（`artifact-backed` 仅为 kill-switch/scaffold）；GQ-4 关闭；禁止用本窗宣称 M6/GQ-4 达标
 
 ## 1. 目标
 
@@ -15,7 +15,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 配置 | **已 clamp**：`percent=0` + `gate=false` + `QUAL=DISABLED` + 默认 artifact-backed（FALLBACK_ONLY） |
+| 配置 | **已 clamp**：`percent=0` + `gate=false` + `QUAL=DISABLED`；代码默认仍为 agentic，本窗禁止扩流 |
 | T0 探针 | 已落盘，但 24h 含开窗前历史 agentic（plan 级 share 失真） |
 | 出口四指标 | 尚未按开窗 since 计算 |
 | 真实闭环 | 未开始 |
@@ -69,13 +69,13 @@
 
 | 决策 | 条件 | 动作 |
 |---|---|---|
-| HOLD | 样本不足或指标临界 | 维持 5%，继续观察 |
+| HOLD | 样本不足或指标临界 | **保持 clamp（percent=0 / gate=false）**，继续 Offline Qual；不得写「维持 5%」 |
 | EXPAND_10 | 四指标过线 + 闭环成立 + 无护栏触发 | Owner 批准后 percent→10（默认仍不变） |
 | ROLLBACK | 护栏触发或显著劣于对照臂 | clamp 回 0% / gate off |
 
 ## 4. 明确不做
 
-- 不把默认 `generation_strategy` 改为 `agentic`（GQ-4 需单独 DecisionRecord）
+- 不以本窗样本宣称 GQ-4 / 默认策略晋级（代码默认已是 agentic；晋级门禁仍要 DecisionRecord）
 - 不用开窗前历史计划计算 canary 成功率
 - 不扩 Skill / Hive / 组织层投资
 - 不以提高 temperature、token、repair 次数作为独立修复
@@ -85,4 +85,4 @@
 - [ ] 探针支持开窗后切片，且至少 1 份 post-open daily
 - [ ] M6 四指标报告可复跑
 - [ ] 闭环证据已完成或书面 blocker
-- [ ] 窗末有书面 HOLD/EXPAND_10/ROLLBACK；默认策略仍为 artifact-backed
+- [ ] 窗末有书面 HOLD/EXPAND_10/ROLLBACK；本窗样本不得作默认策略晋级证据

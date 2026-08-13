@@ -216,6 +216,18 @@ def detect_doom_loop(
         streak = 1
     resumes = int(meta.get("session_resume_attempts") or 0)
     prior_hash = str(meta.get(META_WORKSPACE_HASH) or "")
+    # Progress ROI: consecutive spend-without-progress → doom (stop burn).
+    try:
+        from regent.application.progress_roi import META_PROGRESS_ROI
+        from regent.config import get_settings
+
+        roi = dict(meta.get(META_PROGRESS_ROI) or {})
+        stagnant = int(roi.get("stagnant_streak") or 0)
+        stop_at = int(getattr(get_settings(), "progress_roi_stagnant_stop", 3) or 3)
+        if bool(getattr(get_settings(), "progress_roi_enforced", True)) and stagnant >= stop_at:
+            return True, f"doom_loop:roi_no_progress:streak={stagnant}"
+    except Exception:
+        pass
     if streak >= DOOM_SAME_GAP_STREAK and resumes >= 1:
         return True, f"doom_loop:same_gap:{gap_kind}:streak={streak}"
     if (

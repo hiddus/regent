@@ -1,0 +1,9 @@
+{
+  "skill_id": "ops-environment",
+  "version": "1.0.0",
+  "title": "Ops Environment (Host Heal)",
+  "description": "Detect and repair host pressure with allowlisted actions; grow LESSONS from successful heals.",
+  "applies_when": ["host", "disk", "memory", "preview-venv", "环境", "磁盘", "内存", "自愈", "HOST_RESOURCE"],
+  "anti_examples": ["arbitrary shell", "disable host guard", "skip soft-pause under OOM"],
+  "gap_codes": ["HOST_RESOURCE", "disk_percent", "mem_percent", "preview_venv_count", "load1_per_cpu"]
+}

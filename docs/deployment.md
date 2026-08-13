@@ -41,7 +41,7 @@ stored on the server in `/opt/regent/.deploy.env` with owner-only permissions.
 
 | 组合 | `REGENT_SANDBOX_MODE` | 要求 | 结果 |
 |---|---|---|---|
-| Path A 宿主/容器 worker | `docker` | 已构建 `regent-agent-exec-v1:1`；worker 挂 `docker.sock` + `--group-add docker`；`REGENT_HOST_PATH_MAP=/opt/regent=/opt/regent`（S0 同路径绑定） | ✅ 已在 S0（2026-07-31）验证 |
+| Path A 宿主/容器 worker | `docker` | 已构建 `regent-agent-exec-v1:1`；worker 挂 `docker.sock` + `--group-add docker`；**必须** `REGENT_HOST_PATH_MAP=/var/lib/regent=/opt/regent;/opt/regent=/opt/regent`（容器可见根 → 宿主根） | ✅ S0（2026-07-31）；08-11/12 已 recreate 对齐 |
 | Path B compose（默认） | `local` | 无 docker.sock | ✅ 开发支持（非生产） |
 | Path B compose + docker | `docker` | **必须** `REGENT_HOST_PATH_MAP=/var/lib/regent=/opt/regent` **且**挂载 docker.sock（Owner 风险接受）或改用宿主 worker | 缺 map → **fail-closed**（N-3d） |
 | `environment=production` + `local` | — | — | 启动/配置 **ValueError** |

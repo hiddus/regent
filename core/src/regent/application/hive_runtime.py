@@ -198,36 +198,27 @@ async def materialize_hive_topology(
             relationship_type="APPROVES",
         )
 
-    # Assignments: each work bound to role agents (dev primary executor when present).
+    # Assignments: DB unique is (organization_id, work_id) — one row per work.
+    # Hive PM/Dev/QA collaboration is carried by deployments, relationships, and
+    # durable hive tasks; Dev (or executor) is the primary work assignee.
+    if not bindings:
+        raise ValueError("hive materialize requires at least one role binding")
     primary = bindings.get("dev") or bindings.get("executor") or next(iter(bindings.values()))
     for work in works:
-        for role, binding in bindings.items():
-            session.add(
-                AssignmentModel(
-                    id=uuid.uuid4(),
-                    organization_id=organization_id,
-                    work_id=work.id,
-                    agent_spec_id=binding.agent_spec_id,
-                    role=role,
-                    delegated_capabilities=list(
-                        work.metadata_json.get("required_capabilities", binding.capabilities)
-                    ),
-                )
+        session.add(
+            AssignmentModel(
+                id=uuid.uuid4(),
+                organization_id=organization_id,
+                work_id=work.id,
+                agent_spec_id=primary.agent_spec_id,
+                role=primary.role,
+                delegated_capabilities=list(
+                    work.metadata_json.get(
+                        "required_capabilities", primary.capabilities
+                    )
+                ),
             )
-        # Ensure at least primary assignment exists even if bindings empty (defensive).
-        if not bindings:
-            session.add(
-                AssignmentModel(
-                    id=uuid.uuid4(),
-                    organization_id=organization_id,
-                    work_id=work.id,
-                    agent_spec_id=primary.agent_spec_id,
-                    role=primary.role,
-                    delegated_capabilities=list(
-                        work.metadata_json.get("required_capabilities", [])
-                    ),
-                )
-            )
+        )
 
     return HiveMaterialization(
         template_id=template_id,

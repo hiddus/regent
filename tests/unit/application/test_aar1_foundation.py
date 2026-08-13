@@ -162,6 +162,21 @@ class TestPolicyEngineF1:
         )
         assert result.outcome is PolicyOutcome.DENY
 
+    def test_reversible_but_high_impact_tool_requires_permit(self) -> None:
+        result = evaluate_rules(
+            PolicyEvaluationRequest(
+                decision_point="MCP_TOOL_INVOKE",
+                subject_type="AGENT",
+                subject_id="growth-agent",
+                action="invoke",
+                resource={"side_effect_class": "NONE", "risk_tier": "HIGH"},
+                input_snapshot={"tool": "public-message-preview", "audience": 500},
+                rules=default_system_rules(),
+            )
+        )
+        assert result.outcome is PolicyOutcome.REQUIRE_PERMIT
+        assert "system-mcp-impact-permit" in result.matched_rule_ids
+
 
 # ---------------------------------------------------------------------------
 # F3 Organization — C/V/R + utility
@@ -376,6 +391,88 @@ class TestOrganizationEngineF3:
         assert preferred.decision_json["selected"]["template_id"] == (
             "pm-dev-independent-qa-v1"
         )
+
+        from regent.application.task_features import TaskFeatures
+
+        # R1 demotes multi-agent for production default; preferred still wins and
+        # multi-agent remains admitted in exploration space (no hard exclude).
+        high_baseline = TaskFeatures(
+            tool_call_density=1.0,
+            decomposability_score=0.0,
+            sequential_dependency_score=0.9,
+            single_agent_baseline_success_rate=1.0,
+            independent_verification_required=False,
+            estimated_parallelism_ceiling=0.0,
+        )
+        force_preferred = engine.evaluate_candidates(
+            templates,
+            available_capabilities=caps,
+            preferred_template_id="pm-dev-independent-qa-v1",
+            task_features=high_baseline,
+        )
+        assert force_preferred.status == "ACCEPTED"
+        assert force_preferred.decision_json["selected"]["template_id"] == (
+            "pm-dev-independent-qa-v1"
+        )
+        prune_meta = force_preferred.decision_json["organization_space_prune"]
+        assert "pm-dev-independent-qa-v1" in prune_meta["admitted_template_ids"]
+        assert "pm-dev-independent-qa-v1" in prune_meta["demoted_template_ids"]
+        assert prune_meta["excluded_template_ids"] == []
+        # Already admitted via demotion policy — no need to force-resurrect.
+        assert "preferred_force_admitted" not in prune_meta
+        hive_row = next(
+            c
+            for c in force_preferred.decision_json["candidates"]
+            if c["template_id"] == "pm-dev-independent-qa-v1"
+        )
+        assert hive_row["production_default_demotion_penalty"] > 0.0
+        assert hive_row.get("not_recommended_for_production_default") is True
+
+    def test_failed_certification_candidates_include_utility_components(self) -> None:
+        """Persist path must not KeyError when hive cert fails closed."""
+        engine = OrganizationEngine.__new__(OrganizationEngine)
+        engine._policy = PolicyEngine()
+        engine._enforce_cvr = True
+        templates = [
+            {
+                "name": "single-agent-v1",
+                "topology_json": {
+                    "template_id": "single-agent-v1",
+                    "strategy": "SINGLE_AGENT",
+                    "roles": [{"role": "executor", "capabilities": []}],
+                },
+            },
+            {
+                "name": "pm-dev-independent-qa-v1",
+                "semantic_version": "1.0.0",
+                "topology_json": {
+                    "template_id": "pm-dev-independent-qa-v1",
+                    "strategy": "FIXED_TEMPLATE",
+                    "roles": [
+                        {"role": "pm", "capabilities": ["delivery-review-v1"]},
+                        {"role": "dev", "capabilities": ["product-surface-v1"]},
+                        {
+                            "role": "qa",
+                            "capabilities": ["delivery-review-v1"],
+                            "independent_reviewer": True,
+                        },
+                    ],
+                    "invariants": ["producer_reviewer_separation"],
+                    "template_certification": {"accepted": False, "digest": "stale"},
+                },
+            },
+        ]
+        bundle = engine.evaluate_candidates(
+            templates,
+            available_capabilities={"delivery-review-v1", "product-surface-v1"},
+        )
+        assert bundle.status == "ACCEPTED"
+        assert bundle.decision_json["selected"]["template_id"] == "single-agent-v1"
+        for cand in bundle.decision_json["candidates"]:
+            assert "utility_components" in cand
+            # Mimic decide_and_persist persist fields
+            _ = cand.get("predicted_utility")
+            _ = cand.get("utility_components") or {}
 
     def test_preferred_hive_falls_back_when_infeasible(self) -> None:
         engine = OrganizationEngine.__new__(OrganizationEngine)

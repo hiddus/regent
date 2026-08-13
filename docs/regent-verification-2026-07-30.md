@@ -7,10 +7,12 @@
 > - `docs/registered-unimplemented-2026-07-30.md`  
 > - `Regent-Technical-Spec.md` §25  
 > 另见文末附录「修复后状态（2026-07-30+）」。
+>
+> **口径更新（2026-08-11，定义 3.0）**：正文中「单 Agent 默认 / 动态组织须实验验证净收益 / 非默认」等表述，按现行定义只约束**晋级生产默认与扩大不可逆现实权限**；沙箱内的候选拓扑与组织试验默认开放。净收益 Gate 不是探索前置。
 
 > 核查日期：2026-07-30  
 > 方法：静态代码 + 文档比对（未执行 pytest；环境未安装运行时依赖，详见第六节）  
-> 依据文档：`Regent-PRD.md`、`Regent-Plan.md`、`Regent-Technical-Spec.md`、`Regent-Measurement-Decision-Framework.md`、冻结定义 `docs/definitions/REGENT-DEFINITION-1.0.txt`  
+> 依据文档：`Regent-PRD.md`、`Regent-Plan.md`、`Regent-Technical-Spec.md`、`Regent-Measurement-Decision-Framework.md`、当时的冻结定义 `docs/definitions/REGENT-DEFINITION-1.0.txt`（现行规范源已是 `REGENT-DEFINITION-3.0`）  
 > 代码范围：`C:\regent\core`（166 模块）、`C:\regent\apps`、`C:\regent\tests`（81 测试文件）
 
 ---
@@ -33,7 +35,7 @@
 
 **结论：已覆盖。**
 
-- 产品身份/使命由冻结定义 `REGENT-DEFINITION-1.0.txt` 锚定，PRD §0 引用并声明「CI 在定义 ID/哈希漂移时阻止合并」，目标权威源清晰。
+- 产品身份/使命由当时的冻结定义 `REGENT-DEFINITION-1.0.txt` 锚定（现行为 `REGENT-DEFINITION-3.0`），PRD §0 引用并声明「CI 在定义 ID/哈希漂移时阻止合并」，目标权威源清晰。
 - 目标分层落在四份文档：`Regent-PRD.md`（P0/P1/P2 产品使命、ICP、非目标、北极星/护栏）、`Regent-Plan.md`（实现切片 S0–S8）、`Regent-Technical-Spec.md`（架构与状态机）、`Regent-Measurement-Decision-Framework.md`（P2-4 实验合同）。
 - 未发现「代码中存在、但文档未描述」的产品级目标（Q4 中的溢出项属于实现层/候选层，非目标层）。
 - **注意**：`USER.md` 中「树米科技/Showmac 企业宣传册」为无关历史残留，与 `C:\regent` 的 Regent 项目无关，不计入本项目目标。

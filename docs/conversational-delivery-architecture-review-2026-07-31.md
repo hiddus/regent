@@ -30,10 +30,12 @@
 
 | 冲突 | 产品专家 | 技术专家 | 复核结论 |
 |---|---|---|---|
-| 生成器选择路径 | `worker/main.py:252` 硬编码 `ArtifactBackedCodeGenerator`，忽略 `generation_strategy` | 走 `generator_factory.build_generator_selector` → 可达 `AgenticCodeGenerator` | **技术专家对机制，产品专家对结果**。`worker/main.py:255` 确实调用 `build_generator_selector`；但 `config.py:27/32/36` 三个默认值使 agentic 分支不可达 |
+| 生成器选择路径 | `worker/main.py:252` 硬编码 `ArtifactBackedCodeGenerator`，忽略 `generation_strategy` | 走 `generator_factory.build_generator_selector` → 可达 `AgenticCodeGenerator` | **技术专家对机制**（当时复核成立）。**现行口径（2026-08-11）**：代码默认已是 `agentic`；下表旧默认摘录仅历史核对 |
 
 裁决依据（`core/src/regent/config.py`）：
 
+
+> **口径更新（2026-08-11）**：成稿时 Settings 仍写 `artifact-backed` 默认；现行 `config.py` 代码默认已是 `agentic`，`artifact-backed` 为 kill-switch / scaffold fallback；canary gate/percent 仍关闭。下列代码摘录仅作历史核对。
 ```python
 generation_strategy = "artifact-backed"        # L27  默认走模板
 generation_strategy_canary_percent = 0         # L32  灰度 0%
@@ -41,8 +43,7 @@ generation_strategy_canary_gate = False        # L36  灰度总闸关闭
 generation_strategy_fallback = "artifact-backed"  # L30
 ```
 
-即 `resolve_effective_generation_strategy()` 在默认配置下**恒返回 artifact-backed**。
-这不是「硬编码」，是**暗启动从未点亮**——比硬编码更隐蔽，因为架构测试会通过。
+成稿时：`resolve_effective_generation_strategy()` 在默认配置下**恒返回 artifact-backed**（暗启动从未点亮）。**现行**：默认返回 `agentic`；canary 仍关；`artifact-backed` 仅作 kill-switch / scaffold fallback。
 
 ---
 
@@ -199,8 +200,9 @@ POST /v1/conversations/{id}/messages            api/conversations.py:99
   任何 goal 都回落默认策略」
 - `Regent-Technical-Spec.md:438`：「运行时默认仍由 `generation_strategy` 驱动
   （Settings 代码默认 `artifact-backed`）」
+  > **口径更新（2026-08-11）**：成稿时 Tech-Spec 仍写 artifact-backed 代码默认；现行 §0.1/§13.7 已更正为代码默认 `agentic`，artifact-backed 为 kill-switch / scaffold fallback。上引仅作历史核对。
 
-`config.py:27/32/36` 三个默认值**逐字符符合规范**。第一轮称之为「暗启动从未点亮」属误判：
+`config.py` 默认值须以**当时**规范与**现行** §0.1 对照；第一轮称之为「暗启动从未点亮」属误判：
 它是 GQ-2 → GQ-3 → GQ-4 的强制串行门禁，PRD §10.5 与 Tech-Spec §13.7 有完整的实验、
 统计与 DecisionRecord 前置要求。
 

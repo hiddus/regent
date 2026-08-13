@@ -63,6 +63,23 @@ def test_detect_doom_loop_same_gap() -> None:
     assert "same_gap" in reason
 
 
+def test_detect_doom_loop_roi_no_progress(monkeypatch) -> None:
+    class _S:
+        progress_roi_enforced = True
+        progress_roi_stagnant_stop = 3
+
+    monkeypatch.setattr("regent.config.get_settings", lambda: _S())
+    meta = {
+        "progress_roi": {"stagnant_streak": 3, "next_action": "stop"},
+        "delivery_gap_kind": "product_surface",
+        "delivery_gap_kind_streak": 0,
+        "session_resume_attempts": 1,
+    }
+    is_doom, reason = detect_doom_loop(meta, gap_kind="product_surface")
+    assert is_doom is True
+    assert "roi_no_progress" in reason
+
+
 def test_stop_conversation_copy() -> None:
     exit_row = build_exit(exit_kind="STOP", stop_reason="budget", draft_uri="file://x")
     msg_type, content = conversation_copy_for_exit(exit_row)

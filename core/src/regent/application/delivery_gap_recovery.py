@@ -97,6 +97,13 @@ _DELIVERY_POLICY = "goal_attainment_escalation"
 _MAX_FAILURE_LESSONS = 8
 _MAX_LEARNED_CONSTRAINTS = 16
 
+_NAVIGATION_MARKERS = (
+    "preview-internal-nav",
+    "internal-nav",
+    "broken-nav",
+    "nav 404",
+    "detail/nav",
+)
 _PRESENTATION_MARKERS = (
     "stylesheet-present",
     "stylesheet-substance",
@@ -106,7 +113,6 @@ _PRESENTATION_MARKERS = (
     "forbid-demo-shell",
     "semantic-main",
     "preview-asset-reachability",
-    "preview-internal-nav",
     "preview-home-reachable",
     "preview-product-qa",
 )
@@ -123,6 +129,11 @@ _GOAL_INTENT_MARKERS = (
 )
 
 _KIND_GUIDANCE: dict[str, tuple[str, ...]] = {
+    "navigation": (
+        "Fix broken in-app navigation first: every linked detail/crosswalk path must return HTTP <400 HTML.",
+        "Do not chase CSS/typography when the failing check is preview-internal-nav — repair routes and hrefs.",
+        "Align template hrefs with Flask routes (case, trailing slash, slug); seed data must match linked IDs.",
+    ),
     "presentation": (
         "Fix presentation first: add substantial CSS (stylesheet + layout + typography).",
         "Never ship browser-default dumps; use semantic <main> and designed product structure.",
@@ -173,6 +184,10 @@ def classify_delivery_gap_kind(gap_reasons: list[str]) -> str:
         return "PLAN_APPROVE"
     if "budget_exhausted" in joined:
         return "BUDGET_EXHAUSTED"
+    # Nav/404 must win over presentation — otherwise agents keep polishing CSS
+    # while the same broken href loops forever.
+    if any(m in joined for m in _NAVIGATION_MARKERS):
+        return "navigation"
     if any(m in joined for m in _PRESENTATION_MARKERS):
         return "presentation"
     if any(m in joined for m in _EVIDENCE_MARKERS):
@@ -194,12 +209,39 @@ def guidance_for_gap_kind(gap_kind: str) -> tuple[str, ...]:
 
 def build_learned_constraints(gap_kind: str, gap_reasons: list[str]) -> list[str]:
     """Turn failure codes into concrete do-not / must-fix constraints for replanning."""
+    from urllib.parse import urlparse
+
     constraints: list[str] = [
         f"Do not repeat the prior rejected surface for gap_kind={gap_kind}.",
         "Absorb prior failure lessons before emitting another deliverable.",
     ]
     joined = " ".join(r.lower() for r in gap_reasons)
-    if "stylesheet" in joined or "styled-surface" in joined or gap_kind == "presentation":
+    if gap_kind == "navigation" or "preview-internal-nav" in joined or " → 404" in joined:
+        constraints.append(
+            "MUST fix broken in-app links before cosmetics: every href probed by "
+            "preview-internal-nav must return HTML 2xx (no 404)."
+        )
+        constraints.append(
+            "Align routes with linked paths (case-insensitive slug ok); seed entities "
+            "referenced by nav must exist."
+        )
+        if "not found" in joined or "crosswalk not found" in joined:
+            constraints.append(
+                "If the route exists but returns not-found, fix data lookup keys/seed "
+                "(dict key mismatch is a common root cause), not CSS."
+            )
+        for reason in gap_reasons:
+            for token in str(reason).replace(";", " ").split():
+                if "/crosswalks/" in token or "/countries/" in token or "/item/" in token:
+                    path = token.split("→")[0].split("->")[0].strip().rstrip(",")
+                    if path.startswith("http"):
+                        path = urlparse(path).path or path
+                    item = f"MUST make this path return HTML 200: {path}"
+                    if item not in constraints:
+                        constraints.append(item)
+    if "stylesheet" in joined or "styled-surface" in joined or (
+        gap_kind == "presentation" and "preview-internal-nav" not in joined
+    ):
         constraints.append(
             "Must ship substantial CSS (layout + typography); no browser-default dumps."
         )
@@ -331,19 +373,47 @@ class DeliveryGapRecoveryService:
                 .limit(1)
             )
             metadata = dict(goal.metadata_json or {})
+            # Keep concrete live-preview failures sticky across later deploy/domain
+            # errors so recovery does not forget the real product gap (e.g. 404 nav).
+            sticky_qa = [
+                str(x).strip()
+                for x in list(metadata.get("live_preview_qa_failures") or [])
+                + list((halt_context or {}).get("live_preview_qa_failures") or [])
+                if str(x).strip()
+            ]
+            if sticky_qa:
+                merged_reasons: list[str] = []
+                for item in list(reasons) + [
+                    (
+                        r
+                        if r.startswith("PREVIEW_PRODUCT_QA_FAILED:")
+                        else f"PREVIEW_PRODUCT_QA_FAILED: {r}"
+                    )
+                    for r in sticky_qa
+                ]:
+                    if item and item not in merged_reasons:
+                        merged_reasons.append(item)
+                reasons = merged_reasons[:12]
+                gap_kind = classify_delivery_gap_kind(reasons)
+                guidance = guidance_for_gap_kind(gap_kind)
             # Respect an existing soft-pause (ops or runtime). Do not let in-flight
             # DeliveryStateChanged / gap recovery overwrite DELIVERY_SOFT_PAUSE with
             # another GENERATING replan — that is the high-burn escape hatch.
             stage_now = str(metadata.get("execution_stage") or "")
             if stage_now == "DELIVERY_SOFT_PAUSE" or metadata.get("ops_soft_pause"):
-                return DeliveryGapRecoveryResult(
-                    False,
-                    "SOFT_PAUSE",
-                    "goal already soft-paused; refusing further auto gap recovery",
-                    int(metadata.get("delivery_gap_recovery_attempts") or 0),
-                    gap_kind,
-                    terminal_exhaust=True,
-                )
+                # Exception: a fresh preview QA failure with concrete sticky gaps must
+                # still be absorbable after human/ops CONTINUE cleared the pause path.
+                # When caller is PREVIEW_PRODUCT_QA_FAILED, allow recovery to proceed.
+                halt_stage = str((halt_context or {}).get("stage") or "")
+                if halt_stage != "PREVIEW_PRODUCT_QA_FAILED":
+                    return DeliveryGapRecoveryResult(
+                        False,
+                        "SOFT_PAUSE",
+                        "goal already soft-paused; refusing further auto gap recovery",
+                        int(metadata.get("delivery_gap_recovery_attempts") or 0),
+                        gap_kind,
+                        terminal_exhaust=True,
+                    )
             # Merge halt already on the goal with caller-supplied context.
             prior_halt = dict(metadata.get("halt") or {})
             merged_halt = {**prior_halt, **dict(halt_context or {})}
@@ -403,6 +473,10 @@ class DeliveryGapRecoveryService:
             )
             if exit_enforced:
                 from regent.application.agent_loop_exit import detect_doom_loop
+                from regent.application.progress_roi import (
+                    compute_workspace_hash,
+                    _workspace_root_from_metadata,
+                )
 
                 # H0: user abort is always STOP (not another ASK).
                 if gap_kind == "USER_ABORT":
@@ -420,7 +494,11 @@ class DeliveryGapRecoveryService:
                         actor=actor,
                     )
 
-                is_doom, doom_reason = detect_doom_loop(metadata, gap_kind=gap_kind)
+                ws_root = _workspace_root_from_metadata(metadata)
+                ws_hash = compute_workspace_hash(ws_root)
+                is_doom, doom_reason = detect_doom_loop(
+                    metadata, gap_kind=gap_kind, workspace_hash=ws_hash
+                )
                 # Update streak for doom tracking even when asking.
                 prior_kind = str(metadata.get("delivery_gap_kind") or "")
                 streak = int(metadata.get("delivery_gap_kind_streak") or 0)
@@ -526,7 +604,7 @@ class DeliveryGapRecoveryService:
                         },
                     )
 
-            # goal_intent / presentation / evidence 都是正常交付修复，不是危险动作：
+            # navigation / goal_intent / presentation / evidence 都是正常交付修复：
             # 一律走能力阶梯自动重试；耗尽后自动再开几轮，再不行才软暂停（无确认卡）。
 
             # AC5: persona scales the auto-recovery ladder. balanced -> unchanged.
@@ -803,6 +881,67 @@ class DeliveryGapRecoveryService:
                     gap_kind=gap_kind,
                     gap_reasons=reasons,
                     ask_type="doom_loop" if stop_reason.startswith("doom_loop") else "delivery_gap",
+                )
+            # Progress ROI: stamp evaluation table + rewrite options when stagnant.
+            try:
+                from regent.application.progress_roi import (
+                    apply_roi_on_exit,
+                    build_progress_snapshot,
+                    compute_workspace_hash,
+                    enrich_ask_with_roi,
+                    load_ledger_from_workspace,
+                    _workspace_root_from_metadata,
+                )
+
+                settings = get_settings()
+                roi_enforced = bool(getattr(settings, "progress_roi_enforced", True))
+                ws_root = _workspace_root_from_metadata(metadata)
+                ws_hash = compute_workspace_hash(ws_root)
+                ledger = load_ledger_from_workspace(ws_root)
+                snap = build_progress_snapshot(
+                    metadata,
+                    workspace_hash=ws_hash,
+                    ledger=ledger,
+                    gap_reasons=reasons,
+                    gap_kind=gap_kind,
+                )
+                metadata, roi_state = apply_roi_on_exit(
+                    metadata,
+                    snapshot=snap,
+                    min_tokens=int(getattr(settings, "progress_roi_min_tokens", 2000) or 2000),
+                    stagnant_stop=int(
+                        getattr(settings, "progress_roi_stagnant_stop", 3) or 3
+                    ),
+                    enforced=roi_enforced,
+                )
+                if ask is not None:
+                    ask_type_now = str(ask.get("ask_type") or "")
+                    if ask_type_now in {
+                        "delivery_gap",
+                        "doom_loop",
+                        "progress_roi",
+                        "progress_loop",
+                        "",
+                    }:
+                        ask = enrich_ask_with_roi(ask, roi_state, enforced=roi_enforced)
+                # ROI stop ladder may escalate ASK → STOP when streak exhausted.
+                if (
+                    roi_enforced
+                    and exit_kind == "ASK_HUMAN"
+                    and str(roi_state.get("next_action") or "") == "stop"
+                    and int(roi_state.get("stagnant_streak") or 0)
+                    >= int(getattr(settings, "progress_roi_stagnant_stop", 3) or 3)
+                ):
+                    exit_kind = "STOP"
+                    stop_reason = (
+                        f"doom_loop:roi_no_progress:streak={roi_state.get('stagnant_streak')}"
+                    )
+                    ask = None
+            except Exception:
+                logger.warning(
+                    "progress_roi exit stamp failed",
+                    extra={"goal_id": str(goal.id)},
+                    exc_info=True,
                 )
             # H1.5: surface which plan item is blocking.
             try:
@@ -1338,7 +1477,10 @@ class DeliveryGapRecoveryService:
         preview_endpoint = str(metadata.get("last_preview_endpoint") or "").strip()
         metadata["termination"] = {
             "reason": "goal_attainment_soft_pause",
-            "definition": "REGENT-DEFINITION-1.0 ATTRIBUTE_7",
+            # 3.0: resource ceilings (ATTRIBUTE_6) + stage goal may pause/hand over
+            # while learning is retained (ATTRIBUTE_9). 1.0 ATTRIBUTE_7 was
+            # "explicit termination" and has no 3.0 counterpart.
+            "definition": "REGENT-DEFINITION-3.0 ATTRIBUTE_6/9",
             "gap_reasons": reasons,
             "gap_kind": gap_kind,
             "attempts_tried": attempts,
@@ -1522,12 +1664,132 @@ class DeliveryGapRecoveryService:
                     "stop",
                     "continue_fix",
                     "revise_plan",
+                    "self_repair",
+                    "replan_global",
                 ):
                     if cand in msg_l or cand.replace("_", " ") in msg_l:
                         effective_option = cand
                         break
             if not effective_option:
                 effective_option = str(pending_ask_before.get("suggested") or "continue_fix")
+
+            # Progress ROI gate: rewrite empty continue_fix / stop burn when stagnant.
+            from regent.application.progress_roi import (
+                authorize_resume_by_roi,
+                stamp_cycle_start,
+                build_progress_snapshot,
+                compute_workspace_hash,
+                _workspace_root_from_metadata,
+            )
+
+            settings = get_settings()
+            roi_enforced = bool(getattr(settings, "progress_roi_enforced", True))
+            auth = authorize_resume_by_roi(
+                metadata,
+                option_id=effective_option,
+                human_message=human_message,
+                enforced=roi_enforced,
+                stagnant_stop=int(
+                    getattr(settings, "progress_roi_stagnant_stop", 3) or 3
+                ),
+            )
+            effective_option = str(auth.get("option_id") or effective_option)
+            if auth.get("force_stop") or not auth.get("allowed"):
+                from regent.application.agent_loop_exit import (
+                    apply_exit_to_metadata,
+                    build_ask_envelope,
+                    build_exit,
+                    conversation_copy_for_exit,
+                )
+                from regent.application.progress_roi import (
+                    enrich_ask_with_roi,
+                    META_PROGRESS_ROI,
+                    roi_ask_options,
+                )
+
+                roi_state = dict(metadata.get(META_PROGRESS_ROI) or {})
+                msg = str(
+                    auth.get("message")
+                    or roi_state.get("summary")
+                    or "Progress ROI：无进步，已停烧。"
+                )
+                ask = build_ask_envelope(
+                    question=msg[:800],
+                    why_blocked="progress_roi_stop",
+                    options=roi_ask_options("stop"),
+                    suggested="stop",
+                    ask_type="progress_roi",
+                    gap_kind=str(metadata.get("delivery_gap_kind") or "product_surface"),
+                    gap_reasons=list(metadata.get("delivery_gap_reasons") or [])[:12],
+                )
+                ask = enrich_ask_with_roi(ask, roi_state, enforced=roi_enforced) or ask
+                exit_payload = build_exit(
+                    exit_kind="STOP",
+                    stop_reason="doom_loop:roi_no_progress",
+                    ask_envelope=ask,
+                )
+                metadata = apply_exit_to_metadata(metadata, exit_payload)
+                metadata["execution_stage"] = "DELIVERY_SOFT_PAUSE"
+                metadata["awaiting_human_intervention"] = True
+                metadata.pop("authorized_session_resume", None)
+                msg_type, content = conversation_copy_for_exit(exit_payload)
+                goal.metadata_json = merge_live_action_into_metadata(
+                    metadata,
+                    content.split("\n")[0][:120],
+                    stage="DELIVERY_SOFT_PAUSE",
+                    event_type=msg_type,
+                )
+                flag_modified(goal, "metadata_json")
+                await self._append(
+                    session,
+                    project_id,
+                    role="ASSISTANT",
+                    message_type="AGENT_LOOP_STOP",
+                    content=content,
+                    metadata={
+                        "goal_id": str(goal_id),
+                        "progress_roi": True,
+                        "auth_reason": auth.get("reason"),
+                    },
+                )
+                return DeliveryGapRecoveryResult(
+                    False,
+                    "ROI_STOP",
+                    str(auth.get("reason") or "roi_stop_no_progress"),
+                    0,
+                    str(metadata.get("delivery_gap_kind") or "product_surface"),
+                    terminal_exhaust=True,
+                )
+
+            if auth.get("reset_streak"):
+                roi = dict(metadata.get("progress_roi") or {})
+                roi["stagnant_streak"] = 0
+                roi["next_action"] = "continue_fix"
+                roi["updated_at"] = datetime.now(UTC).isoformat()
+                metadata["progress_roi"] = roi
+
+            inject = [str(c) for c in list(auth.get("inject_constraints") or []) if str(c).strip()]
+            if inject:
+                learned = list(metadata.get("learned_constraints") or [])
+                learned = list(dict.fromkeys([*inject, *learned]))[:16]
+                metadata["learned_constraints"] = learned
+                gap_reasons = [
+                    f"progress-roi:{effective_option}",
+                    *inject[:4],
+                    *gap_reasons,
+                ][:12]
+
+            if auth.get("work_plan_replan") or effective_option == "replan_global":
+                metadata["work_plan_replan_requested"] = True
+                metadata["work_plan_approved"] = False
+                metadata.pop("skip_plan_approve", None)
+
+            if effective_option == "self_repair":
+                # Keep same session; force repair brief into human-authorized reasons.
+                gap_reasons = [
+                    "progress-roi:self_repair — apply ROI repair_constraints this cycle",
+                    *gap_reasons,
+                ][:12]
 
             metadata = mark_ask_answered(
                 metadata,
@@ -1599,14 +1861,36 @@ class DeliveryGapRecoveryService:
             from regent.application.agent_control import clear_abort
 
             clear_abort(str(goal_id))
+            # Start a new ROI spend cycle baseline before burning the next lease.
+            try:
+                ws_root = _workspace_root_from_metadata(metadata)
+                ws_hash = compute_workspace_hash(ws_root)
+                cycle_snap = build_progress_snapshot(
+                    metadata,
+                    workspace_hash=ws_hash,
+                    ledger={},
+                    gap_reasons=gap_reasons,
+                    gap_kind=str(metadata.get("delivery_gap_kind") or ""),
+                )
+                metadata = stamp_cycle_start(metadata, cycle_snap)
+            except Exception:
+                logger.warning(
+                    "progress_roi stamp_cycle_start failed",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
             metadata["execution_stage"] = "GENERATING"
             metadata["authorized_session_resume"] = True
+            resume_label = {
+                "self_repair": "已确认，按 Progress ROI 定向自修复续跑",
+                "replan_global": "已确认，按 Progress ROI 全局重规划续跑",
+            }.get(effective_option, "已确认，同一 Agent Session 继续修复")
             metadata["human_resume_nonce"] = (
                 f"human:{datetime.now(UTC).isoformat()}:{uuid.uuid4().hex[:8]}"
             )
             goal.metadata_json = merge_live_action_into_metadata(
                 metadata,
-                "已确认，同一 Agent Session 继续修复",
+                resume_label,
                 stage="GENERATING",
                 event_type="ATTAINMENT_RECOVERY_STARTED",
             )

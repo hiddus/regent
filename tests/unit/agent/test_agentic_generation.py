@@ -199,6 +199,91 @@ async def test_agent_runner_writes_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_runner_reserves_and_settles_each_model_call(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    class Ledger:
+        def __init__(self) -> None:
+            self.reserved: list[float] = []
+            self.settled: list[float] = []
+            self.released = 0
+
+        async def reserve(self, goal_id, run_id, **kwargs):  # noqa: ANN001
+            self.reserved.append(float(kwargs["amount"]))
+            return SimpleNamespace(id=uuid.uuid4(), claim_token=None)
+
+        async def claim(self, reservation_id):  # noqa: ANN001
+            return SimpleNamespace(id=reservation_id, claim_token=uuid.uuid4())
+
+        async def settle(self, reservation_id, **kwargs):  # noqa: ANN001
+            self.settled.append(float(kwargs["actual_amount"]))
+
+        async def release(self, reservation_id, **kwargs):  # noqa: ANN001
+            self.released += 1
+
+    ledger = Ledger()
+    runner = AgentRunner(
+        _ScriptedProvider(),
+        WorkspaceToolkit(tmp_path / "budgeted"),
+        budget=AgentBudget(max_turns=5, max_tokens=10_000, max_wall_seconds=60),
+        goal_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        budget_ledger=ledger,
+        model_max_output_tokens=100,
+        model_input_cost_per_million=1_000_000,
+        model_output_cost_per_million=2_000_000,
+        execution_mode="act",
+    )
+    await runner.run(
+        {
+            "goal_anchor_text": "AI skills network",
+            "planned_paths": ["index.html", "src/app.py", "requirements.txt", "README.md"],
+            "acceptance_contract": {"first_deliverable": "skill feed"},
+            "work_plan_trivial": True,
+        },
+        verify=False,
+    )
+    assert len(ledger.reserved) == 2
+    assert ledger.settled == [50.0, 15.0]
+    assert all(hold >= actual for hold, actual in zip(ledger.reserved, ledger.settled))
+    assert ledger.released == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_releases_model_hold_when_provider_fails(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    class FailingProvider:
+        async def chat(self, **kwargs):  # noqa: ANN003
+            raise RuntimeError("provider unavailable")
+
+    class Ledger:
+        released = 0
+
+        async def reserve(self, goal_id, run_id, **kwargs):  # noqa: ANN001
+            return SimpleNamespace(id=uuid.uuid4(), claim_token=None)
+
+        async def claim(self, reservation_id):  # noqa: ANN001
+            return SimpleNamespace(id=reservation_id, claim_token=uuid.uuid4())
+
+        async def release(self, reservation_id, **kwargs):  # noqa: ANN001
+            self.released += 1
+
+    ledger = Ledger()
+    runner = AgentRunner(
+        FailingProvider(),  # type: ignore[arg-type]
+        WorkspaceToolkit(tmp_path / "failing"),
+        goal_id=uuid.uuid4(),
+        budget_ledger=ledger,
+        model_input_cost_per_million=1.0,
+        model_output_cost_per_million=1.0,
+    )
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await runner.run({"goal_anchor_text": "fail safely", "work_plan_trivial": True})
+    assert ledger.released == 1
+
+
+@pytest.mark.asyncio
 async def test_agentic_generator_materializes_artifacts(tmp_path: Path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
     generator = AgenticCodeGenerator(

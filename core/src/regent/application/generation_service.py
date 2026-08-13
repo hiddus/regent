@@ -258,11 +258,12 @@ class GenerationService:
         base_workspace: Path | None = None,
         on_progress: Any = None,
     ) -> WorkspaceSnapshotModel:
-        plan_payload = await self._claim(run_id)
-        if base_workspace is not None:
-            # Agentic generator reads base_workspace from the plan dict.
-            plan_payload["base_workspace"] = str(base_workspace)
         try:
+            plan_payload = await self._claim(run_id)
+            await self._overlay_live_goal_steers(plan_payload)
+            if base_workspace is not None:
+                # Agentic generator reads base_workspace from the plan dict.
+                plan_payload["base_workspace"] = str(base_workspace)
             # GQ-1/GQ-3: select the concrete generator for this goal before any
             # consistency check or generation call. A GeneratorSelector resolves
             # the per-goal effective strategy; a plain generator is used directly.
@@ -274,7 +275,9 @@ class GenerationService:
             gen = self._generator
             if hasattr(gen, "select"):
                 gen = gen.select(str(goal_id) if goal_id else None)
-            strategy = resolve_effective_generation_strategy(settings, goal_id=str(goal_id) if goal_id else None)
+            strategy = resolve_effective_generation_strategy(
+                settings, goal_id=str(goal_id) if goal_id else None
+            )
             assert_generator_consistency(
                 strategy=strategy,
                 generator=gen,
@@ -357,6 +360,32 @@ class GenerationService:
             payload["generation_run_id"] = str(run.id)
             payload["plan_id"] = str(plan.id)
             return payload
+
+    async def _overlay_live_goal_steers(self, plan_payload: dict[str, Any]) -> None:
+        """Merge Hive PM / human steer written after the plan was frozen."""
+        acceptance = plan_payload.get("acceptance_contract")
+        if not isinstance(acceptance, dict):
+            return
+        raw_gid = acceptance.get("goal_id") or plan_payload.get("goal_id")
+        if not raw_gid:
+            return
+        try:
+            gid = uuid.UUID(str(raw_gid))
+        except ValueError:
+            return
+        async with self._sessions() as session:
+            goal = await session.get(GoalModel, gid)
+            if goal is None:
+                return
+            meta = dict(goal.metadata_json or {})
+        steer = meta.get("session_steer_brief")
+        if steer:
+            acceptance["session_steer_brief"] = str(steer)
+            plan_payload["session_steer_brief"] = str(steer)
+        hive = meta.get("hive_generation")
+        if isinstance(hive, dict) and hive.get("pm_plan"):
+            plan_payload["hive_pm_plan"] = hive.get("pm_plan")
+            acceptance["hive_pm_plan"] = hive.get("pm_plan")
 
     async def _complete(
         self,

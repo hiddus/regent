@@ -1,0 +1,23 @@
+{
+  "name": "environment-heal-v1",
+  "status": "VERIFIED",
+  "description": "Allowlisted host detect/repair actions; preferences evolve via LESSONS + heal memory. No arbitrary shell.",
+  "verification": {
+    "kind": "environment_heal",
+    "actions": [
+      "reap_stale_previews",
+      "prune_preview_venvs"
+    ],
+    "skill_id": "ops-environment",
+    "ops_guidance": [
+      "Measure disk/mem/load and preview venv counts before any Goal burn.",
+      "Run only allowlisted heal actions from environment-heal-v1.",
+      "After repair, re-measure; soft-pause ACTIVE goals if still unhealthy.",
+      "Record successful reason→action pairs into heal memory and ops-environment LESSONS.",
+      "Never invent shell; new powers require a capability package bump."
+    ],
+    "generation_guidance": [
+      "When HOST_RESOURCE soft-pause is active, do not CONTINUE empty loops — heal environment first."
+    ]
+  }
+}

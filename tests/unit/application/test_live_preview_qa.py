@@ -249,3 +249,107 @@ async def test_live_qa_passes_utility_clock_without_list_nav() -> None:
         )
     assert result.passed is True
     assert "preview-internal-nav" not in result.failed_gap_codes()
+
+
+def _point() -> dict:
+    return {
+        "title": "Consent Obligation",
+        "statute": "PDPA §13",
+        "source": "https://example.test/pdpa",
+        "obligations": (
+            "Obtain informed, voluntary, and unambiguous consent before collecting, "
+            "using, or disclosing personal data; provide an easy withdrawal path "
+            "and cease processing after withdrawal except where law requires."
+        ),
+        "scenario": (
+            "Collecting personal data during marketing signup, account opening, "
+            "or third-party sharing workflows."
+        ),
+        "risk": (
+            "Regulator may impose significant administrative fines and corrective "
+            "orders for consent and transparency failures."
+        ),
+        "priority": "high",
+    }
+
+
+def _step() -> dict:
+    return {
+        "trigger": "Preparing cross-border transfer of US consumer data to Singapore processors",
+        "action": (
+            "Map CCPA rights to PDPA consent controls, complete a transfer impact "
+            "assessment, and contract purpose limits with the recipient"
+        ),
+        "check": "Verify consent basis and purpose limitation are contracted with the recipient",
+        "evidence": "Transfer impact assessment report and signed data processing agreement pages",
+        "owner": "DPO",
+        "priority": "P1",
+    }
+
+
+def _handler_crosswalk_depth(request: httpx.Request) -> httpx.Response:
+    """Serve deep catalog only under the Preview prefix (origin /api must 404)."""
+    url = str(request.url)
+    prefix = "http://example.test/preview/runtime/d8"
+    if url.rstrip("/") == prefix or url == prefix + "/":
+        home = """<!DOCTYPE html><html><head>
+<link rel="stylesheet" href="/preview/runtime/d8/static/style.css">
+</head><body><main>
+<h1>Crosswalk 合规对照</h1>
+<p>PDPA / CCPA catalog via /api/countries and /api/crosswalks</p>
+<a href="/preview/runtime/d8/countries">Countries</a>
+</main></body></html>"""
+        return httpx.Response(200, text=home, headers={"content-type": "text/html"})
+    if url.endswith("/static/style.css"):
+        return httpx.Response(
+            200, text=_SUBSTANTIAL_CSS, headers={"content-type": "text/css"}
+        )
+    # Origin-absolute API (the urljoin bug) must not soft-pass.
+    if url == "http://example.test/api/countries" or url.startswith(
+        "http://example.test/api/"
+    ):
+        return httpx.Response(404, text="not on preview mount")
+    if url.endswith("/api/countries"):
+        payload = [
+            {"country_code": "SG", "points": [_point() for _ in range(10)]},
+            {"country_code": "US", "points": [_point() for _ in range(10)]},
+        ]
+        return httpx.Response(200, json=payload)
+    if "/api/crosswalks/" in url:
+        return httpx.Response(
+            200, json={"steps": [_step() for _ in range(10)]}
+        )
+    if url.endswith("/countries"):
+        return httpx.Response(
+            200,
+            text=_detail_html("Countries catalog"),
+            headers={"content-type": "text/html"},
+        )
+    return httpx.Response(404, text="missing")
+
+
+@pytest.mark.asyncio
+async def test_live_qa_content_depth_stays_under_preview_prefix() -> None:
+    """Content-depth probes must not urljoin away the /preview/runtime prefix."""
+    transport = httpx.MockTransport(_handler_crosswalk_depth)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await run_live_preview_qa(
+            "http://example.test/preview/runtime/d8/", client=client
+        )
+    assert result.passed is True
+    assert "preview-content-depth" not in result.failed_gap_codes()
+    depth = next(c for c in result.checks if c.name == "preview-content-depth")
+    assert depth.passed is True
+    assert "SG.points=10" in depth.detail
+
+
+def test_join_preview_keeps_runtime_prefix() -> None:
+    from regent.application.live_preview_qa import _join_preview
+
+    base = "http://example.test/preview/runtime/abc/"
+    assert _join_preview(base, "/api/countries") == (
+        "http://example.test/preview/runtime/abc/api/countries"
+    )
+    assert _join_preview(base.rstrip("/"), "api/crosswalks/US-SG") == (
+        "http://example.test/preview/runtime/abc/api/crosswalks/US-SG"
+    )

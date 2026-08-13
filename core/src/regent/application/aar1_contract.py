@@ -18,6 +18,9 @@ CONTRACT_PHASE: Aar1Phase = "contract"
 # Seeded certified fixed hive (Durable Hive F2). Not an adaptive topology.
 CERTIFIED_HIVE_TEMPLATE_ID = "pm-dev-independent-qa-v1"
 SINGLE_AGENT_TEMPLATE_ID = "single-agent-v1"
+# Companion fixed template: Product/Tech/Test/UX/Ops durable delivery roles.
+# Not free-form adaptive topology (still ROLLOUT_NOT_ALLOWED).
+DELIVERY_ROLES_TEMPLATE_ID = "delivery-roles-v1"
 
 
 def is_contract_phase(phase: str | None) -> bool:

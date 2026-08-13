@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
+import asyncio
 import os
 
 import uvicorn
@@ -42,11 +43,39 @@ from regent.api.webhooks import router as webhooks_router
 from regent.api.works import router as works_router
 from regent.api.preview_security import PREVIEW_CONTENT_SECURITY_POLICY
 from regent.application.runtime_profile_service import RuntimeProfileService
-from regent.config import get_settings
+from regent.config import effective_runtime_profile, get_settings
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.database import create_engine, create_session_factory
 from regent.infrastructure.delivery_review_capability import ensure_delivery_review_capability
 from regent.model import ModelConfigurationError, ModelOutputError
+
+
+def _host_health_payload(workspace_root: str) -> dict[str, Any]:
+    """Attach host disk/mem/load snapshot for ops visibility (never raises)."""
+    try:
+        from regent.infrastructure.host_resources import (
+            measure_host_resources,
+            read_host_snapshot,
+        )
+
+        snap = read_host_snapshot(workspace_root)
+        if snap is None:
+            resources = measure_host_resources(workspace_root)
+            return {
+                "unhealthy": False,
+                "reasons": [],
+                "resources": resources.as_dict(),
+                "note": "no_snapshot_yet",
+            }
+        return {
+            "unhealthy": bool(snap.get("unhealthy")),
+            "reasons": list(snap.get("reasons") or []),
+            "resources": snap.get("resources") or {},
+            "pruned": snap.get("pruned"),
+            "measured_at": (snap.get("resources") or {}).get("measured_at"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc), "unhealthy": False}
 
 
 def create_app() -> FastAPI:
@@ -67,7 +96,46 @@ def create_app() -> FastAPI:
             )
 
             await ensure_product_surface_capability(app.state.sessions)
+        with suppress(Exception):
+            from regent.infrastructure.environment_heal_capability import (
+                ensure_environment_heal_capability,
+            )
+
+            await ensure_environment_heal_capability(app.state.sessions)
+
+        host_guard_task: asyncio.Task[None] | None = None
+        if settings.host_guard_enabled:
+
+            async def _api_host_guard_loop() -> None:
+                """API-side heal loop so prune/soft-pause still run if workers thrash."""
+                from regent.application.host_guard import tick_host_resource_guard
+
+                while True:
+                    try:
+                        await tick_host_resource_guard(
+                            app.state.sessions,
+                            workspace_root=settings.workspace_root,
+                            disk_percent_max=settings.host_disk_percent_max,
+                            mem_percent_max=settings.host_mem_percent_max,
+                            load1_per_cpu_max=settings.host_load1_per_cpu_max,
+                            prune_keep_newest=settings.host_prune_preview_keep,
+                            prune_disk_percent=settings.host_prune_disk_percent,
+                            prune_mem_percent=settings.host_prune_mem_percent,
+                            reap_processes=settings.host_reap_preview_processes,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await asyncio.sleep(float(settings.host_guard_interval_seconds))
+
+            host_guard_task = asyncio.create_task(
+                _api_host_guard_loop(), name="regent-api-host-guard"
+            )
+
         yield
+        if host_guard_task is not None:
+            host_guard_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await host_guard_task
         await engine.dispose()
 
     app = FastAPI(
@@ -150,10 +218,16 @@ def create_app() -> FastAPI:
                 raise RuntimeError("database probe returned an unexpected value")
         except Exception as exc:
             raise HTTPException(status_code=503, detail="database unavailable") from exc
+        host = _host_health_payload(settings.workspace_root)
+        status = "ok"
+        if host.get("unhealthy"):
+            status = "degraded"
         return {
-            "status": "ok",
+            "status": status,
             "environment": settings.environment,
+            "runtime_profile": effective_runtime_profile(settings),
             "database": "ok",
+            "host": host,
             "outbox_pending": str(pending_events or 0),
             "outbox_failed": str(failed_events or 0),
             "outbox_dead_letter": str(dead_letters or 0),
@@ -168,21 +242,25 @@ def create_app() -> FastAPI:
         """Comprehensive system health including stage distribution and leak detection."""
         try:
             async with app.state.sessions() as session:
-                stage_rows = await session.execute(
-                    text(
-                        "SELECT COALESCE(metadata->>'execution_stage', 'NULL') as stage, "
-                        "COUNT(*) as cnt FROM goals WHERE status='ACTIVE' "
-                        "GROUP BY stage ORDER BY cnt DESC"
+                stage_rows = (
+                    await session.execute(
+                        text(
+                            "SELECT COALESCE(metadata->>'execution_stage', 'NULL') AS stage, "
+                            "COUNT(*) AS cnt FROM goals WHERE status='ACTIVE' "
+                            "GROUP BY 1 ORDER BY 2 DESC"
+                        )
                     )
-                )
-                stages = {row.stage: row.cnt for row in stage_rows}
-                dead_letter_types = await session.execute(
-                    text(
-                        "SELECT event_type, COUNT(*) as cnt FROM outbox_events "
-                        "WHERE status='DEAD_LETTER' GROUP BY event_type"
+                ).all()
+                stages = {row[0]: int(row[1]) for row in stage_rows}
+                dead_letter_types = (
+                    await session.execute(
+                        text(
+                            "SELECT event_type, COUNT(*) AS cnt FROM outbox_events "
+                            "WHERE status='DEAD_LETTER' GROUP BY 1"
+                        )
                     )
-                )
-                dl_by_type = {row.event_type: row.cnt for row in dead_letter_types}
+                ).all()
+                dl_by_type = {row[0]: int(row[1]) for row in dead_letter_types}
                 pending_events = await session.scalar(
                     text("SELECT count(*) FROM outbox_events WHERE status = 'PENDING'")
                 )
@@ -206,10 +284,18 @@ def create_app() -> FastAPI:
                 )
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
-        health = leaked_runs == 0 and dead_letters == 0 and pending_events is not None
+        host = _host_health_payload(settings.workspace_root)
+        health = (
+            leaked_runs == 0
+            and dead_letters == 0
+            and pending_events is not None
+            and not host.get("unhealthy")
+        )
         return {
             "status": "healthy" if health else "degraded",
             "database": "ok",
+            "runtime_profile": effective_runtime_profile(settings),
+            "host": host,
             "metrics": {
                 "goals_active": active_goals or 0,
                 "goals_achieved": achieved_goals or 0,
@@ -246,6 +332,31 @@ def create_app() -> FastAPI:
             db_ok = False
             delivery_seeded = False
         cfg = get_settings()
+        host_summary: dict[str, Any] | None = None
+        with suppress(Exception):
+            from regent.infrastructure.host_resources import (
+                measure_host_resources,
+                read_host_snapshot,
+            )
+
+            snap = read_host_snapshot(cfg.workspace_root)
+            if snap is None:
+                # One-shot measure for doctor visibility without mutating unless heal.
+                host_summary = {
+                    "unhealthy": False,
+                    "reasons": [],
+                    "resources": measure_host_resources(cfg.workspace_root).as_dict(),
+                    "note": "no_snapshot_yet",
+                }
+            else:
+                host_summary = {
+                    "unhealthy": bool(snap.get("unhealthy")),
+                    "reasons": list(snap.get("reasons") or []),
+                    "resources": snap.get("resources") or {},
+                    "actions": list(snap.get("actions") or []),
+                    "pruned": snap.get("pruned"),
+                    "reaped": snap.get("reaped"),
+                }
         report = run_doctor(
             db_ok=db_ok,
             delivery_review_seeded=delivery_seeded,
@@ -255,7 +366,9 @@ def create_app() -> FastAPI:
                     cfg, "delivery_product_gates_mode", None
                 ),
                 "workspace_root_set": bool(getattr(cfg, "workspace_root", None)),
+                "host_guard_enabled": bool(getattr(cfg, "host_guard_enabled", True)),
             },
+            host_summary=host_summary,
         )
         report["workflow_presets"] = list_workflow_presets()
         report["extension_readiness"] = build_extension_readiness(
@@ -264,10 +377,76 @@ def create_app() -> FastAPI:
                     "name": "delivery-review-v1",
                     "certified": bool(delivery_seeded),
                     "available": bool(delivery_seeded),
-                }
+                },
+                {
+                    "name": "environment-heal-v1",
+                    "certified": True,
+                    "available": bool(getattr(cfg, "host_guard_enabled", True)),
+                    "reason": "allowlisted host detect/repair + evolving LESSONS",
+                },
             ]
         )
         return report
+
+    @app.post("/v1/ops/environment/heal", tags=["operations"])
+    async def environment_heal() -> dict[str, Any]:
+        """Detect host pressure and repair: prune venvs, reap stale previews, soft-pause."""
+        from regent.application.environment_heal_memory import load_heal_memory
+        from regent.application.host_guard import tick_host_resource_guard
+        from regent.infrastructure.environment_heal_registry import list_heal_actions
+
+        cfg = get_settings()
+        if not cfg.host_guard_enabled:
+            raise HTTPException(status_code=503, detail="host_guard_disabled")
+        result = await tick_host_resource_guard(
+            app.state.sessions,
+            workspace_root=cfg.workspace_root,
+            disk_percent_max=cfg.host_disk_percent_max,
+            mem_percent_max=cfg.host_mem_percent_max,
+            load1_per_cpu_max=cfg.host_load1_per_cpu_max,
+            prune_keep_newest=cfg.host_prune_preview_keep,
+            prune_disk_percent=cfg.host_prune_disk_percent,
+            prune_mem_percent=cfg.host_prune_mem_percent,
+            reap_processes=cfg.host_reap_preview_processes,
+        )
+        memory = load_heal_memory(Path(cfg.workspace_root))
+        return {
+            "ok": True,
+            "healed": result,
+            "allowlisted_actions": list_heal_actions(),
+            "learned_preferences": list(memory.get("preferences") or [])[:20],
+            "framework": {
+                "capability": "environment-heal-v1",
+                "skill_id": "ops-environment",
+                "evolves": "preferences + LESSONS (not arbitrary shell)",
+            },
+        }
+
+    @app.get("/v1/ops/environment/heal", tags=["operations"])
+    async def environment_heal_status() -> dict[str, Any]:
+        """Inspect allowlisted heal actions and learned preferences (no mutation)."""
+        from regent.application.environment_heal_memory import (
+            load_heal_memory,
+            read_ops_lessons,
+        )
+        from regent.infrastructure.environment_heal_registry import list_heal_actions
+        from regent.infrastructure.host_resources import read_host_snapshot
+
+        cfg = get_settings()
+        memory = load_heal_memory(Path(cfg.workspace_root))
+        return {
+            "ok": True,
+            "allowlisted_actions": list_heal_actions(),
+            "learned_preferences": list(memory.get("preferences") or [])[:20],
+            "recent_incidents": list(memory.get("incidents") or [])[-10:],
+            "lessons_preview": (read_ops_lessons(Path(cfg.workspace_root)) or "")[:1500],
+            "host_snapshot": read_host_snapshot(cfg.workspace_root),
+            "framework": {
+                "capability": "environment-heal-v1",
+                "skill_id": "ops-environment",
+                "evolves": "preferences + LESSONS (not arbitrary shell)",
+            },
+        }
 
     @app.get("/v1/workflow-presets", tags=["operations"])
     async def workflow_presets() -> dict[str, Any]:
@@ -364,9 +543,13 @@ def create_app() -> FastAPI:
             }
         }
         last_err = "unreachable"
+        # Delivery fix: forward query string (delta?from=&to=, search, filters).
+        qs = request.url.query
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
             for host in [h for h in hosts if h]:
                 url = f"http://{host}:{port}/{suffix}"
+                if qs:
+                    url = f"{url}?{qs}"
                 try:
                     upstream = await client.request(
                         request.method,

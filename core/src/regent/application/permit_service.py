@@ -85,6 +85,70 @@ class PermitService:
     async def deny(self, permit_id: uuid.UUID, reason: str) -> None:
         await self._change(permit_id, from_status="REQUESTED", to_status="DENIED", reason=reason)
 
+    async def delegate(
+        self,
+        parent_permit_id: uuid.UUID,
+        *,
+        child_actor_id: str,
+        data_scope: dict[str, Any],
+        network_scope: dict[str, Any],
+        resource_limit: dict[str, Any],
+        valid_until: datetime,
+        idempotency_key: str,
+    ) -> uuid.UUID:
+        """Mint a narrower child permit; never hand down the parent reference."""
+        if valid_until.tzinfo is None:
+            raise ValueError("valid_until must be timezone-aware")
+        async with self._sessions() as session, session.begin():
+            existing = await session.scalar(
+                select(ExecutionPermitModel).where(
+                    ExecutionPermitModel.idempotency_key == idempotency_key
+                )
+            )
+            if existing is not None:
+                return existing.id
+            parent = await session.get(
+                ExecutionPermitModel, parent_permit_id, with_for_update=True
+            )
+            if parent is None or parent.status not in {"APPROVED", "CLAIMED"}:
+                raise DomainError(ErrorCode.PERMIT_INVALID, "parent permit is not delegable")
+            parent_valid_until = _as_utc(parent.valid_until)
+            if parent_valid_until <= utc_now() or valid_until > parent_valid_until:
+                raise DomainError(ErrorCode.PERMIT_INVALID, "delegation exceeds parent validity")
+            for label, child, granted in (
+                ("data_scope", data_scope, parent.data_scope),
+                ("network_scope", network_scope, parent.network_scope),
+                ("resource_limit", resource_limit, parent.resource_limit),
+            ):
+                if not _is_narrower(child, dict(granted or {})):
+                    raise DomainError(
+                        ErrorCode.PERMIT_INVALID,
+                        f"delegated {label} exceeds parent",
+                    )
+            permit_id = uuid.uuid4()
+            session.add(
+                ExecutionPermitModel(
+                    id=permit_id,
+                    goal_id=parent.goal_id,
+                    work_id=parent.work_id,
+                    run_id=parent.run_id,
+                    actor_id=child_actor_id,
+                    action=parent.action,
+                    target=parent.target,
+                    parameter_hash=parent.parameter_hash,
+                    data_scope=data_scope,
+                    network_scope=network_scope,
+                    resource_limit=resource_limit,
+                    risk_level=parent.risk_level,
+                    status="APPROVED",
+                    nonce=uuid.uuid4(),
+                    idempotency_key=idempotency_key,
+                    valid_until=valid_until,
+                    decision_reason=f"delegated from {parent_permit_id}",
+                )
+            )
+            return permit_id
+
     async def claim(self, permit_id: uuid.UUID, *, actor_id: str) -> ClaimedPermit:
         async with self._sessions() as session, session.begin():
             result = cast(
@@ -201,3 +265,17 @@ class PermitService:
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _is_narrower(child: Any, parent: Any) -> bool:
+    if isinstance(child, dict) and isinstance(parent, dict):
+        return all(key in parent and _is_narrower(value, parent[key]) for key, value in child.items())
+    if isinstance(child, list) and isinstance(parent, list):
+        return set(child).issubset(set(parent))
+    if isinstance(child, (int, float)) and isinstance(parent, (int, float)):
+        return child <= parent
+    return child == parent

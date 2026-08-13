@@ -11,6 +11,8 @@ class ToolSpec:
     name: str
     description: str
     parameters: dict[str, Any]
+    # Worst-case monetary cost declared by the tool. Local workspace tools are free.
+    max_cost: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

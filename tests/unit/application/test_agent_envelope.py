@@ -69,8 +69,8 @@ class TestAgentEnvelope:
                 reduced_scope=frozenset(["read", "write"]),
             )
 
-    def test_derive_child_preserves_permits(self) -> None:
-        """Child envelope inherits parent permits plus additional."""
+    def test_derive_child_uses_only_delegated_permits(self) -> None:
+        """Child receives a fresh delegated permit, never the parent permit."""
         parent = create_envelope(
             "coordinator", "worker-1",
             capabilities=["read", "write"],
@@ -78,10 +78,18 @@ class TestAgentEnvelope:
         )
         child = parent.derive_child_envelope(
             "worker-2",
-            additional_permits=["permit-child"],
+            delegated_permits=["delegated-permit-child"],
         )
-        assert "permit-parent" in child.permit_refs
-        assert "permit-child" in child.permit_refs
+        assert child.permit_refs == ["delegated-permit-child"]
+
+    def test_derive_child_rejects_raw_permit_addition(self) -> None:
+        parent = create_envelope(
+            "coordinator", "worker-1", permits=["permit-parent"]
+        )
+        with pytest.raises(ValueError, match="delegated_permits"):
+            parent.derive_child_envelope(
+                "worker-2", additional_permits=["permit-parent"]
+            )
 
     def test_derive_child_inherits_goal_id(self) -> None:
         """Child envelope inherits goal_id from parent."""

@@ -1,6 +1,6 @@
 # Regent Vibe Coding 项目计划书
 
-> 更新：2026-07-31（对话式完整交付统一计划 CD-0…CD-5）
+> 更新：2026-08-10（确立开放探索、实践进化与现实影响分级治理）
 
 > 状态：唯一有效编码基线  
 > 配套需求：[Regent-PRD.md](./Regent-PRD.md)  
@@ -8,11 +8,27 @@
 > 测量框架：[Regent-Measurement-Decision-Framework.md](./Regent-Measurement-Decision-Framework.md)  
 > 对话式交付计划：[docs/conversational-delivery-plan-2026-07-31.md](./docs/conversational-delivery-plan-2026-07-31.md)
 
+## 0.1 2026-08-10 执行口径更正
+
+本文旧批次中的“P2-4 前不开放自由拓扑”“无正净收益则禁止自适应”等表述，只能约束现实世界权限和生产影响的扩大，不能约束思想、候选角色、并行假设或沙箱组织试验。新的实施顺序是：自由提出候选 → 在硬资源租约内进行沙箱验证 → 记录证据与学习更新 → 仅在扩大真实数据、真人、共享状态、公开传播、资金或法律影响时进行分级授权。
+
+2026-08-10 已落地底座（迁移 + 服务类齐备、可独立测试）：预算预留 0044、LearningUpdate 0045、OrganizationExperiment 0046、ExecutionEvent 0047、Permit 窄化委派。**完成度更低的两项**：影响分级只有底层机制（`effect_descriptor.EffectRisk`/`risk_tier`、`trust_posture.permission_impact`），无贯穿主链的独立模块；Goal Charter 只在 `api/goals.py` 校验并写入 metadata，未被编排器消费。它们尚未全部接入生产调度主链，因此当前里程碑是“底座可测”，不是“开放演化经营团队已经端到端上线”。后续验收必须证明调用链实际使用这些能力，不能以存在数据表或服务类代替集成完成。
+
 ## 1. 实现方式
 
 采用模块化单体、PostgreSQL 事实源、持久化状态机、Outbox、数据库任务队列、Timer 和 Worker Lease。P0 不引入微服务、外部事件总线、复杂工作流引擎、图数据库或通用 Agent DSL。LLM 只能提出结构化 Command，状态转换由确定性 Application Service 执行。
 
-P0 是一个整体交付。S0—S8 是降低实现风险的纵向切片，不是独立产品版本；所有 P0 完成条件通过后才能宣告交付。
+对外产品以“围绕经营目标持续工作的智能体团队”为整体承诺；内部按可运行、可验证的经营增量持续交付。不得要求单个 Agent 一次性生成完整复杂项目后，团队才有资格实践或进化。
+
+### 1.1 2026-08-10 计划纠正（优先级高于历史 GQ/MA 顺序）
+
+1. 先建立经营目标、数据源、预算、权限和停止条件；
+2. 给团队开放研究、仿真、沙箱、原型和组织演化空间，不预设最小团队、固定拓扑或唯一正确路线；
+3. 允许多条路径并行探索；结果可以是经营改善、有效失败、认知更新、新问题或新能力；
+4. 团队可以主动创建、替换、合并或退出角色，不要求先证明已知缺口或短期净收益；
+5. 权限控制落在资金、生产、敏感数据、对外沟通等现实影响能力上，不落在组织形式和探索思想上；
+6. 强单 Agent 仅作为局部 Work 的质量/成本基线，不再是团队能力、持续学习或组织调整的前置门槛；
+7. 原 GQ-4、P2-4、P2-5 等 Gate 只约束旧实现的全量策略翻转和不可逆生产权限，不得阻断并行探索、团队重组、复盘、经营记忆和能力创造。
 
 ## 2. Goal 状态机
 
@@ -169,15 +185,15 @@ HumanTask 完成和超时由内部 Command 触发，不调用 `/resume`。Blocke
 
 1. `S0` 工程骨架：Core、空 Apps、数据库、迁移、CI 和一键启动；
 2. `S1` 可靠内核：三套状态机、Outbox、Lease、Timer、Artifact、Evidence、Audit，通过 `CSV_SUMMARY_BASELINE`；
-3. `S2` 单 Agent 闭环：Goal Interpreter、Planner、Executor、Evaluator 和预算停止；
+3. `S2` 最小团队经营闭环：目标统筹、专业执行、独立验证和预算停止；局部 Work 可由单个责任 Agent 完成；
 4. `S3` 治理与人工流程：Permit、Policy、Secret Broker、HumanTask 及各自恢复规则；
 5. `S4` 能力与组织：Requirement、Provider、Certification、Organization、Assignment、DecisionRecord；
 6. `S5` 能力构建：沙箱、ToolSpec、构建、扫描、独立测试和认证，通过 `EVT_PARSER_GAP`；
 7. `S6` 独立 App：Workspace、Build、Test 和 Artifact 通用端口；
-8. `S7` 反馈重规划：预览部署、Observation、ExperienceRecord 和重规划；
-9. `S8` 产品验证与长期目标：完成 A/B/C 首轮冻结实验并形成产品 DecisionRecord；随后通过相同 Goal API 启动两个独立产品。
+8. `S7` 反馈重规划：从首个可运行增量开始持续采集 Observation、沉淀 ExperienceRecord 并重规划；
+9. `S8` 产品验证与长期目标：在真实经营循环中持续运行当前编成与挑战者实验，并按结果扩大、收缩或调整责任范围。
 
-S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Designer 必须记录预期收益、协调成本、风险、可逆性和停止条件。没有正向预期净收益证据时不得增员。
+S2 起允许团队自主形成和演化。Organization Designer 记录角色、资源消耗、现实权限和探索理由以支持理解与复盘，但不得把“证明真实缺口、预期净收益或通过审批”设为创建角色和沙箱尝试的前置条件。
 
 ## 11. 编码与阶段门禁
 
@@ -197,7 +213,7 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 
 ### 12.1 现状与原则
 
-现有代码已具备固定 Hive、AgentTask、组织版本、协调 Token 计数、Eval 基础、MCP 注册、会话 todo 与自动压缩；本计划在其上补强，不重复引入新的编排内核。单 Agent champion 保持默认，自适应自由拓扑继续 `ROLLOUT_NOT_ALLOWED`，直到 P2-4 统计 Gate 证明正净收益。
+现有代码已具备固定 Hive、AgentTask、组织版本、协调 Token 计数、Eval 基础、MCP 注册、会话 todo 与自动压缩；本计划在其上补强。旧代码中的 `ROLLOUT_NOT_ALLOWED` 只解释为“不得自动继承不可逆生产权限”，不得继续解释为禁止自由拓扑、角色创造或沙箱组织演化。
 
 | 能力 | 当前基础 | 主要缺口 | 目标落点 |
 |---|---|---|---|
@@ -214,12 +230,12 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 | 批次 | 依赖 | 交付物 | 完成门禁 |
 |---|---|---|---|
 | MA-0 合同冻结 | 无 | 指标公式、MAST 词表、成员三要素 Schema、现状基线报告 | PRD/Tech/Plan 一致；合同测试先失败 |
-| MA-1 可观测与归因 | MA-0 | 协调 Token 分类、三指标计算器、过程 span、MAST 归因 | 缺数据为 `INSUFFICIENT_EVIDENCE`；指标可由原始轨迹复算；过程 span 验收要求对齐 OTel GenAI semantic conventions（未接供应商栈前为后续对齐项，不得仅用内部私有 span 名义宣称完成） |
+| MA-1 可观测与归因 | MA-0 | 协调 Token 分类、三指标计算器、过程 span、MAST 词表与 `classify_mast_failure`（Schema/单测） | 缺数据为 `INSUFFICIENT_EVIDENCE`；指标可由原始轨迹复算；**MAST 生产分类路径待 P2-4**（对齐 PRD §10.2 / §12）；过程 span 验收要求对齐 OTel GenAI semantic conventions（未接供应商栈前为后续对齐项，不得仅用内部私有 span 名义宣称完成） |
 | MA-2 固定模板加固 | MA-0 | 成员契约、强制澄清、整体认证摘要与回归套件 | 改任一成员/模型/Prompt/工具后旧认证失效 |
 | MA-3 长任务耐久化 | MA-0 | `ExecutionPlanItem`、大结果卸载、Transcript Artifact、结构化 rehydration | Worker 重启与两次压缩后计划/约束/证据无丢失 |
 | MA-4 路由与过程评估 | MA-1、MA-2 | TaskFeatures、裁剪器、DispatchDecision、熵趋势告警 | 强顺序任务不扩编；每次派工可解释与重放 |
-| MA-5 P2-4 冻结实验 | MA-1…MA-4 | 强单 Agent vs 固定 Hive A/B/C 报告与 DecisionRecord | 同预算、盲评、置信区间、护栏全量报告 |
-| MA-6 条件激活 | MA-5 正净收益 | P2-5 自适应组织候选；A2A 边界适配探索 | 未获正净收益则不开发/不启用自适应拓扑 |
+| MA-5 持续团队评测 | MA-1…MA-4 | 当前编成、候选编成与适用局部基线的报告和 DecisionRecord | 同预算、盲评、置信区间、经营结果与护栏全量报告 |
+| MA-6 开放团队进化 | 可用资源池 | 自主角色/拓扑变化、多路径探索、A2A 边界适配 | 记录学习与消耗；现实权限逐能力隔离，不因短期无净收益强制撤销 |
 
 ### 12.3 建议实施顺序与工作包
 
@@ -228,7 +244,7 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 3. **并行可靠性线（MA-3，2 个迭代）**：将现有 todo/compact 从会话能力升级为耐久执行合同，优先服务 P1 长生成链。仅依赖 MA-0，资源允许时可与 MA-1/MA-2 并行；与线性编号不矛盾。
 4. **P2-4 前置（MA-4，1–2 个迭代）**：记录每步 DispatchDecision，并用任务特征裁剪无收益拓扑。
 5. **决策轮（MA-5，1 个冻结实验窗口）**：运行预注册 A/B/C；只接受可复算证据包。
-6. **条件阶段（MA-6）**：仅在 DecisionRecord 为 GO 时开发 P2-5；否则保留固定模板并优化单 Agent champion。
+6. **持续进化（MA-6）**：团队在资源池内自主探索和重组；系统根据实际消耗、学习和结果调整资源组合。DecisionRecord 只用于重大方向、资源池和现实权限变化。
 
 ### 12.4 工作包验收
 
@@ -245,7 +261,7 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 - 不引入 CrewAI/LangGraph 等框架替换自研 Kernel；
 - 不把 A2A 不透明协作语义用于内部 Agent；
 - 不用更多 Agent 数、消息量或更长上下文作为成功指标；
-- 不在 P2-4 DecisionRecord 前开放自适应自由拓扑；
+- 不在 P2-4 DecisionRecord 前**扩大自适应自由拓扑的现实生产权限**（真实数据、真人、共享状态、公开传播、资金或法律影响）；沙箱内的候选拓扑提出、组织试验与并行假设按 §0.1/§1.1 默认开放；
 - 不以 Prompt 调整替代状态机、角色契约、独立验证和恢复机制。
 
 ### 12.6 实现状态（2026-07-31）
@@ -253,7 +269,7 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 | 批次 | 状态 | 说明 |
 |---|---|---|
 | MA-0 合同冻结 | ✅ 已完成 | `multiagent_metrics` / `mast_failure` / `member_contract` Schema + 合同测试 |
-| MA-1 可观测与归因 | ✅ 已完成（OTel GenAI 后续对齐） | Token 分类、三指标复算、MAST 分类器（低置信保留原码）；OTel GenAI conventions 已写入验收，供应商栈未接 |
+| MA-1 可观测与归因 | 🟡 Schema/单测完成；生产路径未接线（P2-4） | Token 分类与三指标复算合同就绪；MAST 词表 + `classify_mast_failure` **仅测试可达**，生产分类路径未接入（对齐 PRD §12）；OTel GenAI conventions 已写入验收，供应商栈未接 |
 | MA-2 固定模板加固 | ✅ 已完成并强制接线 | 成员三要素、五类摘要、迁移 `0040` 回填认证；候选加载时摘要不一致即 fail closed |
 | MA-3 长任务耐久化 | ✅ 已完成并接入生成主链 | `execution_plan_items`、大工具结果卸载、压缩前 Transcript Artifact、结构化 rehydration；Artifact 读取按 Goal 隔离 |
 | MA-4 路由与过程评估 | ✅ 固定 Hive 主链完成 | TaskFeatures 保守裁剪接入 OrganizationEngine；opt-in 不得绕过裁剪；PM→Dev→QA 派工写入 `dispatch_decisions` |
@@ -263,23 +279,23 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 工作包验收对照：`WP-METRICS`/`WP-FAILURE`/`WP-TEMPLATE`/`WP-CONTEXT`/`WP-PLAN`/`WP-DISPATCH` 已有单元测试；`WP-EVAL` 提供可复算实验骨架，完整 95% CI 生产对照仍属实验窗口交付物。
 ### 12.7 过度修复复核与纠正（2026-07-31）
 
-- fixed Hive opt-in 只能对裁剪后仍获准的候选提高优先级，不能恢复被高基线/强顺序规则排除的模板；
+- fixed Hive opt-in 只能提高仍获准候选的优先级；TaskFeatures v2 对高基线/强顺序规则是 **demote（降权生产默认推荐）而非从探索空间硬排除**（`excluded=[]`，沙箱/OrganizationExperiment 仍可试多 Agent）；
 - 缺少安全单 Agent champion 时组织选择 fail closed，不以首个多 Agent 候选兜底；
 - `CERTIFIED` 名称或旧状态不足以启用模板，必须通过嵌入式五类摘要复算；
 - 持久计划终态不可由普通 upsert 改写；上下文 Artifact 查询必须携带 Goal 范围；
 - A2A 未知状态拒绝投影；第三方框架仅在试图替换 Kernel 时拒绝，能力池内单 Agent 封装仍允许。
 
-## 13. 单 Agent 生成质量基线计划（2026-07-31）
+## 13. 局部生成质量与渐进交付计划（2026-07-31 基线，2026-08-10 纠正）
 
-本计划对应诊断报告 `docs/diagnosis-output-quality-2026-07-31.md`（v2）。结论：当前主要质量瓶颈是主 Worker 未将已有 Agentic 生成循环接入默认交付路径；组织层补强（MA-0..MA-6）不能替代单 Agent 生成闭环的修复。固定 Hive 的净收益未经真实任务实验确认，不应假定必然改善或必然放大；其评估必须以强单 Agent 基线为前提（与 §10.5、Tech-Spec §13.4–§13.7 对齐）。
+本计划对应诊断报告 `docs/diagnosis-output-quality-2026-07-31.md`（v2）。原计划把强单 Agent 生成闭环设为团队实践的前置条件，现予纠正：局部生成质量仍必须修复，但它与最小团队经营闭环并行推进；任何单 Agent 都不承担“一次性生成完整复杂项目”的产品验收责任。
 
 ### 13.1 原则
 
-- 优先修复单 Agent 生成闭环，而非继续增加组织层复杂度；
+- 同时修复局部 Agent 执行闭环与团队经营闭环，避免用无目的增员掩盖执行缺陷；
 - `generation_strategy` 是运行时契约，Worker 必须真正遵循；
 - 真实构建 / 测试 / smoke 失败必须回灌至生成会话；
 - agentic 默认切换由成功率 / 成本 / 延迟门槛门控，不得凭直觉；
-- 固定 Hive 与自适应组织评估一律推迟到强单 Agent 基线建立之后（与 MA-5/MA-6 衔接）。
+- 固定团队从最小受控经营循环中持续评估；自由拓扑和生产权限扩张仍需独立 Gate。
 
 ### 13.2 交付批次
 
@@ -298,14 +314,14 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 2. **GQ-1（1–2 迭代）**：修复 `worker/main.py` 生成器选择；加 `generator_ref` 一致性检查与 fail-closed。
 3. **GQ-2（2 迭代）**：打通真实失败回灌；`VerificationAgent` 接入 pytest/项目测试。
 4. **GQ-3（1 实验窗口）**：影子/canary 对照，产出可复算报告。
-5. **GQ-4（1 迭代）**：按 GQ-0 预注册门槛形成切换 DecisionRecord；达标才默认 agentic。
+5. **GQ-4（1 迭代）**：按 GQ-0 预注册门槛形成正式晋级 DecisionRecord（代码默认已是 agentic；本步是资格认证，不是首次把 Settings 翻成 agentic）。
 6. **GQ-5 / MA-5（决策轮）**：运行真实组织实验，基于强单 Agent 基线重评固定 Hive（见 §12）。
 
 ### 13.4 与 MA-0..MA-6 的关系
 
-- 本计划建立的「强单 Agent 基线」是 MA-5 真实实验与 MA-6 条件激活的前提；现有 MA-5 仅指实验骨架，真实组织实验与 GQ-5 合并在 GQ-4 后执行。
-- `aar1_certified_hive` 代码默认值为 False；生产当前已在既有范围 opt-in。GQ-5 前保持该范围且不得扩容，并继续受认证摘要和 TaskFeatures 裁剪约束；P2-5 保持 `ROLLOUT_NOT_ALLOWED`。
-- 不引入框架替换 Kernel（沿用 §12.5）；`generation_strategy=agentic` 使用自研 `AgenticCodeGenerator`，非第三方编排内核。
+- 强单 Agent 数据仅作为适用局部 Work 的比较基线，不是 MA-5 团队学习或 MA-6 受控调整的前提；GQ-4 只控制生成策略全量翻转，不阻断最小团队并行实践。
+- `aar1_certified_hive` **代码默认值为 True**（`.env.example` 默认 on）；可按 Goal `force_single_agent` / `hive_enabled=false` 或 env=false 退出。GQ-5 前不扩容自适应拓扑，并继续受认证摘要和 TaskFeatures 裁剪约束；P2-5 保持 `ROLLOUT_NOT_ALLOWED`。
+- 不引入框架替换 Kernel（沿用 §12.5）；代码默认 `generation_strategy=agentic`（自研 `AgenticCodeGenerator`）；`artifact-backed` 为 kill-switch / scaffold fallback，非第三方编排内核。
 
 ### 13.5 工作包验收
 
@@ -318,7 +334,7 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 ### 13.6 明确不做
 
 - 不把「开蜂巢」当作提升单 Agent 输出质量的首要手段；
-- 不在强单 Agent 基线建立前默认 agentic 或扩大 Hive；
+- 不以「代码默认已是 agentic」替代 GQ-4 DecisionRecord；不在资格阶梯出口前扩大 canary / 宣称正式晋级；不扩容自适应拓扑的现实生产权限；
 - 不假定固定 Hive 必然改善或必然放大质量问题（结论留给 GQ-5）；
 - 不以 LLM 裁判替代真实构建/测试/smoke 验证。
 
@@ -330,8 +346,8 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 | GQ-1 生成器选择一致性 | ✅ 已完成 | Worker/`app_delivery` 经 `generator_factory` 分派；`assert_generator_consistency` fail-closed + Evidence |
 | GQ-2 会话内反馈 + Verification | ✅ 半落地 | FailureEnvelope 注入再生成；VerificationAgent pytest/项目测试；AgentRunner 一次受控修正；完整生产成功率窗待观测 |
 | GQ-3 影子 / Canary | ✅ 控制流已实现 | `GeneratorSelector` 按 `goal_id` 选生成器；`canary_rollout_allowed` + `canary_gate` 强制 GQ-2→GQ-3；canary% 默认 0、闸门默认 False（不开流量） |
-| GQ-4 默认切换决策 | ✅ 控制流已实现 | `drive_generation_strategy_experiment` + `apply_gq4_promotion` 强制门（未过则 `DomainError`）；**代码默认**仍 `artifact-backed`，正式晋级需 DecisionRecord + 翻转 env |
-| GQ-5 / MA-5 固定 Hive 重评 | ⏳ 未开 | 依赖 GQ-4；生产既有 CERTIFIED_HIVE opt-in **保持不扩容** |
+| GQ-4 默认切换决策 | ✅ 控制流已实现 | `drive_generation_strategy_experiment` + `apply_gq4_promotion` 强制门（未过则 `DomainError`）；**代码默认已是 `agentic`**，正式 GQ-4 晋级仍需 DecisionRecord（≠ 仅靠 `.env`） |
+| GQ-5 / MA-5 固定 Hive 重评 | ⏳ 未开 | 依赖 GQ-4；生产 CERTIFIED_HIVE **代码默认 on**（可 per-goal 退出），**不扩容**自适应拓扑 |
 
 工作包：`WP-GEN-SELECT`/`WP-GEN-FEEDBACK`/`WP-VERIFY-TEST`/`WP-CANARY`/`WP-DEFAULT-GATE` 控制流均已落地并有单测（`test_generation_quality.py`）。`WP-CANARY` 的流量开关（`canary_gate`/`canary_percent`）与 `WP-DEFAULT-GATE` 的晋级门（`apply_gq4_promotion`）为代码强制不变式；**完整真实任务实验窗口**（真实模型/工具/预算下跑双臂、产出 95% CI）仍属后续交付，但此时已有可驱动、可复算的控制流支撑，不再只是空钩子。生产运行时策略可由运维以 `REGENT_GENERATION_STRATEGY` 覆盖（≠ GQ-4 晋级）；部署不得擅自改写。详见 `docs/gq34-promotion-control-flow-2026-07-31.md`。
 
@@ -361,7 +377,7 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 
 | 批次 | 名称 | 依赖 | 状态 |
 |---|---|---|---|
-| CD-6 | 沙箱真执行：N-3 族 + T1–T6 | CD-0.1 | ✅ S0 已验证（镜像+worker e2e） |
+| CD-6 | 沙箱真执行：N-3 族 + T1–T6 | CD-0.1 | 🟡 S0 已验证（镜像+worker e2e）；**N-3c/N-3d 仍 incomplete**（见 §14.2） |
 | CD-7 | 技 P1-1…4 + N-4/N-6 | CD-6 全绿 | 🟡 7.1 marker + 7.4 预算隔离已落地；7.2/7.3/7.5 待 |
 | CD-8 | GQ-3 真实 canary 实验窗 | CD-6+7 | 🟡 待运维 |
 | CD-9 | GQ-4 条件晋级 | CD-8 报告 | 🟡 PENDING |
@@ -371,10 +387,12 @@ S4 的默认路径必须是单 Agent。创建额外 Agent 前，Organization Des
 
 ### 14.2 门禁
 
-1. **CD-6 未全绿**（含 N-3c/N-3d，且不得仅用 `echo ok` 验收）：禁止生产 `canary_gate` / 提高 `canary_percent`。
+1. **CD-6 未全绿**（含 **N-3c/N-3d 仍未完成**，且不得仅用 `echo ok` 验收）：禁止生产 `canary_gate` / 提高 `canary_percent`。
 2. **CD-7 未绿**：禁止开 GQ-3 窗。
 3. CD-6 期间默认禁 `_NETWORK_PREFIXES` 裸开网；N-4 完整治理在 CD-7.5（除非 Owner 加速）。
 4. 不删除 Permit / Outbox / Evidence / Audit / Reconciler；`.env=agentic` ≠ GQ-4。
+
+> **事实注记（2026-08-01 → 08-11）**：Owner 曾于 2026-08-01 **加速开窗**生产 5% agentic canary（见 `docs/m6-canary-window-2026-08-01.json`），同日已 **CLAMP** 至 percent=0 / gate=false；观察计划 **HALTED**（须先 Offline Qual）。该加速开窗**不撤销**本条门禁：N-3c/N-3d 仍 incomplete，开窗样本不得作晋级证据，亦不得写成「M6 ACTIVE / 已开 5%」现状。
 
 ### 14.3 与同事评审文档关系
 

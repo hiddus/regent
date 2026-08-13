@@ -7,13 +7,13 @@
 ## 结论
 
 在 **CD-6 S0 已验证** 且 **CD-7.1–7.5 代码侧收口** 后，允许开启 **小流量 GQ-3 canary**。  
-本文件**不等于** GQ-4；默认策略仍为 `artifact-backed`，禁止 `.env=agentic` 宣称晋级。
+本文件**不等于** GQ-4；开窗期默认臂曾为 `artifact-backed`。**现行代码默认**已是 `agentic`（见 `config.py`）；禁止仅凭 `.env=agentic` 宣称 GQ-4 晋级。
 
 ## 开窗参数（冻结；2026-07-31 修订）
 
 | 旋钮 | 值 | 说明 |
 |---|---|---|
-| `REGENT_GENERATION_STRATEGY` | `artifact-backed` | 默认臂不变 |
+| `REGENT_GENERATION_STRATEGY` | `artifact-backed` | **窗内历史配置**（开窗时对照臂）；现行代码默认 `agentic` |
 | `REGENT_GENERATION_STRATEGY_CANARY_GATE` | `true` | GQ-2→GQ-3 顺序门 |
 | `REGENT_GENERATION_STRATEGY_CANARY_PERCENT` | **`20`** | 由 5% **修订升档**（首份报告 n≪30；日均 Goal 过低，5% 无法在 21 天内凑样本） |
 | `REGENT_GENERATION_STRATEGY_CANARY_VARIANT` | `agentic` | 命中臂 |

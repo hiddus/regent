@@ -183,7 +183,7 @@ class ProductDiscoveryService:
                     rationale=(
                         "adapt_select_with_available_evidence: http-snapshot evidence exists; "
                         "select adapted-scope hypothesis instead of waiting for additional "
-                        "publisher coverage (REGENT-DEFINITION-1.0 goal-driven autonomy)"
+                        "publisher coverage (REGENT-DEFINITION-3.0 ATTRIBUTE_1 goal-driven direction)"
                     ),
                     missing_evidence=[],
                     policy_version="product-hypothesis-decision-v1",
@@ -198,7 +198,8 @@ class ProductDiscoveryService:
                 selected_candidate_key=None,
                 rationale=(
                     "adapt policy exhausted: still no http-snapshot after connector recovery; "
-                    "explicit termination per ATTRIBUTE_7 (not human-approval wait)"
+                    "explicit stage stop per REGENT-DEFINITION-3.0 ATTRIBUTE_9 "
+                    "(not human-approval wait)"
                 ),
                 missing_evidence=list(decision.missing_evidence or []),
                 policy_version="product-hypothesis-decision-v1",

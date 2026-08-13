@@ -34,7 +34,8 @@
 
 ### GQ-3 / GQ-4 控制流已接线（2026-07-31 补；原「仅钩子」表述作废）✅
 
-- `config.py` 含 `generation_strategy_kill_switch` / `fallback` / `canary_percent` / `canary_variant` / `canary_gate` / `shadow_mode`；默认 `canary_percent=0`、`canary_gate=False`、代码默认策略仍 `artifact-backed`。
+- `config.py` 含 `generation_strategy_kill_switch` / `fallback` / `canary_percent` / `canary_variant` / `canary_gate` / `shadow_mode`；默认 `canary_percent=0`、`canary_gate=False`。
+  > **口径更新（2026-08-11）**：成稿时曾写「代码默认策略仍 `artifact-backed`」；现行 Settings 代码默认已是 `agentic`，`artifact-backed` 为 kill-switch / scaffold fallback（见 Tech-Spec §0.1 / §13.7）。
 - `GeneratorSelector` + `canary_rollout_allowed` / `apply_gq4_promotion` / `drive_generation_strategy_experiment` 已落地（见 `docs/gq34-promotion-control-flow-2026-07-31.md`）。
 - 真实 canary 流量窗与 GQ-4 DecisionRecord 晋级仍待数据；运维可用 `REGENT_GENERATION_STRATEGY` 覆盖运行时策略（≠ 正式晋级）。
 

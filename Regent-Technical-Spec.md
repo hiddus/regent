@@ -1,11 +1,34 @@
 # Regent 技术架构与实施规范
 
 > 状态：CURRENT  
-> 日期：2026-08-01（吸收 M6 5% canary 开窗、交付缺口软暂停、prompt-cache 布局与 cached_tokens）
+> 日期：2026-08-11（§0.1 诚实更正：M6 CLAMPED、generation_strategy/Hive 代码默认、0044–0047/Permit 委派接线边界；历史 08-01 段仅追溯）
 > 性质：权威执行基线（Owner 批准）  
 > 配套需求：[`Regent-PRD.md`](./Regent-PRD.md)  
-> 永久定义（唯一规范源，仅引用不复述正文）：[`docs/definitions/REGENT-DEFINITION-1.0.txt`](docs/definitions/REGENT-DEFINITION-1.0.txt)（`REGENT-DEFINITION-1.0`）  
-> 编码执行清单：[`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md)（与 `Regent-Plan.md` §14 互指）；M6 观察：[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)  
+> 产品定义（当前唯一规范源，仅引用不复述正文）：[`docs/definitions/REGENT-DEFINITION-3.0.txt`](docs/definitions/REGENT-DEFINITION-3.0.txt)（`REGENT-DEFINITION-3.0`，取代 2.0）
+> 编码执行清单：[`docs/conversational-delivery-plan-2026-07-31.md`](docs/conversational-delivery-plan-2026-07-31.md)（与 `Regent-Plan.md` §14 互指）；M6 观察：[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)（HALTED）  
+
+## 0.1 2026-08-10 / 08-11 运行事实更正（覆盖本文历史状态段）
+
+本文保留的 2026-07-31/08-01 状态记录仅用于追溯，不再代表当前默认值。当前唯一可信运行事实由代码配置与 `/health`、`/ready` 返回的 `runtime_profile` 给出：代码默认 `generation_strategy=agentic`、`aar1_certified_hive=True`、canary 关闭且比例为 0；`artifact-backed` 为 kill-switch / scaffold fallback；非纯单元测试环境应使用 Docker 沙箱。M6 窗权威状态为 **CLAMPED_PENDING_QUALIFICATION**（见 `docs/m6-canary-window-2026-08-01.json`），不得写成「已开 5% ACTIVE」。
+
+当前已经落地的 3.0 基础能力（**迁移 + 单元/服务层可独立测试**）包括：原子预算预留/认领/结算/退款（迁移 0044）、可版本化且可撤销的 LearningUpdate（0045）、仅限沙箱的 OrganizationExperiment（0046）、可确定重放的追加式 ExecutionEvent（0047）、限时窄化 Permit 委派（`permit_service.delegate` + `_is_narrower`，API/单测就绪）。
+
+下列边界**不得按「生产主链已端到端」对外表述**：
+
+- **0044–0047**：迁移与服务/单测已完成；**编排器 / 生产主链接线仍不完整**，不得宣称生产经营循环已全面消费预算、LearningUpdate、OrganizationExperiment 或 ExecutionEvent。
+- **Permit 委派**：`delegate` API 与测试就绪，**主执行链尚未调用**委派路径。
+- **影响分级**：底层分级机制存在于 `application/effect_descriptor.py`（`EffectRisk` LOW/MEDIUM/HIGH/CRITICAL + `EffectDescriptor.risk_tier()`/`requires_permit()`）与 `application/trust_posture.permission_impact()`（输出 `effect_class`/`command_class`，由 `agent_control` 消费）；`mcp_governance_service` 目前仅将 `EffectDescriptor` 作为可选入参，**没有独立命名、贯穿主链的「影响分级」模块**。
+- **Goal Charter**：`application/goal_charter.py` 为 Pydantic 契约，仅在 `api/goals.py` 做请求体校验并持久化到 Goal metadata，**未被执行编排器/调度器作为治理包络消费**。
+
+它们是安全演化的底座，不等于已经接入所有模型、工具和生产经营循环。
+
+能力边界必须按三层表述：
+
+1. 思考、候选方案和离线推演可以自由展开；
+2. 沙箱中的组织变异必须占用资源租约，允许试验、合并、撤销，不以单 Agent 胜出作为探索前提；
+3. 读取真实敏感数据、接触真人、写共享状态、公开传播或产生财务/法律影响的动作，按影响、可逆性、暴露范围和数据敏感度授权。扩大现实影响需要证据，探索本身不需要先“证明资格”。
+
+截至本次更正，OrganizationExperiment、LearningUpdate 和 ExecutionEvent 仍属于可调用基础服务；在被实际调度器、模型与工具调用链消费前，不得对外宣称“生产环境已实现完全自主组织演化、在线学习或全链路因果审计”。
 > 附录：  
 > - [`docs/appendices/State-Machines-and-Invariants.md`](docs/appendices/State-Machines-and-Invariants.md)  
 > - [`docs/appendices/Durable-Execution-and-External-Effects.md`](docs/appendices/Durable-Execution-and-External-Effects.md)  
@@ -159,7 +182,7 @@ P2 前期继续采用模块化单体。除非测量证明 Outbox 已成为瓶颈
 | `TopologyPlanner` | Agent 角色分工与拓扑 |
 | `ReorganizationTrigger` | 触发重构的事件 |
 
-**单 Agent 是默认组织**；动态组织必须通过 P2-4 Eval Harness 证明正净收益才能晋级默认策略。
+**智能体团队是可自由演化的运行组织**。系统不预设单 Agent、最小团队、固定模板或动态拓扑为默认答案；团队可在资源池内并行探索、创建临时角色、分化、组合和重组。Eval Harness 提供现实反馈和资源配置信息，不批准思想、假设、沙箱实验或组织演化。
 
 ---
 
@@ -184,9 +207,10 @@ Create → Register → Discover → Deploy → Run → Communicate → Evaluate
 
 | 形态 | 阶段 |
 |---|---|
-| 单 Agent | P0 / P1（默认） |
-| 固定模板 | P1 候选 |
-| 动态组织 | P2-5（需实验验证） |
+| 单责任 Agent | 局部强顺序 Work 的执行方式，不是产品级组织 |
+| 自组织团队 | 全阶段产品形态；可并行探索、创建角色、分化与重组 |
+| 探索拓扑 | 思考、仿真、沙箱、可逆原型中默认开放，不要求事前认证 |
+| 现实行动拓扑 | 组织仍可自由变化，但每项不可逆外部能力按影响、权限与责任单独授权 |
 | 人类参与 | 全阶段 |
 
 ---
@@ -437,17 +461,16 @@ artifact-backed 路径虽保留下游依赖构建（`execution_orchestrator` 依
 
 - 实验驱动 `drive_generation_strategy_experiment(config, runner)` 注入 `runner(variant, task) -> StrategyRunResult`，跑通双臂并聚合 `UserQualityMetrics`（O9/O10 producer 即 runner）。
 - 晋级须经强制门：`apply_gq4_promotion(experiment_report, kill_switch=, decision_record_ref=)` 调用 `gq4_default_switch_gate`；仅当 `PROMOTE_AGENTIC_CANDIDATE` 且无 kill switch 才返回允许，否则 `DomainError(POLICY_DENIED)` 阻止晋级。`evaluate_gq4_promotion` 为非抛出版本供巡检。
-- 运行时默认仍由 `generation_strategy` 驱动（Settings 代码默认 `artifact-backed`）；晋级步骤为「实验报告 → `apply_gq4_promotion` 通过 → 记录 DecisionRecord → 运维翻转 `REGENT_GENERATION_STRATEGY=agentic`」。kill switch 在运行时始终覆盖默认。
-- **运维覆盖**：生产 `.env` 可设置 `REGENT_GENERATION_STRATEGY=agentic` 作为运维侧运行时覆盖，**不等于** GQ-4 已正式晋级；部署流程不得擅自改写生产策略，除非 DecisionRecord 明确要求。
+- 运行时默认仍由 `generation_strategy` 驱动（Settings **代码默认** `agentic`；kill switch 或显式 `artifact-backed` 为 fallback）；GQ-4 正式晋级步骤仍为「实验报告 → `apply_gq4_promotion` 通过 → 记录 DecisionRecord」。kill switch 在运行时始终覆盖默认。
+- **运维覆盖 / fallback**：显式 `REGENT_GENERATION_STRATEGY=artifact-backed` 或 kill switch 回落 scaffold/fallback 路径；`.env` 写 `agentic` **不等于** GQ-4 已正式晋级（DecisionRecord 仍 PENDING）。
 
-#### 13.7.3 M6 生产 Canary 窗（2026-08-01）
+#### 13.7.3 M6 生产 Canary 窗（2026-08-01 开窗 → 同日 clamp）
 
-- **代码默认**仍为 `generation_strategy=artifact-backed`、`canary_gate=False`、`canary_percent=0`。
-- **生产窗覆盖**（须有窗记录）：`canary_gate=true`、`canary_percent=5`、`canary_variant=agentic`、默认策略保持 `artifact-backed`；权威：`docs/m6-canary-window-2026-08-01.json`。
-- 开闸脚本：`ops/open_m6_canary.py`；回滚：`ops/clamp_generation_strategy_freeze.py`（percent=0、gate=false）。
-- 观察：开窗后切片（`--since` 开窗时刻），禁止用开窗前历史 agentic 计划计算成功率；日更探针 `ops/probe_m6_canary.py`；出口四指标与真实闭环见 `docs/m6-canary-watch-plan-2026-08-01.md`。
-- 硬回滚触发：严重安全/错误发布、开窗后 agentic 连续硬失败且无 changeset、outbox/delivery-gap 失控、成本或 P95 明显越界。
-- **不等于 GQ-4**；护栏未过前禁止 EXPAND_10 与默认策略翻转。
+- **代码默认**：`generation_strategy=agentic`、`canary_gate=False`、`canary_percent=0`；artifact-backed 仅作 kill-switch / 显式 scaffold fallback。
+- **窗状态权威**：`docs/m6-canary-window-2026-08-01.json` → `status=CLAMPED_PENDING_QUALIFICATION`；观察计划 [`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md) → **HALTED_PENDING_QUALIFICATION**（扩流禁止）。不得再写「生产已开 5% canary / M6 ACTIVE」。
+- 历史：同日曾开 `canary_percent=5`；随后 clamp 为 percent=0、gate=false、QUAL=DISABLED。开闸/回滚脚本：`ops/open_m6_canary.py` / `ops/clamp_generation_strategy_freeze.py`。
+- 观察：开窗后切片（`--since` 开窗时刻）仅作历史；日更探针 `ops/probe_m6_canary.py`；扩流须先 Offline Qual，再经新窗记录。
+- **不等于 GQ-4**；护栏与资格阶梯未过前禁止 EXPAND_10 与宣称默认策略「正式晋级」。
 - Provider：`REGENT_MODEL_THINKING_MODE` ∈ `{disabled,enabled,default}`，默认 `disabled`；须解析并记账 `cached_tokens`（缺省字段记 `null`，不得当成 0 宣称命中）。
 
 ### 13.8 Agent 工具执行环境与两级 Effect（对话式交付前置）
@@ -552,7 +575,7 @@ Agent Card 只能声明身份和能力，不能授予当前 Goal 权限。进入
 - 低置信度或冲突升级人工。
 
 最小 Eval Harness 必须记录：任务集哈希、基线配置、预算账本、种子、重复次数、墙钟与计算预算、pass@k、安全违规、DecisionRecord。  
-**自适应组织（P2-5）不得在 Harness 统计 Gate 之前默认启用。**
+**组织拓扑本身不成为禁止对象。**生产资金、敏感数据、对外沟通、发布和其他不可逆能力必须按实际影响授权，且权限不得因团队重组自动继承；思考、研究、仿真、沙箱实验、可逆原型和组织设计默认开放。
 ### 18.1 组织路由特征与裁剪
 
 `TopologyPlanner` 的输入必须包含：
@@ -567,7 +590,7 @@ TaskFeatures
 - estimated_parallelism_ceiling
 ```
 
-`OrganizationSpace` 先按 PRD §10.1 的冻结规则裁剪，再由 `UtilityFunction` 计算效用。裁剪结果、命中规则、输入特征版本和被排除拓扑必须写入 `SchedulingDecision`，不得只保存最终模板。
+`OrganizationSpace` 对沙箱 / OrganizationExperiment **保持候选开放**（多 Agent 拓扑不得因任务先验被删除）。PRD §10.1 的冻结规则仅作用于**生产默认推荐**：可对多 Agent 候选降权并写入注解原因，使单 Agent champion 成为默认生产偏置，但不得把多 Agent 从已准入探索空间中硬排除。降权结果、命中规则、输入特征版本与被降权拓扑必须写入 `SchedulingDecision`，不得只保存最终模板；再由 `UtilityFunction`（含生产默认降权分量）计算效用。
 
 ### 18.2 过程级调度记录
 
@@ -754,8 +777,8 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 | P2-1 Scheduler | 依赖 G0 revision 已应用 + Graduation/P2Start | Queue、Reservation、BudgetLedger、抢占 |
 | P2-2 Runtime Registry | 依赖 P2-1 DecisionRecord | Profile、Certification、构建矩阵 |
 | P2-3 Memory | **条件承诺** | MemoryRecord、Impact Graph、Revocation |
-| P2-4 Minimal Eval Harness | **承诺**；先于自适应组织 | 任务集、基线、预算账本、盲评、统计 Gate |
-| P2-5 Adaptive Organization | **条件**：P2-4 正净收益 | 组织提案、路由 |
+| Continuous Team Eval Harness | **承诺**；与最小经营闭环同步建设 | 在线结果、回放任务、局部基线、预算账本、盲评与周期决策 |
+| Open-ended Team Evolution | **承诺**；探索默认开放，现实影响按能力治理 | 自组织、并行探索、能力创造、资源组合、影响分级、权限隔离与学习记录 |
 | P2-6 Experiment Platform | **条件** | 完整 Champion/Challenger |
 | P2-7…P2-9 | **候选** | 生产发布 / 自我改进 / 能力生态 |
 
@@ -779,16 +802,16 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **真实 App 预览**：StaticAppPublisher、CSP 预览、观测钩子（0020）。
 - **受监管自我改进（候选，未产品门禁）**：SelfImprovementRun 隔离副本、AST 验证、独立审查（0021）已落地代码；按 PRD §9.3 属 P2-8 候选，需单独产品 DecisionRecord 后方可宣称验收完成。
 - **确认后自主执行闭环**：Outbox 指数退避与死信（0022）。产品语义已从「Confirm/Start 硬分离」更新为「快照启动 + 纠偏」（同上 DecisionNote）；发布审批仍独立且默认需要人类批准。
-- **Durable Hive（opt-in 固定模板）**：认证模板 `pm-dev-independent-qa-v1` 经 `REGENT_AAR1_CERTIFIED_HIVE=true` 启用（生产服务器已开；本地/测试默认仍关以保 P0 单 Agent 基线）。该 flag 现受 §18.5 / MA-2 整体认证摘要约束（成员契约 + 五类 hash + 回归；摘要变更即旧认证失效）。能力 C/V/R 满足时优先该固定模板；**产品默认语义仍是强单 Agent champion**；自适应自由拓扑 `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认并行执行能力。
-- **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同、MAST 词表、成员契约、`ExecutionPlanItem` / `DispatchDecision`（迁移 `0039`）与模板认证回填（迁移 `0040`）。固定 Hive 候选必须通过五类摘要复算，opt-in 不得绕过 TaskFeatures 裁剪；Agent 生成主链已接入 todo 持久化、大结果卸载与压缩前 Transcript Artifact，固定 Hive 派工已接入过程审计。P2-4 仍是实验骨架，**P2-5 自适应拓扑仍禁止启用**。见 Plan §12。
-  > **更正（2026-08-01 代码核查）**：MAST 失败码（`application/mast_failure.py`）已定义 9 码与 `classify_mast_failure`，但截至核查**尚未接入生产分类路径**（全库零生产引用，仅测试引用）；§18.4 要求的"轨迹引用 + 置信度 + 人工/离线复核"接入逻辑缺失，当前应视为"定义就绪、集成待 P2-4"，不得宣称已部署生效。另：PRD §12 原列 P2-3 Impact Graph / P2-5 AgentEnvelope HMAC / G0 ExternalOperation 核心闭环**均已实现**（见 `docs/registered-unimplemented-2026-07-30.md`），已从"未实现"清单移除，本 Spec 不再与 PRD 冲突。
-- **单 Agent 生成质量基线（GQ-0～GQ-4；状态更新 2026-08-01）**：生成器元数据协议与 fail-closed 一致性；Worker 按 generation_strategy 分派；FailureEnvelope/RepairAttempt；独立生成策略实验合同；VerificationAgent pytest/项目测试与预算化修正；GQ-3/GQ-4 **控制流已实现**。Settings **代码默认**仍 canary_gate=False、percent=0、artifact-backed。**生产 M6 已开 5% agentic canary**（§13.7.3；窗记录 `docs/m6-canary-window-2026-08-01.json`），**默认策略未翻转，GQ-4 DecisionRecord 仍 PENDING**（见 docs/decision-note-gq4-pending-2026-07-31.md）。生产 CERTIFIED_HIVE opt-in **不扩容**。
+- **Durable Hive（认证固定模板，代码默认 on）**：认证模板 `pm-dev-independent-qa-v1` 由 Settings `aar1_certified_hive=True`（`.env.example` 默认 on）启用；可按 Goal metadata `force_single_agent` / `hive_enabled=false` 或 env=false 退出。该 flag 现受 §18.5 / MA-2 整体认证摘要约束（成员契约 + 五类 hash + 回归；摘要变更即旧认证失效）。能力 C/V/R 满足时优先该固定模板；**产品默认语义是最小智能体经营团队**，局部 Work 可采用单 Agent；自适应自由拓扑的**生产权限继承与默认扩编** `ROLLOUT_NOT_ALLOWED`，不得表述为已验证的默认无限扩编能力——沙箱内的候选拓扑与组织试验按定义 3.0 ATTRIBUTE_4/7 默认开放。
+- **多 Agent 补足（MA-0～MA-6，2026-07-31）**：已落地指标合同、MAST 词表、成员契约、`ExecutionPlanItem` / `DispatchDecision`（迁移 `0039`）与模板认证回填（迁移 `0040`）。固定 Hive 候选必须通过五类摘要复算，opt-in 不得绕过 TaskFeatures 裁剪；Agent 生成主链已接入 todo 持久化、大结果卸载与压缩前 Transcript Artifact，固定 Hive 派工已接入过程审计。P2-4 仍是实验骨架，**P2-5 自适应拓扑仍禁止在生产主链默认启用**（沙箱试验不受限）。见 Plan §12。
+  > **更正（2026-08-01 代码核查）**：MAST 失败码（`application/mast_failure.py`）已定义 9 码与 `classify_mast_failure`，但截至核查**尚未接入生产分类路径**（全库零生产引用，仅测试引用）；§18.4 要求的"轨迹引用 + 置信度 + 人工/离线复核"接入逻辑缺失，当前应视为"定义就绪、集成待 P2-4"，不得宣称已部署生效。另：PRD §12 原列 P2-3 Impact Graph / P2-5 AgentEnvelope HMAC / G0 ExternalOperation **核心闭环**均已实现（见 `docs/registered-unimplemented-2026-07-30.md`），已从"未实现"清单移除；**G0 的「跨 provider 真实网络 query→resolve 全路径」切片仍留在 PRD §12 未实现清单**，与本文 §25「已知非阻塞限制」第 3 条同义，两处口径一致。
+- **单 Agent 生成质量基线（GQ-0～GQ-4；状态更新 2026-08-11）**：生成器元数据协议与 fail-closed 一致性；Worker 按 generation_strategy 分派；FailureEnvelope/RepairAttempt；独立生成策略实验合同；VerificationAgent pytest/项目测试与预算化修正；GQ-3/GQ-4 **控制流已实现**。Settings **代码默认** `generation_strategy=agentic`、canary_gate=False、percent=0。**M6 窗现为 CLAMPED_PENDING_QUALIFICATION**（§13.7.3；曾开 5% 后已 clamp；窗记录 `docs/m6-canary-window-2026-08-01.json`），**GQ-4 DecisionRecord 仍 PENDING**（见 docs/decision-note-gq4-pending-2026-07-31.md）。生产 CERTIFIED_HIVE 代码默认 on，**不扩容**自适应拓扑。
 - **Prompt cache / token 成本（2026-08-01）**：`ContextAssembler` 稳定前缀布局与 tree-only workspace、`cached_tokens` 解析与 ledger 累计、旧 write 参数 compact 已合入（§18.6）；观察命中率纳入 M6 成本护栏。
 - **交付缺口软暂停（2026-08-01）**：自动续跑 + soft-pause；watchdog 不造权限卡；Console 不对交付缺口渲染「总是允许」（§13.8.3 / PRD §4.3）。
 - **控制台前端**：React 19 + Vite + TS；SSE 自适应轮询；三栏布局；status.agents + live_action；GET /v1/app-projects/{id}/delivery-review 审阅面（plan/transcript/verification/budget）。
 - **桌面端（探索性）**：Tauri 骨架；未纳入 P0/P1 验收。
 - **交付状态机（CD-1，2026-07-31）**：decide_delivery_verdict **已接入** _apply_delivery_verdict；DeliveryRejection 类型化；goal_intent 早交人；AC1 门禁进 CI；其后叠加快暂停与 watchdog（见上）。
-- **下一步**：**ACTIVE = M6 观察窗**（[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)）：开窗后切片指标、真实闭环、窗末 HOLD/EXPAND_10/ROLLBACK；成本护栏未过前不扩流量、不开 GQ-4。CD-6…12 与 agent-core 计划继续作为工程参照，但**不以「禁止一切 canary」为当前生产状态描述**。
+- **下一步**：**HALTED = M6 观察窗**（[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)）：须先 Offline Qual；成本护栏未过前不扩流量、不开 GQ-4。CD-6…12 与 agent-core 计划继续作为工程参照；**不得把历史「已开 5%」写成当前 ACTIVE**。
 - **API 挂载（F-1 修复）**：human_tasks / uploads / webhooks / reports / public_deploy 已在 `api/main.py` `include_router`。
 - **近期迭代（2026-08-02/03，登记于代码核查 2026-08-03）**：混合控制平面 H0–H2（`application/agent_control.py` / `agent_loop_exit.py` / `live_action.py`：abort/permission/ask 工具/只读时间线）、Session Work Plan W0–W4（`application/work_plan.py` / `project_agent_session.py`：Step-0 门禁 + 计划审批）、控制台可观测性（`agent/progress_event.py` + `api/events.py` SSE + ProgressEvent）、Agent 内核 W4 收口（`agent/subagent.py` / `skills.py` / `context_assembler.py` / `verification.py`）、交付缺口恢复与诊断交付（`delivery_gap_recovery.py` / `diagnostic_delivery.py` / `delivery_success_policy.py`）。均已接线生产路径；产品语义见 `docs/decision-note-*` 与 `docs/execution-plan-*` 2026-08-02/03。
 
@@ -810,8 +833,8 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 | 标签 | 含义 |
 |---|---|
 | **已完成** | 生产路径可用且默认启用 |
-| **已实现但默认不可启用** | 控制流/代码就绪，须门禁或 DecisionRecord 后方可开流量（如 **GQ-4 默认 agentic**） |
-| **小流量观察窗已开** | 代码默认仍关；生产经窗记录覆盖小比例 canary（如 **M6 5%**），不等于默认翻转 |
+| **已实现但默认不可启用** | 控制流/代码就绪，须门禁或 DecisionRecord 后方可开流量（如 **GQ-4 正式晋级**） |
+| **小流量观察窗（历史/条件）** | 经窗记录曾开小比例 canary（如 M6 5%）；**当前 M6 为 CLAMPED**，不等于默认翻转或 ACTIVE |
 | **门禁就绪，实验窗待运维** | 前置合规已满足代码侧；缺真实流量实验 |
 | **PENDING** | DecisionNote 未 ACCEPTED（如 GQ-4 晋级） |
 

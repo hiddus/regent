@@ -9,19 +9,49 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from regent.application.budget_ledger import (
     COST_MODEL_INPUT,
     COST_MODEL_OUTPUT,
     COST_TOOL_INVOCATION,
+    BudgetExceededError,
     BudgetLedger,
     BudgetReport,
+    BudgetReservationError,
     BudgetStatus,
 )
-from regent.infrastructure.models import BudgetEntryModel, GoalModel
+from regent.infrastructure.models import (
+    BudgetAccountModel,
+    BudgetEntryModel,
+    BudgetReservationModel,
+    GoalModel,
+)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+
+@pytest.fixture
+async def budget_db_sessions():
+    """Focused schema, isolated from unrelated in-flight model additions."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda sync_conn: GoalModel.__table__.create(sync_conn, checkfirst=True)
+        )
+        for table in (
+            BudgetEntryModel.__table__,
+            BudgetAccountModel.__table__,
+            BudgetReservationModel.__table__,
+        ):
+            await conn.run_sync(lambda sync_conn, table=table: table.create(sync_conn))
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -170,11 +200,11 @@ async def test_check_budget_limit_blocks_goal_when_over() -> None:
 
 def test_all_cost_types_defined() -> None:
     from regent.application.budget_ledger import (
+        _ALL_COST_TYPES,
         COST_EXTERNAL_OPERATION,
         COST_FAILURE_RECOVERY,
         COST_HUMAN_MINUTES,
         COST_INFRASTRUCTURE,
-        _ALL_COST_TYPES,
     )
 
     required = {
@@ -187,3 +217,103 @@ def test_all_cost_types_defined() -> None:
         COST_FAILURE_RECOVERY,
     }
     assert required <= _ALL_COST_TYPES
+
+
+async def _goal_with_budget(db_sessions, limit: float) -> tuple[uuid.UUID, BudgetLedger]:
+    goal_id = uuid.uuid4()
+    async with db_sessions() as session, session.begin():
+        session.add(
+            GoalModel(
+                id=goal_id,
+                original_input="budget reservation test",
+                status="ACTIVE",
+                version=1,
+                created_by="test",
+                correlation_id=uuid.uuid4(),
+                metadata_json={"budget_limit": limit},
+            )
+        )
+    return goal_id, BudgetLedger(db_sessions)
+
+
+@pytest.mark.asyncio
+async def test_reserve_claim_settle_refunds_unused_hold(budget_db_sessions) -> None:
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 10.0)
+    hold = await ledger.reserve(
+        goal_id, None, reservation_key="run-1:model", cost_type=COST_MODEL_INPUT, amount=8.0
+    )
+    claimed = await ledger.claim(hold.id)
+    settled = await ledger.settle(claimed.id, claim_token=claimed.claim_token, actual_amount=3.0)
+    assert settled.status == "SETTLED"
+    assert settled.settled_amount == 3.0
+    next_hold = await ledger.reserve(
+        goal_id, None, reservation_key="run-2:model", cost_type=COST_MODEL_INPUT, amount=7.0
+    )
+    assert next_hold.status == "RESERVED"
+    assert (await ledger.get_goal_budget(goal_id)).total_cost == 3.0
+
+
+@pytest.mark.asyncio
+async def test_reservations_cannot_collectively_exceed_goal_limit(budget_db_sessions) -> None:
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 10.0)
+    await ledger.reserve(
+        goal_id, None, reservation_key="parallel-a", cost_type=COST_MODEL_INPUT, amount=6.0
+    )
+    with pytest.raises(BudgetExceededError):
+        await ledger.reserve(
+            goal_id, None, reservation_key="parallel-b", cost_type=COST_MODEL_OUTPUT, amount=5.0
+        )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reservations_admit_only_one_overlapping_hold(budget_db_sessions) -> None:
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 10.0)
+    # Initialize the per-Goal atomic counter before contending transactions.
+    seed = await ledger.reserve(
+        goal_id, None, reservation_key="counter-init", cost_type=COST_MODEL_INPUT, amount=0.0
+    )
+    await ledger.release(seed.id)
+
+    async def attempt(key: str):
+        try:
+            return await ledger.reserve(
+                goal_id, None, reservation_key=key, cost_type=COST_MODEL_INPUT, amount=6.0
+            )
+        except BudgetExceededError as exc:
+            return exc
+
+    outcomes = await asyncio.gather(attempt("concurrent-a"), attempt("concurrent-b"))
+    assert sum(not isinstance(item, Exception) for item in outcomes) == 1
+    assert sum(isinstance(item, BudgetExceededError) for item in outcomes) == 1
+
+
+@pytest.mark.asyncio
+async def test_release_refunds_full_hold_and_claim_token_is_enforced(budget_db_sessions) -> None:
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 5.0)
+    hold = await ledger.reserve(
+        goal_id, None, reservation_key="released", cost_type=COST_TOOL_INVOCATION, amount=5.0
+    )
+    claimed = await ledger.claim(hold.id)
+    with pytest.raises(BudgetReservationError):
+        await ledger.release(claimed.id, claim_token=uuid.uuid4())
+    await ledger.release(claimed.id, claim_token=claimed.claim_token)
+    replacement = await ledger.reserve(
+        goal_id, None, reservation_key="replacement", cost_type=COST_TOOL_INVOCATION, amount=5.0
+    )
+    assert replacement.status == "RESERVED"
+
+
+@pytest.mark.asyncio
+async def test_reservation_key_retry_is_idempotent(budget_db_sessions) -> None:
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 5.0)
+    first = await ledger.reserve(
+        goal_id, None, reservation_key="same", cost_type=COST_MODEL_INPUT, amount=4.0
+    )
+    second = await ledger.reserve(
+        goal_id, None, reservation_key="same", cost_type=COST_MODEL_INPUT, amount=4.0
+    )
+    assert second.id == first.id
+    with pytest.raises(BudgetReservationError):
+        await ledger.reserve(
+            goal_id, None, reservation_key="same", cost_type=COST_MODEL_INPUT, amount=3.0
+        )

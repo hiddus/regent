@@ -51,7 +51,12 @@ class SubagentRunner:
         execution_plans: Any | None = None,
         run_id: Any | None = None,
         parent_depth: int = 0,
-        max_subagent_depth: int = 1,
+        max_subagent_depth: int = 3,
+        budget_ledger: Any | None = None,
+        model_max_output_tokens: int = 8192,
+        model_input_cost_per_million: float = 0.0,
+        model_output_cost_per_million: float = 0.0,
+        price_book_version: str = "model-price-book-v1",
     ) -> None:
         self._provider = provider
         self._workspace_root = workspace_root.resolve()
@@ -62,6 +67,11 @@ class SubagentRunner:
         self._run_id = run_id
         self._parent_depth = int(parent_depth)
         self._max_subagent_depth = int(max_subagent_depth)
+        self._budget_ledger = budget_ledger
+        self._model_max_output_tokens = model_max_output_tokens
+        self._model_input_cost_per_million = model_input_cost_per_million
+        self._model_output_cost_per_million = model_output_cost_per_million
+        self._price_book_version = price_book_version
 
     async def _writeback_plan_item(self, brief: SubagentBrief, *, status: str) -> None:
         if self._execution_plans is None or not self._goal_id or not brief.plan_item_key:
@@ -153,8 +163,17 @@ class SubagentRunner:
             budget=self._budget,
             regent_md=self._regent_md,
             execution_mode="act",
+            producer_ref=agent_id,
+            goal_id=uuid.UUID(self._goal_id) if self._goal_id else None,
+            run_id=self._run_id,
+            execution_plans=self._execution_plans,
             subagent_depth=self._parent_depth + 1,
             max_subagent_depth=self._max_subagent_depth,
+            budget_ledger=self._budget_ledger,
+            model_max_output_tokens=self._model_max_output_tokens,
+            model_input_cost_per_million=self._model_input_cost_per_million,
+            model_output_cost_per_million=self._model_output_cost_per_million,
+            price_book_version=self._price_book_version,
             # Subagent inherits parent plan items for Step 0; skip re-approve.
         )
         # Mark as already approved / trivial so child does not ASK plan_approve again.

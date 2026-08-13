@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,23 @@ import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
+
+# Preview venvs stay lean: skip test/lint-only deps that often timeout on PyPI.
+_PREVIEW_DEV_SKIP = frozenset(
+    {
+        "pytest",
+        "pytest-cov",
+        "pytest-asyncio",
+        "coverage",
+        "black",
+        "ruff",
+        "flake8",
+        "mypy",
+        "isort",
+        "pre-commit",
+        "pip-tools",
+    }
+)
 
 from regent.agent.runtime_profile_v1 import (
     RuntimeProfileV1,
@@ -94,17 +112,33 @@ def _normalize_flask_layout(workspace: Path) -> dict[str, Any]:
 
 
 def _runtime_packages(profile: RuntimeProfileV1 | None, requirements_text: str) -> list[str]:
-    """Lean runtime packages for preview — skip pytest/dev to avoid PyPI timeouts."""
+    """Runtime packages for preview from requirements.txt (dev/test lines skipped).
+
+    Shipping apps often need more than the framework (e.g. feedparser/requests).
+    Installing only Flask caused ModuleNotFoundError and PREVIEW_FAILED.
+    """
+    packages: list[str] = []
+    for raw in requirements_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-") or line.startswith("--"):
+            continue
+        name = re.split(r"[<>=!~\[\s]", line, maxsplit=1)[0].strip().lower()
+        if not name or name in _PREVIEW_DEV_SKIP or name.startswith("pytest"):
+            continue
+        packages.append(line)
+    if packages:
+        return packages
     shape = (profile.project_shape if profile else "") or ""
     lower = requirements_text.lower()
     if shape == "fastapi-web" or "fastapi" in lower or "uvicorn" in lower:
         return ["fastapi", "uvicorn"]
-    # Default Flask web (golden path).
     return ["Flask>=3.0.0"]
 
 
 def _ensure_preview_deps(workspace: Path, profile: RuntimeProfileV1 | None) -> dict[str, Any]:
-    """Install lean runtime deps into a workspace-local venv for preview."""
+    """Install runtime deps into a workspace-local venv for preview."""
     reqs = workspace / "requirements.txt"
     req_text = ""
     if reqs.is_file():
@@ -114,22 +148,36 @@ def _ensure_preview_deps(workspace: Path, profile: RuntimeProfileV1 | None) -> d
             req_text = ""
     if not req_text.strip() and profile is None:
         return {"skipped": True, "reason": "no_requirements"}
+    packages = _runtime_packages(profile, req_text)
+    pkg_key = hashlib.sha256("\n".join(packages).encode("utf-8")).hexdigest()[:16]
     venv = workspace / ".preview-venv"
     marker = venv / ".regent-ready"
     if marker.is_file():
-        return {"skipped": True, "reason": "venv_ready", "venv": str(venv)}
+        try:
+            if marker.read_text(encoding="utf-8").strip() == pkg_key:
+                return {
+                    "skipped": True,
+                    "reason": "venv_ready",
+                    "venv": str(venv),
+                    "packages": packages,
+                }
+        except OSError:
+            pass
     steps: list[dict[str, Any]] = []
-    create = subprocess.run(
-        [sys.executable, "-m", "venv", str(venv)],
-        cwd=str(workspace),
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    steps.append({"cmd": "venv", "code": create.returncode, "err": (create.stderr or "")[-400:]})
-    if create.returncode != 0:
-        return {"ok": False, "steps": steps}
+    if not (venv / "bin" / "python").is_file() and not (venv / "Scripts" / "python.exe").is_file():
+        create = subprocess.run(
+            [sys.executable, "-m", "venv", str(venv)],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        steps.append(
+            {"cmd": "venv", "code": create.returncode, "err": (create.stderr or "")[-400:]}
+        )
+        if create.returncode != 0:
+            return {"ok": False, "steps": steps}
     if os.name == "nt":
         pip = venv / "Scripts" / "pip.exe"
         venv_bin = venv / "Scripts"
@@ -138,7 +186,6 @@ def _ensure_preview_deps(workspace: Path, profile: RuntimeProfileV1 | None) -> d
         pip = venv / "bin" / "pip"
         venv_bin = venv / "bin"
         venv_python = venv / "bin" / "python"
-    packages = _runtime_packages(profile, req_text)
     argv = [
         str(pip),
         "install",
@@ -175,7 +222,7 @@ def _ensure_preview_deps(workspace: Path, profile: RuntimeProfileV1 | None) -> d
             break
     if install is None or install.returncode != 0:
         return {"ok": False, "steps": steps, "venv_python": str(venv_python)}
-    marker.write_text("ok", encoding="utf-8")
+    marker.write_text(pkg_key, encoding="utf-8")
     return {
         "ok": True,
         "steps": steps,
@@ -196,7 +243,8 @@ class RuntimePreviewDeploymentProvider:
         static_provider: Any,
         base_url: str = "",
         process_supervisor: PreviewProcessSupervisor | None = None,
-        readiness_timeout_seconds: float = 25.0,
+        # Low-RAM hosts often recreate .preview-venv after disk prune; 25s is too tight.
+        readiness_timeout_seconds: float = 90.0,
     ) -> None:
         self._root = preview_root.resolve()
         self._root.mkdir(parents=True, exist_ok=True)
@@ -211,6 +259,29 @@ class RuntimePreviewDeploymentProvider:
         existing = self._deployments.get(request.idempotency_key)
         if existing is not None:
             return existing
+
+        # Host guard: refuse new runtime previews when disk/mem/load are critical.
+        try:
+            from regent.config import get_settings
+            from regent.infrastructure.host_resources import host_blocks_work
+
+            settings = get_settings()
+            if settings.host_guard_enabled:
+                blocked, why = host_blocks_work(settings.workspace_root)
+                if blocked:
+                    result = DeploymentResult(
+                        external_request_id=request.idempotency_key,
+                        status="FAILED",
+                        evidence={
+                            "provider": "runtime-preview",
+                            "error": f"host unhealthy — refusing preview deploy: {why}",
+                            "failure_code": "HOST_RESOURCE",
+                        },
+                    )
+                    self._deployments[request.idempotency_key] = result
+                    return result
+        except Exception:  # noqa: BLE001 — never block deploy path on guard bugs
+            pass
 
         profile = parse_runtime_profile_v1(
             dict(request.acceptance_contract or {}).get("runtime_profile")
@@ -407,6 +478,9 @@ class RuntimePreviewDeploymentProvider:
                 self._deployments[request.idempotency_key] = result
                 return result
             (target / ".regent-preview-port").write_text(str(handle.port), encoding="utf-8")
+            (target / ".regent-preview.pid").write_text(
+                str(handle.process.pid), encoding="utf-8"
+            )
             advertise = (
                 os.environ.get("REGENT_PREVIEW_ADVERTISE_HOST")
                 or os.environ.get("HOSTNAME")

@@ -324,6 +324,14 @@ def default_system_rules() -> list[PolicyRule]:
             scope_type="SYSTEM",
         ),
         PolicyRule(
+            id="system-mcp-impact-permit",
+            decision_point="MCP_TOOL_INVOKE",
+            effect="REQUIRE_PERMIT",
+            action={"equals": "invoke"},
+            resource={"risk_tier_gte": "MEDIUM"},
+            scope_type="SYSTEM",
+        ),
+        PolicyRule(
             id="system-mcp-side-effect-permit",
             decision_point="MCP_TOOL_INVOKE",
             effect="REQUIRE_PERMIT",

@@ -83,3 +83,6 @@ def test_preview_csp_allows_inline_styles() -> None:
     assert "style-src 'self' 'unsafe-inline'" in PREVIEW_CONTENT_SECURITY_POLICY
     assert "script-src 'self'" in PREVIEW_CONTENT_SECURITY_POLICY
     assert "script-src 'self' 'unsafe-inline'" not in PREVIEW_CONTENT_SECURITY_POLICY
+    # Runtime Preview injects <base href="/preview/runtime/.../">; CSP must allow it.
+    assert "base-uri 'self'" in PREVIEW_CONTENT_SECURITY_POLICY
+    assert "base-uri 'none'" not in PREVIEW_CONTENT_SECURITY_POLICY

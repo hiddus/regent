@@ -1742,6 +1742,166 @@ class MemoryImpactEdgeModel(Base):
     )
 
 
+class LearningUpdateModel(Timestamped, Base):
+    """Versioned, evidence-backed proposal to change later agent behaviour."""
+
+    __tablename__ = "learning_updates"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PROPOSED','APPLIED','REVOKED','EXPIRED')",
+            name="ck_learning_updates_status",
+        ),
+        CheckConstraint("ttl_seconds IS NULL OR ttl_seconds > 0", name="ck_learning_updates_ttl"),
+        UniqueConstraint(
+            "org_key",
+            "target_type",
+            "target_key",
+            "candidate_version",
+            name="uq_learning_updates_target_version",
+        ),
+        Index("ix_learning_updates_target", "org_key", "target_type", "target_key"),
+        Index("ix_learning_updates_status", "status", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    org_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    goal_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("goals.id", ondelete="SET NULL"))
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    candidate_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    before_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    after_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    applicability_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    invalidation_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    ttl_seconds: Mapped[int | None] = mapped_column(Integer)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rollback_update_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("learning_updates.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PROPOSED")
+    first_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class LearningUpdateApplicationModel(Base):
+    """Proof that a later consumer read and applied a LearningUpdate."""
+
+    __tablename__ = "learning_update_applications"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_update_id",
+            "consumer_type",
+            "consumer_ref",
+            name="uq_learning_update_application_consumer",
+        ),
+        Index("ix_learning_update_applications_update", "learning_update_id", "applied_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    learning_update_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("learning_updates.id", ondelete="CASCADE"), nullable=False
+    )
+    consumer_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    consumer_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    applied_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    read_context_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    applied_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class OrganizationExperimentModel(Timestamped, Base):
+    """Sandbox-only, versioned experiment over a typed organization mutation set."""
+
+    __tablename__ = "organization_experiments"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('SHADOW','EVALUATED','ADOPTED','REJECTED')",
+            name="ck_organization_experiments_status",
+        ),
+        CheckConstraint("version > 0", name="ck_organization_experiments_version"),
+        CheckConstraint(
+            "execution_mode = 'SANDBOX'", name="ck_organization_experiments_sandbox_only"
+        ),
+        UniqueConstraint(
+            "organization_id", "version", name="uq_organization_experiments_org_version"
+        ),
+        Index("ix_organization_experiments_goal_status", "goal_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_organization_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    candidate_topology_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    mutations_json: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    resource_lease_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="SANDBOX")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="SHADOW")
+    evaluation_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    candidate_organization_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True)
+    )
+    rollback_organization_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ExecutionEventModel(Base):
+    """Append-only durable execution fact, separate from UI progress events."""
+
+    __tablename__ = "execution_events"
+    __table_args__ = (
+        UniqueConstraint("event_key", name="uq_execution_events_event_key"),
+        UniqueConstraint("goal_id", "goal_sequence", name="uq_execution_events_goal_sequence"),
+        CheckConstraint("goal_sequence > 0", name="ck_execution_events_goal_sequence"),
+        Index("ix_execution_events_goal_replay", "goal_id", "goal_sequence"),
+        Index("ix_execution_events_run", "run_id", "created_at"),
+    )
+
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    event_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    parent_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("execution_events.event_id", ondelete="SET NULL")
+    )
+    causation_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("execution_events.event_id", ondelete="SET NULL")
+    )
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False
+    )
+    goal_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    work_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("works.id", ondelete="SET NULL"))
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    organization_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True)
+    )
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    permission_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    budget_reservation_ref: Mapped[str | None] = mapped_column(String(255))
+    model_version: Mapped[str | None] = mapped_column(String(255))
+    tool_versions_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PreemptionRecordModel(Base):
     __tablename__ = "preemption_records"
 
@@ -1865,6 +2025,62 @@ class BudgetEntryModel(Base):
     description: Mapped[str | None] = mapped_column(Text)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class BudgetAccountModel(Base):
+    """Atomic Goal-level counters used to enforce the hard budget."""
+
+    __tablename__ = "budget_accounts"
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), primary_key=True
+    )
+    spent_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reserved_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class BudgetReservationModel(Base):
+    """Hard budget hold acquired before a Run performs billable work."""
+
+    __tablename__ = "budget_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('RESERVED','CLAIMED','SETTLED','RELEASED')",
+            name="ck_budget_reservations_status",
+        ),
+        CheckConstraint("amount >= 0", name="ck_budget_reservations_amount_non_negative"),
+        CheckConstraint(
+            "settled_amount >= 0", name="ck_budget_reservations_settled_non_negative"
+        ),
+        UniqueConstraint("reservation_key", name="uq_budget_reservations_key"),
+        Index("ix_budget_reservations_goal_status", "goal_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    reservation_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
+    )
+    cost_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    settled_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    price_book_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="price-book-v1"
+    )
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 

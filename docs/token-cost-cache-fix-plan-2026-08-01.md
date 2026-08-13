@@ -10,7 +10,7 @@
 ## 1. 联合结论（一句话）
 
 **不是模型「不聪明」或项目「不常规」，而是每轮把易变 workspace 全文塞进 prompt 前缀，主动拆掉 prefix cache，导致 within-run 几乎全额重计费。**  
-必须先改消息布局止血，再压缩历史，再补 `cached_tokens` 观测；修完前建议 **维持 5% canary、不扩流量、不谈 GQ-4**。
+必须先改消息布局止血，再压缩历史，再补 `cached_tokens` 观测；修完前建议 **维持 canary=0% / gate=false（M6 已 CLAMPED，见 `docs/m6-canary-window-2026-08-01.json`）、不扩流量、不谈 GQ-4**。成稿时「维持 5%」已废止。
 
 ---
 
@@ -39,7 +39,7 @@
 1. **立刻（P0）**：改拼装顺序 + 去掉每轮全文 dump（成本止血，质量中性或更好）  
 2. **并行（P1）**：压缩 write_file 参数 / 强化 compact（降膨胀）  
 3. **并行（P0.5）**：解析并上报 cache 命中（决策可信）  
-4. **观察窗**：M6 保持 5%；成本护栏未过前 **禁止 EXPAND_10 / GQ-4**
+4. **观察窗**：M6 现为 CLAMPED（canary=0%）；成本护栏未过前 **禁止重新开窗 / EXPAND_10 / GQ-4**
 
 ### 2.4 成功指标（产品护栏）
 
@@ -57,10 +57,10 @@
 
 ### 2.5 对 M6 / GQ-4 的门禁建议
 
-- **现在**：保持 5% canary；日更探针增加粗成本字段（总 prompt_tokens）  
-- **P0 合入并验证前**：不扩 10%  
-- **P0+P1 达标且质量护栏未破**：才允许讨论 EXPAND_10  
-- **GQ-4（默认 agentic）**：本计划范围内 **明确不做**
+- **现在**：保持 canary=0% / gate=false（M6 CLAMPED；不得写成「保持 5%」）；日更探针增加粗成本字段（总 prompt_tokens）  
+- **P0 合入并验证前**：不重新开窗、不扩 10%  
+- **Offline Qual 出口 + P0+P1 达标且质量护栏未破**：才允许讨论新开 CANARY_5 / EXPAND_10  
+- **GQ-4（正式晋级 DecisionRecord）**：本计划范围内 **明确不做**（代码默认已是 agentic ≠ GQ-4）
 
 ---
 
@@ -181,7 +181,7 @@ flowchart LR
 
 1. 实现 P0-1…P0-5 + 单测  
 2. 本地/S0 soft-pass 与一次短 live 对比 token  
-3. sync 到 S0（不影响默认 artifact-backed；仅改善命中 agentic 的 run）  
+3. sync 到 S0（改善 agentic 路径 cache；`artifact-backed` 仅作 kill-switch / scaffold fallback，非现行代码默认）  
 4. 升级 M6 日更探针输出 cache/prompt 汇总  
 5. P1 压缩  
 6. 成本+质量双绿后，才进入观察窗「可考虑 EXPAND_10」讨论
@@ -194,7 +194,7 @@ flowchart LR
 - [ ] `cached_tokens` 可观测  
 - [ ] 单 turn prompt 中位数 ↓ ≥ 50%；长 run 总 input ↓ ≥ 40%  
 - [ ] soft-pass / 交付质量护栏未破  
-- [ ] M6 仍 5%；无 GQ-4；决策记录引用本计划
+- [ ] M6 已 clamp（percent=0）；无 GQ-4；决策记录引用本计划
 
 ---
 

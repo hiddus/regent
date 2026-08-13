@@ -1,10 +1,13 @@
-"""H3 prebury: Hive / ops goal_kind opt-in gates (not coding default)."""
+"""Multi-agent / Hive policy: multi-agent is the product default.
+
+Single-agent (Primary-only) requires an explicit opt-out on the goal.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-# Explicit product kinds that may enable Hive orchestration later.
+# Product kinds that historically mapped to ops Hive UX labels.
 OPS_GOAL_KINDS = frozenset({"ops", "scenic", "city", "operations", "hive"})
 
 
@@ -14,16 +17,25 @@ def get_goal_kind(metadata: dict[str, Any] | None) -> str:
     return str(raw).strip().lower() or "coding"
 
 
-def hive_opt_in_allowed(metadata: dict[str, Any] | None) -> bool:
-    """True only when goal explicitly opts into ops Hive (H3 gate)."""
+def force_single_agent(metadata: dict[str, Any] | None) -> bool:
+    """True only when the goal explicitly opts out of multi-agent / Hive."""
     meta = dict(metadata or {})
-    if meta.get("hive_enabled") is True:
+    if meta.get("force_single_agent") is True:
         return True
-    if meta.get("enable_hive") is True:
+    if meta.get("single_agent_only") is True:
         return True
-    return get_goal_kind(meta) in OPS_GOAL_KINDS
+    if meta.get("hive_enabled") is False:
+        return True
+    if meta.get("enable_hive") is False:
+        return True
+    return False
+
+
+def hive_opt_in_allowed(metadata: dict[str, Any] | None) -> bool:
+    """True when multi-agent / Hive orchestration is allowed (default on)."""
+    return not force_single_agent(metadata)
 
 
 def coding_default_is_primary(metadata: dict[str, Any] | None) -> bool:
-    """Coding path must remain Primary Agent unless opt-in."""
-    return not hive_opt_in_allowed(metadata)
+    """True only when explicitly forced to a single Primary Agent."""
+    return force_single_agent(metadata)

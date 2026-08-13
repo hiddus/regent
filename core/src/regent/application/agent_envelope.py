@@ -84,6 +84,7 @@ class AgentEnvelope:
         *,
         reduced_scope: frozenset[str] | None = None,
         additional_permits: list[str] | None = None,
+        delegated_permits: list[str] | None = None,
         content: dict[str, Any] | None = None,
         hmac_secret: bytes | None = None,
     ) -> AgentEnvelope:
@@ -101,9 +102,14 @@ class AgentEnvelope:
                 f"parent scope {parent_scope}"
             )
 
-        permits = list(self.permit_refs)
+        # Permit references are authorization, not ordinary context. Never
+        # copy a parent's bearer reference into a child envelope.
         if additional_permits:
-            permits.extend(additional_permits)
+            raise ValueError(
+                "raw additional_permits are forbidden; use purpose-bound "
+                "delegated_permits"
+            )
+        permits = list(delegated_permits or [])
 
         return create_envelope(
             self.dest_agent,

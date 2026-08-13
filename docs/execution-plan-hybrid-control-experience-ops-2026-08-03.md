@@ -1,7 +1,7 @@
 # 混合落地方案：控制面先行 × 体验面跟上 × 运营面远期
 
 **日期**：2026-08-03  
-**状态**：H0–H2 LANDED — 控制面 + 体验面 + 只读时间线已落地；H3 Hive 仅 opt-in 预埋（编码默认仍 Primary）  
+**状态**：H0–H2 LANDED — 控制面 + 体验面 + 只读时间线已落地；H3 Hive 预埋已接线，**代码默认 `aar1_certified_hive=True`**（可按 Goal/env 退出；自适应拓扑仍 GQ-5 门禁）  
 **DecisionNote**：[`decision-note-hybrid-h0-control-plane-2026-08-03.md`](decision-note-hybrid-h0-control-plane-2026-08-03.md)  
 **立场修正**：调研文档将 Hive / 甘特 / 流式·事件 / Ask-vs-Act 标为「缓做」；**长远仍要**。本方案把它们纳入**同一产品叙事的分期混合路径**，而不是永久砍掉。  
 **依据**：
@@ -236,7 +236,7 @@ ExecutionPlanItem
 2. H0 预埋是否足够让 H1 不翻 schema？  
 3. Act 是否仍保留 Abort + 删除询问 + A0？  
 4. 甘特是否只是 Plan 投影？  
-5. Hive 是否可能成为编码默认路径？（答案必须为否，除非显式 opt-in）
+5. Hive 是否可能静默成为「无出口的自由拓扑」？（答案必须为否；固定 Hive 可默认，自适应拓扑须 GQ-5 / DecisionRecord）
 
 ---
 

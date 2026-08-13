@@ -32,7 +32,7 @@
 | 项 | 状态 | 影响 |
 |---|---|---|
 | 流式输出 / MCP / 并行 gather | `P2 = DEFERRED` | 控制台无法逐字显示，模型输出必须等整轮结束 |
-| 生产流量 | `canary_percent=0`、`canary_gate=false`、默认 `artifact-backed` | **Agent 内核在生产仍是 0 流量**，DOGFOOD 只是资格态 |
+| 生产流量 | `canary_percent=0`、`canary_gate=false`；代码默认 `generation_strategy=agentic`（`artifact-backed`=fallback） | **canary 流量仍是 0%**（M6 CLAMPED）；DOGFOOD 只是资格态，不等于 GQ-4 |
 | Web 一等公民工具 | 未做 | 50 个验证目标中前 28 个依赖网络获取，仍靠 `curl` 白名单绕行 |
 
 ## A.3 门禁欠账：6 项测试失败

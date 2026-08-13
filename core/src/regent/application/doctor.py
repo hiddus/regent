@@ -18,6 +18,7 @@ def run_doctor(
     delivery_review_seeded: bool | None = None,
     canary_percent: float | None = None,
     settings_summary: dict[str, Any] | None = None,
+    host_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
 
@@ -55,6 +56,19 @@ def run_doctor(
     else:
         add("worker", True, "hint not supplied (check process separately)")
 
+    if host_summary is not None:
+        unhealthy = bool(host_summary.get("unhealthy"))
+        reasons = host_summary.get("reasons") or []
+        res = host_summary.get("resources") or {}
+        detail = (
+            f"unhealthy={unhealthy} disk={res.get('disk_percent')}% "
+            f"mem={res.get('mem_percent')}% load1={res.get('load1')} "
+            f"venvs={res.get('preview_venv_count')} reasons={reasons[:3]}"
+        )
+        add("host_resources", not unhealthy, detail)
+    else:
+        add("host_resources", True, "not probed")
+
     settings = dict(settings_summary or {})
     # Never include secrets.
     redacted = {
@@ -70,4 +84,5 @@ def run_doctor(
         "ok": ok_all,
         "checks": checks,
         "settings_redacted": redacted,
+        "host": host_summary,
     }

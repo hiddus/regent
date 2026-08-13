@@ -271,7 +271,15 @@ class ContextAssembler:
         lessons = list(acceptance.get("failure_lessons") or [])
         constraints = list(acceptance.get("learned_constraints") or [])
         envelopes = list(acceptance.get("failure_envelopes") or [])
+        qa_failures = list(
+            acceptance.get("live_preview_qa_failures")
+            or self._plan.get("live_preview_qa_failures")
+            or []
+        )
         lines = ["══════ RECENT FAILURES ══════"]
+        if qa_failures:
+            lines.append("Live preview QA concrete failures (fix these first — do not ignore):")
+            lines.extend(f"  - {item}" for item in qa_failures[:8])
         resume_brief = str(acceptance.get("session_resume_brief") or "").strip()
         if resume_brief:
             lines.append(f"Session resume: {resume_brief}")
@@ -299,13 +307,23 @@ class ContextAssembler:
                 stage = env.get("stage") or env.get("failure_stage") or "?"
                 summary = (
                     env.get("summary")
+                    or env.get("error_summary")
                     or env.get("error")
                     or env.get("message")
                     or env.get("detail")
                     or ""
                 )
                 lines.append(f"  - stage={stage}: {str(summary)[:400]}")
-                for key in ("stderr", "stdout", "log_tail", "evidence"):
+                evidence = env.get("evidence") if isinstance(env.get("evidence"), dict) else {}
+                for fail in list(evidence.get("concrete_failures") or [])[:4]:
+                    lines.append(f"      concrete: {str(fail)[:400]}")
+                for check in list(evidence.get("failed_checks") or [])[:4]:
+                    if not isinstance(check, dict):
+                        continue
+                    lines.append(
+                        f"      check={check.get('name')}: {str(check.get('detail') or '')[:400]}"
+                    )
+                for key in ("stderr", "stdout", "log_tail"):
                     blob = env.get(key)
                     if isinstance(blob, str) and blob.strip():
                         lines.append(f"      {key}: {blob.strip()[:600]}")
@@ -323,8 +341,16 @@ class ContextAssembler:
                     f"  - lesson={digest} gap_kind={kind} method={method} "
                     f"attempt={lesson.get('attempt')}"
                 )
+                avoid = str(lesson.get("avoid") or "").strip()
+                if avoid:
+                    lines.append(f"      avoid: {avoid[:400]}")
+                last_err = str(lesson.get("last_error") or "").strip()
+                if last_err:
+                    lines.append(f"      last_error: {last_err[:400]}")
                 for reason in list(lesson.get("gap_reasons") or [])[:4]:
                     lines.append(f"      gap: {reason}")
+                for constraint in list(lesson.get("learned_constraints") or [])[:4]:
+                    lines.append(f"      must: {constraint}")
         for gap in self._gaps[:8]:
             lines.append(f"[{gap.code}] {gap.detail}")
             if gap.artifact_snippet:

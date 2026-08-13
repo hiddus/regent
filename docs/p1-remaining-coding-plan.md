@@ -1,14 +1,20 @@
 # Regent P1 / G0 剩余任务核对清单
 
-> 状态：ACTIVE / 唯一编码执行清单（对齐 `REGENT-DEFINITION-1.0`）  
+> 状态：**SUPERSEDED（历史执行清单，2026-08-11 标注）**  
 > 日期：2026-07-22  
-> 永久定义：`docs/definitions/REGENT-DEFINITION-1.0.txt`（`REGENT-DEFINITION-1.0`，不得改写）  
+> 当时的永久定义：`docs/definitions/REGENT-DEFINITION-1.0.txt`（已被 2.0、再被 3.0 取代）  
+>
+> ⚠️ 本文是定义 1.0 时期的 P1/G0 核对清单，**不是现行编码执行清单**：
+> 现行唯一编码执行清单是 [`../Regent-Plan.md`](../Regent-Plan.md)，现行唯一规范定义源是
+> [`definitions/REGENT-DEFINITION-3.0.txt`](definitions/REGENT-DEFINITION-3.0.txt)。
+> 下文的"恒定属性"表是 1.0 的 7 条属性，已被 3.0 的 9 条取代；其中"默认单 Agent / 本阶段不扩多 Agent /
+> 禁止默认多 Agent"等条目按 3.0 ATTRIBUTE_4/7 只约束**生产默认与现实权限扩大**，不约束沙箱内的候选拓扑与组织试验。  
 > 产品/验收：`Regent-PRD.md` §6 Graduation 矩阵  
 > 技术合同：`Regent-Technical-Spec.md` + `docs/appendices/*`  
 > 平台路线：`docs/p2-platform-plan.md`  
 > 测量：`Regent-Measurement-Decision-Framework.md`（P2-4，非本阶段开工）
 
-## 0. 总判（相对锁死定义）
+## 0. 总判（相对当时锁死的定义，已被 3.0 取代）
 
 ```text
 REGENT-DEFINITION-1.0 = 接收自然语言 Goal，在边界内自治解释与补齐能力，
@@ -16,7 +22,7 @@ REGENT-DEFINITION-1.0 = 接收自然语言 Goal，在边界内自治解释与补
 直至成功 / 耗尽 / 失败 / 取消。
 ```
 
-| 定义恒定属性 | 当前实现 | 本阶段任务 | 不得做 |
+| 定义恒定属性（1.0，已被 3.0 取代） | 当时实现 | 当时阶段任务 | 当时不得做 |
 |---|---|---|---|
 | 1 Goal 驱动 | Start→主链已通；GoalSpec 为解释结果 | G1：≥3 未知 Goal | 要求用户先写完整 PRD |
 | 2 边界内自治 | Permit/Lease 部分存在 | **G0 ExternalOperation** 原子派发与对账 | 无限权限、无 Permit 副作用 |
@@ -75,7 +81,7 @@ A…I 已完成 → J. p2-scheduler-01  ← 当前
 - Core 内置产品级 RSS/垂直业务模型；
 - API 注入 activation / 伪 Observation 充当 G6/G7；
 - 单次 Journey 或单用户宣布产品毕业；
-- 修改 `REGENT-DEFINITION-1.0` 文案以迁就实现。
+- 修改当时的冻结定义 `REGENT-DEFINITION-1.0` 文案以迁就实现（现行等价约束：不得改写 `REGENT-DEFINITION-3.0`）。
 
 ### 2.2 延后（有前置）
 
@@ -83,8 +89,8 @@ A…I 已完成 → J. p2-scheduler-01  ← 当前
 |---|---|
 | P2-1 Scheduler | G0+G8+双层 Graduation+P2Start+文档 CURRENT |
 | P2-3 Memory 全闭环 | SYSTEM 毕业后按路线 |
-| P2-4 Eval Harness | Measurement Framework；先于自适应组织 |
-| P2-5 自适应组织 | P2-4 统计 Gate 正净收益 |
+| P2-4 Eval Harness | Measurement Framework；投入顺序上先于自适应组织的**生产晋级** |
+| P2-5 自适应组织**扩大现实生产权限 / 晋级生产默认** | P2-4 统计 Gate 正净收益。沙箱内的候选拓扑提出与组织试验按定义 3.0 ATTRIBUTE_2/7 默认开放，不受本前置约束（`Regent-Plan.md` §0.1/§1.1） |
 | 多 Runtime / 生产发布 / 自我改进 / 能力市场 | 按 PRD §8 顺序 |
 
 ---
@@ -168,7 +174,7 @@ A…I 已完成 → J. p2-scheduler-01  ← 当前
 | 产品证据规模不足却毕业 | 阻塞 | 严格执行 G6/G7 |
 | 执行清单与旧 R1–R11 双源 | 高 | 以本文+PRD v2 为准 |
 | 提前 Scheduler | 阻塞 | 无 P2StartDecisionRecord 不开工 |
-| 定义被阶段文案替换 | 阻塞 | 只引用 REGENT-DEFINITION-1.0 |
+| 定义被阶段文案替换 | 阻塞 | 只引用当时的 REGENT-DEFINITION-1.0（现行：只引用 REGENT-DEFINITION-3.0） |
 
 ---
 

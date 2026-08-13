@@ -53,14 +53,14 @@
 
 | 旋钮 | 代码默认 | 含义 |
 |---|---|---|
-| `REGENT_GENERATION_STRATEGY` | `artifact-backed` | 运行时默认生成策略 |
+| `REGENT_GENERATION_STRATEGY` | `agentic` | 代码默认生成策略；`artifact-backed` 为 kill-switch / scaffold fallback |
 | `REGENT_GENERATION_STRATEGY_CANARY_PERCENT` | `0` | canary 流量比例；0 = 不开流量 |
 | `REGENT_GENERATION_STRATEGY_CANARY_GATE` | `False` | GQ-2 闭环验证后才允许 canary |
 | `REGENT_GENERATION_STRATEGY_KILL_SWITCH` | `False` | 强制新 Run 回落 fallback |
 
 - **运维可覆盖**：生产 `.env` 可设 `REGENT_GENERATION_STRATEGY=agentic` 作为运维侧运行时覆盖；这**不等于** GQ-4 已正式晋级（晋级仍须 `apply_gq4_promotion` + DecisionRecord）。
 - **部署约束**：`ops/deploy_console.py` / `ops/sync_local_to_server.py` **不得擅自改写**生产策略；除非 DecisionRecord 明确要求，保持服务器现有 `.env` 原值。
-- Hive：生产既有 `REGENT_AAR1_CERTIFIED_HIVE` opt-in **保持不扩容**（GQ-5 未开）。
+- Hive：`REGENT_AAR1_CERTIFIED_HIVE` **代码默认 True**；GQ-5 前不扩容自适应拓扑（生产既有配置保持不扩容）。
 
 ## 六、仍属后续交付（非阻塞）
 

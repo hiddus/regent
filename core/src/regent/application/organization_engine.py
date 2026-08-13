@@ -311,16 +311,21 @@ class OrganizationEngine:
         """Pure decision pipeline used by dual-write shadow and enforce paths.
 
         When ``preferred_template_id`` is feasible it wins over utility argmax
-        (used for opt-in certified hive; does not invent free-form topologies).
+        (used for default certified hive; does not invent free-form topologies).
 
-        When ``task_features`` is provided, OrganizationSpace is pruned first
-        (PRD §10.1); prune hits are recorded on the decision JSON.
+        When ``task_features`` is provided, OrganizationSpace keeps all candidates
+        admitted for sandbox / exploration (PRD §10.1). Frozen rules may demote
+        multi-agent topologies only for production-default recommendation scoring;
+        demotion hits are recorded on the decision JSON. A preferred certified
+        template missing from the working set is still force-re-admitted so product
+        default multi-agent is not silently lost.
         """
         from regent.application.member_contract import enrich_topology_with_member_contracts
         from regent.application.task_features import TaskFeatures, prune_organization_space
 
         rules = rules or default_system_rules()
         prune_meta: dict[str, Any] | None = None
+        demotion_penalties: dict[str, float] = {}
         working = list(templates)
         if task_features is not None:
             features = (
@@ -329,8 +334,34 @@ class OrganizationEngine:
                 else TaskFeatures.model_validate(task_features)
             )
             pruned = prune_organization_space(working, features)
-            working = pruned.admitted
+            # Exploration space: admit demoted multi-agent candidates (do not drop).
+            working = list(pruned.admitted)
             prune_meta = pruned.as_dict()
+            demotion_penalties = dict(pruned.demotion_penalties)
+            if preferred_template_id:
+                admitted_ids = {
+                    str(
+                        c.get("template_id")
+                        or c.get("name")
+                        or (c.get("topology_json") or {}).get("template_id")
+                        or ""
+                    )
+                    for c in working
+                }
+                if preferred_template_id not in admitted_ids:
+                    for tmpl in templates:
+                        tid = str(
+                            tmpl.get("template_id")
+                            or tmpl.get("name")
+                            or (tmpl.get("topology_json") or {}).get("template_id")
+                            or ""
+                        )
+                        if tid == preferred_template_id:
+                            working.append(dict(tmpl))
+                            prune_meta["preferred_force_admitted"] = [
+                                preferred_template_id
+                            ]
+                            break
 
         scored: list[tuple[str, PredictedUtility, FeasibilityReport, dict[str, Any]]] = []
         candidate_reports: list[dict[str, Any]] = []
@@ -363,6 +394,7 @@ class OrganizationEngine:
                             "r": "UNKNOWN",
                             "feasible": False,
                             "predicted_utility": None,
+                            "utility_components": {},
                             "reason_codes": [
                                 "TEMPLATE_CERTIFICATION_INVALID",
                                 certification.reason,
@@ -404,22 +436,56 @@ class OrganizationEngine:
                 ]
                 or None,
             )
+            # Production-default recommendation demotion only — candidate stays
+            # in exploration space / candidate reports.
+            demotion_penalty = float(demotion_penalties.get(template_name) or 0.0)
+            if demotion_penalty <= 0.0:
+                demotion_penalty = float(
+                    tmpl.get("production_default_demotion_penalty") or 0.0
+                )
+            if demotion_penalty > 0.0:
+                adjusted_value = round(max(0.0, util.value - demotion_penalty), 4)
+                util = PredictedUtility(
+                    value=adjusted_value,
+                    components={
+                        **util.components,
+                        "production_default_demotion": round(-demotion_penalty, 4),
+                    },
+                    weights=util.weights,
+                    policy_version=util.policy_version,
+                    interval=(
+                        round(max(0.0, adjusted_value - 0.05), 4),
+                        round(min(1.0, adjusted_value + 0.05), 4),
+                    ),
+                    missing_value_policy=util.missing_value_policy,
+                    rationale=(
+                        f"{util.rationale}; production_default_demotion="
+                        f"-{demotion_penalty}"
+                    ),
+                )
             # High utility but failed C/V/R must not enter F_t
             scored.append((template_name, util, report, topology))
-            candidate_reports.append(
-                {
-                    "template_id": template_name,
-                    "c": report.c,
-                    "v": report.v,
-                    "r": report.r,
-                    "feasible": report.feasible,
-                    "predicted_utility": util.value,
-                    "utility_components": util.components,
-                    "utility_interval": list(util.interval),
-                    "reason_codes": report.reason_codes,
-                    "policy_outcome": policy_result.outcome.value,
-                }
-            )
+            report_row: dict[str, Any] = {
+                "template_id": template_name,
+                "c": report.c,
+                "v": report.v,
+                "r": report.r,
+                "feasible": report.feasible,
+                "predicted_utility": util.value,
+                "utility_components": util.components,
+                "utility_interval": list(util.interval),
+                "reason_codes": report.reason_codes,
+                "policy_outcome": policy_result.outcome.value,
+            }
+            if demotion_penalty > 0.0:
+                report_row["production_default_demotion_penalty"] = demotion_penalty
+                report_row["production_default_demotions"] = list(
+                    tmpl.get("production_default_demotions") or []
+                )
+                report_row["not_recommended_for_production_default"] = bool(
+                    tmpl.get("not_recommended_for_production_default")
+                )
+            candidate_reports.append(report_row)
 
         selected = select_feasible_argmax(scored)
         if preferred_template_id:
@@ -498,18 +564,37 @@ class OrganizationEngine:
         preferred_template_id: str | None = None,
         task_features: Any | None = None,
     ) -> OrganizationDecisionBundle:
+        from regent.application.aar1_contract import CERTIFIED_HIVE_TEMPLATE_ID
+        from regent.application.member_contract import (
+            compute_template_certification,
+            enrich_topology_with_member_contracts,
+        )
+
         templates = await self.list_certified_templates(session)
-        tmpl_payloads = [
-            {
-                "name": t.name,
-                "semantic_version": t.semantic_version,
-                "topology_json": {
-                    **dict(t.topology_json),
-                    "template_id": t.topology_json.get("template_id") or t.name,
-                },
+        tmpl_payloads: list[dict[str, Any]] = []
+        for t in templates:
+            topo = {
+                **dict(t.topology_json or {}),
+                "template_id": (t.topology_json or {}).get("template_id") or t.name,
             }
-            for t in templates
-        ]
+            tid = str(topo.get("template_id") or t.name)
+            semver = str(t.semantic_version or "1.0.0")
+            # Refresh hive certification at decide-time so stale DB digests
+            # cannot fail-closed the whole organize persist path.
+            if tid == CERTIFIED_HIVE_TEMPLATE_ID or t.name == CERTIFIED_HIVE_TEMPLATE_ID:
+                topo = enrich_topology_with_member_contracts(topo)
+                topo["template_certification"] = compute_template_certification(
+                    template_id=CERTIFIED_HIVE_TEMPLATE_ID,
+                    semantic_version=semver,
+                    topology={k: v for k, v in topo.items() if k != "template_certification"},
+                ).as_dict()
+            tmpl_payloads.append(
+                {
+                    "name": t.name,
+                    "semantic_version": semver,
+                    "topology_json": topo,
+                }
+            )
         if not tmpl_payloads:
             # Champion fallback when templates table empty (dev / pre-seed).
             tmpl_payloads = [
@@ -522,8 +607,8 @@ class OrganizationEngine:
                     },
                 }
             ]
-        # Default champion is single-agent via utility; preferred_template_id
-        # (certified hive opt-in) overrides when that candidate is feasible.
+        # Product default prefers certified hive when feasible; utility still
+        # ranks candidates when preferred is absent or infeasible.
         bundle = self.evaluate_candidates(
             tmpl_payloads,
             available_capabilities=available_capabilities,
@@ -595,8 +680,8 @@ class OrganizationEngine:
                     status=status,
                     generation_method="CERTIFIED_TEMPLATE",
                     generator_version=GENERATOR_VERSION,
-                    predicted_utility=cand["predicted_utility"],
-                    utility_components_json=cand["utility_components"],
+                    predicted_utility=cand.get("predicted_utility"),
+                    utility_components_json=cand.get("utility_components") or {},
                 )
             )
             check_rows.append((cand_id, cand))

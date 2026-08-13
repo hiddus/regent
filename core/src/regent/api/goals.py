@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
 
 from regent.application.goal_execution_service import GoalExecutionReceipt, GoalExecutionService
+from regent.application.goal_charter import GoalCharter
 from regent.application.goal_interpreter import GoalInterpreter
 from regent.application.goal_service import CreateGoal, GoalService
 from regent.application.organization_service import OrganizationReceipt, OrganizationService
@@ -23,6 +24,7 @@ class CreateGoalRequest(BaseModel):
     explicit_constraints: dict[str, Any] = Field(default_factory=dict)
     success_criteria: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    goal_charter: GoalCharter | None = None
 
 
 class InterpretGoalRequest(BaseModel):
@@ -86,7 +88,12 @@ def _response(goal: Any) -> GoalResponse:
 
 @router.post("", response_model=GoalResponse, status_code=status.HTTP_201_CREATED)
 async def create_goal(payload: CreateGoalRequest, service: GoalServiceDep) -> GoalResponse:
-    goal = await service.create(CreateGoal(**payload.model_dump()))
+    data = payload.model_dump(exclude={"goal_charter"})
+    metadata = dict(data.get("metadata") or {})
+    if payload.goal_charter is not None:
+        metadata["goal_charter"] = payload.goal_charter.model_dump()
+    data["metadata"] = metadata
+    goal = await service.create(CreateGoal(**data))
     return _response(await service.get(goal.id))
 
 
@@ -131,6 +138,18 @@ async def get_goal(goal_id: uuid.UUID, service: GoalServiceDep) -> GoalResponse:
 async def start_goal(
     goal_id: uuid.UUID, payload: StartGoalRequest, request: Request
 ) -> GoalExecutionReceipt:
+    goal = await GoalService(request.app.state.sessions).get(goal_id)
+    metadata = dict(goal.metadata_json or {})
+    if bool(metadata.get("commercial_pilot")):
+        raw_charter = metadata.get("goal_charter")
+        charter = GoalCharter.model_validate(raw_charter or {})
+        if not charter.permits_commercial_start():
+            from regent.domain.errors import DomainError, ErrorCode
+
+            raise DomainError(
+                ErrorCode.POLICY_DENIED,
+                "commercial pilot requires a confirmed Goal Charter",
+            )
     return await GoalExecutionService(request.app.state.sessions).start(
         goal_id, actor=payload.actor, idempotency_key=payload.idempotency_key
     )
@@ -875,3 +894,42 @@ async def get_goal_agents(goal_id: uuid.UUID, request: Request) -> list[dict[str
             by_id[str(row["id"])] = row
         return list(by_id.values())
     return runtime
+
+
+@router.get("/{goal_id}/delivery-roles")
+async def get_goal_delivery_roles(
+    goal_id: uuid.UUID, request: Request
+) -> dict[str, Any]:
+    """Product/Tech/Test/UX/Ops delivery Agents + framework fix plan for a Goal.
+
+    Self-supplements the roster from Goal signals. Surfaces durable bindings,
+    Swarm receipts, follow-up roles, and the multi-role repair plan.
+    """
+    from regent.application.delivery_framework_fix import framework_fix_plan
+    from regent.application.delivery_role_agents import delivery_role_catalog
+    from regent.infrastructure.models import GoalModel
+
+    async with request.app.state.sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return {"ok": False, "error": "goal not found"}
+        meta = dict(goal.metadata_json or {})
+        goal_input = str(goal.original_input or "")
+    catalog = delivery_role_catalog(goal_input=goal_input, metadata=meta)
+    plan = meta.get("delivery_framework_plan") or framework_fix_plan(
+        goal_input=goal_input, metadata=meta
+    )
+    return {
+        "ok": True,
+        "goal_id": str(goal_id),
+        "catalog": catalog,
+        "framework_plan": plan,
+        "roster": meta.get("delivery_role_roster") or catalog.get("selected_roles"),
+        "bindings": meta.get("delivery_role_bindings") or {},
+        "swarm": meta.get("delivery_role_swarm"),
+        "followup": meta.get("delivery_role_followup"),
+        "task_receipts": meta.get("delivery_role_task_receipts"),
+        "evolution": meta.get("delivery_role_evolution"),
+        "template_id": meta.get("delivery_roles_template")
+        or catalog.get("delivery_roles_template"),
+    }

@@ -3,7 +3,7 @@
 > 状态：ACTIVE  
 > 日期：2026-07-23  
 > 准入：`docs/P2StartDecisionRecord.json` = PASSED  
-> 定义：`REGENT-DEFINITION-1.0`（不得改写）  
+> 定义：`REGENT-DEFINITION-3.0`（现行唯一规范源，不得改写；本文成稿时的基线是已被取代的 `REGENT-DEFINITION-1.0`）  
 > 基线：PRD / Tech Spec / 附录 = CURRENT
 
 ## 承诺范围（PRD §8）
@@ -36,7 +36,7 @@
 
 ## 禁止（仍有效）
 
-- 无 P2-4 Eval DecisionRecord 前默认多 Agent / 自适应组织
+- 无 P2-4 Eval DecisionRecord 前把多 Agent / 自适应组织设为**生产默认**或让其继承不可逆现实权限（沙箱内的候选试验默认开放，见定义 3.0 ATTRIBUTE_2/7）
 - 跳过 G0 约束做不可审计副作用
 
 ## 结论

@@ -32,6 +32,24 @@ def _disable_agent_loop_exit_for_ladder_tests(monkeypatch: pytest.MonkeyPatch) -
     )
 
 
+def test_classify_navigation_before_presentation() -> None:
+    assert (
+        classify_delivery_gap_kind(
+            [
+                "PREVIEW_PRODUCT_QA_FAILED: preview-internal-nav: "
+                "/crosswalks/US-SG → 404/text/html"
+            ]
+        )
+        == "navigation"
+    )
+    assert (
+        classify_delivery_gap_kind(
+            ["stylesheet-present: missing", "preview-internal-nav: detail/nav 1/2"]
+        )
+        == "navigation"
+    )
+
+
 def test_classify_presentation_before_evidence() -> None:
     assert (
         classify_delivery_gap_kind(
@@ -765,6 +783,38 @@ async def test_recover_routes_presentation_to_product_surface() -> None:
         goal.metadata_json["capability_resolution"]["primary_capability"]
         == PRODUCT_SURFACE_NAME
     )
+
+
+def test_build_learned_constraints_absorb_nav_404() -> None:
+    from regent.application.delivery_gap_recovery import (
+        build_failure_lesson,
+        build_learned_constraints,
+    )
+
+    reasons = [
+        "PREVIEW_PRODUCT_QA_FAILED: preview-internal-nav: "
+        "http://x/preview/runtime/a/crosswalks/US-SG → 404/text/html"
+    ]
+    constraints = build_learned_constraints("navigation", reasons)
+    assert any("broken in-app links" in c.lower() or "404" in c for c in constraints)
+    assert any("/crosswalks/US-SG" in c for c in constraints)
+    assert not any(
+        "substantial css" in c.lower() and "broken" not in c.lower() for c in constraints
+    )
+
+    lesson = build_failure_lesson(
+        gap_reasons=reasons,
+        gap_kind="navigation",
+        method="REUSE",
+        attempt=2,
+        halt_context={
+            "stage": "PREVIEW_PRODUCT_QA_FAILED",
+            "last_error": reasons[0],
+        },
+        goal_text="crosswalk compliance site",
+    )
+    assert lesson["gap_kind"] == "navigation"
+    assert "US-SG" in lesson["last_error"] or "US-SG" in str(lesson["gap_reasons"])
 
 
 def test_build_failure_lesson_and_constraints_absorb_deploy_gap() -> None:

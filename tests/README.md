@@ -7,13 +7,13 @@ Regent 的三层测试体系，全部由根 `pyproject.toml` 的 `[tool.pytest.i
 
 - `tests/architecture/` — **架构边界与约束**
   - `test_dependency_boundaries.py`：依赖方向边界检查（断言 `domain` 不依赖 fastapi / sqlalchemy / `regent.api` / `regent.infrastructure`）— ✅ 有效
-  - `test_regent_definition_freeze.py`：永久定义防漂移（对照 `docs/definitions/REGENT-DEFINITION-1.0.*`）— ✅ 有效（F-2 已闭环）
+  - `test_regent_definition_freeze.py`：永久定义防漂移（对照现行规范源 `docs/definitions/REGENT-DEFINITION-3.0.*`；1.0/2.0 仅作被取代版本参与查重）— ✅ 有效（F-2 已闭环）。除 ID/哈希漂移外还守：正文不得被复制成第二规范源、现行文档（含 `regent-pptx/*.html`）不得复述被取代的定义正文、已退役规范句必须带历史标注、代码与现行文档不得把被取代的定义 ID 当规范源引用
 - `tests/integration/` — **端到端集成测试**
   - `test_scheduler_checkpoint.py` / `test_scheduler_e2e.py`：调度与检查点
   - `test_health_api.py`：健康端点
   - `test_csv_summary_baseline.py` / `test_evt_parser_gap.py`：评测基线 / 事件解析缺口（P0 验收项）
   - `test_experiment_platform.py`：实验平台（**P2-6 候选特性**，非已验收项）
-  - `test_adaptive_organization.py`：自适应组织（**P2-5 条件承诺**，默认 `ROLLOUT_NOT_ALLOWED`）
+  - `test_adaptive_organization.py`：自适应组织（**P2-5 条件承诺**；`ROLLOUT_NOT_ALLOWED` 仅指生产 rollout 门禁，沙箱候选试验按定义 3.0 ATTRIBUTE_7 默认开放）
   - `test_eval_harness_e2e.py`：Eval 工具链（**P2-4 承诺项**）
 - `tests/unit/` — **单元测试**，按分层组织：`agent/`、`api/`、`application/`、`domain/`、`infrastructure/`、`model/`、`ops/`、`runtime/`，以及 `test_config.py` / `test_console.py` / `test_worker.py`。
 

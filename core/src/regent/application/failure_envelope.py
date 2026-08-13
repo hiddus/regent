@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import FailureEnvelopeModel, RepairAttemptModel
 
-FailureStage = Literal["build", "test", "smoke", "verification", "generation"]
+FailureStage = Literal[
+    "build", "test", "smoke", "verification", "generation", "preview_product_qa"
+]
 RepairStatus = Literal[
     "REQUESTED", "RUNNING", "SUCCEEDED", "FAILED", "EXHAUSTED", "HANDED_OFF"
 ]
@@ -51,6 +53,12 @@ STAGE_REPAIR_POLICY: dict[str, dict[str, Any]] = {
         "human_handoff_on_exhaust": True,
         # TRANSCRIPT_PERSIST_FAILED is intentionally NOT non-retryable (CD-7.5 / N-6).
     },
+    "preview_product_qa": {
+        "max_attempts": 2,
+        "timeout_seconds": 900,
+        "non_retryable_codes": ("POLICY_DENIED",),
+        "human_handoff_on_exhaust": True,
+    },
 }
 
 MAX_ERROR_SUMMARY_CHARS = 4_000
@@ -84,6 +92,36 @@ def clip_error_summary(text: str) -> str:
     if len(text) <= MAX_ERROR_SUMMARY_CHARS:
         return text
     return text[: MAX_ERROR_SUMMARY_CHARS - 20] + "\n…[truncated]"
+
+
+def _clip_evidence_for_feedback(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Shrink QA/build evidence so regenerators see concrete failing checks."""
+    raw = dict(payload or {})
+    if not raw:
+        return {}
+    out: dict[str, Any] = {}
+    if raw.get("summary"):
+        out["summary"] = str(raw.get("summary"))[:400]
+    if raw.get("failed_gaps"):
+        out["failed_gaps"] = list(raw.get("failed_gaps") or [])[:12]
+    if raw.get("concrete_failures"):
+        out["concrete_failures"] = [
+            str(item)[:400] for item in list(raw.get("concrete_failures") or [])[:8]
+        ]
+    checks = list(raw.get("checks") or [])
+    failed_checks = [
+        {
+            "name": str(c.get("name") or ""),
+            "detail": str(c.get("detail") or "")[:400],
+        }
+        for c in checks
+        if isinstance(c, dict) and not c.get("passed")
+    ][:8]
+    if failed_checks:
+        out["failed_checks"] = failed_checks
+    if raw.get("error"):
+        out["error"] = str(raw.get("error"))[:400]
+    return out
 
 
 def is_non_retryable(stage: str, error_code: str | None) -> bool:
@@ -251,6 +289,9 @@ class FailureEnvelopeService:
                     "error_summary": row.error_summary,
                     "evidence_artifact_uri": row.evidence_artifact_uri,
                     "created_at": row.created_at.isoformat() if row.created_at else None,
+                    # Keep failed-check details so regenerators absorb concrete 404s
+                    # instead of only the abstract error_code.
+                    "evidence": _clip_evidence_for_feedback(row.evidence_payload),
                 }
                 for row in rows
             ]

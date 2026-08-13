@@ -148,7 +148,13 @@ class AgentLifecycleService:
             await self.transition_spec_version(
                 session, row.id, to_status="CERTIFIED", actor=actor, reason="certified"
             )
+            # transition_spec_version flushes; refresh now sees CERTIFIED.
             await session.refresh(row)
+            if row.status != "CERTIFIED":
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    f"spec version certify did not stick (status={row.status})",
+                )
         return row
 
     async def transition_spec_version(
@@ -185,6 +191,9 @@ class AgentLifecycleService:
             if self._enforce and result.outcome is PolicyOutcome.DENY:
                 raise DomainError(ErrorCode.POLICY_DENIED, "certification denied")
         row.status = to_status
+        # Persist before any subsequent refresh(); otherwise refresh reloads DRAFT
+        # and hive materialize fails with "spec version must be CERTIFIED".
+        await session.flush()
         return row
 
     async def create_deployment(
@@ -196,6 +205,9 @@ class AgentLifecycleService:
         goal_id: uuid.UUID,
         role: str,
         effective_permissions: dict[str, Any] | None = None,
+        parent_permissions: dict[str, Any] | None = None,
+        organization_permissions: dict[str, Any] | None = None,
+        goal_permissions: dict[str, Any] | None = None,
         actor: str = "regent-core",
     ) -> AgentDeploymentModel:
         spec_ver = await session.get(AgentSpecVersionModel, agent_spec_version_id)
@@ -216,6 +228,23 @@ class AgentLifecycleService:
         if self._enforce and result.outcome is PolicyOutcome.DENY:
             raise DomainError(ErrorCode.POLICY_DENIED, "deployment denied")
 
+        manifest_caps = {
+            str(item)
+            for item in dict(spec_ver.manifest_json or {}).get("capabilities", [])
+        }
+        manifest_scope = {
+            "allow": sorted(manifest_caps),
+            "require_permit": [],
+            "deny": [],
+        }
+        requested = dict(effective_permissions or manifest_scope)
+        derived_permissions = intersect_permissions(
+            dict(parent_permissions or manifest_scope),
+            dict(organization_permissions or manifest_scope),
+            dict(goal_permissions or manifest_scope),
+            requested,
+        )
+
         dep = AgentDeploymentModel(
             id=uuid.uuid4(),
             agent_spec_version_id=agent_spec_version_id,
@@ -223,7 +252,7 @@ class AgentLifecycleService:
             goal_id=goal_id,
             role=role,
             status="PENDING",
-            effective_permissions_json=dict(effective_permissions or {}),
+            effective_permissions_json=derived_permissions,
         )
         session.add(dep)
         session.add(

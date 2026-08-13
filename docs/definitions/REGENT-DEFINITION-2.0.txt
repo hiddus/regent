@@ -1,0 +1,34 @@
+# REGENT-DEFINITION-2.0
+# Normative identity. Supersedes REGENT-DEFINITION-1.0.
+# Do not edit in place. To supersede: create a new version.
+# Other documents must link here; they must not copy this body into a second normative source.
+
+DEFINITION_ID=REGENT-DEFINITION-2.0
+SUPERSEDES=REGENT-DEFINITION-1.0
+
+DEFINITION_TEXT=
+Regent 是围绕经营目标持续工作的智能体团队。它在明确的约束、资源、授权和治理边界内，持续感知经营状态，发现问题与机会，形成策略和计划，组织智能体与人分工执行，并依据可验证的外部经营结果调整策略、能力和组织，直至阶段目标达成、资源耗尽、不可恢复失败或被经营目标负责人终止。
+
+ATTRIBUTE_1_BUSINESS_OUTCOME_DRIVEN=
+Regent 以收入、增长、客流、成本、效率、服务质量等可定义、可验证的经营结果为牵引，而不是以完成一次对话、生成一份内容或执行一条工作流作为最终成功。
+
+ATTRIBUTE_2_CONTINUOUS_WORK=
+Regent 不是等待逐项派单的一次性 Agent；它围绕持续存在的经营目标观察、判断、行动、验证和调整，并能跨会话、进程中断和组织变化恢复工作。
+
+ATTRIBUTE_3_AGENT_TEAM_AS_PRODUCT=
+用户获得的是一支可管理、可分工、可考核的智能体团队。团队可包含统筹、专业执行、独立验证和人类责任角色；具体成员数量与拓扑按经营任务动态裁剪，局部工作允许由单个智能体完成，但不得把单智能体实现等同于 Regent 的产品形态。
+
+ATTRIBUTE_4_BOUNDED_AUTONOMY=
+团队自治始终受目标、预算、权限、安全、合规、治理和人工接管约束；涉及资金、高风险外部效应、根目标变更和其他受限事项时，必须按策略取得授权。
+
+ATTRIBUTE_5_CAPABILITY_AND_ORGANIZATION_EVOLUTION=
+Regent 能发现能力与组织缺口，通过复用、配置、组合、构建、引入新成员或请求人类补齐，并依据经营结果调整策略、能力、角色和协作关系。
+
+ATTRIBUTE_6_EXTERNAL_OUTCOME_LOOP=
+Regent 依据可信业务系统和外部 Evidence、Observation 判断进展；生成者自评、内部 smoke、任务完成数量或智能体投票均不得替代经营结果。
+
+ATTRIBUTE_7_GOVERNED_ACCOUNTABILITY=
+每项重要决策、行动、授权、成本与结果必须可追溯、可审计、可恢复并可由人接管；智能体承担执行责任，人类或法定主体保留最终治理与法律责任。
+
+ATTRIBUTE_8_EXPLICIT_TERMINATION=
+持续工作不等于无限运行。每个经营目标及其阶段必须有可验证的成功、继续、修订、耗尽、失败、取消或移交条件。

@@ -23,9 +23,11 @@
 7. 框架仅当替换 Kernel 时拒绝 → `assert_not_replacing_kernel` 由硬黑名单改为 `replaces_kernel` 标志 ✅
 
 ### C. MA-0..MA-6 实现状态（来自 Plan §12 + 代码）
-- MA-0 合同冻结 ✅；MA-1 三指标/MAST ✅；MA-2 模板整体认证+迁移0040 ✅；MA-3 长任务耐久接入生成主链 ✅（`agent_runner` 压缩前存 Transcript、大结果卸载、todo_write 落持久计划；`generator` 注入服务）；
+- MA-0 合同冻结 ✅；MA-1 三指标/MAST **Schema+单测完成，生产分类路径未接线**（对齐 PRD §12）；MA-2 模板整体认证+迁移0040 ✅；MA-3 长任务耐久接入生成主链 ✅（`agent_runner` 压缩前存 Transcript、大结果卸载、todo_write 落持久计划；`generator` 注入服务）；
 - MA-4 TaskFeatures 裁剪+`dispatch_decisions` 审计 ✅（`hive_runtime` 写 PM→Dev→QA 审计行）；MA-6 P2-5 Gate 钩子+A2A 投影 ✅ 未激活；
-- MA-5 P2-4 冻结实验 = **半落地骨架**，完整生产盲评窗口属实验窗口交付物（与"无正净收益 DecisionRecord 不启用"原则一致，非遗漏）。
+- MA-5 P2-4 冻结实验 = **半落地骨架**，完整生产盲评窗口属实验窗口交付物（与"无正净收益 DecisionRecord 不扩大生产默认/现实权限"原则一致，非遗漏；沙箱试验不在此禁令内）。
+
+> **口径更新（2026-08-11）**：净收益 / P2-4 Gate 只约束**生产晋级与扩大现实权限**，不约束沙箱探索。
 
 ### D. 调研 11 项借鉴闭合（A1–E）
 10/11 已闭合，仅 #9 OTel 显式记录为后续对齐。A2A 映射、MCP 边界、指标合同、MAST 词表、成员三要素、模板整体认证、任务属性裁剪、过程可检查、上下文卸载、持久计划 均到位。

@@ -214,7 +214,8 @@ def test_member_contract_certification_invalidation() -> None:
     ).accepted is True
 
 
-def test_task_features_prune_strong_sequential() -> None:
+def test_task_features_demote_not_exclude_multi_agent() -> None:
+    """PRD §10.1: exploration keeps multi-agent; rules only demote production default."""
     candidates = [
         {
             "name": "single-agent-v1",
@@ -247,16 +248,67 @@ def test_task_features_prune_strong_sequential() -> None:
         estimated_parallelism_ceiling=0.5,
     )
     pruned = prune_organization_space(candidates, features)
-    assert "single-agent-v1" in pruned.as_dict()["admitted_template_ids"]
-    assert CERTIFIED_HIVE_TEMPLATE_ID in pruned.as_dict()["excluded_template_ids"]
+    meta = pruned.as_dict()
+    assert "single-agent-v1" in meta["admitted_template_ids"]
+    # Strong sequential demotes multi-agent for production default, does NOT exclude.
+    assert CERTIFIED_HIVE_TEMPLATE_ID in meta["admitted_template_ids"]
+    assert CERTIFIED_HIVE_TEMPLATE_ID in meta["demoted_template_ids"]
+    assert CERTIFIED_HIVE_TEMPLATE_ID not in meta["excluded_template_ids"]
+    assert meta["excluded_template_ids"] == []
     assert any(h.rule_id == "R2_STRONG_SEQUENTIAL" for h in pruned.hits)
+    assert any(h.effect == "demote" for h in pruned.hits)
+    assert meta["production_default_recommended_template_ids"] == ["single-agent-v1"]
+    assert pruned.demotion_penalties[CERTIFIED_HIVE_TEMPLATE_ID] > 0.0
 
-    high_baseline = features.model_copy(update={"sequential_dependency_score": 0.1, "single_agent_baseline_success_rate": 0.6})
+    def _cand_tid(c: dict) -> str:
+        topo = c.get("topology_json") or {}
+        return str(c.get("template_id") or c.get("name") or topo.get("template_id") or "")
+
+    demoted_hive = next(c for c in pruned.admitted if _cand_tid(c) == CERTIFIED_HIVE_TEMPLATE_ID)
+    assert demoted_hive.get("not_recommended_for_production_default") is True
+
+    high_baseline = features.model_copy(
+        update={
+            "sequential_dependency_score": 0.1,
+            "single_agent_baseline_success_rate": 0.6,
+        }
+    )
     pruned2 = prune_organization_space(candidates, high_baseline)
+    meta2 = pruned2.as_dict()
     assert any(h.rule_id == "R1_HIGH_SINGLE_AGENT_BASELINE" for h in pruned2.hits)
+    assert CERTIFIED_HIVE_TEMPLATE_ID in meta2["admitted_template_ids"]
+    assert CERTIFIED_HIVE_TEMPLATE_ID in meta2["demoted_template_ids"]
+    assert meta2["excluded_template_ids"] == []
+    assert any(
+        c.get("not_recommended_for_production_default") is True
+        for c in pruned2.admitted
+        if _cand_tid(c) == CERTIFIED_HIVE_TEMPLATE_ID
+    )
+
+    # R0: multi-agent still admitted when priors do not specially justify it.
+    soft = TaskFeatures(
+        tool_call_density=0.1,
+        decomposability_score=0.2,
+        sequential_dependency_score=0.1,
+        single_agent_baseline_success_rate=0.2,
+        independent_verification_required=False,
+        estimated_parallelism_ceiling=0.0,
+    )
+    pruned_r0 = prune_organization_space(candidates, soft)
+    assert any(h.rule_id == "R0_DEFAULT_SINGLE_AGENT" for h in pruned_r0.hits)
+    assert CERTIFIED_HIVE_TEMPLATE_ID in pruned_r0.as_dict()["admitted_template_ids"]
+    assert CERTIFIED_HIVE_TEMPLATE_ID not in pruned_r0.as_dict()["excluded_template_ids"]
+    assert any(
+        c.get("not_recommended_for_production_default") is True
+        for c in pruned_r0.admitted
+        if _cand_tid(c) == CERTIFIED_HIVE_TEMPLATE_ID
+    )
+
+    # Missing single-agent champion: warn for production default, still admit multi-agent.
     unsafe = prune_organization_space([candidates[1]], features)
-    assert unsafe.admitted == []
+    assert CERTIFIED_HIVE_TEMPLATE_ID in unsafe.as_dict()["admitted_template_ids"]
     assert any(h.rule_id == "R_NO_SAFE_SINGLE_AGENT_FALLBACK" for h in unsafe.hits)
+    assert any(h.effect == "warn" for h in unsafe.hits)
 
 
 @pytest.mark.asyncio

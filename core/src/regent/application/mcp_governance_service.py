@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.effect_descriptor import EffectDescriptor
 from regent.application.external_operation_service import ExternalOperationService, request_digest
 from regent.application.policy_engine import (
     PolicyEngine,
@@ -163,6 +164,7 @@ class McpGovernanceService:
         permit_id: uuid.UUID | None = None,
         fencing_token: uuid.UUID | None = None,
         causation_id: str | None = None,
+        effect: EffectDescriptor | None = None,
         readonly_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> McpInvokeResult:
         tool_name = ""
@@ -207,13 +209,16 @@ class McpGovernanceService:
             tool_name = binding.tool_name
             side_effect_class = binding.side_effect_class
 
+            policy_resource = {"side_effect_class": side_effect_class}
+            if effect is not None:
+                policy_resource.update(effect.policy_resource())
             policy_result = await self._policy.evaluate_and_persist(
                 PolicyEvaluationRequest(
                     decision_point="MCP_TOOL_INVOKE",
                     subject_type="MCP",
                     subject_id=str(tool_binding_id),
                     action="invoke",
-                    resource={"side_effect_class": side_effect_class},
+                    resource=policy_resource,
                     input_snapshot={
                         "tool": tool_name,
                         "goal_id": str(goal_id),
@@ -254,6 +259,15 @@ class McpGovernanceService:
                     output_trust="UNTRUSTED_DATA",
                     policy_evaluation_id=policy_result.id,
                     external_operation_id=None,
+                )
+
+            if (
+                side_effect_class == "NONE"
+                and policy_result.outcome is PolicyOutcome.REQUIRE_PERMIT
+            ):
+                raise DomainError(
+                    ErrorCode.PERMIT_REQUIRED,
+                    "high-impact read requires a scoped governed-read permit path",
                 )
 
             if side_effect_class == "NONE":

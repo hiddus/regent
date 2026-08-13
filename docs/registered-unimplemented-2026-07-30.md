@@ -11,7 +11,7 @@
 
 SelfImprovementRun（P2-8）代码已落地但属**候选**：API 返回 `candidate_ungated=true` / `decision_record_status=ROLLOUT_NOT_ALLOWED`，无产品 DecisionRecord 前不得宣称验收。
 
-Hive：产品默认仍为单 Agent champion；`REGENT_AAR1_CERTIFIED_HIVE` 仅为认证固定模板 `pm-dev-independent-qa-v1` 的 opt-in（生产服务器已 true），自适应自由拓扑仍 `ROLLOUT_NOT_ALLOWED`，见 `.env.example`。
+Hive：Settings **代码默认** `aar1_certified_hive=True`（`.env.example` 默认 on），启用认证固定模板 `pm-dev-independent-qa-v1`；可按 Goal metadata `force_single_agent` / `hive_enabled=false` 或 `REGENT_AAR1_CERTIFIED_HIVE=false` 退出。自适应自由拓扑的**生产权限继承**仍 `ROLLOUT_NOT_ALLOWED`（沙箱探索开放）。
 
 ## 隐私治理（PRD §7 — 对齐审计收尾轮）
 

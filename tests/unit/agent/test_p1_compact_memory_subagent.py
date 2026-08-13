@@ -206,5 +206,52 @@ async def test_subagent_returns_summary_without_sidechain(tmp_path: Path) -> Non
     assert "README.md" in result.files
 
 
+@pytest.mark.asyncio
+async def test_subagent_inherits_hard_budget_ledger(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    class Ledger:
+        def __init__(self) -> None:
+            self.reservations = 0
+            self.settlements = 0
+
+        async def reserve(self, goal_id, run_id, **kwargs):  # noqa: ANN001
+            self.reservations += 1
+            return SimpleNamespace(id=uuid.uuid4(), claim_token=None)
+
+        async def claim(self, reservation_id):  # noqa: ANN001
+            return SimpleNamespace(id=reservation_id, claim_token=uuid.uuid4())
+
+        async def settle(self, reservation_id, **kwargs):  # noqa: ANN001
+            self.settlements += 1
+
+        async def release(self, reservation_id, **kwargs):  # noqa: ANN001
+            raise AssertionError("successful subagent call must settle, not release")
+
+    ledger = Ledger()
+    runner = SubagentRunner(
+        _Scripted(),
+        workspace_root=tmp_path,
+        budget=AgentBudget(max_turns=5, max_tokens=10_000, max_wall_seconds=30),
+        goal_id=str(uuid.uuid4()),
+        run_id=uuid.uuid4(),
+        budget_ledger=ledger,
+        model_max_output_tokens=10,
+        model_input_cost_per_million=1.0,
+        model_output_cost_per_million=1.0,
+    )
+    await runner.run_milestone(
+        goal_anchor_text="build community",
+        success_criteria={"has_api": True},
+        brief=SubagentBrief(
+            milestone_key="budgeted", milestone_title="Budgeted child",
+            milestone_ordinal=2, planned_paths=["README.md"],
+        ),
+        verify=False,
+    )
+    assert ledger.reservations == 2
+    assert ledger.settlements == 2
+
+
 def test_estimate_tokens_positive() -> None:
     assert estimate_tokens([ChatMessage(role="user", content="abcd" * 10)]) >= 1

@@ -57,6 +57,108 @@ _UTILITY_SURFACE_HINTS = re.compile(
     r"时间|时钟|待办|上传|生成器|北京)",
     re.IGNORECASE,
 )
+# Content-product APIs: thin seed catalogs must not soft-pass as demos.
+_MIN_COUNTRY_POINTS = 10
+_MIN_CROSSWALK_STEPS = 10
+# Each group is independently required — a long scenario must not waive thin obligations.
+_REQUIRED_POINT_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("title", "name"),
+    ("statute", "法源"),
+    ("source", "source_url"),
+    ("obligations", "obligation", "body", "义务"),
+    ("scenario", "detail"),
+    ("risk", "风险"),
+)
+_REQUIRED_STEP_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("trigger", "触发"),
+    ("action", "动作"),
+    ("check",),
+    ("evidence", "证据"),
+    ("owner", "责任方", "owner_role"),
+    ("priority", "优先级"),
+)
+# Present-but-thin fields are outlines, not operable handbook detail.
+_MIN_POINT_FIELD_CHARS: dict[str, int] = {
+    "title": 8,
+    "name": 8,
+    "statute": 6,
+    "source": 12,
+    "source_url": 12,
+    "法源": 6,
+    "obligations": 80,
+    "obligation": 80,
+    "body": 80,
+    "scenario": 40,
+    "detail": 40,
+    "义务": 80,
+    "risk": 50,
+    "风险": 50,
+}
+_MIN_STEP_FIELD_CHARS: dict[str, int] = {
+    "trigger": 24,
+    "触发": 24,
+    "action": 40,
+    "check": 24,
+    "动作": 40,
+    "evidence": 24,
+    "证据": 24,
+    "owner": 2,
+    "责任方": 2,
+    "owner_role": 2,
+    "priority": 1,
+    "优先级": 1,
+}
+_CONTENT_API_HINTS = re.compile(
+    r"(?:/api/countries|/api/crosswalks|跨境|合规|Crosswalk|PDPA|CCPA)",
+    re.IGNORECASE,
+)
+
+
+def _has_any_field(row: dict[str, Any], names: tuple[str, ...]) -> bool:
+    lower_map = {str(k).lower(): v for k, v in row.items()}
+    for name in names:
+        val = lower_map.get(name.lower())
+        if val is None:
+            continue
+        if isinstance(val, str) and val.strip():
+            return True
+        if not isinstance(val, str) and val not in (None, [], {}, ()):
+            return True
+    return False
+
+
+def _field_text_for_group(row: dict[str, Any], names: tuple[str, ...]) -> str:
+    lower_map = {str(k).lower(): v for k, v in row.items()}
+    best = ""
+    for name in names:
+        val = lower_map.get(name.lower())
+        if isinstance(val, str) and val.strip():
+            if len(val.strip()) > len(best):
+                best = val.strip()
+        elif val not in (None, [], {}, ()) and not isinstance(val, str):
+            text = str(val)
+            if len(text) > len(best):
+                best = text
+    return best
+
+
+def _missing_field_groups(
+    row: dict[str, Any],
+    groups: tuple[tuple[str, ...], ...],
+    *,
+    min_chars: dict[str, int] | None = None,
+) -> list[str]:
+    missing: list[str] = []
+    mins = min_chars or {}
+    for group in groups:
+        text = _field_text_for_group(row, group)
+        need = max((mins.get(n.lower(), mins.get(n, 1)) for n in group), default=1)
+        if not text:
+            missing.append("|".join(group[:3]))
+        elif len(text) < need:
+            missing.append(f"{'|'.join(group[:2])}:thin:{len(text)}<{need}")
+    return missing
+
 
 
 def _looks_like_list_product(html: str) -> bool:
@@ -87,6 +189,16 @@ class LivePreviewQaResult:
     def failed_gap_codes(self) -> list[str]:
         return [c.name for c in self.checks if not c.passed]
 
+    def concrete_failure_reasons(self) -> list[str]:
+        """Gap reasons that keep check detail (URLs/status) for learning loops."""
+        out: list[str] = []
+        for check in self.checks:
+            if check.passed:
+                continue
+            detail = (check.detail or "").strip()
+            out.append(f"{check.name}: {detail}" if detail else check.name)
+        return out
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "passed": self.passed,
@@ -96,6 +208,7 @@ class LivePreviewQaResult:
                 for c in self.checks
             ],
             "failed_gaps": self.failed_gap_codes(),
+            "concrete_failures": self.concrete_failure_reasons(),
         }
 
 
@@ -132,6 +245,17 @@ def _score_css_substance(css_text: str) -> tuple[bool, str]:
 
 def _inline_style_bodies(html: str) -> list[str]:
     return [(m.group(1) or "").strip() for m in _INLINE_STYLE_RE.finditer(html or "")]
+
+
+def _join_preview(base: str, path: str) -> str:
+    """Join a path under the Preview mount.
+
+    ``urljoin(base, "/api/...")`` drops ``/preview/runtime/<id>/`` because a
+    leading slash is treated as origin-absolute. Preview APIs must stay under
+    the same public prefix users open.
+    """
+    root = base if base.endswith("/") else f"{base}/"
+    return urljoin(root, (path or "").lstrip("/"))
 
 
 def _pick_nav_candidates(html: str, *, base_url: str, limit: int = 8) -> list[str]:
@@ -420,6 +544,10 @@ async def run_live_preview_qa(
                 )
             )
 
+        depth = await _probe_content_catalog_depth(http, base=base, home_html=html)
+        if depth is not None:
+            checks.append(depth)
+
         passed = all(c.passed for c in checks)
         return LivePreviewQaResult(
             passed=passed,
@@ -433,3 +561,115 @@ async def run_live_preview_qa(
     finally:
         if owns_client:
             await http.aclose()
+
+
+async def _probe_content_catalog_depth(
+    http: httpx.AsyncClient,
+    *,
+    base: str,
+    home_html: str,
+) -> LivePreviewCheck | None:
+    """Fail closed when a compliance/catalog product ships thin seed APIs."""
+    if not _CONTENT_API_HINTS.search(home_html or ""):
+        # Only enforce for surfaces that advertise this product shape.
+        return None
+    details: list[str] = []
+    try:
+        countries_resp = await http.get(_join_preview(base, "/api/countries"))
+    except Exception as exc:  # noqa: BLE001
+        return LivePreviewCheck(
+            "preview-content-depth",
+            False,
+            f"/api/countries unreachable: {exc}"[:200],
+        )
+    if countries_resp.status_code >= 400:
+        return LivePreviewCheck(
+            "preview-content-depth",
+            False,
+            f"/api/countries → {countries_resp.status_code}",
+        )
+    try:
+        countries = countries_resp.json()
+    except Exception:  # noqa: BLE001
+        return LivePreviewCheck(
+            "preview-content-depth",
+            False,
+            "/api/countries not JSON",
+        )
+    if not isinstance(countries, list) or not countries:
+        return LivePreviewCheck(
+            "preview-content-depth",
+            False,
+            "/api/countries empty",
+        )
+    thin_countries: list[str] = []
+    weak_fields: list[str] = []
+    for item in countries:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("country_code") or item.get("code") or "?")
+        points = item.get("points") or []
+        n = len(points) if isinstance(points, list) else 0
+        details.append(f"{code}.points={n}")
+        if n < _MIN_COUNTRY_POINTS:
+            thin_countries.append(f"{code}:{n}")
+        if isinstance(points, list):
+            for idx, point in enumerate(points[:12]):
+                if not isinstance(point, dict):
+                    weak_fields.append(f"{code}[{idx}]:not-object")
+                    continue
+                miss = _missing_field_groups(
+                    point,
+                    _REQUIRED_POINT_FIELD_GROUPS,
+                    min_chars=_MIN_POINT_FIELD_CHARS,
+                )
+                if miss:
+                    weak_fields.append(f"{code}[{idx}]:missing:{','.join(miss)}")
+                    if len(weak_fields) >= 8:
+                        break
+    # Probe pairwise crosswalk APIs referenced by common demo routes.
+    thin_crosswalks: list[str] = []
+    for pair in ("US-SG", "SG-US"):
+        path = f"/api/crosswalks/{pair}"
+        try:
+            resp = await http.get(_join_preview(base, path))
+        except Exception as exc:  # noqa: BLE001
+            thin_crosswalks.append(f"{pair}:err:{type(exc).__name__}")
+            continue
+        if resp.status_code >= 400:
+            thin_crosswalks.append(f"{pair}:http:{resp.status_code}")
+            continue
+        try:
+            payload = resp.json()
+        except Exception:  # noqa: BLE001
+            thin_crosswalks.append(f"{pair}:not-json")
+            continue
+        steps = payload.get("steps") if isinstance(payload, dict) else None
+        n = len(steps or []) if isinstance(steps, list) else 0
+        details.append(f"{pair}.steps={n}")
+        if n < _MIN_CROSSWALK_STEPS:
+            thin_crosswalks.append(f"{pair}:{n}")
+        if isinstance(steps, list):
+            for idx, step in enumerate(steps[:12]):
+                if not isinstance(step, dict):
+                    weak_fields.append(f"{pair}[{idx}]:not-object")
+                    continue
+                miss = _missing_field_groups(
+                    step,
+                    _REQUIRED_STEP_FIELD_GROUPS,
+                    min_chars=_MIN_STEP_FIELD_CHARS,
+                )
+                if miss:
+                    weak_fields.append(f"{pair}[{idx}]:missing:{','.join(miss)}")
+                    if len(weak_fields) >= 12:
+                        break
+
+    ok = not thin_countries and not thin_crosswalks and not weak_fields
+    detail = "; ".join(details)[:360]
+    if not ok:
+        detail = (
+            f"thin catalog countries={thin_countries or '-'} "
+            f"crosswalks={thin_crosswalks or '-'} "
+            f"weak_fields={weak_fields[:6] or '-'}; {detail}"
+        )[:400]
+    return LivePreviewCheck("preview-content-depth", ok, detail)

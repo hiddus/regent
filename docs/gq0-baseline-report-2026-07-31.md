@@ -16,10 +16,10 @@
 
 ## 2. 代码现状（基线事实）
 
-- 默认 `REGENT_GENERATION_STRATEGY=artifact-backed`。
+- 默认 `REGENT_GENERATION_STRATEGY=agentic`（现行代码默认；`artifact-backed` 为 kill-switch/scaffold）。
 - Worker 经 `build_code_generator` 按有效策略分派（GQ-1）；不再硬编码 artifact-backed。
-- 生产 `REGENT_AAR1_CERTIFIED_HIVE` 既有 opt-in **保持**；代码默认仍 False；**GQ-5 前不得扩容**。
-- P2-5 自适应拓扑仍 `ROLLOUT_NOT_ALLOWED`。
+- `REGENT_AAR1_CERTIFIED_HIVE` **代码默认 True**（可用 `force_single_agent` / env=false 退出）；**GQ-5 前不得扩容自适应拓扑**。
+- P2-5 自适应拓扑仍 `ROLLOUT_NOT_ALLOWED`（生产现实权限；沙箱试验不在此限）。
 - Canary 百分比默认 0；诊断顺序要求 GQ-2 反馈闭环后再开 canary（`canary_rollout_allowed`）。
 
 ## 3. 预注册门槛（实验前已登记）

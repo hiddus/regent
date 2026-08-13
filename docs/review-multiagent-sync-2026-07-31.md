@@ -3,15 +3,17 @@
 > 评审对象：Regent-PRD.md §10.1–10.4、Regent-Technical-Spec.md §17.1/§18.1–18.7、Regent-Plan.md §12
 > 对照基线：docs/research-multiagent-landscape-2026-07-30.md
 > 性质：一致性 / 合理性评审（非执行改动）
+>
+> **口径更新（2026-08-11，定义 3.0）**：下文成稿时的「强单 Agent 默认 / 多 Agent 须证明净收益 / 自适应受 P2-4 Gate 约束」只约束**晋级生产默认与扩大不可逆现实权限**，不约束沙箱内候选拓扑、角色创造或组织试验。净收益与冻结实验是生产晋级门槛，不是探索前置。
 
 ## 一、四项结论合理性
 
 | 结论 | 外部证据支撑 | 判定 |
 |---|---|---|
-| 强单 Agent 默认，多 Agent 须证明净收益 | Scaling 论文均值 −3.5%、45% 饱和规则、全行业「multi-agent is a tool not a goal」 | ✅ 强支撑 |
+| 强单 Agent 默认，多 Agent 须证明净收益（**当时口径**；现仅约束生产晋级） | Scaling 论文均值 −3.5%、45% 饱和规则、全行业「multi-agent is a tool not a goal」 | ✅ 强支撑（证据仍成立；适用范围已按 3.0 收窄） |
 | 不引入 CrewAI / LangGraph 替换 Kernel | CrewAI Token 足迹最重；LangGraph checkpoint 与 Outbox/Lease/Permit 职责重叠但治理更弱 | ✅ 合理 |
 | 优先补齐协作评测 / 失败归因 / 模板整体认证 / 长任务耐久 | MAST（41.8% 失败源于系统设计）、TeamTR（整体认证）、Deep Agents harness 四件套 | ✅ 直接对应 |
-| 自适应组织继续受 P2-4 统计 Gate 约束 | 87% 架构预测器本身依赖冻结基准；论文证明架构选择必须实证 | ✅ 合理 |
+| 自适应组织继续受 P2-4 统计 Gate 约束（**生产扩权**；沙箱试验开放） | 87% 架构预测器本身依赖冻结基准；论文证明架构选择必须实证 | ✅ 合理（Gate 管现实权限，不管沙箱探索） |
 
 ## 二、三文档一致性核对
 

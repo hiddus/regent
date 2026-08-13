@@ -5,9 +5,11 @@ Evaluate (product QA gaps) → Diagnose → Edit LESSONS.md (agent/skill state) 
 Re-score → keep only on **strict improvement**, else rollback.
 
 Roles mirrored from PenguinHarness:
-- Target Agent harness = skill GUIDANCE + LESSONS overlays (PM / Tech / UX)
-- Evaluator = Live Preview QA + blocking delivery gap codes
-- Optimizer = this service (hypothesis → lesson edit → gated accept)
+- Target Agent harness = skill GUIDANCE + LESSONS overlays
+  (PM / Product / Tech / Test / UX / Ops)
+- Evaluator = Live Preview QA + Delivery Role Swarm + blocking gap codes
+- Optimizer = this service (hypothesis → lesson edit → gated accept);
+  failed delivery roles must re-verify before Preview success
 """
 
 from __future__ import annotations
@@ -47,6 +49,20 @@ _GAP_TO_SKILL: dict[str, str] = {
     "preview_qa:stylesheet-substance": "ui",
     "preview_qa:styled-surface": "ui",
     "preview_qa:preview-internal-nav": "ui",
+    "preview-content-depth": "product",
+    "preview_qa:preview-content-depth": "product",
+    "hive-live-content-review": "product",
+    "delivery-role-swarm": "product",
+    "delivery-product-outline": "product",
+    "delivery-tech-api": "http-api",
+    "delivery-test-scenarios": "test-harness",
+    "delivery-ux-surface": "ui",
+    "delivery-ops-host": "ops-environment",
+    "HOST_RESOURCE": "ops-environment",
+    "disk_percent": "ops-environment",
+    "mem_percent": "ops-environment",
+    "preview_venv_count": "ops-environment",
+    "load1_per_cpu": "ops-environment",
 }
 
 _FORBIDDEN_LESSON_PATTERNS = (
@@ -65,7 +81,7 @@ class HarnessLessonProposal(BaseModel):
     lesson_markdown: str = Field(min_length=_MIN_LESSON_CHARS, max_length=_MAX_LESSON_CHARS)
     addressed_gaps: list[str] = Field(min_length=1)
     rationale: str = Field(min_length=1, max_length=2000)
-    role: str = Field(pattern=r"^(PM|Tech|UX)$")
+    role: str = Field(pattern=r"^(PM|Product|Tech|Test|UX|Ops)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,21 +142,38 @@ def map_gaps_to_skills(gaps: list[str]) -> dict[str, list[str]]:
             continue
         head = code.split(":", 1)[-1] if code.startswith("preview_qa:") else code
         head = head.split(":", 1)[0].strip()
-        skill = _GAP_TO_SKILL.get(code) or _GAP_TO_SKILL.get(head) or "product"
+        skill = _GAP_TO_SKILL.get(code) or _GAP_TO_SKILL.get(head)
+        if skill is None:
+            # Host reasons look like "disk_percent=93.0 >= 85.0"
+            token = head.split("=", 1)[0].strip()
+            skill = _GAP_TO_SKILL.get(token)
+        if skill is None:
+            for key, sid in _GAP_TO_SKILL.items():
+                if head.startswith(key) or code.startswith(key):
+                    skill = sid
+                    break
+        skill = skill or "product"
         out.setdefault(skill, []).append(code)
     return out
 
 
 def score_harness(*, gaps: list[str], lesson_text: str) -> float:
-    """Higher is better. Penalize open blocking gaps; reward concrete lesson coverage."""
+    """Higher is better. Penalize open blocking gaps; reward concrete lesson coverage.
+
+    Uncovered gap tokens are heavily penalized so a focused new lesson that names the
+    failing gap can beat a long baseline that never mentions it (strict-improvement gate).
+    """
     blocking = [g for g in gaps if is_blocking_delivery_gap_code(g.split(":", 1)[-1])]
     score = 100.0 - 12.0 * len(blocking) - 4.0 * max(0, len(gaps) - len(blocking))
     lower = (lesson_text or "").lower()
     for gap in gaps:
         token = gap.split(":", 1)[-1].lower()
-        if token and token in lower:
-            score += 6.0
-        # Concrete product/UX verbs bump score slightly.
+        if not token:
+            continue
+        if token in lower:
+            score += 14.0
+        else:
+            score -= 20.0
     for needle in (
         "font-family",
         "max-width",
@@ -152,9 +185,27 @@ def score_harness(*, gaps: list[str], lesson_text: str) -> float:
         "stylesheet",
         "<main>",
         "href",
+        "preview-venv",
+        "soft-pause",
+        "allowlisted",
+        "HOST_RESOURCE",
+        "prune",
+        "reap",
+        "/api/countries",
+        "/api/crosswalks",
+        "preview-content-depth",
+        "content depth",
+        "statute",
+        "source",
+        "trigger",
+        "evidence",
+        ">=10",
+        "≥10",
+        "points",
+        "steps",
     ):
         if needle.lower() in lower:
-            score += 1.5
+            score += 2.5
     return round(score, 2)
 
 
@@ -297,8 +348,26 @@ class HarnessEvolutionService:
         candidate_score = score_harness(
             gaps=skill_gaps, lesson_text=proposal.lesson_markdown
         )
-        # Strict improvement (PenguinHarness): only keep if score rises.
-        if candidate_score <= baseline_score:
+        lower_cand = (proposal.lesson_markdown or "").lower()
+        gap_tokens = {
+            g.split(":", 1)[-1].lower() for g in skill_gaps if str(g).strip()
+        }
+        addressed_tokens = {
+            str(x).split(":", 1)[-1].lower()
+            for x in (proposal.addressed_gaps or [])
+            if str(x).strip()
+        }
+        covers_all = bool(gap_tokens) and (
+            gap_tokens <= addressed_tokens
+            or all(token in lower_cand for token in gap_tokens)
+        )
+        # Strict improvement (PenguinHarness): keep if score rises.
+        # Empty baseline: allow first lesson that covers every gap (bootstrap).
+        empty_baseline = not (baseline_lesson or "").strip()
+        improved = candidate_score > baseline_score or (
+            empty_baseline and covers_all and candidate_score >= baseline_score
+        )
+        if not improved:
             return HarnessEvolutionReceipt(
                 id=run_id,
                 status="REJECTED",

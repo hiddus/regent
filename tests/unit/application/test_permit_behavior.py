@@ -164,3 +164,42 @@ async def test_permit_request_idempotent_key(db_sessions) -> None:
     a = await svc.request(binding)
     b = await svc.request(binding)
     assert a == b
+
+
+@pytest.mark.permit
+@pytest.mark.asyncio
+async def test_delegated_permit_is_narrower_and_bound_to_child(db_sessions) -> None:
+    goal_id, work_id, run_id = await _seed_gwr(db_sessions)
+    svc = PermitService(db_sessions)
+    parent = await svc.request(_binding(goal_id, work_id, run_id, key="permit-parent"))
+    child = await svc.delegate(
+        parent,
+        child_actor_id="child-agent",
+        data_scope={"paths": ["output/"]},
+        network_scope={"hosts": []},
+        resource_limit={"cpu": 0.5},
+        valid_until=datetime.now(UTC) + timedelta(minutes=10),
+        idempotency_key="permit-child",
+    )
+    claimed = await svc.claim(child, actor_id="child-agent")
+    assert claimed.binding.actor_id == "child-agent"
+    assert claimed.binding.resource_limit == {"cpu": 0.5}
+
+
+@pytest.mark.permit
+@pytest.mark.asyncio
+async def test_delegated_permit_cannot_widen_parent_scope(db_sessions) -> None:
+    goal_id, work_id, run_id = await _seed_gwr(db_sessions)
+    svc = PermitService(db_sessions)
+    parent = await svc.request(_binding(goal_id, work_id, run_id, key="permit-parent-wide"))
+    with pytest.raises(DomainError) as raised:
+        await svc.delegate(
+            parent,
+            child_actor_id="child-agent",
+            data_scope={"paths": ["output/", "secrets/"]},
+            network_scope={"hosts": []},
+            resource_limit={"cpu": 2},
+            valid_until=datetime.now(UTC) + timedelta(minutes=10),
+            idempotency_key="permit-child-wide",
+        )
+    assert raised.value.code == ErrorCode.PERMIT_INVALID

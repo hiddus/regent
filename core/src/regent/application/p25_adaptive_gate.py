@@ -1,8 +1,12 @@
 """P2-5 adaptive organization conditional activation gate (MA-6).
 
-Adaptive free-form topology remains ROLLOUT_NOT_ALLOWED until a P2-4
-DecisionRecord proves positive net benefit. This module only provides gate
-hooks and skeleton proposal enrichment — it never activates rollout.
+Production *rollout* of adaptive free-form topology remains ROLLOUT_NOT_ALLOWED
+until a P2-4 DecisionRecord proves positive net benefit. That gate constrains
+production-default / real-world permission expansion only — it does not block
+sandbox OrganizationSpace exploration or OrganizationExperiment candidates
+(PRD §10.1 / REGENT-DEFINITION-3.0 ATTRIBUTE_2/7). This module only provides
+gate hooks and skeleton proposal enrichment — it never activates production
+rollout.
 """
 
 from __future__ import annotations

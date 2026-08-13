@@ -1,8 +1,9 @@
 """Recover RESEARCH_MORE by binding certified evidence connector capability.
 
-Per REGENT-DEFINITION-1.0: Goal is the only required user input; capability evolution
-orders REUSE→…→request human last. Exhausted auto-recovery must adapt and continue
-with available external evidence — not block the console waiting for URL paste.
+Per REGENT-DEFINITION-3.0 ATTRIBUTE_1/5: the business goal sets direction, and
+Evidence serves learning rather than gating exploration. Capability recovery orders
+REUSE→…→request human last; exhausted auto-recovery must adapt and continue with
+available external evidence — not block the console waiting for URL paste.
 """
 
 from __future__ import annotations
@@ -215,7 +216,9 @@ class ResearchMoreRecoveryService:
             metadata["awaiting_human_intervention"] = True
             metadata["termination"] = {
                 "reason": "research_more_needs_human",
-                "definition": "REGENT-DEFINITION-1.0 ATTRIBUTE_7",
+                # 3.0 ATTRIBUTE_8: reality contact stays accountable and the legal
+                # subject keeps the non-transferable takeover right.
+                "definition": "REGENT-DEFINITION-3.0 ATTRIBUTE_8",
                 "handoff": "WAITING_HUMAN",
             }
             goal.metadata_json = metadata
@@ -252,8 +255,9 @@ class ResearchMoreRecoveryService:
         else:
             merged = self._merge_urls(goal, spec, metadata, package_feeds)
         prefix = note or (
-            "自动能力恢复已达轮次上限。按 REGENT-DEFINITION-1.0: "
-            "不以等人粘贴 URL 为默认路径; 改用已有外部证据自适应缩小范围并继续推进。"
+            "自动能力恢复已达轮次上限。按 REGENT-DEFINITION-3.0: "
+            "证据用于学习而非探索许可; 不以等人粘贴 URL 为默认路径, "
+            "改用已有外部证据自适应缩小范围并继续推进。"
         )
         return await self._resume_discovery(
             session,

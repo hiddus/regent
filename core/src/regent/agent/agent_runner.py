@@ -101,7 +101,12 @@ class AgentRunner:
         execution_mode: str = "ask",
         permission_always_tools: set[str] | frozenset[str] | None = None,
         subagent_depth: int = 0,
-        max_subagent_depth: int = 1,
+        max_subagent_depth: int = 3,
+        budget_ledger: Any | None = None,
+        model_max_output_tokens: int = 8192,
+        model_input_cost_per_million: float = 0.0,
+        model_output_cost_per_million: float = 0.0,
+        price_book_version: str = "model-price-book-v1",
     ) -> None:
         self._provider = provider
         self._toolkit = toolkit
@@ -123,6 +128,12 @@ class AgentRunner:
         self._permission_always = set(permission_always_tools or ())
         self._subagent_depth = int(subagent_depth)
         self._max_subagent_depth = int(max_subagent_depth)
+        self._budget_ledger = budget_ledger
+        self._model_max_output_tokens = max(1, int(model_max_output_tokens))
+        self._model_input_rate = max(0.0, float(model_input_cost_per_million)) / 1_000_000
+        self._model_output_rate = max(0.0, float(model_output_cost_per_million)) / 1_000_000
+        self._price_book_version = price_book_version
+        self._context_window_tokens = int(context_window_tokens)
         self._compactor = ContextCompactor(
             toolkit=toolkit,
             summarizer=HeuristicSummarizer(),
@@ -232,6 +243,38 @@ class AgentRunner:
             files=dict(report.files),
             ledger=ledger,
         )
+
+    async def _execute_toolkit_call(self, call: Any, *, turn: int) -> str:
+        spec = next((item for item in TOOL_SPECS if item.name == call.name), None)
+        if spec is None or spec.max_cost is None:
+            raise RuntimeError(f"tool {call.name!r} does not declare max_cost")
+        hold = None
+        if spec.max_cost > 0 and self._budget_ledger is not None and self._goal_id is not None:
+            from regent.application.budget_ledger import COST_TOOL_INVOCATION
+
+            hold = await self._budget_ledger.reserve(
+                self._goal_id,
+                self._run_id,
+                reservation_key=(
+                    f"{self._producer_ref}:{self._run_id or 'goal'}:turn:{turn}:tool:{call.id}"
+                ),
+                cost_type=COST_TOOL_INVOCATION,
+                amount=float(spec.max_cost),
+                price_book_version=self._price_book_version,
+                description=f"tool invocation hold: {call.name}",
+            )
+            hold = await self._budget_ledger.claim(hold.id)
+        try:
+            result = await self._toolkit.execute(call)
+        except Exception:
+            if hold is not None:
+                await self._budget_ledger.release(hold.id, claim_token=hold.claim_token)
+            raise
+        if hold is not None:
+            await self._budget_ledger.settle(
+                hold.id, claim_token=hold.claim_token, actual_amount=float(spec.max_cost)
+            )
+        return result
 
     async def _seed_work_plan(self, plan: dict[str, Any]) -> None:
         """Restore todos from plan checkpoint or durable ExecutionPlan items."""
@@ -410,6 +453,11 @@ class AgentRunner:
             run_id=self._run_id,
             parent_depth=self._subagent_depth,
             max_subagent_depth=self._max_subagent_depth,
+            budget_ledger=self._budget_ledger,
+            model_max_output_tokens=self._model_max_output_tokens,
+            model_input_cost_per_million=self._model_input_rate * 1_000_000,
+            model_output_cost_per_million=self._model_output_rate * 1_000_000,
+            price_book_version=self._price_book_version,
         )
         result = await runner.run_milestone(
             goal_anchor_text=str(plan.get("goal_anchor_text") or ""),
@@ -645,13 +693,55 @@ class AgentRunner:
                 )
 
             messages = assembler.assemble(turn=turn, conversation=conversation)
+            model_hold = None
+            if self._budget_ledger is not None and self._goal_id is not None:
+                from regent.agent.compact import estimate_tokens
+                from regent.application.budget_ledger import COST_MODEL_INPUT
+
+                estimated_input = estimate_tokens(messages)
+                worst_input = max(
+                    estimated_input,
+                    self._context_window_tokens - self._model_max_output_tokens,
+                )
+                worst_cost = (
+                    worst_input * self._model_input_rate
+                    + self._model_max_output_tokens * self._model_output_rate
+                )
+                try:
+                    model_hold = await self._budget_ledger.reserve(
+                        self._goal_id,
+                        self._run_id,
+                        reservation_key=(
+                            f"{self._producer_ref}:{self._run_id or 'goal'}:turn:{turn}"
+                        ),
+                        cost_type=COST_MODEL_INPUT,
+                        amount=worst_cost,
+                        price_book_version=self._price_book_version,
+                        description="agent model call worst-case hold",
+                    )
+                except Exception as exc:
+                    from regent.application.budget_ledger import BudgetExceededError
+
+                    if not isinstance(exc, BudgetExceededError):
+                        raise
+                    self._raise_budget_exhausted(
+                        str(exc),
+                        transcript=transcript,
+                        ledger=ledger,
+                        compact_events=compact_events,
+                    )
+                model_hold = await self._budget_ledger.claim(model_hold.id)
             try:
                 response = await self._provider.chat(
                     messages=messages,
                     tools=TOOL_SPECS,
                     temperature=chat_temperature,
                 )
-            except (ModelTruncatedError, ToolCallInvalidError):
+            except Exception:
+                if model_hold is not None:
+                    await self._budget_ledger.release(
+                        model_hold.id, claim_token=model_hold.claim_token
+                    )
                 ledger.wall_seconds = time.monotonic() - started
                 ledger.add_usage(input_tokens=input_tokens, output_tokens=output_tokens)
                 raise
@@ -666,6 +756,15 @@ class AgentRunner:
             turn_out = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
             turn_cached = getattr(usage, "cached_tokens", None) if usage else None
             turn_cached_i = int(turn_cached or 0) if turn_cached is not None else 0
+            if model_hold is not None:
+                actual_cost = (
+                    turn_in * self._model_input_rate + turn_out * self._model_output_rate
+                )
+                await self._budget_ledger.settle(
+                    model_hold.id,
+                    claim_token=model_hold.claim_token,
+                    actual_amount=actual_cost,
+                )
             input_tokens += turn_in
             output_tokens += turn_out
             ledger.add_usage(
@@ -743,6 +842,9 @@ class AgentRunner:
             submitted_this_turn = False
             for call in assistant.tool_calls:
                 ledger.add_tool_invocation(1)
+                tool_spec = next((spec for spec in TOOL_SPECS if spec.name == call.name), None)
+                if tool_spec is None or tool_spec.max_cost is None:
+                    raise RuntimeError(f"tool {call.name!r} does not declare max_cost")
                 self._raise_if_aborted(plan)
                 step0_block = self._step0_blocks_write(plan, call.name)
                 if step0_block:
@@ -756,7 +858,7 @@ class AgentRunner:
                         )
                     else:
                         # Toolkit validates; runner executes isolated subagent.
-                        probe = await self._toolkit.execute(call)
+                        probe = await self._execute_toolkit_call(call, turn=turn)
                         if probe.startswith("ERROR:"):
                             result_text = probe
                         else:
@@ -776,7 +878,7 @@ class AgentRunner:
                         self._maybe_require_tool_permission(
                             plan, call.name, dict(call.arguments or {})
                         )
-                    result_text = await self._toolkit.execute(call)
+                    result_text = await self._execute_toolkit_call(call, turn=turn)
                 message_result = result_text
                 if call.name == "submit":
                     submitted_this_turn = True

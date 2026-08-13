@@ -12,10 +12,24 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from regent.infrastructure.models import BudgetEntryModel, GoalModel
+from regent.infrastructure.models import (
+    BudgetAccountModel,
+    BudgetEntryModel,
+    BudgetReservationModel,
+    GoalModel,
+)
+
+
+class BudgetExceededError(RuntimeError):
+    """The requested hold cannot fit inside the Goal's hard budget."""
+
+
+class BudgetReservationError(RuntimeError):
+    """A reservation transition or ownership check failed."""
+
 
 # ---------------------------------------------------------------------------
 # Value objects
@@ -56,6 +70,18 @@ class BudgetStatus:
         return max(0.0, self.limit - self.total_cost)
 
 
+@dataclass(frozen=True, slots=True)
+class BudgetReservation:
+    id: uuid.UUID
+    reservation_key: str
+    goal_id: uuid.UUID
+    run_id: uuid.UUID | None
+    amount: float
+    settled_amount: float
+    status: str
+    claim_token: uuid.UUID | None
+
+
 # ---------------------------------------------------------------------------
 # Cost types
 # ---------------------------------------------------------------------------
@@ -68,15 +94,17 @@ COST_EXTERNAL_OPERATION = "external_operation"
 COST_HUMAN_MINUTES = "human_minutes"
 COST_FAILURE_RECOVERY = "failure_recovery"
 
-_ALL_COST_TYPES = frozenset({
-    COST_MODEL_INPUT,
-    COST_MODEL_OUTPUT,
-    COST_TOOL_INVOCATION,
-    COST_INFRASTRUCTURE,
-    COST_EXTERNAL_OPERATION,
-    COST_HUMAN_MINUTES,
-    COST_FAILURE_RECOVERY,
-})
+_ALL_COST_TYPES = frozenset(
+    {
+        COST_MODEL_INPUT,
+        COST_MODEL_OUTPUT,
+        COST_TOOL_INVOCATION,
+        COST_INFRASTRUCTURE,
+        COST_EXTERNAL_OPERATION,
+        COST_HUMAN_MINUTES,
+        COST_FAILURE_RECOVERY,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +121,230 @@ class BudgetLedger:
     ) -> None:
         self._sessions = sessions
 
+    async def reserve(
+        self,
+        goal_id: uuid.UUID,
+        run_id: uuid.UUID | None,
+        *,
+        reservation_key: str,
+        cost_type: str,
+        amount: float,
+        price_book_version: str = "price-book-v1",
+        description: str = "",
+    ) -> BudgetReservation:
+        """Atomically hold worst-case spend before billable work starts.
+
+        Locking the Goal serializes all reservations for that Goal in PostgreSQL.
+        The unique reservation key makes retries idempotent.
+        """
+        self._validate_cost(cost_type, amount)
+        if not reservation_key.strip():
+            raise ValueError("reservation_key must not be empty")
+        async with self._sessions() as session, session.begin():
+            existing = await session.scalar(
+                select(BudgetReservationModel).where(
+                    BudgetReservationModel.reservation_key == reservation_key
+                )
+            )
+            if existing is not None:
+                if (
+                    existing.goal_id != goal_id
+                    or existing.run_id != run_id
+                    or existing.cost_type != cost_type
+                    or existing.amount != amount
+                ):
+                    raise BudgetReservationError("reservation key reused with different binding")
+                return self._reservation(existing)
+
+            goal = await session.get(GoalModel, goal_id, with_for_update=True)
+            if goal is None:
+                raise BudgetReservationError("goal not found")
+            limit_raw = (goal.metadata_json or {}).get("budget_limit")
+            limit = float(limit_raw) if limit_raw is not None else None
+            account = await session.get(BudgetAccountModel, goal_id)
+            if account is None:
+                spent = float(
+                    await session.scalar(
+                        select(func.coalesce(func.sum(BudgetEntryModel.amount), 0.0)).where(
+                            BudgetEntryModel.goal_id == goal_id
+                        )
+                    )
+                    or 0.0
+                )
+                account = BudgetAccountModel(
+                    goal_id=goal_id,
+                    spent_amount=spent,
+                    reserved_amount=0.0,
+                    updated_at=datetime.now(UTC),
+                )
+                session.add(account)
+                await session.flush()
+            held = float(account.reserved_amount)
+            spent = float(account.spent_amount)
+            if limit is not None:
+                result = await session.execute(
+                    update(BudgetAccountModel)
+                    .where(
+                        BudgetAccountModel.goal_id == goal_id,
+                        BudgetAccountModel.spent_amount
+                        + BudgetAccountModel.reserved_amount
+                        + amount
+                        <= limit,
+                    )
+                    .values(
+                        reserved_amount=BudgetAccountModel.reserved_amount + amount,
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+                admitted = getattr(result, "rowcount", 0) == 1
+            else:
+                await session.execute(
+                    update(BudgetAccountModel)
+                    .where(BudgetAccountModel.goal_id == goal_id)
+                    .values(
+                        reserved_amount=BudgetAccountModel.reserved_amount + amount,
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+                admitted = True
+            if not admitted:
+                raise BudgetExceededError(
+                    f"budget reservation exceeds limit: spent={spent}, held={held}, "
+                    f"requested={amount}, limit={limit}"
+                )
+            row = BudgetReservationModel(
+                id=uuid.uuid4(),
+                reservation_key=reservation_key,
+                goal_id=goal_id,
+                run_id=run_id,
+                cost_type=cost_type,
+                amount=amount,
+                settled_amount=0.0,
+                status="RESERVED",
+                claim_token=None,
+                price_book_version=price_book_version,
+                description=description,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+            session.add(row)
+            await session.flush()
+            return self._reservation(row)
+
+    async def claim(self, reservation_id: uuid.UUID) -> BudgetReservation:
+        async with self._sessions() as session, session.begin():
+            row = await self._locked_reservation(session, reservation_id)
+            if row.status == "CLAIMED":
+                return self._reservation(row)
+            if row.status != "RESERVED":
+                raise BudgetReservationError(f"cannot claim reservation from {row.status}")
+            row.status = "CLAIMED"
+            row.claim_token = uuid.uuid4()
+            row.updated_at = datetime.now(UTC)
+            await session.flush()
+            return self._reservation(row)
+
+    async def settle(
+        self, reservation_id: uuid.UUID, *, claim_token: uuid.UUID, actual_amount: float
+    ) -> BudgetReservation:
+        if actual_amount < 0:
+            raise ValueError("actual_amount must be non-negative")
+        async with self._sessions() as session, session.begin():
+            row = await self._locked_reservation(session, reservation_id)
+            self._require_claim(row, claim_token)
+            if actual_amount > row.amount:
+                raise BudgetExceededError("actual cost exceeds reserved hard budget")
+            session.add(
+                BudgetEntryModel(
+                    id=uuid.uuid4(),
+                    goal_id=row.goal_id,
+                    run_id=row.run_id,
+                    cost_type=row.cost_type,
+                    amount=actual_amount,
+                    price_book_version=row.price_book_version,
+                    description=row.description,
+                    recorded_at=datetime.now(UTC),
+                )
+            )
+            await session.execute(
+                update(BudgetAccountModel)
+                .where(
+                    BudgetAccountModel.goal_id == row.goal_id,
+                    BudgetAccountModel.reserved_amount >= row.amount,
+                )
+                .values(
+                    reserved_amount=BudgetAccountModel.reserved_amount - row.amount,
+                    spent_amount=BudgetAccountModel.spent_amount + actual_amount,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            row.settled_amount = actual_amount
+            row.status = "SETTLED"
+            row.updated_at = datetime.now(UTC)
+            await session.flush()
+            return self._reservation(row)
+
+    async def release(
+        self, reservation_id: uuid.UUID, *, claim_token: uuid.UUID | None = None
+    ) -> BudgetReservation:
+        async with self._sessions() as session, session.begin():
+            row = await self._locked_reservation(session, reservation_id)
+            if row.status == "RELEASED":
+                return self._reservation(row)
+            if row.status == "CLAIMED":
+                self._require_claim(row, claim_token)
+            elif row.status != "RESERVED":
+                raise BudgetReservationError(f"cannot release reservation from {row.status}")
+            await session.execute(
+                update(BudgetAccountModel)
+                .where(
+                    BudgetAccountModel.goal_id == row.goal_id,
+                    BudgetAccountModel.reserved_amount >= row.amount,
+                )
+                .values(
+                    reserved_amount=BudgetAccountModel.reserved_amount - row.amount,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            row.status = "RELEASED"
+            row.updated_at = datetime.now(UTC)
+            await session.flush()
+            return self._reservation(row)
+
+    @staticmethod
+    def _validate_cost(cost_type: str, amount: float) -> None:
+        if cost_type not in _ALL_COST_TYPES:
+            raise ValueError(f"unknown cost type: {cost_type}")
+        if amount < 0:
+            raise ValueError("cost amount must be non-negative")
+
+    @staticmethod
+    def _reservation(row: BudgetReservationModel) -> BudgetReservation:
+        return BudgetReservation(
+            id=row.id,
+            reservation_key=row.reservation_key,
+            goal_id=row.goal_id,
+            run_id=row.run_id,
+            amount=row.amount,
+            settled_amount=row.settled_amount,
+            status=row.status,
+            claim_token=row.claim_token,
+        )
+
+    @staticmethod
+    async def _locked_reservation(
+        session: AsyncSession, reservation_id: uuid.UUID
+    ) -> BudgetReservationModel:
+        row = await session.get(BudgetReservationModel, reservation_id, with_for_update=True)
+        if row is None:
+            raise BudgetReservationError("reservation not found")
+        return row
+
+    @staticmethod
+    def _require_claim(row: BudgetReservationModel, claim_token: uuid.UUID | None) -> None:
+        if row.status != "CLAIMED" or claim_token is None or row.claim_token != claim_token:
+            raise BudgetReservationError("claimed reservation token mismatch")
+
     async def record_cost(
         self,
         goal_id: uuid.UUID,
@@ -103,10 +355,7 @@ class BudgetLedger:
         price_book_version: str = "price-book-v1",
         description: str = "",
     ) -> BudgetEntryModel:
-        if cost_type not in _ALL_COST_TYPES:
-            raise ValueError(f"unknown cost type: {cost_type}")
-        if amount < 0:
-            raise ValueError("cost amount must be non-negative")
+        self._validate_cost(cost_type, amount)
         async with self._sessions() as session, session.begin():
             entry = BudgetEntryModel(
                 id=uuid.uuid4(),
@@ -181,9 +430,7 @@ class BudgetLedger:
             if not goal_ids:
                 return BudgetReport(goal_id=org_id, total_cost=0.0, entries=[])
             rows = await session.scalars(
-                select(BudgetEntryModel).where(
-                    BudgetEntryModel.goal_id.in_(goal_ids)
-                )
+                select(BudgetEntryModel).where(BudgetEntryModel.goal_id.in_(goal_ids))
             )
             entries = [
                 {

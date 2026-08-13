@@ -4,7 +4,7 @@ V3 §2.2 (Resource Engine) — when internal REUSE/CONFIGURE/COMPOSE/BUILD canno
 satisfy a capability gap, the system may acquire a pre-built capability package
 from a known registry over the network.
 
-Safety invariants (from REGENT-DEFINITION-1.0 ATTRIBUTE_3 + Tech Spec §12):
+Safety invariants (from REGENT-DEFINITION-3.0 ATTRIBUTE_7 + Tech Spec §12):
 - All external data is UNTRUSTED_DATA; it may NOT become instruction or
   authorization source.
 - Downloads are gated by Permit + ExternalOperation (controlled egress).
