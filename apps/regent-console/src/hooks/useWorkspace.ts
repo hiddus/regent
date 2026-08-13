@@ -331,7 +331,7 @@ export function useWorkspace() {
         const msg = data as unknown as Message
         setMessages(prev => {
           if (prev.some(m => m.id === msg.id)) return prev
-          return [...prev, msg]
+          return [...prev, msg].sort((a, b) => a.ordinal - b.ordinal)
         })
         if (msg.ordinal && msg.ordinal > lastOrdinalRef.current) {
           lastOrdinalRef.current = msg.ordinal
@@ -412,6 +412,7 @@ export function useWorkspace() {
     },
     onError: () => {
       sseConnectedRef.current = false
+      showCoreHint('实时连接暂时中断，正在自动重连；内容会继续同步。', true)
     },
     onConnectionChange: setConnection,
     reconnectDelay: 2000,

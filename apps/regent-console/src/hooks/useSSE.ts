@@ -13,9 +13,11 @@ export function useSSE(url: string | null, options: UseSSEOptions) {
   const optionsRef = useRef(options)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectCountRef = useRef(0)
+  const generationRef = useRef(0)
   optionsRef.current = options
 
   const disconnect = useCallback(() => {
+    generationRef.current += 1
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current)
       reconnectTimerRef.current = null
@@ -29,6 +31,7 @@ export function useSSE(url: string | null, options: UseSSEOptions) {
   const connect = useCallback(() => {
     if (!url) return
     disconnect()
+    const generation = generationRef.current
     optionsRef.current.onConnectionChange?.(
       reconnectCountRef.current > 0 ? 'reconnecting' : 'connecting',
     )
@@ -37,11 +40,13 @@ export function useSSE(url: string | null, options: UseSSEOptions) {
     esRef.current = es
 
     es.onopen = () => {
+      if (generation !== generationRef.current) return
       reconnectCountRef.current = 0
       optionsRef.current.onConnectionChange?.('connected')
     }
 
     es.onmessage = (event) => {
+      if (generation !== generationRef.current) return
       try {
         const parsed = JSON.parse(event.data) as { type: string; data: Record<string, unknown> }
         optionsRef.current.onEvent?.(parsed.type, parsed.data)
@@ -51,11 +56,13 @@ export function useSSE(url: string | null, options: UseSSEOptions) {
     }
 
     es.onerror = (e) => {
+      if (generation !== generationRef.current) return
       optionsRef.current.onError?.(e)
       optionsRef.current.onConnectionChange?.('reconnecting')
       // Close and schedule reconnect with exponential backoff
       es.close()
       esRef.current = null
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
 
       const delay = Math.min(
         (options.reconnectDelay ?? 3000) * Math.pow(1.5, reconnectCountRef.current),
@@ -63,7 +70,7 @@ export function useSSE(url: string | null, options: UseSSEOptions) {
       )
       reconnectCountRef.current += 1
       reconnectTimerRef.current = setTimeout(() => {
-        connect()
+        if (generation === generationRef.current) connect()
       }, delay)
     }
   }, [url, disconnect, options.reconnectDelay])
@@ -75,7 +82,14 @@ export function useSSE(url: string | null, options: UseSSEOptions) {
       return
     }
     connect()
+    const resume = () => {
+      if (document.visibilityState === 'visible' && !esRef.current) connect()
+    }
+    window.addEventListener('online', resume)
+    document.addEventListener('visibilitychange', resume)
     return () => {
+      window.removeEventListener('online', resume)
+      document.removeEventListener('visibilitychange', resume)
       disconnect()
     }
   }, [connect, disconnect, url])

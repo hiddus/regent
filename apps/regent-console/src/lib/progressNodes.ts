@@ -5,6 +5,7 @@
  */
 
 import type { Message } from './types'
+import { classifyEventForPresentation } from './eventPresentation'
 
 export type NodeStatus = 'pending' | 'running' | 'done' | 'failed' | 'waiting'
 
@@ -495,6 +496,7 @@ export function buildTimeline(
 
   for (let mi = 0; mi < messages.length; mi += 1) {
     const m = messages[mi]
+    const presentation = classifyEventForPresentation(m)
     const isTaskSurface =
       m.message_type === 'HUMAN_TASK_REQUIRED' ||
       m.message_type === 'DELIVERY_GAP_EXHAUSTED' ||
@@ -526,6 +528,12 @@ export function buildTimeline(
     }
 
     if (m.role === 'EVENT' && !TYPE_INDEX.has(m.message_type)) {
+      continue
+    }
+
+    // Transient actions occupy the single live-action slot; artifacts belong
+    // to the read-only artifact surface; infrastructure noise is never chat.
+    if (presentation === 'current_action' || presentation === 'artifact' || presentation === 'silent') {
       continue
     }
 

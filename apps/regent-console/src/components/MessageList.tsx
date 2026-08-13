@@ -412,6 +412,8 @@ export function MessageList({
     [messages, extras],
   )
 
+  const activityCount = timeline.filter(item => item.kind === 'node' || item.kind === 'retry_cluster').length
+
   if (messages.length === 0 && !showPinnedRecovery && !showResultCard) {
     return (
       <section className="messages">
@@ -489,6 +491,12 @@ export function MessageList({
   return (
     <section className="messages">
       <div className="stream">
+        {activityCount > 1 && (
+          <div className="activity-compression-note">
+            <span>运行活动已自动归并</span>
+            <small>{activityCount} 组进度与重试记录，可逐项展开查看</small>
+          </div>
+        )}
         {timeline.map((item, idx) => {
           if (item.kind === 'retry_cluster') {
             return <RetryClusterCard key={`retry-${item.fingerprint}-${idx}`} cluster={item} />
