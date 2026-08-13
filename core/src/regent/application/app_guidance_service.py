@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
@@ -294,9 +295,47 @@ class AppGuidanceService:
         )
         interpretation = generated.output
 
+        # In boundary-confirmation mode, numbered free-text is an answer to the
+        # questions Regent just asked. Do not let the model classify it as a
+        # status QUERY, which would repeat the same unknowns forever.
+        goal_status = str((context.get("goal") or {}).get("status") or "")
+        spec_unknowns = list((context.get("goal_spec") or {}).get("unknowns") or [])
+        numbered_answers = [
+            value.strip()
+            for value in re.findall(
+                r"(?:^|[；;\n。]\s*)(?:\d+)\s*[、.．:]\s*(.*?)(?=(?:[；;\n。]\s*\d+\s*[、.．:])|$)",
+                message.strip(),
+            )
+            if value.strip()
+        ]
+        if goal_status == "DRAFT" and spec_unknowns and numbered_answers:
+            answered_count = min(len(numbered_answers), len(spec_unknowns), 3)
+            answered = spec_unknowns[:answered_count]
+            remaining = spec_unknowns[answered_count:]
+            answer_map: dict[str, str] = {}
+            for item, answer in zip(answered, numbered_answers, strict=False):
+                question = item.get("question") if isinstance(item, dict) else item
+                answer_map[str(question)] = answer
+            interpretation = GuidanceInterpretation(
+                command_type="CORRECT",
+                summary=f"已确认 {answered_count} 项边界",
+                correction_target="requirements",
+                correction_detail=message,
+                explicit_constraints={"boundary_answers": answer_map},
+                unknowns=[
+                    str(item.get("question") if isinstance(item, dict) else item)
+                    for item in remaining
+                ],
+                feasibility_verdict="REVISION_REQUIRED" if remaining else "FEASIBLE",
+                feasibility_reasons=(
+                    ["仍有待确认边界，继续下一轮确认。"]
+                    if remaining
+                    else ["用户已回答全部边界问题；最小范围、验收和预算可进入锁定确认。"]
+                ),
+            )
+
         # WAITING_HUMAN + pending task: directional free text is approve+resume,
         # not a silent CORRECT that leaves the goal stuck.
-        goal_status = str((context.get("goal") or {}).get("status") or "")
         pending = context.get("pending_human_tasks") or []
         if (
             goal_status == "WAITING_HUMAN"
