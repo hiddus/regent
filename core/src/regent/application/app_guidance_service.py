@@ -22,7 +22,12 @@ from regent.application.execution_events import (
 from regent.application.goal_execution_service import GoalExecutionService
 from regent.application.human_task_service import HumanTaskService
 from regent.application.p1_contracts import canonical_hash
-from regent.application.goal_readiness import blocking_unknowns, effective_feasibility_verdict
+from regent.application.goal_readiness import (
+    assess_goal_readiness,
+    blocking_unknowns,
+    confirmation_gate_key,
+    effective_feasibility_verdict,
+)
 from regent.application.transition_service import TransitionContext, TransitionService
 from regent.domain.errors import DomainError, ErrorCode
 from regent.domain.transitions import GoalCommand
@@ -1227,7 +1232,9 @@ class AppGuidanceService:
         self, session: AsyncSession, project_id: uuid.UUID
     ) -> ConversationModel:
         conversation = await session.scalar(
-            select(ConversationModel).where(ConversationModel.app_project_id == project_id)
+            select(ConversationModel)
+            .where(ConversationModel.app_project_id == project_id)
+            .with_for_update()
         )
         if conversation is None:
             raise DomainError(ErrorCode.NOT_FOUND, "app conversation not found")
@@ -1941,7 +1948,6 @@ class AppGuidanceService:
                 **spec_content,
             )
             session.add(next_spec)
-            metadata["goal_clarity_state"] = "EXPLORING" if unknowns else "CLARIFIED"
             metadata["clarification_rounds"] = int(metadata.get("clarification_rounds") or 0) + 1
             if interpretation.feasibility_verdict is not None:
                 metadata["feasibility_verdict"] = effective_feasibility_verdict(
@@ -1955,24 +1961,80 @@ class AppGuidanceService:
             metadata["latest_goal_spec_version"] = next_spec.version
             metadata["goal_spec_hash"] = next_spec.content_hash
             metadata["unknowns"] = unknowns
+            readiness = assess_goal_readiness(
+                verdict=metadata.get("feasibility_verdict"),
+                rounds=int(metadata.get("clarification_rounds") or 0),
+                unknowns=unknowns,
+            )
+            gate_key = confirmation_gate_key(goal_id, next_spec.version)
+            metadata["goal_clarity_state"] = (
+                "WAITING_CONFIRMATION" if readiness.ready else "CLARIFYING"
+            )
+            metadata["goal_phase"] = readiness.phase
+            metadata["confirmation_state"] = "PENDING" if readiness.ready else "NONE"
+            metadata["confirmation_gate_key"] = gate_key if readiness.ready else None
             goal.metadata_json = metadata
             flag_modified(goal, "metadata_json")
 
             conversation = await self._conversation(session, project_id)
             ordinal = await self._next_ordinal(session, conversation.id)
+            remaining_questions = [
+                str(item.get("question") if isinstance(item, dict) else item).strip()
+                for item in readiness.blocking_unknowns
+                if str(item.get("question") if isinstance(item, dict) else item).strip()
+            ]
+            if readiness.ready:
+                assistant_type = "APP_CONFIRMATION_REQUIRED"
+                response = (
+                    f"可行性分析已通过，目标已更新为第 {next_spec.version} 版。"
+                    "请确认并锁定当前目标后再开始执行；确认前不会开工。"
+                )
+            elif remaining_questions:
+                assistant_type = "CLARIFICATION_REQUIRED"
+                response = "已记录本轮回答。下一步请回答：\n" + "\n".join(
+                    f"{index}. {question}"
+                    for index, question in enumerate(remaining_questions[:3], 1)
+                )
+            elif readiness.verdict == "NOT_FEASIBLE":
+                assistant_type = "CLARIFICATION_REQUIRED"
+                response = "当前可行性分析未通过。请调整目标范围或停止该项目。"
+            else:
+                assistant_type = "CLARIFICATION_REQUIRED"
+                response = "已记录本轮回答，正在完成可行性分析；正式执行尚未开始。"
+            understanding = {
+                **dict(next_spec.system_inferences or {}),
+                "explicit_constraints": dict(next_spec.explicit_constraints or {}),
+                "success_criteria": dict(next_spec.success_criteria or {}),
+                "unknowns": list(next_spec.unknowns or []),
+            }
+            assistant_metadata = {
+                "command_id": str(command_id),
+                "app_project_id": str(project_id),
+                "goal_id": str(goal_id),
+                "goal_spec_id": str(next_spec.id),
+                "goal_spec_version": next_spec.version,
+                "goal_spec_hash": next_spec.content_hash,
+                "goal_spec_status": next_spec.status,
+                "feasibility_verdict": readiness.verdict,
+                "feasibility_reasons": list(metadata.get("feasibility_reasons") or []),
+                "clarification_rounds": readiness.rounds,
+                "unknowns": list(next_spec.unknowns or []),
+                "blocking_unknowns": list(readiness.blocking_unknowns),
+                "understanding": understanding,
+                "plan": dict(metadata.get("runtime_plan") or {}),
+                "gate_key": gate_key,
+                "gate_status": "PENDING" if readiness.ready else "NONE",
+                "next_action": "CONFIRM_GOAL" if readiness.ready else "ANSWER_CLARIFICATION",
+                "correction_target": target,
+                "correction_detail": detail,
+                "total_corrections": len(corrections),
+                "spec_version": next_spec.version,
+            }
             user_msg = await self._persist_message_pair(
                 session, conversation.id, ordinal, message, actor,
-                f"已记录修正: [{target}] {detail}\n正在中断当前执行并以最新目标方向续跑。",
-                "CORRECTION_APPLIED",
-                {
-                    "command_id": str(command_id),
-                    "goal_id": str(goal_id),
-                    "correction_target": target,
-                    "correction_detail": detail,
-                    "total_corrections": len(corrections),
-                    "goal_evolving": True,
-                    "spec_version": next_spec.version,
-                },
+                response,
+                assistant_type,
+                assistant_metadata,
             )
             cid = await self._persist_command(
                 session, conversation.id, project_id, user_msg.id,
@@ -1981,21 +2043,13 @@ class AppGuidanceService:
             command_id = cid
 
         if goal_status == "DRAFT":
-            remaining_questions = [
-                str(item.get("question") if isinstance(item, dict) else item).strip()
-                for item in unknowns
-                if str(item.get("question") if isinstance(item, dict) else item).strip()
-            ]
-            if remaining_questions:
-                response = "已记录本轮回答。下一轮请回答：\n"
-                response += "\n".join(
-                    f"{index}. {question}"
-                    for index, question in enumerate(remaining_questions[:3], 1)
-                )
-                response += "\n请按编号回复；不确定可直接写“不确定”。"
-            else:
-                response = "已记录全部边界回答。可行性条件已满足，请确认锁定当前目标版本后再开始执行。"
-            return GuidanceReceipt(command_id, "CORRECT", None, False, response)
+            return GuidanceReceipt(
+                command_id,
+                "CORRECT",
+                goal_id if readiness.ready else None,
+                readiness.ready,
+                response,
+            )
 
         # Interrupt in-flight lease so steering is not deferred to a vague "next step".
         # resume_after_human clears the abort flag before requeueing.

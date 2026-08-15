@@ -1,6 +1,7 @@
 """Shared readiness semantics for unresolved GoalSpec questions."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -26,3 +27,43 @@ def effective_feasibility_verdict(
     ):
         return "FEASIBLE"
     return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class GoalReadiness:
+    phase: str
+    verdict: str
+    rounds: int
+    blocking_unknowns: tuple[Any, ...]
+    advisory_unknowns: tuple[Any, ...]
+
+    @property
+    def ready(self) -> bool:
+        return self.phase == "DRAFT_CONFIRMABLE"
+
+
+def assess_goal_readiness(
+    *, verdict: str | None, rounds: int, unknowns: list[Any] | None
+) -> GoalReadiness:
+    all_unknowns = list(unknowns or [])
+    blockers = blocking_unknowns(all_unknowns)
+    advisory = [item for item in all_unknowns if item not in blockers]
+    effective = effective_feasibility_verdict(
+        verdict, rounds=rounds, unknowns=all_unknowns
+    )
+    phase = (
+        "DRAFT_CONFIRMABLE"
+        if effective == "FEASIBLE" and rounds >= 2 and not blockers
+        else "DRAFT_CLARIFYING"
+    )
+    return GoalReadiness(
+        phase=phase,
+        verdict=effective,
+        rounds=rounds,
+        blocking_unknowns=tuple(blockers),
+        advisory_unknowns=tuple(advisory),
+    )
+
+
+def confirmation_gate_key(goal_id: Any, spec_version: int) -> str:
+    return f"goal:{goal_id}:spec:{spec_version}:confirm"

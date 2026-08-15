@@ -4,13 +4,14 @@ import { MessageList } from './components/MessageList'
 import { Composer } from './components/Composer'
 import { ArtifactPanel } from './components/ArtifactPanel'
 import { useWorkspace } from './hooks/useWorkspace'
-import { api } from './lib/api'
+import { api, ApiError } from './lib/api'
 import type { DiagnosticDelivery } from './lib/types'
 
 export default function App() {
   const ws = useWorkspace()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sending, setSending] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const [pendingSend, setPendingSend] = useState<{ text: string; startedAt: number; state: 'processing' | 'failed'; error?: string } | null>(null)
   const [projectViewOpen, setProjectViewOpen] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -68,13 +69,12 @@ export default function App() {
         const result = await api.guidance(ws.currentProject!.id, text)
         await ws.refresh()
         if (result.requires_confirmation && result.resulting_goal_id) {
-          await api.startGoal(result.resulting_goal_id)
-          ws.showHint('新目标版本已开始执行；你仍可继续补充')
+          ws.showHint('可行性分析已通过，请在对话中确认并锁定最新目标；确认前不会开工。')
         }
         else if (result.command_type === 'SELECT_OPTION') ws.showHint('已记录你的选择，正在按该方向推进。')
         else if (result.command_type === 'PAUSE') ws.showHint('已暂停。可发送修正或恢复指令。')
         else if (result.command_type === 'RESUME') ws.showHint('已恢复执行。')
-        else if (result.command_type === 'CORRECT') ws.showHint('修正已记录，将在下一步执行中生效。')
+        else if (result.command_type === 'CORRECT') ws.showHint('修正已记录，Regent 已更新目标状态与下一步操作。')
         else if (result.command_type === 'APPROVE') ws.showHint('已批准，目标继续执行。')
         else if (result.command_type === 'REJECT') ws.showHint('已拒绝，Core 将重新规划。')
         else ws.showHint('')
@@ -109,6 +109,7 @@ export default function App() {
   }, [ws])
 
   const handleConfirm = useCallback(async (projectId: string, goalId: string, hash: string) => {
+    setConfirming(true)
     try {
       const state = await api.getProjectStatus(projectId)
       const currentHash = ((state.goal?.metadata as Record<string, unknown>)?.goal_spec_hash as string) ||
@@ -133,7 +134,14 @@ export default function App() {
       ws.showHint('Core 已开始执行，你无需继续操作')
       await ws.openProject(projectId)
     } catch (e) {
-      ws.showHint((e as Error).message, true)
+      if (e instanceof ApiError && e.code === 'VERSION_CONFLICT') {
+        await ws.openProject(projectId)
+        ws.showHint('目标方案已更新，已切换到最新确认版本，请重新确认。', true)
+      } else {
+        ws.showHint((e as Error).message, true)
+      }
+    } finally {
+      setConfirming(false)
     }
   }, [ws])
 
@@ -256,6 +264,7 @@ export default function App() {
           coreHintError={ws.coreHintError}
           goalMetadata={(ws.status?.goal?.metadata as Record<string, unknown> | undefined) || {}}
           bottomRef={messagesEndRef}
+          confirmationPending={confirming}
         />
         <Composer
           onSend={handleSend}

@@ -374,6 +374,15 @@ body {
   scroll-margin-bottom: 20px;
 }
 
+.stale-confirmation-note {
+  margin-top: 8px;
+  padding: 9px 12px;
+  border-left: 2px solid var(--muted);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 6%, transparent);
+  font-size: 12px;
+}
+
 /* Progress nodes 鈥?collapsible Workbuddy-style cards */
 .progress-node {
   display: grid;

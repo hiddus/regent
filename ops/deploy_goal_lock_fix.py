@@ -44,8 +44,8 @@ for name in goal_readiness.py app_project_service.py app_guidance_service.py; do
   cp "$src" "/opt/regent/core/src/regent/application/$name"
 done
 docker restart regent-api
-for i in 1 2 3 4 5 6; do
-  code=$(curl -sS -o /tmp/regent-goal-lock-health.json -w '%{http_code}' http://127.0.0.1:8000/health || true)
+for i in $(seq 1 15); do
+  code=$(curl -sS -o /tmp/regent-goal-lock-health.json -w '%{http_code}' http://127.0.0.1:8000/health/ready || true)
   if [ "$code" = 200 ]; then cat /tmp/regent-goal-lock-health.json; exit 0; fi
   sleep 2
 done

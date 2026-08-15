@@ -17,6 +17,7 @@ interface ConfirmationCardProps {
   docked?: boolean
   onConfirm: () => void
   onSelectOption?: (optionId: string, label: string) => void
+  submitting?: boolean
 }
 
 function asStringList(value: unknown): string[] {
@@ -71,6 +72,7 @@ export function ConfirmationCard({
   docked = false,
   onConfirm,
   onSelectOption,
+  submitting = false,
 }: ConfirmationCardProps) {
   const u = (metadata.understanding as Record<string, unknown>) || {}
   const plan = (metadata.plan as Record<string, unknown>) || {}
@@ -153,7 +155,9 @@ export function ConfirmationCard({
         </div>
       ) : mayStart ? (
         <div className="intervention-actions">
-          <button className="confirm-btn" onClick={onConfirm}>确认边界、锁定目标并开始</button>
+          <button className="confirm-btn" onClick={onConfirm} disabled={submitting}>
+            {submitting ? '正在确认最新版本…' : '确认边界、锁定目标并开始'}
+          </button>
           <p className="confirm-note">锁定后按当前边界执行；过程中可继续修正，重大边界变化将重新确认。</p>
         </div>
       ) : settled ? (

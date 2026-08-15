@@ -40,3 +40,15 @@
 - Outbox 未知事件最终进入死信。
 - 两个独立 App 均完成 DRAFT → READY → ACTIVE → PREVIEW_READY。
 - 本地测试、格式、类型、迁移、服务器健康和日志验收通过。
+
+## 锁定前状态与确认事件合同
+
+- DRAFT 目标必须由统一 `GoalReadiness` 判定为 `DRAFT_CLARIFYING` 或 `DRAFT_CONFIRMABLE`；前端不得自行推导另一套规则。
+- 每次修正产生新版 GoalSpec 后，事务必须以一种可行动事件结束：未就绪写入 `CLARIFICATION_REQUIRED`，就绪写入 `APP_CONFIRMATION_REQUIRED`。
+- `APP_CONFIRMATION_REQUIRED` 必须携带最新 GoalSpec ID、版本、哈希、readiness 快照和唯一 `gate_key`；同一 GoalSpec 最多存在一个有效 gate。
+- `DRAFT_CONFIRMABLE` 只表示等待 Goal Owner 确认。系统不得自动 confirm 或 start，也不得显示“正在续跑”。
+- GoalSpec 更新后旧 gate 自动失效；确认旧哈希返回当前版本与哈希，控制台刷新到最新 gate。
+- 页面刷新、SSE 重连或消息重复投递不得恢复旧 gate，也不得产生重复启动。
+- 存量 `DRAFT_CONFIRMABLE` 目标可通过幂等 reconciliation 补发确认事件，但不得自动锁定或启动。
+
+新增运行不变量：`draft_confirmable_without_pending_gate=0`、`pending_gate_hash_mismatch=0`、`duplicate_pending_gate_keys=0`。

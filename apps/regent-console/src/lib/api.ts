@@ -18,6 +18,18 @@ const ACTOR = 'trial-user'
 // different ceiling must make that budget decision explicitly.
 const TRIAL_GOAL_BUDGET_LIMIT = 1
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string,
+    readonly details: Record<string, unknown>,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 async function request<T>(path: string, body?: unknown, method?: string): Promise<T> {
   const res = await fetch(path, {
     method: method || (body ? 'POST' : 'GET'),
@@ -33,9 +45,12 @@ async function request<T>(path: string, body?: unknown, method?: string): Promis
     return text as unknown as T
   }
   if (!res.ok) {
-    const msg = (data as Record<string, unknown>)?.error
-    throw new Error(
-      (msg as Record<string, string>)?.message || String(msg) || `${res.status}`
+    const payload = ((data as Record<string, unknown>)?.error || {}) as Record<string, unknown>
+    throw new ApiError(
+      String(payload.message || `${res.status}`),
+      res.status,
+      String(payload.code || ''),
+      (payload.details as Record<string, unknown>) || {},
     )
   }
   return data

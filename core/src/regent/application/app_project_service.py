@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.application.p1_contracts import canonical_hash
-from regent.application.goal_readiness import blocking_unknowns, effective_feasibility_verdict
+from regent.application.goal_readiness import assess_goal_readiness
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
     AppProjectModel,
@@ -277,18 +277,26 @@ class AppProjectService:
             if spec is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "goal spec not found")
             if spec.content_hash != expected_spec_hash:
-                raise DomainError(ErrorCode.VERSION_CONFLICT, "goal proposal changed")
+                raise DomainError(
+                    ErrorCode.VERSION_CONFLICT,
+                    "goal proposal changed",
+                    details={
+                        "current_spec_id": str(spec.id),
+                        "current_spec_version": spec.version,
+                        "current_spec_hash": spec.content_hash,
+                    },
+                )
             metadata = dict(goal.metadata_json or {})
-            if int(metadata.get("clarification_rounds") or 0) < 2:
-                raise DomainError(ErrorCode.POLICY_DENIED, "two clarification rounds required")
-            if blocking_unknowns(spec.unknowns):
-                raise DomainError(ErrorCode.POLICY_DENIED, "goal boundary has unresolved questions")
-            verdict = effective_feasibility_verdict(
-                metadata.get("feasibility_verdict"),
+            readiness = assess_goal_readiness(
+                verdict=metadata.get("feasibility_verdict"),
                 rounds=int(metadata.get("clarification_rounds") or 0),
                 unknowns=spec.unknowns,
             )
-            if verdict != "FEASIBLE":
+            if readiness.rounds < 2:
+                raise DomainError(ErrorCode.POLICY_DENIED, "two clarification rounds required")
+            if readiness.blocking_unknowns:
+                raise DomainError(ErrorCode.POLICY_DENIED, "goal boundary has unresolved questions")
+            if not readiness.ready:
                 raise DomainError(
                     ErrorCode.POLICY_DENIED,
                     "feasibility analysis must be FEASIBLE",
@@ -321,11 +329,14 @@ class AppProjectService:
             goal.version = 1
             goal.metadata_json = {
                 **metadata,
-                "feasibility_verdict": verdict,
+                "feasibility_verdict": readiness.verdict,
                 "execution_boundary_locked": True,
                 "locked_spec_hash": spec.content_hash,
                 "locked_spec_version": spec.version,
                 "locked_by": actor,
+                "goal_phase": "READY_LOCKED",
+                "goal_clarity_state": "LOCKED",
+                "confirmation_state": "USED",
             }
             payload = {
                 "app_project_id": str(project.id),
@@ -358,7 +369,9 @@ class AppProjectService:
                 )
             )
             conversation = await session.scalar(
-                select(ConversationModel).where(ConversationModel.app_project_id == project_id)
+                select(ConversationModel)
+                .where(ConversationModel.app_project_id == project_id)
+                .with_for_update()
             )
             if conversation is not None:
                 last = await session.scalar(

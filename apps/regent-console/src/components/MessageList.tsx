@@ -12,6 +12,7 @@ import { ProgressNodeCard } from './ProgressNodeCard'
 import { ResultCard } from './ResultCard'
 import { RetryClusterCard } from './RetryClusterCard'
 import { LeadLine, MarkdownBody } from './MarkdownBody'
+import { isStaleConfirmation, selectActiveConfirmationId } from '../lib/confirmationGate'
 
 const EMPTY_EXAMPLES = [
   '做一个景区门票预约小程序，支持选日期和人数',
@@ -46,6 +47,7 @@ interface MessageListProps {
   coreHintError?: boolean
   goalMetadata?: Record<string, unknown>
   bottomRef?: RefObject<HTMLDivElement | null>
+  confirmationPending?: boolean
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -133,6 +135,8 @@ function MessageItem({
   currentProjectId,
   goalDiagnostic,
   goalMetadata,
+  isCurrentConfirmation,
+  confirmationPending,
   stickyGate,
   onConfirm,
   onSelectOption,
@@ -145,6 +149,8 @@ function MessageItem({
   currentProjectId?: string | null
   goalDiagnostic?: DiagnosticDelivery | null
   goalMetadata?: Record<string, unknown>
+  isCurrentConfirmation?: boolean
+  confirmationPending?: boolean
   stickyGate?: boolean
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
@@ -160,8 +166,7 @@ function MessageItem({
   const forkResolved = Boolean(
     goalId ? movingGoals.has(goalId) : movingGoals.has('*'),
   )
-  const isAwaiting =
-    (m.message_type === 'APP_CONFIRMATION_REQUIRED' || m.message_type === 'GOAL_PLAN_PROPOSED') &&
+  const isAwaiting = Boolean(isCurrentConfirmation) &&
     !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))
   const showForkActions =
     needsUserFork && !forkResolved && m.message_type === 'GOAL_PLAN_PROPOSED'
@@ -170,6 +175,11 @@ function MessageItem({
   const avatarLabel = m.role === 'USER' ? '你' : 'R'
   const metaLabel = m.role === 'USER' ? '你' : 'Regent'
   const processNoise = isProcessNoise(m)
+  const staleConfirmation = isStaleConfirmation(
+    m,
+    isCurrentConfirmation ? m.id : null,
+    goalMetadata || {},
+  )
 
   if (m.message_type === 'PREVIEW_READY' || m.message_type === 'PREVIEW_DEPLOYMENT_SUCCEEDED') {
     return null
@@ -308,12 +318,13 @@ function MessageItem({
           />
         )}
 
-        {isConfirmation && (
+        {isConfirmation && !staleConfirmation && (
           <ConfirmationCard
             metadata={{ ...(m.metadata || {}), ...(goalMetadata || {}) }}
             canConfirm={isAwaiting}
             needsUserFork={showForkActions}
             docked={!!stickyGate && (isAwaiting || showForkActions)}
+            submitting={confirmationPending}
             onConfirm={() => {
               const pid = String(
                 m.metadata?.app_project_id || currentProjectId || '',
@@ -329,6 +340,11 @@ function MessageItem({
               if (pid) onSelectOption?.(pid, optionId, label)
             }}
           />
+        )}
+        {staleConfirmation && (
+          <div className="stale-confirmation-note">
+            方案已更新，此确认入口已经失效。请使用对话底部的最新目标确认卡。
+          </div>
         )}
 
         {isCorrection && (
@@ -380,6 +396,7 @@ export function MessageList({
   coreHintError = false,
   goalMetadata = {},
   bottomRef,
+  confirmationPending = false,
 }: MessageListProps) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -389,6 +406,10 @@ export function MessageList({
 
   const movingGoals = useMemo(() => buildMovingGoals(messages), [messages])
   const resolvedIndex = useMemo(() => buildResolvedTasks(messages), [messages])
+  const activeConfirmationId = useMemo(
+    () => selectActiveConfirmationId(messages, goalMetadata),
+    [messages, goalMetadata],
+  )
 
   const extras: ProgressNodeExtras = useMemo(
     () => ({ toolEvents, liveTool }),
@@ -494,12 +515,9 @@ export function MessageList({
       taskMetaResolved(taskMeta) ||
       (taskId ? resolvedIndex.byTaskId.has(taskId) : false) ||
       (goalId ? resolvedIndex.byGoalId.has(goalId) : false)
-    const isConf =
-      m.message_type === 'APP_CONFIRMATION_REQUIRED' ||
-      m.message_type === 'GOAL_PLAN_PROPOSED'
+    const isConf = m.id === activeConfirmationId
     const awaiting =
-      ((m.message_type === 'APP_CONFIRMATION_REQUIRED' || m.message_type === 'GOAL_PLAN_PROPOSED') &&
-        !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))) ||
+      (isConf && !(goalId ? movingGoals.has(goalId) : movingGoals.has('*'))) ||
       (Boolean(m.metadata?.needs_user_fork) &&
         m.message_type === 'GOAL_PLAN_PROPOSED' &&
         !(goalId ? movingGoals.has(goalId) : movingGoals.has('*')))
@@ -559,6 +577,8 @@ export function MessageList({
               currentProjectId={currentProjectId}
               goalDiagnostic={goalDiagnostic}
               goalMetadata={goalMetadata}
+              isCurrentConfirmation={m.id === activeConfirmationId}
+              confirmationPending={confirmationPending}
               stickyGate={stickyMessageId === m.id}
               onConfirm={onConfirm}
               onSelectOption={onSelectOption}

@@ -49,12 +49,12 @@ def _receipt(command_type: str, response: str) -> GuidanceReceipt:
 
 
 @pytest.mark.asyncio
-async def test_available_tools_exposes_all_eight_handlers() -> None:
+async def test_available_tools_exposes_all_nine_handlers() -> None:
     service = AppGuidanceService(sessions=AsyncMock(), provider=AsyncMock())
     tools = service.available_tools()
-    assert len(tools) == 8
+    assert len(tools) == 9
     assert all(isinstance(t, ToolSpec) for t in tools)
-    assert {"query", "continue", "modify", "pause", "resume", "correct", "approve", "reject"} == {
+    assert {"query", "continue", "modify", "pause", "resume", "correct", "approve", "reject", "select_option"} == {
         t.name for t in tools
     }
 
