@@ -255,8 +255,8 @@ export default function App() {
           coreHint={ws.coreHint}
           coreHintError={ws.coreHintError}
           goalMetadata={(ws.status?.goal?.metadata as Record<string, unknown> | undefined) || {}}
+          bottomRef={messagesEndRef}
         />
-        <div ref={messagesEndRef} />
         <Composer
           onSend={handleSend}
           onUpload={handleUpload}

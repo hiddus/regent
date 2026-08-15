@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type RefObject } from 'react'
 import type { DiagnosticDelivery, Message } from '../lib/types'
 import { buildTimeline, type ProgressNodeExtras } from '../lib/progressNodes'
 import { collapseRetryClusters } from '../lib/retryClusters'
@@ -45,6 +45,7 @@ interface MessageListProps {
   coreHint?: string
   coreHintError?: boolean
   goalMetadata?: Record<string, unknown>
+  bottomRef?: RefObject<HTMLDivElement | null>
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -378,6 +379,7 @@ export function MessageList({
   coreHint = '',
   coreHintError = false,
   goalMetadata = {},
+  bottomRef,
 }: MessageListProps) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -637,6 +639,7 @@ export function MessageList({
         {pendingSend && !pendingAlreadyPersisted && <article className="message user optimistic-message"><div className="avatar">你</div><div className="body"><div className="meta">你 · 发送中</div><MarkdownBody>{pendingSend.text}</MarkdownBody></div></article>}
         {pendingSend && <article className="message assistant pending-response" aria-live="polite"><div className="avatar">R</div><div className="body"><div className="meta">Regent · 实时进度</div><div className={`pending-response-card ${pendingSend.state}`}><span className="pending-dot"/><div><strong>{pendingSend.state === 'failed' ? '发送失败' : '服务器正在处理…'}</strong><p>{pendingSend.state === 'failed' ? (pendingSend.error || '未能提交，请重试。') : (liveAction?.summary || coreHint || userHint || '已收到你的消息，等待最新进度。')}</p><small>{Math.max(0, Math.floor((now - pendingSend.startedAt) / 1000))} 秒</small></div>{pendingSend.state === 'failed' && <button type="button" onClick={onRetryPending}>重试</button>}</div></div></article>}
         {!pendingSend && (userHint || coreHint) && <article className={`message assistant feed-status ${(userHintError || (!userHint && coreHintError)) ? 'error' : ''}`} aria-live="polite"><div className="avatar">R</div><div className="body"><div className="meta">Regent · 当前状态</div><div className="feed-status-card"><span className="feed-status-dot"/><p>{userHint || coreHint}</p></div></div></article>}
+        <div ref={bottomRef} className="feed-scroll-anchor" aria-hidden />
       </div>
     </section>
   )
