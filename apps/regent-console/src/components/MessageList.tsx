@@ -40,6 +40,10 @@ interface MessageListProps {
   onQuickAction?: (text: string) => void
   pendingSend?: { text: string; startedAt: number; state: 'processing' | 'failed'; error?: string } | null
   onRetryPending?: () => void
+  userHint?: string
+  userHintError?: boolean
+  coreHint?: string
+  coreHintError?: boolean
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -366,6 +370,10 @@ export function MessageList({
   onQuickAction,
   pendingSend = null,
   onRetryPending,
+  userHint = '',
+  userHintError = false,
+  coreHint = '',
+  coreHintError = false,
 }: MessageListProps) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -425,7 +433,7 @@ export function MessageList({
       })
     : false
 
-  if (messages.length === 0 && !showPinnedRecovery && !showResultCard && !pendingSend) {
+  if (messages.length === 0 && !showPinnedRecovery && !showResultCard && !pendingSend && !userHint && !coreHint) {
     return (
       <section className="messages">
         <div className="stream">
@@ -622,7 +630,8 @@ export function MessageList({
           </article>
         )}
         {pendingSend && !pendingAlreadyPersisted && <article className="message user optimistic-message"><div className="avatar">你</div><div className="body"><div className="meta">你 · 发送中</div><MarkdownBody>{pendingSend.text}</MarkdownBody></div></article>}
-        {pendingSend && <article className="message assistant pending-response" aria-live="polite"><div className="avatar">R</div><div className="body"><div className="meta">Regent</div><div className={`pending-response-card ${pendingSend.state}`}><span className="pending-dot"/><div><strong>{pendingSend.state === 'failed' ? '发送失败' : '服务器正在处理…'}</strong><p>{pendingSend.state === 'failed' ? (pendingSend.error || '未能提交，请重试。') : (liveAction?.summary || '已收到你的消息，等待最新进度。')}</p><small>{Math.max(0, Math.floor((now - pendingSend.startedAt) / 1000))} 秒</small></div>{pendingSend.state === 'failed' && <button type="button" onClick={onRetryPending}>重试</button>}</div></div></article>}
+        {pendingSend && <article className="message assistant pending-response" aria-live="polite"><div className="avatar">R</div><div className="body"><div className="meta">Regent · 实时进度</div><div className={`pending-response-card ${pendingSend.state}`}><span className="pending-dot"/><div><strong>{pendingSend.state === 'failed' ? '发送失败' : '服务器正在处理…'}</strong><p>{pendingSend.state === 'failed' ? (pendingSend.error || '未能提交，请重试。') : (liveAction?.summary || coreHint || userHint || '已收到你的消息，等待最新进度。')}</p><small>{Math.max(0, Math.floor((now - pendingSend.startedAt) / 1000))} 秒</small></div>{pendingSend.state === 'failed' && <button type="button" onClick={onRetryPending}>重试</button>}</div></div></article>}
+        {!pendingSend && (userHint || coreHint) && <article className={`message assistant feed-status ${(userHintError || (!userHint && coreHintError)) ? 'error' : ''}`} aria-live="polite"><div className="avatar">R</div><div className="body"><div className="meta">Regent · 当前状态</div><div className="feed-status-card"><span className="feed-status-dot"/><p>{userHint || coreHint}</p></div></div></article>}
       </div>
     </section>
   )

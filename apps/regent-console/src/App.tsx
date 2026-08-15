@@ -254,16 +254,16 @@ export default function App() {
           onQuickAction={handleQuickAction}
           pendingSend={pendingSend}
           onRetryPending={() => { if (pendingSend) { const text = pendingSend.text; setPendingSend(null); void handleSend(text) } }}
+          userHint={ws.userHint}
+          userHintError={ws.userHintError}
+          coreHint={ws.coreHint}
+          coreHintError={ws.coreHintError}
         />
         <div ref={messagesEndRef} />
         <Composer
           onSend={handleSend}
           onUpload={handleUpload}
           disabled={sending}
-          userHint={ws.userHint}
-          userHintError={ws.userHintError}
-          coreHint={ws.coreHint}
-          coreHintError={ws.coreHintError}
           goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
         />
       </main>
