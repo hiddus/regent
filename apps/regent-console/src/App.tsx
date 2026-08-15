@@ -42,8 +42,6 @@ export default function App() {
   }, [ws])
 
   const handleSend = useCallback(async (text: string) => {
-    const ordinal = ws.messages.reduce((max, m) => Math.max(max, m.ordinal || 0), 0) + 0.5
-    ws.setMessages(prev => [...prev, { id: `optimistic-${crypto.randomUUID()}`, conversation_id: ws.currentConv?.id || 'pending', ordinal, role: 'USER', message_type: 'TEXT', content: text, metadata: { optimistic: true }, created_by: 'trial-user', created_at: new Date().toISOString() }])
     setPendingSend({ text, startedAt: Date.now(), state: 'processing' })
     setSending(true)
     try {
@@ -255,7 +253,7 @@ export default function App() {
           onExampleSend={(text) => { void handleSend(text) }}
           onQuickAction={handleQuickAction}
           pendingSend={pendingSend}
-          onRetryPending={() => { if (pendingSend) { const text = pendingSend.text; ws.setMessages(prev => prev.filter(m => !m.metadata?.optimistic)); setPendingSend(null); void handleSend(text) } }}
+          onRetryPending={() => { if (pendingSend) { const text = pendingSend.text; setPendingSend(null); void handleSend(text) } }}
         />
         <div ref={messagesEndRef} />
         <Composer

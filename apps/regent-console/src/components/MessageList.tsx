@@ -417,8 +417,15 @@ export function MessageList({
   )
 
   const activityCount = timeline.filter(item => item.kind === 'node' || item.kind === 'retry_cluster').length
+  const pendingAlreadyPersisted = pendingSend
+    ? messages.some(message => {
+        if (message.role !== 'USER' || message.content.trim() !== pendingSend.text.trim()) return false
+        const createdAt = Date.parse(message.created_at || '')
+        return Number.isFinite(createdAt) && createdAt >= pendingSend.startedAt - 2_000
+      })
+    : false
 
-  if (messages.length === 0 && !showPinnedRecovery && !showResultCard) {
+  if (messages.length === 0 && !showPinnedRecovery && !showResultCard && !pendingSend) {
     return (
       <section className="messages">
         <div className="stream">
@@ -614,6 +621,7 @@ export function MessageList({
             </div>
           </article>
         )}
+        {pendingSend && !pendingAlreadyPersisted && <article className="message user optimistic-message"><div className="avatar">你</div><div className="body"><div className="meta">你 · 发送中</div><MarkdownBody>{pendingSend.text}</MarkdownBody></div></article>}
         {pendingSend && <article className="message assistant pending-response" aria-live="polite"><div className="avatar">R</div><div className="body"><div className="meta">Regent</div><div className={`pending-response-card ${pendingSend.state}`}><span className="pending-dot"/><div><strong>{pendingSend.state === 'failed' ? '发送失败' : '服务器正在处理…'}</strong><p>{pendingSend.state === 'failed' ? (pendingSend.error || '未能提交，请重试。') : (liveAction?.summary || '已收到你的消息，等待最新进度。')}</p><small>{Math.max(0, Math.floor((now - pendingSend.startedAt) / 1000))} 秒</small></div>{pendingSend.state === 'failed' && <button type="button" onClick={onRetryPending}>重试</button>}</div></div></article>}
       </div>
     </section>
