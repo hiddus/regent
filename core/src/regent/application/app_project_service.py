@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.application.p1_contracts import canonical_hash
+from regent.application.goal_readiness import blocking_unknowns, effective_feasibility_verdict
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
     AppProjectModel,
@@ -280,9 +281,14 @@ class AppProjectService:
             metadata = dict(goal.metadata_json or {})
             if int(metadata.get("clarification_rounds") or 0) < 2:
                 raise DomainError(ErrorCode.POLICY_DENIED, "two clarification rounds required")
-            if list(spec.unknowns or []):
+            if blocking_unknowns(spec.unknowns):
                 raise DomainError(ErrorCode.POLICY_DENIED, "goal boundary has unresolved questions")
-            if str(metadata.get("feasibility_verdict") or "").upper() != "FEASIBLE":
+            verdict = effective_feasibility_verdict(
+                metadata.get("feasibility_verdict"),
+                rounds=int(metadata.get("clarification_rounds") or 0),
+                unknowns=spec.unknowns,
+            )
+            if verdict != "FEASIBLE":
                 raise DomainError(
                     ErrorCode.POLICY_DENIED,
                     "feasibility analysis must be FEASIBLE",
@@ -315,6 +321,7 @@ class AppProjectService:
             goal.version = 1
             goal.metadata_json = {
                 **metadata,
+                "feasibility_verdict": verdict,
                 "execution_boundary_locked": True,
                 "locked_spec_hash": spec.content_hash,
                 "locked_spec_version": spec.version,

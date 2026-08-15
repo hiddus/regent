@@ -22,6 +22,7 @@ from regent.application.execution_events import (
 from regent.application.goal_execution_service import GoalExecutionService
 from regent.application.human_task_service import HumanTaskService
 from regent.application.p1_contracts import canonical_hash
+from regent.application.goal_readiness import blocking_unknowns, effective_feasibility_verdict
 from regent.application.transition_service import TransitionContext, TransitionService
 from regent.domain.errors import DomainError, ErrorCode
 from regent.domain.transitions import GoalCommand
@@ -108,7 +109,7 @@ def build_reviewable_plan_response(context: dict[str, Any]) -> str:
     if not criteria:
         criteria = ["待补充可观察、可复现的验收标准。"]
     unknowns = []
-    for item in list(spec.get("unknowns") or []):
+    for item in blocking_unknowns(list(spec.get("unknowns") or [])):
         value = item.get("question") if isinstance(item, dict) else item
         if str(value or "").strip():
             unknowns.append(str(value).strip())
@@ -117,8 +118,10 @@ def build_reviewable_plan_response(context: dict[str, Any]) -> str:
     budget = metadata.get("budget_limit")
     stop_conditions = ["达到预算上限立即停止", "出现欠费或不可恢复错误立即停止", "重大边界变化先重新确认"]
     rounds = int(metadata.get("clarification_rounds") or 0)
-    verdict = str(metadata.get("feasibility_verdict") or "REVISION_REQUIRED").upper()
-    ready = verdict == "FEASIBLE" and rounds >= 2 and not list(spec.get("unknowns") or [])
+    verdict = effective_feasibility_verdict(
+        metadata.get("feasibility_verdict"), rounds=rounds, unknowns=list(spec.get("unknowns") or [])
+    )
+    ready = verdict == "FEASIBLE" and rounds >= 2 and not blocking_unknowns(list(spec.get("unknowns") or []))
     next_action = "请确认锁定当前目标版本；确认后才开始执行。" if ready else "请先回答“待确认”中的问题；可行性通过前不会开始执行。"
 
     def section(title: str, items: list[str]) -> str:
@@ -339,7 +342,9 @@ class AppGuidanceService:
         history = await self._conversation_history(project_id, limit=10)
 
         goal_status = str((context.get("goal") or {}).get("status") or "")
-        spec_unknowns = list((context.get("goal_spec") or {}).get("unknowns") or [])
+        spec_unknowns = blocking_unknowns(
+            list((context.get("goal_spec") or {}).get("unknowns") or [])
+        )
         normalized_message = str(message or "").strip().lower()
 
         # The Goal Owner may explicitly defer unresolved choices to bounded
@@ -446,7 +451,9 @@ class AppGuidanceService:
         # questions Regent just asked. Do not let the model classify it as a
         # status QUERY, which would repeat the same unknowns forever.
         goal_status = str((context.get("goal") or {}).get("status") or "")
-        spec_unknowns = list((context.get("goal_spec") or {}).get("unknowns") or [])
+        spec_unknowns = blocking_unknowns(
+            list((context.get("goal_spec") or {}).get("unknowns") or [])
+        )
         numbered_answers = [
             value.strip()
             for value in re.findall(
@@ -1899,7 +1906,13 @@ class AppGuidanceService:
             progressive.append({"target": target, "detail": detail, "actor": actor})
             inferences["progressive_corrections"] = progressive
             unknowns = (
-                [{"question": item, "blocking": False} for item in interpretation.unknowns]
+                [
+                    {
+                        "question": item,
+                        "blocking": interpretation.feasibility_verdict != "FEASIBLE",
+                    }
+                    for item in interpretation.unknowns
+                ]
                 if interpretation.unknowns is not None
                 else list(latest_spec.unknowns or [])
             )
@@ -1931,11 +1944,17 @@ class AppGuidanceService:
             metadata["goal_clarity_state"] = "EXPLORING" if unknowns else "CLARIFIED"
             metadata["clarification_rounds"] = int(metadata.get("clarification_rounds") or 0) + 1
             if interpretation.feasibility_verdict is not None:
-                metadata["feasibility_verdict"] = interpretation.feasibility_verdict
+                metadata["feasibility_verdict"] = effective_feasibility_verdict(
+                    interpretation.feasibility_verdict,
+                    rounds=int(metadata.get("clarification_rounds") or 0),
+                    unknowns=unknowns,
+                )
             if interpretation.feasibility_reasons is not None:
                 metadata["feasibility_reasons"] = list(interpretation.feasibility_reasons)
             metadata["execution_boundary_locked"] = False
             metadata["latest_goal_spec_version"] = next_spec.version
+            metadata["goal_spec_hash"] = next_spec.content_hash
+            metadata["unknowns"] = unknowns
             goal.metadata_json = metadata
             flag_modified(goal, "metadata_json")
 
@@ -2938,6 +2957,8 @@ class AppGuidanceService:
                 )
                 session.add(next_spec)
                 metadata["latest_goal_spec_version"] = next_spec.version
+                metadata["goal_spec_hash"] = next_spec.content_hash
+                metadata["unknowns"] = list(next_spec.unknowns or [])
 
             goal.metadata_json = metadata
             flag_modified(goal, "metadata_json")
@@ -2945,6 +2966,20 @@ class AppGuidanceService:
             conversation = await self._conversation(session, project_id)
             ordinal = await self._next_ordinal(session, conversation.id)
             label = str(chosen.get("label") or chosen.get("id"))
+            remaining = blocking_unknowns(
+                list(latest_spec.unknowns or []) if latest_spec is not None else []
+            )
+            next_prompt = ""
+            if remaining:
+                questions = [
+                    str(item.get("question") if isinstance(item, dict) else item).strip()
+                    for item in remaining[:3]
+                ]
+                next_prompt = "\n下一步请回答：\n" + "\n".join(
+                    f"{index}. {question}"
+                    for index, question in enumerate(questions, 1)
+                    if question
+                )
             user_msg = await self._persist_message_pair(
                 session,
                 conversation.id,

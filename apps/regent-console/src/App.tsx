@@ -110,14 +110,10 @@ export default function App() {
 
   const handleConfirm = useCallback(async (projectId: string, goalId: string, hash: string) => {
     try {
-      if (!hash) {
-        const state = await api.getProjectStatus(projectId)
-        hash = ((state.goal?.metadata as Record<string, unknown>)?.goal_spec_hash as string) || ''
-        if (!hash) {
-          const specHash = (state.goal?.metadata as Record<string, unknown>)?.spec_hash as string
-          if (specHash) hash = specHash
-        }
-      }
+      const state = await api.getProjectStatus(projectId)
+      const currentHash = ((state.goal?.metadata as Record<string, unknown>)?.goal_spec_hash as string) ||
+        ((state.goal?.metadata as Record<string, unknown>)?.spec_hash as string) || ''
+      if (currentHash) hash = currentHash
       if (!hash) {
         ws.showHint('缺少目标版本哈希，请刷新后重试', true)
         return
@@ -258,6 +254,7 @@ export default function App() {
           userHintError={ws.userHintError}
           coreHint={ws.coreHint}
           coreHintError={ws.coreHintError}
+          goalMetadata={(ws.status?.goal?.metadata as Record<string, unknown> | undefined) || {}}
         />
         <div ref={messagesEndRef} />
         <Composer

@@ -44,6 +44,7 @@ interface MessageListProps {
   userHintError?: boolean
   coreHint?: string
   coreHintError?: boolean
+  goalMetadata?: Record<string, unknown>
 }
 
 function buildMovingGoals(items: Message[]): Set<string> {
@@ -130,6 +131,7 @@ function MessageItem({
   resolved,
   currentProjectId,
   goalDiagnostic,
+  goalMetadata,
   stickyGate,
   onConfirm,
   onSelectOption,
@@ -141,6 +143,7 @@ function MessageItem({
   resolved: boolean
   currentProjectId?: string | null
   goalDiagnostic?: DiagnosticDelivery | null
+  goalMetadata?: Record<string, unknown>
   stickyGate?: boolean
   onConfirm: (projectId: string, goalId: string, hash: string) => void
   onSelectOption?: (projectId: string, optionId: string, label: string) => void
@@ -275,7 +278,7 @@ function MessageItem({
           </LeadLine>
         )}
 
-        {isConfirmation && <PlanSummary metadata={m.metadata || {}} />}
+        {isConfirmation && <PlanSummary metadata={{ ...(m.metadata || {}), ...(goalMetadata || {}) }} />}
 
         {showMarkdown && (
           <MarkdownBody
@@ -306,7 +309,7 @@ function MessageItem({
 
         {isConfirmation && (
           <ConfirmationCard
-            metadata={m.metadata}
+            metadata={{ ...(m.metadata || {}), ...(goalMetadata || {}) }}
             canConfirm={isAwaiting}
             needsUserFork={showForkActions}
             docked={!!stickyGate && (isAwaiting || showForkActions)}
@@ -374,6 +377,7 @@ export function MessageList({
   userHintError = false,
   coreHint = '',
   coreHintError = false,
+  goalMetadata = {},
 }: MessageListProps) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -552,6 +556,7 @@ export function MessageList({
               resolved={resolved}
               currentProjectId={currentProjectId}
               goalDiagnostic={goalDiagnostic}
+              goalMetadata={goalMetadata}
               stickyGate={stickyMessageId === m.id}
               onConfirm={onConfirm}
               onSelectOption={onSelectOption}

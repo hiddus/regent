@@ -10,7 +10,10 @@ export interface StartReadiness {
 
 function asList(value: unknown): string[] {
   if (!Array.isArray(value)) return []
-  return value.map(item => typeof item === 'string' ? item.trim() : String((item as { question?: unknown })?.question || '').trim()).filter(Boolean)
+  return value
+    .filter(item => typeof item !== 'object' || item === null || (item as { blocking?: unknown }).blocking !== false)
+    .map(item => typeof item === 'string' ? item.trim() : String((item as { question?: unknown })?.question || '').trim())
+    .filter(Boolean)
 }
 
 export function getStartReadiness(metadata: Record<string, unknown>): StartReadiness {
