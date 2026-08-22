@@ -317,3 +317,49 @@ async def test_reservation_key_retry_is_idempotent(budget_db_sessions) -> None:
         await ledger.reserve(
             goal_id, None, reservation_key="same", cost_type=COST_MODEL_INPUT, amount=3.0
         )
+
+
+@pytest.mark.asyncio
+async def test_reserving_consumed_key_after_settle_derives_fresh_hold(
+    budget_db_sessions,
+) -> None:
+    """Regression: a resumed epoch re-reserves the same turn key.
+
+    The old row is SETTLED, so claim used to fail forever with
+    `cannot claim reservation from SETTLED` and the resumed run looped.
+    """
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 50.0)
+    key = "resume:run-1:turn:0"
+    first = await ledger.reserve(
+        goal_id, None, reservation_key=key, cost_type=COST_MODEL_INPUT, amount=8.0
+    )
+    claimed = await ledger.claim(first.id)
+    await ledger.settle(claimed.id, claim_token=claimed.claim_token, actual_amount=8.0)
+
+    # Resumed epoch: same key must yield a fresh, claimable reservation.
+    second = await ledger.reserve(
+        goal_id, None, reservation_key=key, cost_type=COST_MODEL_INPUT, amount=8.0
+    )
+    assert second.id != first.id
+    assert second.status == "RESERVED"
+    reclaimed = await ledger.claim(second.id)
+    assert reclaimed.status == "CLAIMED"
+
+
+@pytest.mark.asyncio
+async def test_reserving_consumed_key_after_release_derives_fresh_hold(
+    budget_db_sessions,
+) -> None:
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 50.0)
+    key = "resume:released:turn:0"
+    first = await ledger.reserve(
+        goal_id, None, reservation_key=key, cost_type=COST_TOOL_INVOCATION, amount=5.0
+    )
+    claimed = await ledger.claim(first.id)
+    await ledger.release(claimed.id, claim_token=claimed.claim_token)
+
+    second = await ledger.reserve(
+        goal_id, None, reservation_key=key, cost_type=COST_TOOL_INVOCATION, amount=5.0
+    )
+    assert second.id != first.id
+    assert second.status == "RESERVED"

@@ -141,20 +141,16 @@ class BudgetLedger:
         if not reservation_key.strip():
             raise ValueError("reservation_key must not be empty")
         async with self._sessions() as session, session.begin():
-            existing = await session.scalar(
-                select(BudgetReservationModel).where(
-                    BudgetReservationModel.reservation_key == reservation_key
-                )
+            reservation_key, live = await self._resolve_live_key(
+                session,
+                reservation_key,
+                goal_id=goal_id,
+                run_id=run_id,
+                cost_type=cost_type,
+                amount=amount,
             )
-            if existing is not None:
-                if (
-                    existing.goal_id != goal_id
-                    or existing.run_id != run_id
-                    or existing.cost_type != cost_type
-                    or existing.amount != amount
-                ):
-                    raise BudgetReservationError("reservation key reused with different binding")
-                return self._reservation(existing)
+            if live is not None:
+                return live
 
             goal = await session.get(GoalModel, goal_id, with_for_update=True)
             if goal is None:
@@ -230,6 +226,45 @@ class BudgetLedger:
             session.add(row)
             await session.flush()
             return self._reservation(row)
+
+    async def _resolve_live_key(
+        self,
+        session: AsyncSession,
+        reservation_key: str,
+        *,
+        goal_id: uuid.UUID,
+        run_id: uuid.UUID | None,
+        cost_type: str,
+        amount: float,
+    ) -> tuple[str, BudgetReservation | None]:
+        """Return ``(key, live_reservation)`` where the key's row is live.
+
+        Retries are idempotent while a reservation is RESERVED/CLAIMED (the
+        live row is returned). Once the row is terminal (SETTLED/RELEASED)
+        the key is consumed — a resumed epoch re-reserving the same turn
+        derives a fresh key instead of deadlocking on
+        `cannot claim reservation from SETTLED`.
+        """
+        key = reservation_key
+        for attempt in range(16):
+            existing = await session.scalar(
+                select(BudgetReservationModel).where(
+                    BudgetReservationModel.reservation_key == key
+                )
+            )
+            if existing is None:
+                return key, None
+            if existing.status in ("RESERVED", "CLAIMED"):
+                if (
+                    existing.goal_id != goal_id
+                    or existing.run_id != run_id
+                    or existing.cost_type != cost_type
+                    or existing.amount != amount
+                ):
+                    raise BudgetReservationError("reservation key reused with different binding")
+                return key, self._reservation(existing)
+            key = f"{reservation_key}#r{attempt + 2}"
+        raise BudgetReservationError("reservation key namespace exhausted")
 
     async def claim(self, reservation_id: uuid.UUID) -> BudgetReservation:
         async with self._sessions() as session, session.begin():
