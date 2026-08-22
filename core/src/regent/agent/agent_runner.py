@@ -80,6 +80,11 @@ class AgentRunResult:
     skill_refs: list[dict[str, Any]] = field(default_factory=list)
 
 
+# Identical-tool-call anti-loop: warn after N repeats, escalate to ASK after M.
+REPEAT_CALL_WARN_AFTER = 3
+REPEAT_CALL_ASK_AFTER = 6
+
+
 class AgentRunner:
     """Tool-using agent loop with explicit submit and non-recursive repair."""
 
@@ -130,6 +135,9 @@ class AgentRunner:
         self._subagent_depth = int(subagent_depth)
         self._max_subagent_depth = int(max_subagent_depth)
         self._budget_ledger = budget_ledger
+        # Identical tool-call anti-loop state (fingerprint of last issued call).
+        self._last_call_fp: str | None = None
+        self._repeat_call_count = 0
         self._model_max_output_tokens = max(1, int(model_max_output_tokens))
         self._model_input_rate = max(0.0, float(model_input_cost_per_million)) / 1_000_000
         self._model_output_rate = max(0.0, float(model_output_cost_per_million)) / 1_000_000
@@ -140,6 +148,14 @@ class AgentRunner:
             summarizer=LLMSummarizer(compaction_model) if compaction_model is not None else HeuristicSummarizer(),
             context_window_tokens=context_window_tokens,
         )
+
+    @staticmethod
+    def _call_fingerprint(call: Any) -> str:
+        try:
+            args = json.dumps(call.arguments or {}, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            args = repr(call.arguments)
+        return f"{call.name}|{args[:512]}"
 
     def _raise_if_aborted(self, plan: dict[str, Any]) -> None:
         from regent.application.agent_control import UserAbortError, is_abort_requested
@@ -847,9 +863,62 @@ class AgentRunner:
                 if tool_spec is None or tool_spec.max_cost is None:
                     raise RuntimeError(f"tool {call.name!r} does not declare max_cost")
                 self._raise_if_aborted(plan)
+                fp = self._call_fingerprint(call)
+                if fp == self._last_call_fp:
+                    self._repeat_call_count += 1
+                else:
+                    self._last_call_fp = fp
+                    self._repeat_call_count = 1
+                if self._repeat_call_count >= REPEAT_CALL_ASK_AFTER:
+                    from regent.application.agent_control import AskUserRequiredError
+                    from regent.application.agent_loop_exit import build_ask_envelope
+
+                    detail = (
+                        f"identical tool call repeated {self._repeat_call_count} "
+                        f"times: {fp[:200]}"
+                    )
+                    await _emit(
+                        on_event,
+                        {
+                            "type": "progress_loop",
+                            "turn": turn,
+                            "summary": "同参数工具调用重复循环",
+                            "detail": detail,
+                        },
+                    )
+                    envelope = build_ask_envelope(
+                        question=(
+                            f"同一工具调用（{call.name}）已连续重复 "
+                            f"{self._repeat_call_count} 次且无进展。"
+                            "请换方向、跳过，或补充约束后继续。"
+                        ),
+                        why_blocked=detail[:400],
+                        ask_type="progress_loop",
+                        gap_kind="PROGRESS_LOOP",
+                        options=[
+                            {"id": "continue_fix", "label": "换思路继续修"},
+                            {"id": "skip_item", "label": "跳过并改计划"},
+                            {"id": "stop", "label": "停止本轮"},
+                        ],
+                        suggested="continue_fix",
+                    )
+                    raise AskUserRequiredError(
+                        envelope["question"],
+                        options=list(envelope.get("options") or []),
+                        envelope=envelope,
+                    )
                 step0_block = self._step0_blocks_write(plan, call.name)
                 if step0_block:
                     result_text = f"ERROR: WorkPlanRequired: {step0_block}"
+                elif self._repeat_call_count >= REPEAT_CALL_WARN_AFTER:
+                    # Do not re-execute: feed back an error so the model changes
+                    # approach instead of burning turns on the same call.
+                    result_text = (
+                        f"ERROR: RepeatedToolCall: identical {call.name} call "
+                        f"repeated {self._repeat_call_count} times with no progress. "
+                        "Stop repeating it: try a different command/tool, "
+                        "or call ask_user_question / submit."
+                    )
                 elif call.name == "delegate_plan_item":
                     if self._subagent_depth >= self._max_subagent_depth:
                         result_text = (
