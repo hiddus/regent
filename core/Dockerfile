@@ -8,7 +8,7 @@ COPY core ./core
 COPY apps ./apps
 COPY docs ./docs
 COPY capabilities ./capabilities
-RUN pip install --upgrade pip setuptools wheel && \
+RUN pip install --upgrade --index-url "$PIP_INDEX_URL" pip setuptools wheel && \
     pip install --no-cache-dir --timeout 180 --retries 10 --index-url "$PIP_INDEX_URL" .
 
 USER nobody

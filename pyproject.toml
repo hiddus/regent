@@ -39,7 +39,6 @@ packages = ["core/src/regent"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "core/src/regent/capabilities_bootstrap/allowlisted_http_source_v1.json" = "regent/capabilities_bootstrap/allowlisted_http_source_v1.json"
-"core/src/regent/agent/skill_packs" = "regent/agent/skill_packs"
 
 [tool.pytest.ini_options]
 # Per-run basetemp under repo (QA: avoid shared system Temp WinError 5; xdist workers
