@@ -10,6 +10,7 @@ from regent.application.app_guidance_service import (
     AppGuidanceService,
     GuidanceInterpretation,
 )
+from regent.application.app_project_service import AppProjectService
 from regent.application.goal_execution_service import GoalExecutionService
 from regent.application.p1_contracts import canonical_hash
 from regent.domain.errors import DomainError, ErrorCode
@@ -37,6 +38,8 @@ async def _seed_fork_draft(
     sessions: async_sessionmaker[AsyncSession],
     *,
     needs_user_fork: bool = True,
+    clarification_rounds: int = 0,
+    feasibility_verdict: str | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID]:
     project_id = uuid.uuid4()
     goal_id = uuid.uuid4()
@@ -67,6 +70,8 @@ async def _seed_fork_draft(
                     correlation_id=uuid.uuid4(),
                     metadata_json={
                         "budget_limit": 10.0,
+                        "clarification_rounds": clarification_rounds,
+                        **({"feasibility_verdict": feasibility_verdict} if feasibility_verdict else {}),
                         "needs_user_fork": needs_user_fork,
                         "pending_fork_options": options if needs_user_fork else [],
                         "runtime_plan": {
@@ -196,3 +201,57 @@ async def test_start_refuses_unlocked_boundary_even_with_budget(
         )
     assert exc.value.code == ErrorCode.POLICY_DENIED
     assert "confirmed" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_fork_resolution_counts_clarification_round_and_unlocks_confirm(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression: fork choice is a clarification exchange.
+
+    A draft whose only unknowns are advisory used to deadlock: fork
+    resolution did not count toward the two-round confirmation gate, and
+    the numbered-answer path required blocking unknowns.
+    """
+    project_id, goal_id = await _seed_fork_draft(
+        db_sessions,
+        needs_user_fork=True,
+        clarification_rounds=1,
+        feasibility_verdict="FEASIBLE",
+    )
+    service = AppGuidanceService(db_sessions, MagicMock())
+    receipt = await service._handle_select_option(
+        project_id,
+        "方向A",
+        "tester",
+        GuidanceInterpretation(
+            command_type="SELECT_OPTION",
+            summary="选方向A",
+            selected_option_id="a",
+        ),
+        "regent-core:test",
+    )
+    assert receipt.command_type == "SELECT_OPTION"
+
+    async with db_sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        assert goal is not None
+        meta = dict(goal.metadata_json or {})
+        assert meta.get("clarification_rounds") == 2
+        assert meta.get("goal_clarity_state") == "WAITING_CONFIRMATION"
+        assert meta.get("goal_phase") == "DRAFT_CONFIRMABLE"
+        assert meta.get("confirmation_state") == "PENDING"
+        latest = await session.scalar(
+            select(GoalSpecModel)
+            .where(GoalSpecModel.goal_id == goal_id)
+            .order_by(GoalSpecModel.version.desc())
+            .limit(1)
+        )
+        assert latest is not None
+        current_hash = latest.content_hash
+
+    # The confirmation gate must now accept the draft.
+    receipt_confirm = await AppProjectService(db_sessions, MagicMock()).confirm(
+        project_id, actor="tester", expected_spec_hash=current_hash
+    )
+    assert receipt_confirm.goal.status == "READY"

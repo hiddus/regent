@@ -467,33 +467,49 @@ class AppGuidanceService:
             )
             if value.strip()
         ]
-        if goal_status == "DRAFT" and spec_unknowns and numbered_answers:
-            answered_count = min(len(numbered_answers), len(spec_unknowns), 3)
-            answered = spec_unknowns[:answered_count]
-            remaining = spec_unknowns[answered_count:]
-            answer_map: dict[str, str] = {}
-            for item, answer in zip(answered, numbered_answers, strict=False):
-                question = item.get("question") if isinstance(item, dict) else item
-                answer_map[str(question)] = answer
-            interpretation = GuidanceInterpretation(
-                command_type="CORRECT",
-                summary=f"已确认 {answered_count} 项边界",
-                correction_target="requirements",
-                correction_detail=message,
-                explicit_constraints={
-                    "boundary_answers_json": json.dumps(answer_map, ensure_ascii=False)
-                },
-                unknowns=[
-                    str(item.get("question") if isinstance(item, dict) else item)
-                    for item in remaining
-                ],
-                feasibility_verdict="REVISION_REQUIRED" if remaining else "FEASIBLE",
-                feasibility_reasons=(
-                    ["仍有待确认边界，继续下一轮确认。"]
-                    if remaining
-                    else ["用户已回答全部边界问题；最小范围、验收和预算可进入锁定确认。"]
-                ),
-            )
+        if goal_status == "DRAFT" and numbered_answers:
+            if spec_unknowns:
+                answered_count = min(len(numbered_answers), len(spec_unknowns), 3)
+                answered = spec_unknowns[:answered_count]
+                remaining = spec_unknowns[answered_count:]
+                answer_map: dict[str, str] = {}
+                for item, answer in zip(answered, numbered_answers, strict=False):
+                    question = item.get("question") if isinstance(item, dict) else item
+                    answer_map[str(question)] = answer
+                interpretation = GuidanceInterpretation(
+                    command_type="CORRECT",
+                    summary=f"已确认 {answered_count} 项边界",
+                    correction_target="requirements",
+                    correction_detail=message,
+                    explicit_constraints={
+                        "boundary_answers_json": json.dumps(answer_map, ensure_ascii=False)
+                    },
+                    unknowns=[
+                        str(item.get("question") if isinstance(item, dict) else item)
+                        for item in remaining
+                    ],
+                    feasibility_verdict="REVISION_REQUIRED" if remaining else "FEASIBLE",
+                    feasibility_reasons=(
+                        ["仍有待确认边界，继续下一轮确认。"]
+                        if remaining
+                        else ["用户已回答全部边界问题；最小范围、验收和预算可进入锁定确认。"]
+                    ),
+                )
+            else:
+                # No blocking unknowns left — numbered replies are boundary
+                # confirmations answering the assistant's advisory questions.
+                # Count them as a clarification round instead of letting the
+                # model misclassify them as a QUERY.
+                interpretation = GuidanceInterpretation(
+                    command_type="CORRECT",
+                    summary=f"已确认 {min(len(numbered_answers), 3)} 项边界",
+                    correction_target="requirements",
+                    correction_detail=message,
+                    feasibility_verdict="FEASIBLE",
+                    feasibility_reasons=[
+                        "用户已逐项确认边界；最小范围、验收和预算可进入锁定确认。"
+                    ],
+                )
 
         # WAITING_HUMAN + pending task: directional free text is approve+resume,
         # not a silent CORRECT that leaves the goal stuck.
@@ -2973,6 +2989,13 @@ class AppGuidanceService:
             plan["needs_user_fork"] = False
             plan["selected_fork"] = metadata["selected_fork"]
             metadata["runtime_plan"] = plan
+            # Resolving a pending fork is a real clarification exchange — it
+            # must count toward the confirmation gate's round budget, otherwise
+            # fork-driven drafts can never reach DRAFT_CONFIRMABLE.
+            if goal.status == "DRAFT":
+                metadata["clarification_rounds"] = (
+                    int(metadata.get("clarification_rounds") or 0) + 1
+                )
 
             latest_spec = await session.scalar(
                 select(GoalSpecModel)
@@ -3013,6 +3036,28 @@ class AppGuidanceService:
                 metadata["latest_goal_spec_version"] = next_spec.version
                 metadata["goal_spec_hash"] = next_spec.content_hash
                 metadata["unknowns"] = list(next_spec.unknowns or [])
+                if goal.status == "DRAFT":
+                    if interpretation.feasibility_verdict is not None:
+                        metadata["feasibility_verdict"] = effective_feasibility_verdict(
+                            interpretation.feasibility_verdict,
+                            rounds=int(metadata.get("clarification_rounds") or 0),
+                            unknowns=metadata["unknowns"],
+                        )
+                    readiness = assess_goal_readiness(
+                        verdict=metadata.get("feasibility_verdict"),
+                        rounds=int(metadata.get("clarification_rounds") or 0),
+                        unknowns=metadata["unknowns"],
+                    )
+                    metadata["goal_clarity_state"] = (
+                        "WAITING_CONFIRMATION" if readiness.ready else "FORK_RESOLVED"
+                    )
+                    metadata["goal_phase"] = readiness.phase
+                    metadata["confirmation_state"] = "PENDING" if readiness.ready else "NONE"
+                    metadata["confirmation_gate_key"] = (
+                        confirmation_gate_key(goal_id, next_spec.version)
+                        if readiness.ready
+                        else None
+                    )
 
             goal.metadata_json = metadata
             flag_modified(goal, "metadata_json")
