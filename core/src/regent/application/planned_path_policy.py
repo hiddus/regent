@@ -74,14 +74,25 @@ _BYPRODUCT_DIR_SEGMENTS = frozenset(
     }
 )
 _BYPRODUCT_SUFFIXES = (".pyc", ".pyo")
+# Runner-internal metadata files persisted into the agent workspace.
+_REGENT_METADATA_PREFIX = ".regent_"
 
 
 def is_incidental_byproduct(relative: str) -> bool:
     """Return True for tool-run byproducts that should be dropped, not denied."""
-    segments = [seg for seg in normalize_relative_path(relative).split("/") if seg]
+    normalized = normalize_relative_path(relative)
+    segments = [seg for seg in normalized.split("/") if seg]
     if any(seg in _BYPRODUCT_DIR_SEGMENTS for seg in segments):
         return True
-    return normalize_relative_path(relative).lower().endswith(_BYPRODUCT_SUFFIXES)
+    lower = normalized.lower()
+    if lower.endswith(_BYPRODUCT_SUFFIXES):
+        return True
+    # Top-level .regent_* runtime metadata files are platform internals.
+    return (
+        "/" not in normalized.strip("/")
+        and normalized.startswith(_REGENT_METADATA_PREFIX)
+        and lower.endswith(".json")
+    )
 
 
 def is_allowed_extra_path(relative: str) -> bool:

@@ -322,7 +322,11 @@ class GenerationService:
                 and not is_incidental_byproduct(change.relative_path)
             ]
             if planned_paths and violations:
-                raise DomainError(ErrorCode.POLICY_DENIED, "generated path is outside frozen plan")
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED,
+                    "generated path is outside frozen plan: "
+                    + ", ".join(sorted(violations)[:5]),
+                )
             if len(kept_changes) != len(changes.changes):
                 changes = changes.model_copy(update={"changes": kept_changes})
             if not changes.changes:
