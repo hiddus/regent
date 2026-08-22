@@ -60,7 +60,7 @@ export default function App() {
         if (draft.needs_user_fork) {
           ws.showHint('方案已就绪，请先选择一个方向后再继续')
         } else if (draft.auto_started) {
-          ws.showHint('Core 已基于当前方案开始探索；你可以随时补充或修正')
+          ws.showHint('Core 已基于当前理解开始探索；你可以随时补充或修正')
         } else {
           ws.showHint('方案已形成；你可以补充后继续，或确认开始')
         }

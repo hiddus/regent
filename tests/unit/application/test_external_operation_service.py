@@ -239,6 +239,13 @@ async def test_mark_failed_terminal_from_prepared() -> None:
 
 @pytest.mark.asyncio
 async def test_mark_failed_terminal_rejects_wrong_status() -> None:
+    """Already-terminal EO is gracefully ignored (no DomainError).
+
+    P0a fix: when an EO is already in a terminal state (SUCCEEDED,
+    FAILED_TERMINAL, etc.), marking it with a different terminal status
+    logs a warning and returns gracefully instead of raising DomainError.
+    This prevents the state machine from hanging on concurrent transitions.
+    """
     eo_id = uuid.uuid4()
     eo = ExternalOperationModel(
         id=eo_id,
@@ -266,7 +273,7 @@ async def test_mark_failed_terminal_rejects_wrong_status() -> None:
     session.begin = MagicMock(return_value=tx)
     factory = MagicMock(return_value=session_context)
 
-    with pytest.raises(DomainError):
-        await ExternalOperationService(factory).mark_failed_terminal(
-            eo_id, failure_code="X"
-        )
+    # P0a: gracefully returns instead of raising DomainError.
+    await ExternalOperationService(factory).mark_failed_terminal(
+        eo_id, failure_code="X"
+    )

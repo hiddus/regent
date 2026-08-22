@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,13 @@ from regent.infrastructure.models import (
 )
 
 _RECONCILE_TIMEOUT_MINUTES = 15
+
+logger = logging.getLogger(__name__)
+
+# Terminal EO statuses — once in any of these, the EO is done.
+_EO_TERMINAL_STATUSES = frozenset(
+    {"SUCCEEDED", "FAILED_TERMINAL", "UNKNOWN", "MANUAL_REVIEW"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,5 +377,16 @@ class ExternalOperationService:
             # Idempotent: already at the requested terminal status.
             eo = await session.get(ExternalOperationModel, operation_id)
             if eo is not None and eo.status == status:
+                return
+            # Already in a *different* terminal state — first writer wins.
+            # Log and return gracefully instead of raising, so callers don't
+            # get stuck in "cannot mark FAILED_TERMINAL" loops.
+            if eo is not None and eo.status in _EO_TERMINAL_STATUSES:
+                logger.warning(
+                    "EO %s already terminal at %s; ignoring mark %s",
+                    operation_id,
+                    eo.status,
+                    status,
+                )
                 return
             raise DomainError(ErrorCode.INVALID_STATE, f"cannot mark {status}")

@@ -418,9 +418,10 @@ async def test_m0_3_nested_repair_ledger_accumulates(tmp_path: Path) -> None:
             _TwoPhaseProvider(),
             toolkit,
             budget=AgentBudget(max_turns=10, max_tokens=200_000, max_wall_seconds=900),
+            execution_mode="act",
         )
         result = await runner.run(
-            {"goal_anchor_text": "x", "acceptance_contract": {}},
+            {"goal_anchor_text": "x", "acceptance_contract": {}, "work_plan_trivial": True},
             verify=True,
             run_smoke=False,
             _nested_repair_budget=1,

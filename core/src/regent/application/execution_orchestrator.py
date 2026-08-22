@@ -317,6 +317,19 @@ class ExecutionOrchestrator:
             milestone_plan = await ensure_milestone_plan(session, goal=goal, spec=spec)
             current = current_milestone(milestone_plan)
 
+            # ── Fast-path bypass for simple goals ──────────────────────────
+            # When a goal is small, self-contained, and doesn't need external
+            # evidence or multi-stage discovery, skip the entire Discovery →
+            # Requirement → Capability pipeline and go straight to Generation.
+            # This eliminates the primary information-loss path that caused
+            # "generated apps are simple demos" (root cause A from failure analysis).
+            if self._is_direct_generation_goal(goal, spec, milestone_plan):
+                await self._bypass_pipeline_to_generation(
+                    session, goal, spec, milestone_plan, current,
+                    execution_event_id, actor,
+                )
+                return
+
             idempotency_key = make_idempotency_key("discovery", goal_id, execution_event_id)
             existing_round = await session.scalar(
                 select(DiscoveryRoundModel).where(
@@ -500,6 +513,250 @@ class ExecutionOrchestrator:
                 extra={"goal_id": str(goal_id)},
                 exc_info=True,
             )
+
+    # ---------------------------------------------------------------------------
+    # Fast-path: detect goals that can skip Discovery/Requirement/Capability
+    # ---------------------------------------------------------------------------
+
+    @staticmethod
+    def _is_direct_generation_goal(
+        goal: "GoalModel",
+        spec: "GoalSpecModel",
+        milestone_plan: Any,
+    ) -> bool:
+        """Return True when the goal can bypass Discovery → Requirement → Capability.
+
+        Criteria (all must hold):
+        - Goal scale is SMALL
+        - Explicit ``direct_generation`` metadata flag, OR original input is short
+          (≤ 300 chars) and has no external evidence requirement
+        - Success criteria count ≤ 3
+        """
+        meta = dict(goal.metadata_json or {})
+        # Explicit opt-in always wins.
+        if meta.get("direct_generation"):
+            return True
+        # Must be SMALL scale.
+        if getattr(milestone_plan, "goal_scale", "").upper() != "SMALL":
+            return False
+        # External evidence requirement disqualifies bypass.
+        try:
+            if goal_requires_external_evidence(
+                dict(spec.explicit_constraints or {}),
+                dict(spec.success_criteria or {}),
+            ):
+                return False
+        except Exception:
+            pass
+        original = str(goal.original_input or "").strip()
+        if not original or len(original) > 300:
+            return False
+        criteria = dict(spec.success_criteria or {})
+        if len(criteria) > 3:
+            return False
+        return True
+
+    async def _bypass_pipeline_to_generation(
+        self,
+        session: AsyncSession,
+        goal: "GoalModel",
+        spec: "GoalSpecModel",
+        milestone_plan: Any,
+        current: Any,
+        execution_event_id: str,
+        actor: str,
+    ) -> None:
+        """Create synthetic pipeline records and emit GENERATION_RUN_REQUESTED.
+
+        Builds the full chain in one transaction:
+        DiscoveryRound(DECIDED) → ProductHypothesis → HypothesisDecision(SELECT)
+        → RequirementRevision(VALIDATED) → CapabilityResolutionPlan(SATISFIED)
+        → GENERATION_RUN_REQUESTED outbox event.
+        """
+        goal_id = goal.id
+        project_id = goal.app_project_id
+        original_input = str(goal.original_input or "").strip()
+
+        # 1. Discovery round — synthetic, already decided.
+        round_idempotency = make_idempotency_key(
+            "discovery", goal_id, execution_event_id
+        )
+        snapshot = {
+            "goal_id": str(goal_id),
+            "goal_version": goal.version,
+            "spec_version": spec.version,
+            "bypass": True,
+        }
+        snapshot_hash = hashlib.sha256(
+            json.dumps(
+                snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()
+        ).hexdigest()
+        discovery_round = DiscoveryRoundModel(
+            id=uuid.uuid4(),
+            goal_id=goal_id,
+            round=1,
+            status="DECIDED",
+            version=0,
+            input_snapshot_hash=snapshot_hash,
+            budget={"max_sources": 0, "max_tokens": 0},
+            policy_version="bypass-v1",
+            idempotency_key=round_idempotency,
+            created_by=actor,
+            correlation_id=str(goal.correlation_id),
+        )
+        session.add(discovery_round)
+
+        # 2. Synthetic hypothesis — goal text as the single hypothesis.
+        hypothesis_id = uuid.uuid4()
+        hypothesis_content = {
+            "claims": [
+                {
+                    "text": original_input,
+                    "annotation": "observed",
+                    "source": "goal_original_input",
+                }
+            ],
+            "product_concept": "direct_generation",
+            "target_users": "per goal specification",
+            "value_proposition": original_input,
+        }
+        hypothesis_hash = hashlib.sha256(
+            json.dumps(
+                hypothesis_content, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        hypothesis = ProductHypothesisModel(
+            id=hypothesis_id,
+            round_id=discovery_round.id,
+            candidate_key="bypass-direct",
+            content_json=hypothesis_content,
+            content_hash=hypothesis_hash,
+            eligibility="ELIGIBLE",
+            invalid_reasons=[],
+            generator_ref="bypass-v1",
+        )
+        session.add(hypothesis)
+
+        # 3. Hypothesis decision — SELECT the synthetic hypothesis.
+        decision = HypothesisDecisionModel(
+            id=uuid.uuid4(),
+            round_id=discovery_round.id,
+            decision="SELECT",
+            selected_hypothesis_id=hypothesis_id,
+            rationale="Simple goal bypassed discovery pipeline",
+            evidence_digest="no-evidence-needed",
+            policy_version="bypass-v1",
+            created_by=actor,
+        )
+        session.add(decision)
+
+        # 4. Requirement revision — goal text IS the requirement.
+        req_content = {
+            "planned_paths": ["app.py", "requirements.txt", "README.md"],
+            "acceptance_contract": {
+                "goal_anchor_text": original_input,
+                "goal_scale": "SMALL",
+                "success_criteria": dict(spec.success_criteria or {}),
+            },
+            "architecture_summary": original_input,
+            "component_plan": [{"name": "app", "type": "web"}],
+            "dependency_intents": [],
+            "verification_commands": ["python -c 'import app'"],
+        }
+        req_hash = hashlib.sha256(
+            json.dumps(
+                req_content, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        requirement = RequirementRevisionModel(
+            id=uuid.uuid4(),
+            goal_id=goal_id,
+            hypothesis_id=hypothesis_id,
+            requirement_key=f"req-{goal_id.hex[:8]}-bypass",
+            revision=0,
+            status="VALIDATED",
+            version=0,
+            content_json=req_content,
+            content_hash=req_hash,
+        )
+        session.add(requirement)
+
+        # 5. Capability resolution plan — SATISFIED, no gaps.
+        cap_content = {"gaps": [], "items": [], "bypass": True}
+        cap_hash = hashlib.sha256(
+            json.dumps(
+                cap_content, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        cap_plan = CapabilityResolutionPlanModel(
+            id=uuid.uuid4(),
+            requirement_revision_id=requirement.id,
+            status="SATISFIED",
+            version=0,
+            content_hash=cap_hash,
+            policy_version="bypass-v1",
+        )
+        session.add(cap_plan)
+
+        # 6. Emit GENERATION_RUN_REQUESTED.
+        gen_idempotency = make_idempotency_key(
+            "generation", goal_id, execution_event_id
+        )
+        gen_payload: dict[str, Any] = {
+            "goal_id": str(goal_id),
+            "app_project_id": str(project_id),
+            "requirement_revision_id": str(requirement.id),
+            "capability_resolution_plan_id": str(cap_plan.id),
+            "actor": actor,
+            "idempotency_key": gen_idempotency,
+        }
+        # Carry session metadata if present.
+        goal_meta = dict(goal.metadata_json or {})
+        sid = str(goal_meta.get("project_agent_session_id") or "").strip()
+        if sid:
+            gen_payload["project_agent_session_id"] = sid
+            if goal_meta.get("project_agent_session_epoch") is not None:
+                gen_payload["project_agent_session_epoch"] = int(
+                    goal_meta.get("project_agent_session_epoch") or 0
+                )
+        outbox_event = make_outbox_event(
+            EventEnvelope(
+                event_type=GENERATION_RUN_REQUESTED,
+                aggregate_type="goal",
+                aggregate_id=goal_id,
+                aggregate_version=goal.version,
+                payload=gen_payload,
+                idempotency_key=gen_idempotency,
+                correlation_id=goal.correlation_id,
+            )
+        )
+        session.add(outbox_event)
+
+        await self._append_conversation_event(
+            session,
+            project_id,
+            "DIRECT_GENERATION",
+            f"简单目标直接进入代码生成（跳过 Discovery/Requirement/Capability）：{original_input[:120]}",
+            {
+                "goal_id": str(goal_id),
+                "bypass": True,
+                "requirement_revision_id": str(requirement.id),
+                "capability_resolution_plan_id": str(cap_plan.id),
+            },
+        )
+        await session.flush()
+        logger.info(
+            "goal bypassed pipeline → direct generation",
+            extra={
+                "goal_id": str(goal_id),
+                "requirement_id": str(requirement.id),
+                "cap_plan_id": str(cap_plan.id),
+            },
+        )
 
     # ---------------------------------------------------------------------------
     # R2: DiscoveryRoundRequested -> run discovery -> DiscoveryCompleted
@@ -5289,9 +5546,10 @@ class ExecutionOrchestrator:
             )
             return True
         if recovery.terminal_exhaust:
-            # Soft-pause is not a permission gate: do not WAIT_FOR_HUMAN /
-            # HUMAN_TASK_REQUIRED (that mints Console「总是允许」cards).
-            if recovery.method in {"SOFT_PAUSE", "ASK_HUMAN", "STOP"}:
+            # Soft-pause / ASK_HUMAN are self-contained exits — no further
+            # WAIT_FOR_HUMAN needed.  STOP must fall through so the caller
+            # can issue the explicit WAIT_FOR_HUMAN halt (test: GAC-A4 ladder).
+            if recovery.method in {"SOFT_PAUSE", "ASK_HUMAN"}:
                 logger.info(
                     "delivery gap exited without permission TaskCard",
                     extra={

@@ -54,6 +54,8 @@ async def test_verification_soft_skips_tests_and_demotes_gaps(
         encoding="utf-8",
     )
     (root / "requirements.txt").write_text("flask\n", encoding="utf-8")
+    (root / "README.md").write_text("# Demo\nA minimal demo project.\n", encoding="utf-8")
+    (root / "test_demo.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
     toolkit = WorkspaceToolkit(root)
     agent = VerificationAgent(toolkit)
     verdict = await agent.verify(run_smoke=True)

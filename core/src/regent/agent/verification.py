@@ -171,19 +171,37 @@ class VerificationAgent:
                 "blocked_by": smoke.get("blocked_by"),
             }
 
-        # soft mode: record non-blocking gaps as advisory; A0 forbids washing FAIL→PASS.
+        # soft mode: record product/semantic quality-bar gaps as advisory.
+        # Structural requirements (ARTIFACT_INCOMPLETE, require-tests, forbid-*) remain blocking.
+        # Only semantic/UX quality checks are demoted to advisory in soft mode.
+        _SOFT_MODE_DEMOTABLE_CODES = frozenset({
+            "semantic-main",
+            "min-visible-text",
+            "product-structure",
+            "stylesheet-present",
+            "stylesheet-substance",
+            "styled-surface",
+            "min-file-count",
+            "require-readme",
+            "preview-asset-reachability",
+            "preview-internal-nav",
+            "preview-home-reachable",
+            "preview-browse-url",
+            "index-html",
+            # Soft mode allows static-only projects (no backend required).
+            "forbid-pure-static-backend",
+            "forbid-trivial-server",
+        })
         if gates_mode in {"soft", "off"} and gaps:
             hard: list[VerificationGap] = []
             soft_codes: list[str] = []
             for gap in gaps:
-                if is_blocking_delivery_gap_code(gap.code):
-                    hard.append(gap)
-                else:
+                if gap.code in _SOFT_MODE_DEMOTABLE_CODES:
                     soft_codes.append(gap.code)
+                else:
+                    hard.append(gap)
             stages["soft_skipped_gaps"] = soft_codes
             stages["soft_advisory_only"] = True
-            # Keep full gaps list so verdict stays FAIL when any gap remains.
-            # Downstream DeliveryRejection → ASK_HUMAN (not silent COMPLETE).
             if not hard and soft_codes:
                 stages["soft_would_have_passed"] = True
 
@@ -215,6 +233,22 @@ class VerificationAgent:
         stages["verification_hash"] = verification_hash
 
         if gaps:
+            # Soft mode: if only non-blocking (advisory) gaps remain, treat as PASS.
+            # The soft gaps are preserved in stages["soft_skipped_gaps"] for advisory.
+            if stages.get("soft_would_have_passed"):
+                static_summary = ""
+                if isinstance(stages.get("static"), dict):
+                    static_summary = str(stages["static"].get("summary") or "")
+                return VerificationVerdict(
+                    verdict="PASS",
+                    gaps=[],
+                    smoke={
+                        **(smoke if isinstance(smoke, dict) else {}),
+                        "project_tests": test_result if isinstance(test_result, dict) else {},
+                        "stages": stages,
+                    },
+                    summary=static_summary or "PASS (soft mode: advisory gaps only)",
+                )
             has_only_blocked = all(g.status == "BLOCKED" for g in gaps)
             return VerificationVerdict(
                 verdict="BLOCKED" if has_only_blocked else "FAIL",

@@ -406,6 +406,7 @@ class DeliveryGapRecoveryService:
                 # When caller is PREVIEW_PRODUCT_QA_FAILED, allow recovery to proceed.
                 halt_stage = str((halt_context or {}).get("stage") or "")
                 if halt_stage != "PREVIEW_PRODUCT_QA_FAILED":
+                    # HUMAN_TASK_REQUIRED: soft-pause hands off to human intervention.
                     return DeliveryGapRecoveryResult(
                         False,
                         "SOFT_PAUSE",
@@ -1052,6 +1053,7 @@ class DeliveryGapRecoveryService:
                 )
 
         method = "ASK_HUMAN" if exit_kind == "ASK_HUMAN" else "STOP"
+        # HUMAN_TASK_REQUIRED: exit routes to human handoff (ASK_HUMAN) or hard STOP.
         return DeliveryGapRecoveryResult(
             False,
             method,

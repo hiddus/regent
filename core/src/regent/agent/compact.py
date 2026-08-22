@@ -65,6 +65,10 @@ def estimate_tokens(messages: list[ChatMessage]) -> int:
     for msg in messages:
         if msg.content:
             total += estimate_text_tokens(msg.content)
+        # Count reasoning_content tokens (retained reasoning from model thinking).
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning:
+            total += estimate_text_tokens(reasoning)
         for call in msg.tool_calls:
             total += estimate_text_tokens(
                 json.dumps(call.arguments, ensure_ascii=False)
@@ -267,6 +271,13 @@ class ContextCompactor:
             text = (msg.content or "")[:2_000]
             if text:
                 blob_parts.append(f"[{prefix}] {text}")
+            # Retain reasoning content from assistant turns (Codex Harness
+            # "retained reasoning" pattern).  Truncate to 1000 chars to keep
+            # the summary compact while preserving the model's chain-of-thought.
+            reasoning = getattr(msg, "reasoning_content", None)
+            if msg.role == "assistant" and reasoning:
+                reasoning_text = reasoning[:1_000]
+                blob_parts.append(f"[reasoning] {reasoning_text}")
         blob = "\n".join(blob_parts[-40:])
         if self._summarizer is not None:
             return await self._summarizer.summarize(blob)
@@ -361,3 +372,48 @@ class HeuristicSummarizer:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         keep = lines[:30] + (["..."] + lines[-15:] if len(lines) > 50 else [])
         return "Heuristic summary:\n" + "\n".join(keep)
+
+
+class LLMSummarizer:
+    """LLM-based context summarizer (Codex Harness context compaction pattern).
+
+    Uses the same ChatProvider as the main agent loop.  Falls back to
+    HeuristicSummarizer on any failure so compaction never blocks the loop.
+    """
+
+    _SUMMARY_PROMPT = (
+        "You are a context compression assistant.  Given a conversation log from "
+        "a coding agent, produce a structured summary that preserves:\n"
+        "1. The user's original goal/intent\n"
+        "2. Key decisions already made and their rationale\n"
+        "3. Files created or modified (with paths)\n"
+        "4. Errors encountered and how they were resolved\n"
+        "5. Current work-in-progress and next steps\n"
+        "6. Hard constraints discovered (e.g. API limits, format requirements)\n"
+        "7. Any reasoning chains that led to important conclusions\n\n"
+        "Output a concise structured summary.  Omit routine tool calls and "
+        "boilerplate.  Keep it under 2000 characters."
+    )
+
+    def __init__(self, provider: Any, *, fallback: HeuristicSummarizer | None = None) -> None:
+        self._provider = provider
+        self._fallback = fallback or HeuristicSummarizer()
+
+    async def summarize(self, text: str) -> str:
+        from regent.agent.types import ChatMessage
+
+        try:
+            response = await self._provider.chat(
+                messages=[
+                    ChatMessage(role="system", content=self._SUMMARY_PROMPT),
+                    ChatMessage(role="user", content=f"Summarize this conversation:\n\n{text[:12_000]}"),
+                ],
+                tools=None,
+                temperature=0.0,
+            )
+            summary = (response.message.content or "").strip()
+            if summary:
+                return summary
+        except Exception:  # noqa: BLE001 — never block compaction
+            pass
+        return await self._fallback.summarize(text)

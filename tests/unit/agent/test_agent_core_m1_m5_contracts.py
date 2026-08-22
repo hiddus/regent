@@ -312,8 +312,9 @@ async def test_p0_4_identical_gap_fingerprint_stops_loop(tmp_path: Path) -> None
             _Prov(),
             toolkit,
             budget=AgentBudget(max_turns=40, max_tokens=200_000, max_wall_seconds=120),
+            execution_mode="act",
         ).run(
-            {"goal_anchor_text": "x"},
+            {"goal_anchor_text": "x", "work_plan_trivial": True},
             verify=True,
             run_smoke=False,
             _nested_repair_budget=4,
@@ -397,8 +398,9 @@ async def test_p0_4_repair_phase_turn_cap_without_submit(tmp_path: Path) -> None
                 prov,
                 toolkit,
                 budget=AgentBudget(max_turns=40, max_tokens=200_000, max_wall_seconds=120),
+                execution_mode="act",
             ).run(
-                {"goal_anchor_text": "x"},
+                {"goal_anchor_text": "x", "work_plan_trivial": True},
                 verify=True,
                 run_smoke=False,
                 _nested_repair_budget=2,
@@ -699,8 +701,9 @@ async def test_m3_1_non_recursive_repair_same_trajectory(tmp_path: Path) -> None
             _Prov(),
             toolkit,
             budget=AgentBudget(max_turns=10, max_tokens=50_000, max_wall_seconds=60),
+            execution_mode="act",
         ).run(
-            {"goal_anchor_text": "x"},
+            {"goal_anchor_text": "x", "work_plan_trivial": True},
             verify=True,
             run_smoke=False,
             _nested_repair_budget=1,

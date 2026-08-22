@@ -184,12 +184,14 @@ async def test_agent_runner_writes_files(tmp_path: Path) -> None:
         _ScriptedProvider(),
         toolkit,
         budget=AgentBudget(max_turns=5, max_tokens=10_000, max_wall_seconds=60),
+        execution_mode="act",
     )
     result = await runner.run(
         {
             "goal_anchor_text": "AI skills network",
             "planned_paths": ["index.html", "src/app.py", "requirements.txt", "README.md"],
             "acceptance_contract": {"first_deliverable": "skill feed"},
+            "work_plan_trivial": True,
         },
         verify=False,
     )
@@ -320,6 +322,8 @@ async def test_agentic_generator_materializes_artifacts(tmp_path: Path) -> None:
                 "hypothesis_decision_id": str(uuid.uuid4()),
                 "goal_anchor_text": "AI skills",
                 "acceptance_contract": {},
+                "execution_mode": "act",
+                "work_plan_trivial": True,
             }
         )
     finally:

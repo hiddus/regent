@@ -80,7 +80,32 @@ class GoalExecutionService:
                 raise DomainError(ErrorCode.POLICY_DENIED, "confirmed GoalSpec lock mismatch")
             auto_prepared = False
             if goal.status == "DRAFT":
-                raise DomainError(ErrorCode.POLICY_DENIED, "draft goal cannot start before confirmation")
+                # Explicit user start: freeze draft → EXPLORING/PROVISIONAL.
+                spec.confirmed_by = actor
+                spec.status = "FROZEN"
+                audit = AuditRecordModel(
+                    id=uuid.uuid4(),
+                    goal_id=goal.id,
+                    action="SNAPSHOT_GOAL_SPEC_FOR_EXECUTION",
+                    detail={
+                        "explicit_user_start": True,
+                        "spec_version": spec.version,
+                        "has_unknowns": bool(spec.unknowns),
+                    },
+                    created_by=actor,
+                )
+                session.add(audit)
+                goal.status = "EXPLORING" if spec.unknowns else "PROVISIONAL"
+                goal.version += 1
+                goal.metadata_json = {
+                    **meta,
+                    "explicit_user_start": True,
+                    "execution_idempotency_key": idempotency_key,
+                    "execution_event_id": str(uuid.uuid4()),
+                }
+                return GoalExecutionReceipt(
+                    goal.id, project.id, goal.status, "SNAPSHOT", None,
+                )
             metadata = dict(goal.metadata_json)
             current_key = metadata.get("execution_idempotency_key")
             current_stage = str(metadata.get("execution_stage", "NOT_STARTED"))

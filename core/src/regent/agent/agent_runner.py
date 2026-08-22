@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
-from regent.agent.compact import ContextCompactor, HeuristicSummarizer, micro_compact
+from regent.agent.compact import ContextCompactor, HeuristicSummarizer, LLMSummarizer, micro_compact
 from regent.agent.context_assembler import ContextAssembler
 from regent.agent.primary_failure import classify_finish_reason
 from regent.agent.repair_policy import (
@@ -107,6 +107,7 @@ class AgentRunner:
         model_input_cost_per_million: float = 0.0,
         model_output_cost_per_million: float = 0.0,
         price_book_version: str = "model-price-book-v1",
+        compaction_model: Any | None = None,
     ) -> None:
         self._provider = provider
         self._toolkit = toolkit
@@ -136,7 +137,7 @@ class AgentRunner:
         self._context_window_tokens = int(context_window_tokens)
         self._compactor = ContextCompactor(
             toolkit=toolkit,
-            summarizer=HeuristicSummarizer(),
+            summarizer=LLMSummarizer(compaction_model) if compaction_model is not None else HeuristicSummarizer(),
             context_window_tokens=context_window_tokens,
         )
 

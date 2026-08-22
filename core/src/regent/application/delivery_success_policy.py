@@ -33,6 +33,31 @@ BLOCKING_DELIVERY_GAP_CODES: frozenset[str] = frozenset(
     }
 )
 
+# Subset of BLOCKING_DELIVERY_GAP_CODES that truly prevent achievement.
+# Quality-bar / UX gaps (semantic-*, min-visible-text, etc.) are NOT here —
+# SMALL+preview soft-pass may override them.
+ACHIEVEMENT_BLOCKING_GAP_CODES: frozenset[str] = frozenset(
+    {
+        "forbid-unrendered-templates",
+        "forbid-demo-shell",
+        "forbid-demo-copy",
+        "forbid-placeholder-content",
+        "forbid-trivial-server",
+        "forbid-pure-static-backend",
+        "ARTIFACT_INCOMPLETE",
+        "empty-changeset",
+        # Presentation surface: must have real styling, not browser defaults.
+        "stylesheet-present",
+        "stylesheet-substance",
+        "styled-surface",
+        # Live Preview QA: navigation must work through the public browse URL.
+        "preview-asset-reachability",
+        "preview-internal-nav",
+        "preview-home-reachable",
+        "preview-browse-url",
+    }
+)
+
 
 def is_blocking_delivery_gap_code(code: str) -> bool:
     raw = str(code or "").strip()
@@ -118,7 +143,8 @@ def verification_allows_achieve(
     if not small or not has_preview:
         return False, verdict or "MISSING"
     codes = _gap_codes(payload)
-    if any(is_blocking_delivery_gap_code(code) for code in codes):
+    # Use achievement-blocking set (excludes quality-bar gaps like min-visible-text).
+    if any(code in ACHIEVEMENT_BLOCKING_GAP_CODES for code in codes):
         return False, "blocking_gaps"
     # Preview exists and no hard blockers → treat as delivered-for-review success.
     return True, "soft_pass_preview"
