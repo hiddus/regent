@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
@@ -81,8 +82,13 @@ class AgentRunResult:
 
 
 # Identical-tool-call anti-loop: warn after N repeats, escalate to ASK after M.
+# Counts occurrences within a sliding window so alternating patterns
+# (A,B,A,B,...) are caught, not only strict consecutive repeats.
 REPEAT_CALL_WARN_AFTER = 3
 REPEAT_CALL_ASK_AFTER = 6
+# Window large enough that a two-call alternating loop (A,B,A,B,...) still
+# reaches REPEAT_CALL_ASK_AFTER occurrences of each call.
+REPEAT_CALL_WINDOW = 12
 
 
 class AgentRunner:
@@ -135,9 +141,8 @@ class AgentRunner:
         self._subagent_depth = int(subagent_depth)
         self._max_subagent_depth = int(max_subagent_depth)
         self._budget_ledger = budget_ledger
-        # Identical tool-call anti-loop state (fingerprint of last issued call).
-        self._last_call_fp: str | None = None
-        self._repeat_call_count = 0
+        # Identical tool-call anti-loop state (sliding window of call fingerprints).
+        self._recent_call_fps: deque[str] = deque(maxlen=REPEAT_CALL_WINDOW)
         self._model_max_output_tokens = max(1, int(model_max_output_tokens))
         self._model_input_rate = max(0.0, float(model_input_cost_per_million)) / 1_000_000
         self._model_output_rate = max(0.0, float(model_output_cost_per_million)) / 1_000_000
@@ -864,18 +869,17 @@ class AgentRunner:
                     raise RuntimeError(f"tool {call.name!r} does not declare max_cost")
                 self._raise_if_aborted(plan)
                 fp = self._call_fingerprint(call)
-                if fp == self._last_call_fp:
-                    self._repeat_call_count += 1
-                else:
-                    self._last_call_fp = fp
-                    self._repeat_call_count = 1
+                self._recent_call_fps.append(fp)
+                self._repeat_call_count = sum(
+                    1 for past in self._recent_call_fps if past == fp
+                )
                 if self._repeat_call_count >= REPEAT_CALL_ASK_AFTER:
                     from regent.application.agent_control import AskUserRequiredError
                     from regent.application.agent_loop_exit import build_ask_envelope
 
                     detail = (
                         f"identical tool call repeated {self._repeat_call_count} "
-                        f"times: {fp[:200]}"
+                        f"times within the last {len(self._recent_call_fps)} calls: {fp[:200]}"
                     )
                     await _emit(
                         on_event,
@@ -888,7 +892,8 @@ class AgentRunner:
                     )
                     envelope = build_ask_envelope(
                         question=(
-                            f"同一工具调用（{call.name}）已连续重复 "
+                            f"同一工具调用（{call.name}）在最近 "
+                            f"{len(self._recent_call_fps)} 次调用内重复了 "
                             f"{self._repeat_call_count} 次且无进展。"
                             "请换方向、跳过，或补充约束后继续。"
                         ),
@@ -915,7 +920,8 @@ class AgentRunner:
                     # approach instead of burning turns on the same call.
                     result_text = (
                         f"ERROR: RepeatedToolCall: identical {call.name} call "
-                        f"repeated {self._repeat_call_count} times with no progress. "
+                        f"repeated {self._repeat_call_count} times within the last "
+                        f"{len(self._recent_call_fps)} calls with no progress. "
                         "Stop repeating it: try a different command/tool, "
                         "or call ask_user_question / submit."
                     )
