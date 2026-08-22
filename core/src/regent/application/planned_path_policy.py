@@ -62,6 +62,28 @@ def normalize_relative_path(relative: str) -> str:
     return relative.replace("\\", "/").strip()
 
 
+# Command side-effect artifacts (pytest/python caches, bytecode) that must
+# never fail the frozen-plan check: they are incidental, not deliverables.
+_BYPRODUCT_DIR_SEGMENTS = frozenset(
+    {
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        "node_modules",
+    }
+)
+_BYPRODUCT_SUFFIXES = (".pyc", ".pyo")
+
+
+def is_incidental_byproduct(relative: str) -> bool:
+    """Return True for tool-run byproducts that should be dropped, not denied."""
+    segments = [seg for seg in normalize_relative_path(relative).split("/") if seg]
+    if any(seg in _BYPRODUCT_DIR_SEGMENTS for seg in segments):
+        return True
+    return normalize_relative_path(relative).lower().endswith(_BYPRODUCT_SUFFIXES)
+
+
 def is_allowed_extra_path(relative: str) -> bool:
     """Return True for safe scaffold paths outside a narrow planned set."""
     name = normalize_relative_path(relative).lower()

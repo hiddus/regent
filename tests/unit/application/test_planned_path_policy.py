@@ -3,6 +3,7 @@
 from regent.application.planned_path_policy import (
     expand_planned_paths,
     is_allowed_extra_path,
+    is_incidental_byproduct,
     is_path_within_frozen_plan,
 )
 
@@ -30,3 +31,15 @@ def test_allowed_extra_and_frozen_plan() -> None:
     assert is_path_within_frozen_plan("tests/test_smoke.py", ["src/app.py"])
     assert not is_path_within_frozen_plan(".regent/x", ["src/app.py"])
     assert not is_path_within_frozen_plan("vendor/x.py", ["src/app.py"])
+
+
+def test_incidental_byproduct_detection() -> None:
+    """Tool-run caches must be dropped, not denied, by the frozen-plan gate."""
+    assert is_incidental_byproduct(".pytest_cache/v/cache/lastfailed")
+    assert is_incidental_byproduct("tests/__pycache__/test_smoke.cpython-312.pyc")
+    assert is_incidental_byproduct("src/__pycache__/app.pyc")
+    assert is_incidental_byproduct("source/lib/__pycache__/x.pyo")
+    assert is_incidental_byproduct(".ruff_cache/0.15/CACHEDIR.TAG")
+    assert not is_incidental_byproduct("src/app.py")
+    assert not is_incidental_byproduct("README.md")
+    assert not is_incidental_byproduct("source/static/engine.js")

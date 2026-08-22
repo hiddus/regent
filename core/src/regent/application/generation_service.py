@@ -293,7 +293,10 @@ class GenerationService:
                 # Older generators without on_progress kwarg.
                 generated = await generate(plan_payload)
             changes = generated.output
-            from regent.application.planned_path_policy import is_path_within_frozen_plan
+            from regent.application.planned_path_policy import (
+                is_incidental_byproduct,
+                is_path_within_frozen_plan,
+            )
 
             # planned_paths already expanded + persisted in _claim; re-expand is idempotent.
             planned_paths = set(
@@ -304,11 +307,24 @@ class GenerationService:
                     ),
                 )
             )
-            if planned_paths and any(
-                not is_path_within_frozen_plan(change.relative_path, planned_paths)
+            # Command side effects (pytest/python caches) are dropped, not denied:
+            # denying them rejected whole runs that otherwise delivered planned files.
+            kept_changes = [
+                change
                 for change in changes.changes
-            ):
+                if is_path_within_frozen_plan(change.relative_path, planned_paths)
+                or not is_incidental_byproduct(change.relative_path)
+            ]
+            violations = [
+                change.relative_path
+                for change in changes.changes
+                if not is_path_within_frozen_plan(change.relative_path, planned_paths)
+                and not is_incidental_byproduct(change.relative_path)
+            ]
+            if planned_paths and violations:
                 raise DomainError(ErrorCode.POLICY_DENIED, "generated path is outside frozen plan")
+            if len(kept_changes) != len(changes.changes):
+                changes = changes.model_copy(update={"changes": kept_changes})
             if not changes.changes:
                 raise DomainError(
                     ErrorCode.POLICY_DENIED,
