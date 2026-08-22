@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.infrastructure.models import (
@@ -244,27 +244,51 @@ class BudgetLedger:
         the key is consumed — a resumed epoch re-reserving the same turn
         derives a fresh key instead of deadlocking on
         `cannot claim reservation from SETTLED`.
+
+        Terminal rows accumulate across epochs (every resumed epoch reuses
+        the same per-turn keys), so the next free suffix is computed from
+        all existing rows in one query. Bounded probing previously raised
+        `reservation key namespace exhausted` after ~16 epochs and blocked
+        all further generation for the goal.
         """
-        key = reservation_key
-        for attempt in range(16):
-            existing = await session.scalar(
+        rows = (
+            await session.scalars(
                 select(BudgetReservationModel).where(
-                    BudgetReservationModel.reservation_key == key
+                    or_(
+                        BudgetReservationModel.reservation_key == reservation_key,
+                        BudgetReservationModel.reservation_key.like(
+                            f"{reservation_key}#r%"
+                        ),
+                    )
                 )
             )
-            if existing is None:
-                return key, None
-            if existing.status in ("RESERVED", "CLAIMED"):
-                if (
-                    existing.goal_id != goal_id
-                    or existing.run_id != run_id
-                    or existing.cost_type != cost_type
-                    or existing.amount != amount
-                ):
-                    raise BudgetReservationError("reservation key reused with different binding")
-                return key, self._reservation(existing)
-            key = f"{reservation_key}#r{attempt + 2}"
-        raise BudgetReservationError("reservation key namespace exhausted")
+        ).all()
+        live = [r for r in rows if r.status in ("RESERVED", "CLAIMED")]
+        if live:
+            existing = live[-1]
+            if (
+                existing.goal_id != goal_id
+                or existing.run_id != run_id
+                or existing.cost_type != cost_type
+                or existing.amount != amount
+            ):
+                raise BudgetReservationError("reservation key reused with different binding")
+            return existing.reservation_key, self._reservation(existing)
+        base_used = False
+        used_suffixes: set[int] = set()
+        for row in rows:
+            if row.reservation_key == reservation_key:
+                base_used = True
+                continue
+            suffix = row.reservation_key.rsplit("#r", 1)[-1]
+            if suffix.isdigit():
+                used_suffixes.add(int(suffix))
+        if not base_used:
+            return reservation_key, None
+        attempt = 2
+        while attempt in used_suffixes:
+            attempt += 1
+        return f"{reservation_key}#r{attempt}", None
 
     async def claim(self, reservation_id: uuid.UUID) -> BudgetReservation:
         async with self._sessions() as session, session.begin():

@@ -363,3 +363,29 @@ async def test_reserving_consumed_key_after_release_derives_fresh_hold(
     )
     assert second.id != first.id
     assert second.status == "RESERVED"
+
+
+@pytest.mark.asyncio
+async def test_many_epochs_reusing_turn_key_do_not_exhaust_namespace(
+    budget_db_sessions,
+) -> None:
+    """Regression: each resumed epoch re-reserves the same per-turn key.
+
+    Terminal rows accumulate one per epoch; bounded probing used to raise
+    `reservation key namespace exhausted` after ~16 epochs and blocked all
+    further generation for the goal.
+    """
+    goal_id, ledger = await _goal_with_budget(budget_db_sessions, 1000.0)
+    key = "resume:many:turn:0"
+    for _ in range(20):
+        hold = await ledger.reserve(
+            goal_id, None, reservation_key=key, cost_type=COST_MODEL_INPUT, amount=8.0
+        )
+        assert hold.status == "RESERVED"
+        claimed = await ledger.claim(hold.id)
+        await ledger.settle(claimed.id, claim_token=claimed.claim_token, actual_amount=8.0)
+    # One more epoch after 20 settled rows must still reserve cleanly.
+    final = await ledger.reserve(
+        goal_id, None, reservation_key=key, cost_type=COST_MODEL_INPUT, amount=8.0
+    )
+    assert final.status == "RESERVED"
