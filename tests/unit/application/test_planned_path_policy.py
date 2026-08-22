@@ -24,11 +24,21 @@ def test_allowed_extra_and_frozen_plan() -> None:
     assert is_allowed_extra_path("src/Component.tsx")
     assert is_allowed_extra_path("src/App.vue")
     assert is_allowed_extra_path("src/schema.sql")
+    # Deliverables under a top-level source/ directory are common scaffolds.
+    assert is_allowed_extra_path("source/static/engine.js")
+    assert is_allowed_extra_path("source/README.md")
+    assert is_allowed_extra_path("source/selftest.py")
+    assert is_allowed_extra_path("source/deploy.sh")
+    assert is_allowed_extra_path("source/nginx.conf")
+    assert not is_allowed_extra_path("source/.regent/x")
     assert not is_allowed_extra_path("random/dir/x.py")
     assert not is_allowed_extra_path(".regent/x")
     assert not is_allowed_extra_path("../etc/passwd")
     assert is_path_within_frozen_plan("src/app.py", ["src/app.py"])
     assert is_path_within_frozen_plan("tests/test_smoke.py", ["src/app.py"])
+    assert is_path_within_frozen_plan(
+        "source/static/data.js", ["src/app.py", "README.md"]
+    )
     assert not is_path_within_frozen_plan(".regent/x", ["src/app.py"])
     assert not is_path_within_frozen_plan("vendor/x.py", ["src/app.py"])
 

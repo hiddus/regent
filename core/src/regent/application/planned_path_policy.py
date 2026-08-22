@@ -55,6 +55,8 @@ _ALLOWED_SUFFIXES = (
     ".toml",
     ".yml",
     ".yaml",
+    ".sh",
+    ".conf",
 )
 
 
@@ -110,6 +112,9 @@ def is_allowed_extra_path(relative: str) -> bool:
         or name.startswith("static/")
         or name.startswith("templates/")
         or name.startswith("src/")
+        # Goals frequently deliver into a top-level source/ directory whose
+        # subtree is not enumerated in the frozen planned_paths set.
+        or name.startswith("source/")
     )
 
 
