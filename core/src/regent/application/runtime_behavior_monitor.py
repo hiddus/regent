@@ -159,6 +159,12 @@ class RuntimeBehaviorMonitor:
                         self._check_world_background(goal_id, preview_url, visible, html)
                     )
 
+                    # Deep analysis: fetch and analyze JS data files
+                    js_observations = await self._check_js_data_quality(
+                        goal_id, preview_url, html
+                    )
+                    observations.extend(js_observations)
+
                 # Filter out NONE-severity observations
                 observations = [o for o in observations if o.severity != "NONE"]
 
@@ -347,6 +353,188 @@ class RuntimeBehaviorMonitor:
                     f"氛围={world_hints['atmosphere']}, "
                     f"规则={world_hints['rules']}"
                 ),
+                preview_url=preview_url,
+            ))
+
+        return observations
+
+    async def _check_js_data_quality(
+        self, goal_id: uuid.UUID, preview_url: str, html: str
+    ) -> list[BehaviorObservation]:
+        """Deep analysis: fetch JS data files and analyze character/world data.
+
+        For SPA applications, the static HTML is just a shell. The actual
+        content lives in JS files. This method:
+        1. Extracts <script src="..."> references from the HTML
+        2. Fetches each JS file
+        3. Analyzes character definitions, routines, world rules
+        """
+        observations: list[BehaviorObservation] = []
+
+        # Extract script src references (relative paths only)
+        script_srcs = re.findall(
+            r'<script\s+src=["\']([^"\']+)["\']', html, re.I
+        )
+        if not script_srcs:
+            return observations
+
+        # Build base URL for resolving relative paths
+        base = preview_url.rstrip("/")
+        js_contents: dict[str, str] = {}
+
+        async with httpx.AsyncClient(
+            timeout=self._http_timeout, follow_redirects=True
+        ) as http:
+            for src in script_srcs:
+                if src.startswith(("http://", "https://")):
+                    url = src
+                else:
+                    url = f"{base}/{src.lstrip('./')}"
+                try:
+                    resp = await http.get(url)
+                    if resp.status_code == 200:
+                        js_contents[src] = resp.text
+                except Exception:
+                    pass
+
+        if not js_contents:
+            return observations
+
+        all_js = " ".join(js_contents.values())
+
+        # --- Check 1: Character count and diversity ---
+        name_matches = re.findall(
+            r"name:\s*['\"]([^'\"]{2,6})['\"]", all_js
+        )
+        unique_names = set(name_matches)
+        if len(unique_names) < 3:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="character_count",
+                metric_value={
+                    "unique_names": len(unique_names),
+                    "names": sorted(unique_names),
+                },
+                anomaly=True,
+                severity="MEDIUM",
+                detail=f"仅检测到 {len(unique_names)} 个角色（建议 ≥3）: {sorted(unique_names)}",
+                preview_url=preview_url,
+            ))
+        else:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="character_count",
+                metric_value={
+                    "unique_names": len(unique_names),
+                    "names": sorted(unique_names),
+                },
+                anomaly=False,
+                severity="NONE",
+                detail=f"检测到 {len(unique_names)} 个角色: {sorted(unique_names)}",
+                preview_url=preview_url,
+            ))
+
+        # --- Check 2: Location Diversity ---
+        location_names = {
+            n for n in set(re.findall(r"name:\s*['\"]([^'\"]{2,10})['\"]", all_js))
+            if re.search(r"[镇村坊场馆园所院厅堂街巷路桥寺庙学校店]", n)
+            or n in {"家", "办公室"}
+        }
+        if len(location_names) < 3:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="location_count",
+                metric_value={"locations": len(location_names)},
+                anomaly=True,
+                severity="LOW",
+                detail=f"地点数量较少（{len(location_names)} 个）",
+                preview_url=preview_url,
+            ))
+
+        # --- Check 3: Daily routine / sleep cycle ---
+        has_sleep = bool(re.search(
+            r"(?:睡觉|就寝|入睡|晚安|sleep|bedtime|night|22:|23:|00:)", all_js
+        ))
+        has_wake = bool(re.search(
+            r"(?:起床|醒来|早起|wake|morning|06:|07:)", all_js
+        ))
+        if not has_sleep or not has_wake:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="sleep_cycle",
+                metric_value={"has_sleep": has_sleep, "has_wake": has_wake},
+                anomaly=True,
+                severity="MEDIUM",
+                detail=(
+                    "昼夜节律不完整："
+                    f"就寝逻辑={'有' if has_sleep else '缺失'}, "
+                    f"起床逻辑={'有' if has_wake else '缺失'}"
+                ),
+                preview_url=preview_url,
+            ))
+        else:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="sleep_cycle",
+                metric_value={"has_sleep": True, "has_wake": True},
+                anomaly=False,
+                severity="NONE",
+                detail="昼夜节律完整（含就寝和起床逻辑）",
+                preview_url=preview_url,
+            ))
+
+        # --- Check 4: Dialogue cooldown / limits ---
+        has_cooldown = bool(re.search(
+            r"(?:cooldown|冷却|间隔|cool_down|coolDown)", all_js
+        ))
+        has_daily_limit = bool(re.search(
+            r"(?:MAX_DAILY|max_daily|每日.*上限|daily.*limit)", all_js, re.I
+        ))
+        if not has_cooldown and not has_daily_limit:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="dialogue_guards",
+                metric_value={"has_cooldown": has_cooldown, "has_daily_limit": has_daily_limit},
+                anomaly=True,
+                severity="LOW",
+                detail="未检测到对话冷却或每日上限机制，可能导致对话过度频繁",
+                preview_url=preview_url,
+            ))
+
+        # --- Check 5: Character depth ---
+        has_bio = bool(re.search(r"bio:\s*['\"]", all_js))
+        has_personality = bool(re.search(r"personality:\s*\[", all_js))
+        has_routine = bool(re.search(r"(?:dailyRoutine|routine|schedule):\s*\[", all_js))
+        missing = []
+        if not has_bio: missing.append("人物简介(bio)")
+        if not has_personality: missing.append("性格特点(personality)")
+        if not has_routine: missing.append("日常作息(routine)")
+        if missing:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="character_depth",
+                metric_value={"has_bio": has_bio, "has_personality": has_personality, "has_routine": has_routine},
+                anomaly=True,
+                severity="MEDIUM",
+                detail=f"角色深度不足，缺少: {', '.join(missing)}",
+                preview_url=preview_url,
+            ))
+        else:
+            observations.append(BehaviorObservation(
+                goal_id=goal_id,
+                observed_at=datetime.now(UTC),
+                metric_name="character_depth",
+                metric_value={"has_bio": True, "has_personality": True, "has_routine": True},
+                anomaly=False,
+                severity="NONE",
+                detail="角色深度完整（含简介、性格、作息）",
                 preview_url=preview_url,
             ))
 
