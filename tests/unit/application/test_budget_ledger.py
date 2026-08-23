@@ -126,6 +126,37 @@ async def test_record_cost_rejects_invalid_type() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_cost_nulls_dangling_run_id() -> None:
+    """Defect #12: FK violation on missing runs row must not abort accounting."""
+    goal_id = uuid.uuid4()
+    dangling = uuid.uuid4()
+
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+    transaction_context = AsyncMock()
+    transaction_context.__aenter__.return_value = None
+    transaction_context.__aexit__.return_value = None
+    session.begin = MagicMock(return_value=transaction_context)
+    factory = MagicMock(return_value=session_context)
+
+    ledger = BudgetLedger(factory)
+    entry = await ledger.record_cost(
+        goal_id,
+        dangling,
+        cost_type=COST_MODEL_INPUT,
+        amount=1.5,
+        description="generation input tokens",
+    )
+    assert entry.goal_id == goal_id
+    assert entry.run_id is None
+    assert entry.amount == 1.5
+
+
+@pytest.mark.asyncio
 async def test_record_cost_rejects_negative_amount() -> None:
     factory = MagicMock()
     ledger = BudgetLedger(factory)

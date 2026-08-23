@@ -7,6 +7,7 @@ into BLOCKED when spend exceeds the configured ceiling.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -20,7 +21,10 @@ from regent.infrastructure.models import (
     BudgetEntryModel,
     BudgetReservationModel,
     GoalModel,
+    RunModel,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 class BudgetExceededError(RuntimeError):
@@ -317,7 +321,7 @@ class BudgetLedger:
                 BudgetEntryModel(
                     id=uuid.uuid4(),
                     goal_id=row.goal_id,
-                    run_id=row.run_id,
+                    run_id=await self._existing_run_id(session, row.run_id),
                     cost_type=row.cost_type,
                     amount=actual_amount,
                     price_book_version=row.price_book_version,
@@ -416,6 +420,10 @@ class BudgetLedger:
     ) -> BudgetEntryModel:
         self._validate_cost(cost_type, amount)
         async with self._sessions() as session, session.begin():
+            # Defect #12: agentic epochs sometimes reference run ids that never
+            # materialized a runs row; the FK violation aborted cost recording.
+            # Ship-first: keep the cost entry, drop the dangling run reference.
+            run_id = await self._existing_run_id(session, run_id)
             entry = BudgetEntryModel(
                 id=uuid.uuid4(),
                 goal_id=goal_id,
@@ -428,6 +436,18 @@ class BudgetLedger:
             )
             session.add(entry)
             return entry
+
+    @staticmethod
+    async def _existing_run_id(
+        session: AsyncSession, run_id: uuid.UUID | None
+    ) -> uuid.UUID | None:
+        if run_id is None:
+            return None
+        exists = await session.scalar(select(RunModel.id).where(RunModel.id == run_id))
+        if exists is None:
+            LOGGER.warning("dangling run_id %s in cost entry; nulling reference", run_id)
+            return None
+        return run_id
 
     async def get_goal_budget(self, goal_id: uuid.UUID) -> BudgetReport:
         async with self._sessions() as session:
