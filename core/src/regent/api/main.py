@@ -465,13 +465,31 @@ def create_app() -> FastAPI:
         app.mount("/console", StaticFiles(directory=console_path, html=True), name="console")
 
     def preview_file(project_id: uuid.UUID, release_id: uuid.UUID, filename: str) -> FileResponse:
-        allowed = {
-            "index.html": "text/html",
-            "styles.css": "text/css",
-            "app.js": "text/javascript",
-            "regent-preview.js": "text/javascript",
+        allowed_types = {
+            ".html": "text/html",
+            ".css": "text/css",
+            ".js": "text/javascript",
+            ".mjs": "text/javascript",
+            ".json": "application/json",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".ico": "image/x-icon",
+            ".txt": "text/plain",
+            ".map": "application/json",
         }
-        if filename not in allowed:
+        if (
+            "\\" in filename
+            or "/" in filename
+            or filename.startswith(".")
+            or ".." in filename
+        ):
+            raise HTTPException(status_code=404, detail="preview file not found")
+        media_type = allowed_types.get(Path(filename).suffix.lower())
+        if media_type is None:
             raise HTTPException(status_code=404, detail="preview file not found")
         root = (Path(settings.workspace_root) / "previews").resolve()
         path = (root / str(project_id) / str(release_id) / filename).resolve()
@@ -479,7 +497,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="preview file not found")
         return FileResponse(
             path,
-            media_type=allowed[filename],
+            media_type=media_type,
             headers={
                 "Content-Security-Policy": PREVIEW_CONTENT_SECURITY_POLICY,
                 "X-Content-Type-Options": "nosniff",
