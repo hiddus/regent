@@ -206,7 +206,7 @@ class AgenticCodeGenerator:
         else:
             budget_ledger = None
         context_window = 128_000
-        max_subagent_depth = 3
+        max_subagent_depth = 1
         model_max_output_tokens = 8192
         model_input_cost_per_million = 0.0
         model_output_cost_per_million = 0.0

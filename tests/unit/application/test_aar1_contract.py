@@ -104,7 +104,7 @@ class TestM5StopLegacyWrites:
         s = Settings(_env_file=None)
         assert s.aar1_phase == "contract"
         assert s.aar1_certified_hive is True
-        assert s.max_subagent_depth == 3
+        assert s.max_subagent_depth == 1  # hub-and-spoke: sub-agents cannot re-delegate
 
     def test_certified_hive_helpers(self) -> None:
         from regent.application.aar1_contract import (

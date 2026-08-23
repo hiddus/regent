@@ -51,7 +51,7 @@ class SubagentRunner:
         execution_plans: Any | None = None,
         run_id: Any | None = None,
         parent_depth: int = 0,
-        max_subagent_depth: int = 3,
+        max_subagent_depth: int = 1,
         budget_ledger: Any | None = None,
         model_max_output_tokens: int = 8192,
         model_input_cost_per_million: float = 0.0,

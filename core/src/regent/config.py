@@ -112,7 +112,9 @@ class Settings(BaseSettings):
     # Opt out per-goal via metadata force_single_agent / hive_enabled=false, or set env false.
     aar1_certified_hive: bool = True
     # Nested delegate_plan_item depth (0 = no delegation).
-    max_subagent_depth: int = Field(default=3, ge=0, le=8)
+    # Default 1: only the main Agent may delegate; sub-agents cannot re-delegate.
+    # This prevents A→B→A dead-loops and wasteful token burn.
+    max_subagent_depth: int = Field(default=1, ge=0, le=8)
     require_release_human_approval: bool = True
     decision_preference: Literal["aggressive", "balanced", "conservative"] = "balanced"
     decision_allow_actions: str = ""

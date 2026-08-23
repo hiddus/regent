@@ -112,7 +112,7 @@ class AgentRunner:
         execution_mode: str = "ask",
         permission_always_tools: set[str] | frozenset[str] | None = None,
         subagent_depth: int = 0,
-        max_subagent_depth: int = 3,
+        max_subagent_depth: int = 1,
         budget_ledger: Any | None = None,
         model_max_output_tokens: int = 8192,
         model_input_cost_per_million: float = 0.0,

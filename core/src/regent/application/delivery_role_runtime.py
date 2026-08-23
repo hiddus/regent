@@ -176,28 +176,15 @@ async def materialize_delivery_roles(
             capabilities=caps,
         )
 
-    # Relationships: product supervises tech; test/ux/ops review tech.
+    # Relationships: test/ux/ops review tech (unidirectional, no cross-invocation).
+    # REMOVED: product→tech SUPERVISES/DELEGATES_TO — these created indirect
+    # agent-to-agent invocation paths that risked dead-loops and token waste.
+    # All delivery roles now report only to the orchestrator (hub-and-spoke).
     try:
-        product = bindings.get("product")
         tech = bindings.get("tech")
         test = bindings.get("test")
         ux = bindings.get("ux")
         ops = bindings.get("ops")
-        if product and tech:
-            await life.add_relationship(
-                session,
-                organization_version_id=organization_version_id,
-                source_deployment_id=product.deployment_id,
-                target_deployment_id=tech.deployment_id,
-                relationship_type="SUPERVISES",
-            )
-            await life.add_relationship(
-                session,
-                organization_version_id=organization_version_id,
-                source_deployment_id=product.deployment_id,
-                target_deployment_id=tech.deployment_id,
-                relationship_type="DELEGATES_TO",
-            )
         for reviewer in (test, ux, ops):
             if reviewer and tech:
                 AgentLifecycleService.assert_producer_reviewer_separation(
