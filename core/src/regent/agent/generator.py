@@ -227,10 +227,26 @@ class AgenticCodeGenerator:
             context_window = int(plan["context_window_tokens"])
         if plan.get("max_subagent_depth") is not None:
             max_subagent_depth = int(plan["max_subagent_depth"])
+        # P0-1: resolve tiered budget per-run based on goal_scale.
+        run_budget = self._budget
+        goal_scale = str(
+            (plan.get("acceptance_contract") or {}).get("goal_scale")
+            or (plan.get("goal_metadata") or {}).get("goal_scale")
+            or ""
+        ).upper()
+        if goal_scale in ("SMALL", "MEDIUM", "LARGE"):
+            from regent.config import budget_for_goal_scale
+
+            tier_turns, tier_tokens = budget_for_goal_scale(goal_scale)
+            run_budget = AgentBudget(
+                max_turns=min(tier_turns, self._budget.max_turns),
+                max_tokens=min(tier_tokens, self._budget.max_tokens),
+                max_wall_seconds=self._budget.max_wall_seconds,
+            )
         runner = AgentRunner(
             self._provider,
             toolkit,
-            budget=self._budget,
+            budget=run_budget,
             regent_md=regent_md,
             context_window_tokens=context_window,
             context_artifacts=context_artifacts,

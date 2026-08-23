@@ -615,6 +615,12 @@ class AgentRunner:
         chat_temperature = 0.0
         last_gap_fingerprint: str | None = None
         turns_since_plan_update = 0
+        # P0-2: Marginal ROI circuit breaker state.
+        _prev_gap_count: int = 0
+        _roi_stagnant_rounds: int = 0
+        # P0-3: Same-gap no-improvement circuit breaker state.
+        _prev_primary_gap: str | None = None
+        _same_gap_stagnant: int = 0
 
         while turn < max_turns:
             self._raise_if_aborted(plan)
@@ -1193,6 +1199,41 @@ class AgentRunner:
             primary = verification.gaps[0].code
             fingerprint = gap_fingerprint([g.code for g in verification.gaps])
             gap_repeat[primary] = gap_repeat.get(primary, 0) + 1
+            # ── P0-2: Marginal ROI circuit breaker ──────────────────────
+            # If gap count didn't shrink enough vs previous round, count stagnant.
+            cur_gap_count = len(verification.gaps)
+            from regent.config import get_settings as _gs_roi
+
+            _roi_settings = _gs_roi()
+            _roi_min_frac = float(_roi_settings.roi_min_improvement_fraction)
+            _roi_max_stagnant = int(_roi_settings.roi_consecutive_stagnant_rounds)
+            if _prev_gap_count > 0:
+                improvement = (_prev_gap_count - cur_gap_count) / max(_prev_gap_count, 1)
+                if improvement < _roi_min_frac:
+                    _roi_stagnant_rounds += 1
+                else:
+                    _roi_stagnant_rounds = 0
+            _prev_gap_count = cur_gap_count
+            if _roi_stagnant_rounds >= _roi_max_stagnant:
+                ledger.notes.append(
+                    f"marginal_roi_stop:stagnant={_roi_stagnant_rounds}"
+                    f",gaps={cur_gap_count}"
+                )
+                ledger.primary_failure_code = primary
+                break
+            # ── P0-3: Same-gap no-improvement circuit breaker ───────────
+            _gap_stagnant_limit = int(_roi_settings.gap_stagnant_stop_after)
+            if primary == _prev_primary_gap:
+                _same_gap_stagnant += 1
+            else:
+                _same_gap_stagnant = 1
+                _prev_primary_gap = primary
+            if _same_gap_stagnant >= _gap_stagnant_limit:
+                ledger.notes.append(
+                    f"same_gap_stagnant_stop:{primary}:n={_same_gap_stagnant}"
+                )
+                ledger.primary_failure_code = primary
+                break
             # Identical gap set after a prior repair attempt → thrashing; stop.
             if (
                 last_gap_fingerprint is not None

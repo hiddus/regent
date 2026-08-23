@@ -3565,6 +3565,57 @@ class ExecutionOrchestrator:
             )
 
         if qa.passed and not live_overturn and not swarm_overturn:
+            # ── P1-2: Goal task completion verification ──────────────────
+            # Proxy QA passed — now verify goal-specific success criteria.
+            try:
+                from regent.application.goal_task_verifier import (
+                    verify_goal_task_completion,
+                )
+
+                success_criteria = None
+                goal_text = ""
+                async with self._sessions() as _gs_task:
+                    _g_task = await _gs_task.get(GoalModel, goal_id)
+                    if _g_task is not None:
+                        goal_text = str((_g_task.original_input or "") or "")
+                        _spec = await _gs_task.execute(
+                            select(GoalSpecModel)
+                            .where(GoalSpecModel.goal_id == goal_id)
+                            .order_by(GoalSpecModel.version.desc())
+                            .limit(1)
+                        )
+                        _spec_row = _spec.first()
+                        if _spec_row is not None:
+                            success_criteria = getattr(_spec_row, "success_criteria", None)
+
+                task_verdict = await verify_goal_task_completion(
+                    public_url,
+                    success_criteria,
+                    goal_input=goal_text,
+                )
+                if not task_verdict.passed and task_verdict.skipped_reason == "":
+                    logger.warning(
+                        "goal task completion verification failed",
+                        extra={
+                            "goal_id": str(goal_id),
+                            "verdict": task_verdict.as_dict(),
+                        },
+                    )
+                    # Task failure is a soft signal — log but don't block.
+                    # The proxy QA + swarm are still authoritative for now.
+                    # This data feeds into the DELIVERED_AWAITING_REVIEW state.
+                    async with self._sessions() as _gs_tv, _gs_tv.begin():
+                        _g_tv = await _gs_tv.get(GoalModel, goal_id, for_update=True)
+                        if _g_tv is not None:
+                            _meta_tv = dict(_g_tv.metadata_json or {})
+                            _meta_tv["goal_task_verdict"] = task_verdict.as_dict()
+                            _g_tv.metadata_json = _meta_tv
+            except Exception as task_exc:
+                logger.warning(
+                    "goal task verification skipped (non-blocking)",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
             return True, qa, public_url
 
         logger.warning(
@@ -4315,7 +4366,7 @@ class ExecutionOrchestrator:
             ]
 
             # Store observations in metadata for audit.
-            async with self._sessions() as session:
+            async with self._sessions() as session, session.begin():
                 goal = await session.get(GoalModel, goal_id)
                 if goal is not None:
                     meta = dict(goal.metadata_json or {})
@@ -4323,6 +4374,10 @@ class ExecutionOrchestrator:
                     meta["behavior_monitor_ran_at"] = str(
                         datetime.utcnow().isoformat()
                     )
+                    # Persist the monitored URL so the worker-side periodic
+                    # monitor tick can re-observe without re-resolving
+                    # deployment endpoints.
+                    meta["behavior_monitor_preview_url"] = public_url
                     goal.metadata_json = meta
 
             # If repair loop is enabled and anomalies found, run repair.
@@ -4331,12 +4386,18 @@ class ExecutionOrchestrator:
 
                 repair = BehaviorRepairLoop()
                 decision = await repair.evaluate_and_repair(
-                    self._sessions, goal_id, obs_dicts
+                    self._sessions,
+                    goal_id,
+                    obs_dicts,
+                    budget_ledger=self._budget_ledger,
+                    retrigger_execution=True,
                 )
                 if decision.action == "REPAIR":
                     logger.info(
-                        "behavior repair triggered: %s",
+                        "behavior repair triggered: %s (retriggered=%s, %s)",
                         decision.reason,
+                        decision.retriggered,
+                        decision.retrigger_reason,
                         extra={"goal_id": str(goal_id)},
                     )
         except Exception:
@@ -4790,7 +4851,51 @@ class ExecutionOrchestrator:
             )
             return False
 
-        # Accepting Agent ACHIEVEs with Verification PASS or SMALL soft-pass evidence.
+        # ── P0-4: Separate DELIVERED_AWAITING_REVIEW from ACHIEVED ──────
+        # Soft proxy-based verification → DELIVERED_AWAITING_REVIEW (not ACHIEVED).
+        # Only hard verification or human approval → ACHIEVED.
+        is_soft_pass = (achieve_reason == "soft_pass_preview")
+
+        if is_soft_pass:
+            # Delivered but NOT achieved — awaiting human product acceptance.
+            await transitions.transition_goal(
+                TransitionContext(goal_id, version, actor, corr),
+                GoalCommand.WAIT_FOR_HUMAN,
+            )
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id)
+                if goal is not None:
+                    metadata = dict(goal.metadata_json or {})
+                    metadata["execution_stage"] = "DELIVERED_AWAITING_REVIEW"
+                    metadata["quality_verified_by"] = actor
+                    metadata.pop("halt", None)
+                    metadata.pop("awaiting_human_intervention", None)
+                    metadata.pop("awaiting_verification", None)
+                    goal.metadata_json = metadata
+                await self._append_conversation_event(
+                    session,
+                    project_id,
+                    "GOAL_DELIVERED_FOR_REVIEW",
+                    "产物已交付审阅，等待人工确认产品验收。",
+                    {
+                        "goal_id": str(goal_id),
+                        "deployment_id": str(deployment_id),
+                        "delivery_verification": verification,
+                        "achieve_reason": achieve_reason,
+                        "gac": "P0-4-split",
+                    },
+                )
+            logger.info(
+                "goal delivered for review (soft pass, not achieved)",
+                extra={
+                    "goal_id": str(goal_id),
+                    "actor": actor,
+                    "achieve_reason": achieve_reason,
+                },
+            )
+            return False
+
+        # Hard verification passed → ACHIEVE.
         await transitions.transition_goal(
             TransitionContext(goal_id, version, actor, corr),
             GoalCommand.ACHIEVE,

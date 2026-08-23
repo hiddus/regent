@@ -65,10 +65,32 @@ class Settings(BaseSettings):
     generation_strategy_shadow_mode: bool = False
     delivery_batch_enabled: bool = False
     delivery_profile: Literal["aggressive", "balanced", "conservative"] = "balanced"
+    # ── Task-tiered budgets (P0-1 audit fix) ──────────────────────────────
+    # Default budgets by goal scale. The legacy agent_max_turns/tokens remain
+    # as fallback when goal_scale is unknown or LARGE exceeds tier limits.
+    # Small: 8 turns / 60k tokens — enough for single-page apps, landing pages.
+    # Medium: 12 turns / 100k tokens — interactive apps, multi-component.
+    # Large: 20 turns / 180k tokens — multi-milestone, complex backends.
+    agent_budget_small_turns: int = Field(default=8, ge=1, le=50)
+    agent_budget_small_tokens: int = Field(default=60_000, ge=1_000)
+    agent_budget_medium_turns: int = Field(default=12, ge=1, le=100)
+    agent_budget_medium_tokens: int = Field(default=100_000, ge=1_000)
+    agent_budget_large_turns: int = Field(default=20, ge=1, le=200)
+    agent_budget_large_tokens: int = Field(default=180_000, ge=1_000)
+    # Legacy fallback (used when goal_scale is not yet known).
     agent_max_turns: int = Field(default=40, ge=1, le=200)
     agent_max_tokens: int = Field(default=400_000, ge=1_000)
     agent_max_wall_seconds: int = Field(default=900, ge=30)
     agent_nested_repair_max: int = Field(default=4, ge=0, le=8)
+    # ── Marginal ROI circuit breaker (P0-2 audit fix) ─────────────────────
+    # If verification score doesn't improve by this fraction after a repair
+    # round, stop the current strategy and force replan or human intervention.
+    roi_min_improvement_fraction: float = Field(default=0.05, ge=0.0, le=1.0)
+    roi_consecutive_stagnant_rounds: int = Field(default=2, ge=1, le=5)
+    # ── Same-gap no-improvement circuit breaker (P0-3 audit fix) ──────────
+    # If the same gap fingerprint appears N consecutive times with no score
+    # improvement, stop immediately (don't wait for identical_gap_stop_after).
+    gap_stagnant_stop_after: int = Field(default=2, ge=1, le=5)
     # M1: VerificationGap prefers Session chassis; A0 forbids silent auto-resume.
     # When agent_loop_exit_enforced, gap → ASK_HUMAN/STOP; resume only after human.
     agent_session_resume_enabled: bool = True
@@ -131,6 +153,10 @@ class Settings(BaseSettings):
     host_prune_mem_percent: float = Field(default=85.0, ge=50.0, le=99.5)
     host_prune_preview_keep: int = Field(default=8, ge=1, le=64)
     host_reap_preview_processes: bool = True
+    # Runtime behavior monitoring: periodic re-observation of deployed
+    # previews for goals that opted in via org_mode.enable_monitoring.
+    behavior_monitor_enabled: bool = True
+    behavior_monitor_interval_seconds: float = Field(default=600.0, ge=60.0)
     # 0 = derive from worker_replicas × worker_dispatch_concurrency × 2
     max_concurrent_generating: int = Field(default=0, ge=0, le=64)
     worker_dispatch_concurrency: int = Field(default=2, ge=1, le=32)
@@ -183,4 +209,32 @@ def effective_runtime_profile(settings: Settings) -> dict[str, object]:
             settings.model_input_cost_per_million > 0
             and settings.model_output_cost_per_million > 0
         ),
+        # Tiered budget info (P0-1 audit fix).
+        "budget_small_turns": settings.agent_budget_small_turns,
+        "budget_small_tokens": settings.agent_budget_small_tokens,
+        "budget_medium_turns": settings.agent_budget_medium_turns,
+        "budget_medium_tokens": settings.agent_budget_medium_tokens,
+        "budget_large_turns": settings.agent_budget_large_turns,
+        "budget_large_tokens": settings.agent_budget_large_tokens,
     }
+
+
+def budget_for_goal_scale(goal_scale: str | None = None) -> tuple[int, int]:
+    """Return (max_turns, max_tokens) for the given goal scale.
+
+    P0-1 audit fix: task-tiered budgets prevent over-burning on simple goals.
+    - SMALL: 8 turns / 60k tokens
+    - MEDIUM: 12 turns / 100k tokens
+    - LARGE: 20 turns / 180k tokens
+    - Unknown/None: legacy fallback (40 turns / 400k tokens)
+    """
+    s = get_settings()
+    scale = (goal_scale or "").upper()
+    if scale == "SMALL":
+        return s.agent_budget_small_turns, s.agent_budget_small_tokens
+    elif scale == "MEDIUM":
+        return s.agent_budget_medium_turns, s.agent_budget_medium_tokens
+    elif scale == "LARGE":
+        return s.agent_budget_large_turns, s.agent_budget_large_tokens
+    # Unknown scale — use legacy fallback.
+    return s.agent_max_turns, s.agent_max_tokens

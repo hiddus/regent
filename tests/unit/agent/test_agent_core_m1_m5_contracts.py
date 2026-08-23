@@ -326,7 +326,12 @@ async def test_p0_4_identical_gap_fingerprint_stops_loop(tmp_path: Path) -> None
     assert result.verification is not None and not result.verification.passed
     # First fail opens repair; second identical fail stops — not 40-turn thrash.
     assert result.ledger.repair_rounds == 1
-    assert any("identical_gap_fingerprint_stop" in n for n in result.ledger.notes)
+    # P0-3 same-gap stagnant stop fires before (or alongside) the legacy
+    # identical-gap-fingerprint stop — both are valid circuit breakers.
+    assert any(
+        "same_gap_stagnant_stop" in n or "identical_gap_fingerprint_stop" in n
+        for n in result.ledger.notes
+    )
     assert len(temps) < 12
     # Second repair attempt would use mild temperature; we stop before needing many.
     assert any(t == 0.0 for t in temps)
