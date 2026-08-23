@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from regent.application.p1_contracts import FileChangeSet, FileMode, FileOperation
+
+LOGGER = logging.getLogger(__name__)
 
 
 class WorkspaceError(RuntimeError):
@@ -97,7 +100,14 @@ class WorkspaceWriter:
                             change.mode,
                         )
                 elif change.operation is FileOperation.REPLACE:
-                    self._verify_previous(destination, change.expected_previous_hash)
+                    # Ship-first: a new epoch's agent generates REPLACE against the
+                    # file state it just read, which may drift from the hash recorded
+                    # in the change set. Stale expected_previous_hash must not cancel
+                    # the Goal — mirror the CREATE overwrite behaviour above. Missing
+                    # files still conflict so accidental deletions stay visible.
+                    self._verify_previous(
+                        destination, change.expected_previous_hash, strict=False
+                    )
                     self._write(
                         destination, change.content_artifact_uri, change.content_hash, change.mode
                     )
@@ -194,13 +204,20 @@ class WorkspaceWriter:
         os.replace(temporary, destination)
 
     @staticmethod
-    def _verify_previous(destination: Path, expected_hash: str | None) -> None:
+    def _verify_previous(destination: Path, expected_hash: str | None, *, strict: bool = True) -> None:
         if not destination.is_file() or WorkspaceWriter._is_link(destination):
             raise WorkspaceConflictError("previous regular file does not exist")
         if expected_hash is None:
-            raise WorkspaceConflictError("incremental operation requires expected_previous_hash")
+            if strict:
+                raise WorkspaceConflictError("incremental operation requires expected_previous_hash")
+            LOGGER.warning("workspace operation without expected_previous_hash: %s", destination.name)
+            return
         if hashlib.sha256(destination.read_bytes()).hexdigest() != expected_hash:
-            raise WorkspaceConflictError("previous file hash mismatch")
+            if strict:
+                raise WorkspaceConflictError("previous file hash mismatch")
+            LOGGER.warning(
+                "stale expected_previous_hash for %s; overwriting with new content", destination.name
+            )
 
     def _manifest(self, stage: Path) -> tuple[dict[str, object], int, int]:
         files: list[dict[str, object]] = []

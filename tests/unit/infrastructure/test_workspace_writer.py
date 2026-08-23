@@ -64,12 +64,45 @@ def test_incremental_replace_checks_previous_hash(tmp_path: Path) -> None:
         base_workspace=base.workspace_path,
     )
     assert (result.workspace_path / "main.py").read_bytes() == b"two"
-    bad = replacement.model_copy(update={"expected_previous_hash": "0" * 64})
+
+
+def test_replace_with_stale_previous_hash_overwrites_ship_first(tmp_path: Path) -> None:
+    """Defect #10: stale expected_previous_hash must not cancel the Goal."""
+    first, first_content = change("main.py", b"on-disk-content")
+    store = {**first_content, "memory://new": b"updated"}
+    writer = WorkspaceWriter(tmp_path, store.__getitem__)
+    base = writer.apply(
+        "base", FileChangeSet(changes=[first], generator_ref="g", prompt_version="v1")
+    )
+    stale = FileChange(
+        relative_path="main.py",
+        operation=FileOperation.REPLACE,
+        content_artifact_uri="memory://new",
+        content_hash=hashlib.sha256(b"updated").hexdigest(),
+        expected_previous_hash="0" * 64,
+        rationale="replace",
+    )
+    commit = writer.apply(
+        "rev-2",
+        FileChangeSet(changes=[stale], generator_ref="g", prompt_version="v1"),
+        base_workspace=base.workspace_path,
+    )
+    assert (commit.workspace_path / "main.py").read_bytes() == b"updated"
+
+
+def test_replace_missing_previous_file_still_conflicts(tmp_path: Path) -> None:
+    writer = WorkspaceWriter(tmp_path, lambda uri: b"x")
+    missing = FileChange(
+        relative_path="absent.py",
+        operation=FileOperation.REPLACE,
+        content_artifact_uri="memory://x",
+        content_hash=hashlib.sha256(b"x").hexdigest(),
+        expected_previous_hash="1" * 64,
+        rationale="replace",
+    )
     with pytest.raises(WorkspaceConflictError):
         writer.apply(
-            "bad",
-            FileChangeSet(changes=[bad], generator_ref="g", prompt_version="v1"),
-            base_workspace=base.workspace_path,
+            "bad", FileChangeSet(changes=[missing], generator_ref="g", prompt_version="v1")
         )
 
 
