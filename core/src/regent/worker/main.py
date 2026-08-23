@@ -94,6 +94,9 @@ class Worker:
         self._host_guard_interval = 60.0
         self._next_host_guard = 0.0
         self._host_guard_enabled = True
+        self._behavior_monitor_interval = 600.0
+        self._next_behavior_monitor = 0.0
+        self._behavior_monitor_enabled = True
         if sessions is not None:
             from regent.application.reconciliation_worker import ReconciliationWorker
             from regent.config import get_settings
@@ -105,6 +108,12 @@ class Worker:
             self._privacy_retention_interval = settings.privacy_retention_interval_seconds
             self._host_guard_enabled = bool(settings.host_guard_enabled)
             self._host_guard_interval = float(settings.host_guard_interval_seconds)
+            self._behavior_monitor_enabled = bool(
+                getattr(settings, "behavior_monitor_enabled", True)
+            )
+            self._behavior_monitor_interval = float(
+                getattr(settings, "behavior_monitor_interval_seconds", 600.0)
+            )
 
     async def serve(self) -> None:
         lease = await self.leases.acquire(
@@ -216,6 +225,30 @@ class Worker:
                     except Exception:
                         logger.exception("host resource guard tick failed")
                     self._next_host_guard = monotonic() + self._host_guard_interval
+                if (
+                    self._behavior_monitor_enabled
+                    and self.sessions is not None
+                    and monotonic() >= self._next_behavior_monitor
+                ):
+                    try:
+                        from regent.application.behavior_monitor_tick import (
+                            tick_behavior_monitoring,
+                        )
+
+                        bm_stats = await tick_behavior_monitoring(
+                            self.sessions,
+                            budget_ledger=BudgetLedger(self.sessions),
+                        )
+                        if bm_stats.get("observed") or bm_stats.get("monitored"):
+                            logger.info(
+                                "behavior monitor tick",
+                                extra=bm_stats,
+                            )
+                    except Exception:
+                        logger.exception("behavior monitor tick failed")
+                    self._next_behavior_monitor = (
+                        monotonic() + self._behavior_monitor_interval
+                    )
                 await self.dispatcher.dispatch_once(self.worker_id)
                 if monotonic() >= next_heartbeat:
                     lease = await self.leases.heartbeat(lease)
