@@ -90,7 +90,7 @@ def test_replace_with_stale_previous_hash_overwrites_ship_first(tmp_path: Path) 
     assert (commit.workspace_path / "main.py").read_bytes() == b"updated"
 
 
-def test_replace_missing_previous_file_still_conflicts(tmp_path: Path) -> None:
+def test_replace_missing_previous_file_degrades_to_create(tmp_path: Path) -> None:
     writer = WorkspaceWriter(tmp_path, lambda uri: b"x")
     missing = FileChange(
         relative_path="absent.py",
@@ -100,10 +100,10 @@ def test_replace_missing_previous_file_still_conflicts(tmp_path: Path) -> None:
         expected_previous_hash="1" * 64,
         rationale="replace",
     )
-    with pytest.raises(WorkspaceConflictError):
-        writer.apply(
-            "bad", FileChangeSet(changes=[missing], generator_ref="g", prompt_version="v1")
-        )
+    commit = writer.apply(
+        "ok", FileChangeSet(changes=[missing], generator_ref="g", prompt_version="v1")
+    )
+    assert (commit.workspace_path / "absent.py").read_bytes() == b"x"
 
 
 def test_hash_and_quota_fail_without_committing(tmp_path: Path) -> None:

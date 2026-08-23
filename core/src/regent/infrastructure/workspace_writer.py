@@ -103,10 +103,12 @@ class WorkspaceWriter:
                     # Ship-first: a new epoch's agent generates REPLACE against the
                     # file state it just read, which may drift from the hash recorded
                     # in the change set. Stale expected_previous_hash must not cancel
-                    # the Goal — mirror the CREATE overwrite behaviour above. Missing
-                    # files still conflict so accidental deletions stay visible.
+                    # the Goal — mirror the CREATE overwrite behaviour above. A missing
+                    # target degrades to CREATE (logged) so resumed sessions cannot
+                    # deadlock on "previous regular file does not exist".
                     self._verify_previous(
-                        destination, change.expected_previous_hash, strict=False
+                        destination, change.expected_previous_hash,
+                        strict=False, allow_missing=True,
                     )
                     self._write(
                         destination, change.content_artifact_uri, change.content_hash, change.mode
@@ -204,8 +206,20 @@ class WorkspaceWriter:
         os.replace(temporary, destination)
 
     @staticmethod
-    def _verify_previous(destination: Path, expected_hash: str | None, *, strict: bool = True) -> None:
+    def _verify_previous(
+        destination: Path,
+        expected_hash: str | None,
+        *,
+        strict: bool = True,
+        allow_missing: bool = False,
+    ) -> None:
         if not destination.is_file() or WorkspaceWriter._is_link(destination):
+            if allow_missing:
+                LOGGER.warning(
+                    "workspace REPLACE on missing file; degrading to CREATE: %s",
+                    destination.name,
+                )
+                return
             raise WorkspaceConflictError("previous regular file does not exist")
         if expected_hash is None:
             if strict:
