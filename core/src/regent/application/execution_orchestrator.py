@@ -77,11 +77,6 @@ from regent.application.generation_service import (
     GenerationService,
     RequestGenerationRun,
 )
-from regent.application.goal_interpreter import (
-    GoalInterpretation,
-    GoalInterpreter,
-    SubGoal,
-)
 from regent.application.human_task_service import HumanTaskService
 from regent.application.iteration_loop_service import IterationLoopService
 from regent.application.milestone_service import (
@@ -92,12 +87,6 @@ from regent.application.milestone_service import (
     ensure_milestone_plan,
     is_final_milestone,
     plan_from_metadata,
-)
-from regent.application.organization_service import (
-    OrganizationService,
-    compute_utility,
-    default_organization_space,
-    select_best_organization,
 )
 from regent.application.p1_contracts import (
     GenerationPlanContract,
@@ -439,81 +428,6 @@ class ExecutionOrchestrator:
                 },
             )
 
-        # V3 P1-B: Goal decomposition -> SubGoal -> Work items
-        try:
-            async with self._sessions() as session:
-                goal_obj = await session.get(GoalModel, goal_id)
-                if goal_obj is not None:
-                    meta = dict(goal_obj.metadata_json or {})
-                    if "decomposed_work_items" not in meta:
-                        interpretation = GoalInterpretation(
-                            objective=meta.get("objective", f"Goal {goal_id}"),
-                            explicit_constraints=meta.get("constraints", {}),
-                            success_criteria=meta.get("success_criteria", {}),
-                        )
-                        # Use static create_work_items with fallback sub-goals
-                        sub_goals = [
-                            SubGoal(
-                                id="root",
-                                label=interpretation.objective or "root",
-                                depends_on=[],
-                                acceptance_criteria=dict(interpretation.success_criteria),
-                            )
-                        ]
-                        work_cmds = GoalInterpreter.create_work_items(
-                            sub_goals,
-                            goal_id=goal_id,
-                            correlation_id=goal_obj.correlation_id,
-                        )
-                        meta["decomposed_work_items"] = work_cmds
-                        goal_obj.metadata_json = meta
-        except Exception:
-            logger.warning(
-                "goal decomposition skipped (non-fatal)",
-                extra={"goal_id": str(goal_id)},
-                exc_info=True,
-            )
-
-        # GAC-O1: ensure minimal organization exists before execution chain starts.
-        # V3 P1-A: utility-driven organization selection.
-        try:
-            org_service = OrganizationService(self._sessions)
-            receipt = await org_service.organize(goal_id)
-            # Write utility evaluation to Goal metadata
-            async with self._sessions() as session, session.begin():
-                goal_obj = await session.get(GoalModel, goal_id)
-                if goal_obj is not None:
-                    meta = dict(goal_obj.metadata_json or {})
-                    if "utility_evaluation" not in meta:
-                        # Fallback: evaluate if organize() didn't store it
-                        templates = default_organization_space()
-                        candidates = [
-                            (t, compute_utility(t)) for t in templates
-                        ]
-                        best = select_best_organization(candidates)
-                        if best is not None:
-                            tmpl, result = best
-                            meta["utility_evaluation"] = {
-                                "template_id": tmpl.template_id,
-                                "utility": result.utility,
-                                "components": result.components,
-                                "rationale": result.rationale,
-                            }
-                            goal_obj.metadata_json = meta
-            logger.info(
-                "organization ready for goal",
-                extra={
-                    "goal_id": str(goal_id),
-                    "strategy": receipt.strategy,
-                },
-            )
-        except Exception:
-            logger.warning(
-                "organization skipped (non-fatal)",
-                extra={"goal_id": str(goal_id)},
-                exc_info=True,
-            )
-
     # ---------------------------------------------------------------------------
     # Fast-path: detect goals that can skip Discovery/Requirement/Capability
     # ---------------------------------------------------------------------------
@@ -566,153 +480,25 @@ class ExecutionOrchestrator:
         execution_event_id: str,
         actor: str,
     ) -> None:
-        """Create synthetic pipeline records and emit GENERATION_RUN_REQUESTED.
+        """Emit GENERATION_RUN_REQUESTED directly — no intermediate records.
 
-        Builds the full chain in one transaction:
-        DiscoveryRound(DECIDED) → ProductHypothesis → HypothesisDecision(SELECT)
-        → RequirementRevision(VALIDATED) → CapabilityResolutionPlan(SATISFIED)
-        → GENERATION_RUN_REQUESTED outbox event.
+        Bypass mode skips the entire Discovery → Requirement → Capability
+        pipeline.  The generation handler recognises ``bypass=True`` in the
+        payload and derives everything from the goal itself.
         """
         goal_id = goal.id
         project_id = goal.app_project_id
         original_input = str(goal.original_input or "").strip()
 
-        # 1. Discovery round — synthetic, already decided.
-        round_idempotency = make_idempotency_key(
-            "discovery", goal_id, execution_event_id
-        )
-        snapshot = {
-            "goal_id": str(goal_id),
-            "goal_version": goal.version,
-            "spec_version": spec.version,
-            "bypass": True,
-        }
-        snapshot_hash = hashlib.sha256(
-            json.dumps(
-                snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-            ).encode()
-        ).hexdigest()
-        discovery_round = DiscoveryRoundModel(
-            id=uuid.uuid4(),
-            goal_id=goal_id,
-            round=1,
-            status="DECIDED",
-            version=0,
-            input_snapshot_hash=snapshot_hash,
-            budget={"max_sources": 0, "max_tokens": 0},
-            policy_version="bypass-v1",
-            idempotency_key=round_idempotency,
-            created_by=actor,
-            correlation_id=str(goal.correlation_id),
-        )
-        session.add(discovery_round)
-
-        # 2. Synthetic hypothesis — goal text as the single hypothesis.
-        hypothesis_id = uuid.uuid4()
-        hypothesis_content = {
-            "claims": [
-                {
-                    "text": original_input,
-                    "annotation": "observed",
-                    "source": "goal_original_input",
-                }
-            ],
-            "product_concept": "direct_generation",
-            "target_users": "per goal specification",
-            "value_proposition": original_input,
-        }
-        hypothesis_hash = hashlib.sha256(
-            json.dumps(
-                hypothesis_content, sort_keys=True, separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode()
-        ).hexdigest()
-        hypothesis = ProductHypothesisModel(
-            id=hypothesis_id,
-            round_id=discovery_round.id,
-            candidate_key="bypass-direct",
-            content_json=hypothesis_content,
-            content_hash=hypothesis_hash,
-            eligibility="ELIGIBLE",
-            invalid_reasons=[],
-            generator_ref="bypass-v1",
-        )
-        session.add(hypothesis)
-
-        # 3. Hypothesis decision — SELECT the synthetic hypothesis.
-        decision = HypothesisDecisionModel(
-            id=uuid.uuid4(),
-            round_id=discovery_round.id,
-            decision="SELECT",
-            selected_hypothesis_id=hypothesis_id,
-            rationale="Simple goal bypassed discovery pipeline",
-            evidence_digest="no-evidence-needed",
-            policy_version="bypass-v1",
-            created_by=actor,
-        )
-        session.add(decision)
-
-        # 4. Requirement revision — goal text IS the requirement.
-        req_content = {
-            "planned_paths": ["app.py", "requirements.txt", "README.md"],
-            "acceptance_contract": {
-                "goal_anchor_text": original_input,
-                "goal_scale": "SMALL",
-                "success_criteria": dict(spec.success_criteria or {}),
-            },
-            "architecture_summary": original_input,
-            "component_plan": [{"name": "app", "type": "web"}],
-            "dependency_intents": [],
-            "verification_commands": ["python -c 'import app'"],
-        }
-        req_hash = hashlib.sha256(
-            json.dumps(
-                req_content, sort_keys=True, separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode()
-        ).hexdigest()
-        requirement = RequirementRevisionModel(
-            id=uuid.uuid4(),
-            goal_id=goal_id,
-            hypothesis_id=hypothesis_id,
-            requirement_key=f"req-{goal_id.hex[:8]}-bypass",
-            revision=0,
-            status="VALIDATED",
-            version=0,
-            content_json=req_content,
-            content_hash=req_hash,
-        )
-        session.add(requirement)
-
-        # 5. Capability resolution plan — SATISFIED, no gaps.
-        cap_content = {"gaps": [], "items": [], "bypass": True}
-        cap_hash = hashlib.sha256(
-            json.dumps(
-                cap_content, sort_keys=True, separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode()
-        ).hexdigest()
-        cap_plan = CapabilityResolutionPlanModel(
-            id=uuid.uuid4(),
-            requirement_revision_id=requirement.id,
-            status="SATISFIED",
-            version=0,
-            content_hash=cap_hash,
-            policy_version="bypass-v1",
-        )
-        session.add(cap_plan)
-
-        # 6. Emit GENERATION_RUN_REQUESTED.
         gen_idempotency = make_idempotency_key(
             "generation", goal_id, execution_event_id
         )
         gen_payload: dict[str, Any] = {
             "goal_id": str(goal_id),
             "app_project_id": str(project_id),
-            "requirement_revision_id": str(requirement.id),
-            "capability_resolution_plan_id": str(cap_plan.id),
             "actor": actor,
             "idempotency_key": gen_idempotency,
+            "bypass": True,
         }
         # Carry session metadata if present.
         goal_meta = dict(goal.metadata_json or {})
@@ -740,22 +526,13 @@ class ExecutionOrchestrator:
             session,
             project_id,
             "DIRECT_GENERATION",
-            f"简单目标直接进入代码生成（跳过 Discovery/Requirement/Capability）：{original_input[:120]}",
-            {
-                "goal_id": str(goal_id),
-                "bypass": True,
-                "requirement_revision_id": str(requirement.id),
-                "capability_resolution_plan_id": str(cap_plan.id),
-            },
+            f"简单目标直接进入代码生成（无中间记录）：{original_input[:120]}",
+            {"goal_id": str(goal_id), "bypass": True},
         )
         await session.flush()
         logger.info(
-            "goal bypassed pipeline → direct generation",
-            extra={
-                "goal_id": str(goal_id),
-                "requirement_id": str(requirement.id),
-                "cap_plan_id": str(cap_plan.id),
-            },
+            "goal bypassed pipeline → direct generation (no intermediate records)",
+            extra={"goal_id": str(goal_id)},
         )
 
     # ---------------------------------------------------------------------------
@@ -1129,7 +906,8 @@ class ExecutionOrchestrator:
             logger.exception("requirement revision creation failed")
             raise
 
-        # Auto-validate the revision and emit RequirementValidated
+        # Auto-validate the revision and directly emit CapabilityResolutionRequested
+        # (merged: skip the RequirementValidated relay event)
         async with self._sessions() as session, session.begin():
             rev = await session.get(RequirementRevisionModel, revision.id)
             if rev is not None:
@@ -1138,9 +916,10 @@ class ExecutionOrchestrator:
 
             goal = await session.get(GoalModel, goal_id)
             if goal:
-                validated_event = make_outbox_event(
+                cap_idempotency = make_idempotency_key("cap_resolution", goal_id, idempotency_key)
+                outbox_event = make_outbox_event(
                     EventEnvelope(
-                        event_type=REQUIREMENT_VALIDATED,
+                        event_type=CAPABILITY_RESOLUTION_REQUESTED,
                         aggregate_type="goal",
                         aggregate_id=goal_id,
                         aggregate_version=goal.version,
@@ -1149,73 +928,23 @@ class ExecutionOrchestrator:
                             "app_project_id": str(project_id),
                             "requirement_revision_id": str(revision.id),
                             "actor": actor,
-                            "idempotency_key": idempotency_key,
+                            "idempotency_key": cap_idempotency,
                         },
-                        idempotency_key=idempotency_key,
+                        idempotency_key=cap_idempotency,
                         correlation_id=goal.correlation_id,
                     )
                 )
-                session.add(validated_event)
+                session.add(outbox_event)
                 await self._append_conversation_event(
                     session,
                     project_id,
-                    "REQUIREMENT_VALIDATED",
-                    "产品需求已验证通过。",
+                    "CAPABILITY_RESOLUTION_REQUESTED",
+                    "产品需求已验证，正在分析实现所需的技术能力。",
                     {
                         "goal_id": str(goal_id),
                         "requirement_revision_id": str(revision.id),
                     },
                 )
-
-    # ---------------------------------------------------------------------------
-    # R3: RequirementValidated -> emit CapabilityResolutionRequested
-    # ---------------------------------------------------------------------------
-
-    async def handle_requirement_validated(self, payload: dict[str, Any]) -> None:
-        """RequirementValidated -> emit CapabilityResolutionRequested."""
-        goal_id = uuid.UUID(str(payload["goal_id"]))
-        project_id = uuid.UUID(str(payload["app_project_id"]))
-        revision_id = uuid.UUID(str(payload["requirement_revision_id"]))
-        actor = str(payload.get("actor", "regent-core"))
-        idempotency_key = str(payload.get("idempotency_key", ""))
-
-        async with self._sessions() as session, session.begin():
-            rev = await session.get(RequirementRevisionModel, revision_id)
-            if rev is None or rev.status != "VALIDATED":
-                raise DomainError(ErrorCode.INVALID_STATE, "validated requirement required")
-
-            goal = await session.get(GoalModel, goal_id)
-            if goal is None:
-                return
-            cap_idempotency = make_idempotency_key("cap_resolution", goal_id, idempotency_key)
-            outbox_event = make_outbox_event(
-                EventEnvelope(
-                    event_type=CAPABILITY_RESOLUTION_REQUESTED,
-                    aggregate_type="goal",
-                    aggregate_id=goal_id,
-                    aggregate_version=goal.version,
-                    payload={
-                        "goal_id": str(goal_id),
-                        "app_project_id": str(project_id),
-                        "requirement_revision_id": str(revision_id),
-                        "actor": actor,
-                        "idempotency_key": cap_idempotency,
-                    },
-                    idempotency_key=cap_idempotency,
-                    correlation_id=goal.correlation_id,
-                )
-            )
-            session.add(outbox_event)
-            await self._append_conversation_event(
-                session,
-                project_id,
-                "CAPABILITY_RESOLUTION_REQUESTED",
-                "正在分析实现所需的技术能力。",
-                {
-                    "goal_id": str(goal_id),
-                    "requirement_revision_id": str(revision_id),
-                },
-            )
 
     # ---------------------------------------------------------------------------
     # R3: CapabilityResolutionRequested -> create plan -> CapabilityResolutionSatisfied
@@ -1471,8 +1200,17 @@ class ExecutionOrchestrator:
         """Create generation plan, execute, emit WorkspaceSnapshotReady."""
         goal_id = uuid.UUID(str(payload["goal_id"]))
         project_id = uuid.UUID(str(payload["app_project_id"]))
-        requirement_id = uuid.UUID(str(payload["requirement_revision_id"]))
-        resolution_plan_id = uuid.UUID(str(payload["capability_resolution_plan_id"]))
+        is_bypass = bool(payload.get("bypass"))
+        requirement_id = (
+            uuid.UUID(str(payload["requirement_revision_id"]))
+            if not is_bypass and payload.get("requirement_revision_id")
+            else None
+        )
+        resolution_plan_id = (
+            uuid.UUID(str(payload["capability_resolution_plan_id"]))
+            if not is_bypass and payload.get("capability_resolution_plan_id")
+            else None
+        )
         actor = str(payload.get("actor", "regent-core"))
         idempotency_key = str(payload.get("idempotency_key", ""))
         generation_run_id: uuid.UUID | None = None
@@ -1518,9 +1256,13 @@ class ExecutionOrchestrator:
             self._sessions, self._generator, self._workspace_writer
         )
 
-        # Load requirement for contract hashes
+        # Load requirement for contract hashes (bypass: derive from goal)
         async with self._sessions() as session:
-            revision = await session.get(RequirementRevisionModel, requirement_id)
+            revision = (
+                await session.get(RequirementRevisionModel, requirement_id)
+                if requirement_id is not None
+                else None
+            )
             goal = await session.get(GoalModel, goal_id)
             if goal is not None:
                 _meta = dict(goal.metadata_json or {})
@@ -1585,7 +1327,23 @@ class ExecutionOrchestrator:
             decision_id = decision.id if decision else _NIL_UUID
 
         # Derive generation plan from requirement content (R10: no hardcoding)
-        req_content = dict(revision.content_json) if revision else {}
+        if is_bypass:
+            # Bypass: derive req_content directly from goal (no intermediate records).
+            _orig = str(goal.original_input or "").strip() if goal else ""
+            req_content = {
+                "planned_paths": ["app.py", "requirements.txt", "README.md"],
+                "acceptance_contract": {
+                    "goal_anchor_text": _orig,
+                    "goal_scale": "SMALL",
+                    "success_criteria": dict(spec.success_criteria or {}) if spec else {},
+                },
+                "architecture_summary": _orig or "Generated web application",
+                "component_plan": [{"name": "app", "type": "web"}],
+                "dependency_intents": [],
+                "verification_commands": ["python -c 'import app'"],
+            }
+        else:
+            req_content = dict(revision.content_json) if revision else {}
         from regent.application.planned_path_policy import (
             DEFAULT_PLANNED_PATHS,
             expand_planned_paths,
@@ -1970,6 +1728,7 @@ class ExecutionOrchestrator:
                     component_plan=component_plan,
                     actor=actor,
                     correlation_id=correlation_id,
+                    bypass=is_bypass,
                 )
             )
             # Bind run idempotency to plan_id so metadata drift (lessons/envelopes)
@@ -2268,6 +2027,13 @@ class ExecutionOrchestrator:
                 reasons = reasons_from_exception(exc)
                 draft_uri = getattr(exc, "draft_uri", None)
                 gap_kind = getattr(exc, "gap_kind", None)
+                # Bypass mode: no intermediate records → skip gap recovery.
+                if is_bypass:
+                    logger.warning(
+                        "bypass generation failed; no gap recovery (no intermediate records)",
+                        extra={"goal_id": str(goal_id), "reasons": reasons},
+                    )
+                    raise
                 recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                     goal_id=goal_id,
                     project_id=project_id,
@@ -2323,6 +2089,12 @@ class ExecutionOrchestrator:
                     ) from exc
                 # Business INVALID_STATE / POLICY_DENIED: learn + replan into a new event.
                 # Do not blind-retry the same GenerationRunRequested payload.
+                if is_bypass:
+                    logger.warning(
+                        "bypass generation policy error; no gap recovery",
+                        extra={"goal_id": str(goal_id), "error": exc.message[:200]},
+                    )
+                    raise
                 recovery = await DeliveryGapRecoveryService(self._sessions).recover(
                     goal_id=goal_id,
                     project_id=project_id,
@@ -2382,7 +2154,39 @@ class ExecutionOrchestrator:
             logger.exception("generation failed", extra={"goal_id": str(goal_id)})
             raise
 
-        # Write WorkspaceSnapshotReady
+        # Post-generation: emit next event.
+        # Bypass mode: skip the 5-step chain (WorkspaceSnapshot → DependencyResolution
+        # → AppBuild → AppBuildPassed → PreviewDeployment).  Mark generation complete
+        # and let the caller handle deployment directly.
+        if is_bypass:
+            async with self._sessions() as session, session.begin():
+                goal = await session.get(GoalModel, goal_id)
+                if goal:
+                    meta = dict(goal.metadata_json or {})
+                    meta["generation_completed"] = True
+                    meta["execution_stage"] = "GENERATION_COMPLETE"
+                    meta["bypass_deployment"] = True
+                    goal.metadata_json = meta
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(goal, "metadata_json")
+                    await self._append_conversation_event(
+                        session,
+                        project_id,
+                        "GENERATION_COMPLETE",
+                        "源代码已生成完毕（旁路模式，跳过构建/部署管线）。",
+                        {
+                            "goal_id": str(goal_id),
+                            "snapshot_id": str(snapshot.id) if snapshot else None,
+                            "bypass": True,
+                        },
+                    )
+            logger.info(
+                "bypass generation complete — skipped post-generation pipeline",
+                extra={"goal_id": str(goal_id)},
+            )
+            return
+
+        # Normal path: emit WorkspaceSnapshotReady to continue the pipeline.
         async with self._sessions() as session, session.begin():
             goal = await session.get(GoalModel, goal_id)
             if goal:
@@ -2839,13 +2643,15 @@ class ExecutionOrchestrator:
                         return
                 return
 
-        # Write AppBuildPassed
+        # Build passed — directly emit PreviewDeploymentRequested
+        # (merged: skip the AppBuildPassed relay event)
         async with self._sessions() as session, session.begin():
             goal = await session.get(GoalModel, goal_id)
             if goal:
+                deploy_idempotency = make_idempotency_key("deploy", goal_id, idempotency_key)
                 outbox_event = make_outbox_event(
                     EventEnvelope(
-                        event_type=APP_BUILD_PASSED,
+                        event_type=PREVIEW_DEPLOYMENT_REQUESTED,
                         aggregate_type="goal",
                         aggregate_id=goal_id,
                         aggregate_version=goal.version,
@@ -2854,9 +2660,9 @@ class ExecutionOrchestrator:
                             "app_project_id": str(project_id),
                             "app_build_id": str(result_build.id),
                             "actor": actor,
-                            "idempotency_key": idempotency_key,
+                            "idempotency_key": deploy_idempotency,
                         },
-                        idempotency_key=idempotency_key,
+                        idempotency_key=deploy_idempotency,
                         correlation_id=goal.correlation_id,
                     )
                 )
@@ -2864,42 +2670,10 @@ class ExecutionOrchestrator:
                 await self._append_conversation_event(
                     session,
                     project_id,
-                    "APP_BUILD_PASSED",
-                    "应用构建成功，已通过验证。",
+                    "PREVIEW_DEPLOYMENT_REQUESTED",
+                    "应用构建成功，正在部署预览环境。",
                     {"goal_id": str(goal_id), "build_id": str(result_build.id)},
                 )
-
-    async def handle_app_build_passed(self, payload: dict[str, Any]) -> None:
-        """AppBuildPassed -> emit PreviewDeploymentRequested."""
-        goal_id = uuid.UUID(str(payload["goal_id"]))
-        project_id = uuid.UUID(str(payload["app_project_id"]))
-        build_id = uuid.UUID(str(payload["app_build_id"]))
-        actor = str(payload.get("actor", "regent-core"))
-        idempotency_key = str(payload.get("idempotency_key", ""))
-
-        async with self._sessions() as session, session.begin():
-            goal = await session.get(GoalModel, goal_id)
-            if goal is None:
-                return
-            deploy_idempotency = make_idempotency_key("deploy", goal_id, idempotency_key)
-            outbox_event = make_outbox_event(
-                EventEnvelope(
-                    event_type=PREVIEW_DEPLOYMENT_REQUESTED,
-                    aggregate_type="goal",
-                    aggregate_id=goal_id,
-                    aggregate_version=goal.version,
-                    payload={
-                        "goal_id": str(goal_id),
-                        "app_project_id": str(project_id),
-                        "app_build_id": str(build_id),
-                        "actor": actor,
-                        "idempotency_key": deploy_idempotency,
-                    },
-                    idempotency_key=deploy_idempotency,
-                    correlation_id=goal.correlation_id,
-                )
-            )
-            session.add(outbox_event)
 
     # ---------------------------------------------------------------------------
     # R6: PreviewDeploymentRequested -> release, deploy -> PreviewDeploymentSucceeded
@@ -5041,7 +4815,7 @@ class ExecutionOrchestrator:
     async def _resolve_generation_ids(
         self, goal_id: uuid.UUID
     ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
-        """Locate requirement + capability plan ids for recovery after build failure."""
+        """Locate requirement + capability plan ids from goal metadata."""
         async with self._sessions() as session:
             goal = await session.get(GoalModel, goal_id)
             meta = dict((goal.metadata_json if goal else None) or {})
@@ -5049,33 +4823,6 @@ class ExecutionOrchestrator:
             raw_req = meta.get("requirement_revision_id")
             if raw_plan and raw_req:
                 return uuid.UUID(str(raw_req)), uuid.UUID(str(raw_plan))
-            if raw_plan:
-                plan = await session.get(
-                    CapabilityResolutionPlanModel, uuid.UUID(str(raw_plan))
-                )
-                if plan is not None:
-                    return plan.requirement_revision_id, plan.id
-            gen = await session.scalar(
-                select(GenerationPlanModel)
-                .join(
-                    RequirementRevisionModel,
-                    RequirementRevisionModel.id
-                    == GenerationPlanModel.requirement_revision_id,
-                )
-                .join(
-                    ProductHypothesisModel,
-                    ProductHypothesisModel.id == RequirementRevisionModel.hypothesis_id,
-                )
-                .join(
-                    DiscoveryRoundModel,
-                    DiscoveryRoundModel.id == ProductHypothesisModel.round_id,
-                )
-                .where(DiscoveryRoundModel.goal_id == goal_id)
-                .order_by(GenerationPlanModel.created_at.desc())
-                .limit(1)
-            )
-            if gen is not None:
-                return gen.requirement_revision_id, gen.capability_resolution_plan_id
         return None, None
 
     async def _recover_or_wait_after_deploy_gap(
@@ -5673,12 +5420,6 @@ class ExecutionOrchestrator:
                 return draft
             return None
 
-    async def _resolve_last_good_draft_workspace(
-        self, goal_id: uuid.UUID
-    ) -> Path | None:
-        """Deprecated alias — prefer accepted snapshot via ``_resolve_revise_base_workspace``."""
-        return await self._resolve_revise_base_workspace(goal_id)
-
     async def _remember_generation_attempt(
         self,
         goal_id: uuid.UUID,
@@ -5868,118 +5609,6 @@ class ExecutionOrchestrator:
             )
         )
 
-    # ---------------------------------------------------------------------------
-    # P1-C: V3 Domain Event Handlers
-    # ---------------------------------------------------------------------------
-
-    async def handle_reorganization_triggered(self, payload: dict[str, Any]) -> None:
-        """Handle ReorganizationTriggered domain event.
-
-        Logs the trigger and records it in the conversation timeline.
-        Future: initiate capability gap analysis and org restructuring.
-        """
-        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
-        reason = str(payload.get("reason", "unknown"))
-        logger.info(
-            "reorganization triggered for goal=%s: %s",
-            goal_id, reason,
-        )
-        project_id = uuid.UUID(str(payload.get("app_project_id", "")))
-        if project_id:
-            async with self._sessions() as session, session.begin():
-                await self._append_conversation_event(
-                    session, project_id, "REORGANIZATION_TRIGGERED",
-                    f"Reorganization triggered: {reason}",
-                    {"goal_id": str(goal_id), "reason": reason},
-                )
-
-    async def handle_constraint_violated(self, payload: dict[str, Any]) -> None:
-        """Handle ConstraintViolated domain event.
-
-        Records the violation and marks the Goal as FAILED if the violation
-        is blocking.
-        """
-        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
-        constraint = str(payload.get("constraint", "unknown"))
-        blocking = bool(payload.get("blocking", True))
-        logger.warning(
-            "constraint violated for goal=%s: %s (blocking=%s)",
-            goal_id, constraint, blocking,
-        )
-        if blocking:
-            async with self._sessions() as session, session.begin():
-                goal = await session.get(GoalModel, goal_id)
-                if goal is not None:
-                    goal.status = "FAILED"
-                    meta = dict(goal.metadata_json or {})
-                    meta["failure_reason"] = f"CONSTRAINT_VIOLATED: {constraint}"
-                    goal.metadata_json = meta
-
-    async def handle_organization_selected(self, payload: dict[str, Any]) -> None:
-        """Handle OrganizationSelected domain event.
-
-        Records the organization selection in the conversation timeline.
-        """
-        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
-        template_id = str(payload.get("template_id", ""))
-        utility = float(payload.get("utility", 0.0))
-        logger.info(
-            "organization selected for goal=%s: template=%s utility=%.4f",
-            goal_id, template_id, utility,
-        )
-        project_id = uuid.UUID(str(payload.get("app_project_id", "")))
-        if project_id:
-            async with self._sessions() as session, session.begin():
-                await self._append_conversation_event(
-                    session, project_id, "ORGANIZATION_SELECTED",
-                    f"Organization selected: {template_id} (U={utility:.4f})",
-                    {
-                        "goal_id": str(goal_id),
-                        "template_id": template_id,
-                        "utility": utility,
-                    },
-                )
-
-    # ---------------------------------------------------------------------------
-    # P3-A: Adaptive Organization Handler
-    # ---------------------------------------------------------------------------
-
-    async def handle_adaptive_organization(self, payload: dict[str, Any]) -> None:
-        """Handle adaptive organization proposal.
-
-        Evaluates utility for all candidate organizations and proposes
-        the best one. Records the proposal in conversation timeline.
-        """
-        goal_id = uuid.UUID(str(payload.get("goal_id", "")))
-        actor = str(payload.get("actor", "regent-core"))
-
-        try:
-            org_service = OrganizationService(self._sessions)
-            proposal = await org_service.propose_adaptive_organization(
-                goal_id, actor=actor,
-            )
-            logger.info(
-                "adaptive organization proposed for goal=%s: %s (U=%.4f)",
-                goal_id, proposal["proposed_template"], proposal["utility"],
-            )
-            project_id = uuid.UUID(str(payload.get("app_project_id", "")))
-            if project_id:
-                async with self._sessions() as session, session.begin():
-                    await self._append_conversation_event(
-                        session, project_id, "ADAPTIVE_ORGANIZATION_PROPOSED",
-                        f"Adaptive org proposed: {proposal['proposed_template']} "
-                        f"(U={proposal['utility']:.4f})",
-                        {
-                            "goal_id": str(goal_id),
-                            "proposal": proposal,
-                        },
-                    )
-        except Exception:
-            logger.warning(
-                "adaptive organization proposal failed for goal=%s",
-                goal_id, exc_info=True,
-            )
-
     @staticmethod
     async def _append_conversation_event(
         session: AsyncSession,
@@ -6040,14 +5669,12 @@ def get_p1_event_handlers(
         DISCOVERY_ROUND_REQUESTED: orchestrator.handle_discovery_round_requested,
         DISCOVERY_COMPLETED: orchestrator.handle_discovery_completed,
         REQUIREMENT_REQUESTED: orchestrator.handle_requirement_requested,
-        REQUIREMENT_VALIDATED: orchestrator.handle_requirement_validated,
         CAPABILITY_RESOLUTION_REQUESTED: orchestrator.handle_capability_resolution_requested,
         CAPABILITY_RESOLUTION_SATISFIED: orchestrator.handle_capability_resolution_satisfied,
         GENERATION_RUN_REQUESTED: orchestrator.handle_generation_run_requested,
         WORKSPACE_SNAPSHOT_READY: orchestrator.handle_workspace_snapshot_ready,
         DEPENDENCY_RESOLUTION_REQUESTED: orchestrator.handle_dependency_resolution_requested,
         APP_BUILD_REQUESTED: orchestrator.handle_app_build_requested,
-        APP_BUILD_PASSED: orchestrator.handle_app_build_passed,
         PREVIEW_DEPLOYMENT_REQUESTED: orchestrator.handle_preview_deployment_requested,
         PREVIEW_DEPLOYMENT_SUCCEEDED: orchestrator.handle_preview_deployment_succeeded,
         QUALITY_APPROVAL_REQUESTED: orchestrator.handle_quality_approval_requested,
@@ -6057,8 +5684,4 @@ def get_p1_event_handlers(
         # Observability-only; state already persisted on goal.metadata.
         DELIVERY_STATE_CHANGED: _ack_delivery_state_changed,
         "TimerFired": orchestrator.handle_timer_fired,
-        # P1-C: V3 domain event handlers
-        "ReorganizationTriggered": orchestrator.handle_reorganization_triggered,
-        "ConstraintViolated": orchestrator.handle_constraint_violated,
-        "OrganizationSelected": orchestrator.handle_organization_selected,
     }

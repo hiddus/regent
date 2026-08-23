@@ -85,17 +85,20 @@ class GoalExecutionService:
                 spec.status = "FROZEN"
                 audit = AuditRecordModel(
                     id=uuid.uuid4(),
-                    goal_id=goal.id,
+                    aggregate_type="goal",
+                    aggregate_id=goal.id,
+                    aggregate_version=goal.version,
                     action="SNAPSHOT_GOAL_SPEC_FOR_EXECUTION",
-                    detail={
+                    actor=actor,
+                    payload={
                         "explicit_user_start": True,
                         "spec_version": spec.version,
                         "has_unknowns": bool(spec.unknowns),
                     },
-                    created_by=actor,
+                    correlation_id=goal.correlation_id,
                 )
                 session.add(audit)
-                goal.status = "EXPLORING" if spec.unknowns else "PROVISIONAL"
+                goal.status = "ACTIVE"
                 goal.version += 1
                 goal.metadata_json = {
                     **meta,

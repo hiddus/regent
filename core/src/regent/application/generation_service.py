@@ -32,13 +32,14 @@ _STALE_GENERATING = timedelta(minutes=20)
 
 @dataclass(frozen=True, slots=True)
 class CreateGenerationPlan:
-    requirement_revision_id: uuid.UUID
-    capability_resolution_plan_id: uuid.UUID
+    requirement_revision_id: uuid.UUID | None
+    capability_resolution_plan_id: uuid.UUID | None
     contract: GenerationPlanContract
     architecture_summary: str
     component_plan: list[dict[str, Any]]
     actor: str
     correlation_id: str
+    bypass: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,26 @@ class GenerationService:
                 self._expand_plan_contract(existing)
                 await session.flush()
                 return existing
+
+            # Bypass mode: no intermediate pipeline records needed.
+            if command.bypass:
+                model = GenerationPlanModel(
+                    id=uuid.uuid4(),
+                    requirement_revision_id=None,
+                    capability_resolution_plan_id=None,
+                    status="FROZEN",
+                    version=1,
+                    input_digest=digest,
+                    contract_json=command.contract.model_dump(mode="json"),
+                    architecture_summary=command.architecture_summary,
+                    component_plan=command.component_plan,
+                    created_by=command.actor,
+                    correlation_id=command.correlation_id,
+                )
+                session.add(model)
+                await session.flush()
+                return model
+
             requirement = await session.get(
                 RequirementRevisionModel, command.requirement_revision_id
             )

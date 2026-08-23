@@ -912,11 +912,11 @@ class GenerationPlanModel(Base):
         UniqueConstraint("input_digest", name="uq_generation_plans_input_digest"),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    requirement_revision_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("requirement_revisions.id", ondelete="RESTRICT"), nullable=False
+    requirement_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("requirement_revisions.id", ondelete="SET NULL"), nullable=True
     )
-    capability_resolution_plan_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("capability_resolution_plans.id", ondelete="RESTRICT"), nullable=False
+    capability_resolution_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("capability_resolution_plans.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
