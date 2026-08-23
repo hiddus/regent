@@ -180,7 +180,12 @@ async def materialize_delivery_roles(
     # REMOVED: product→tech SUPERVISES/DELEGATES_TO — these created indirect
     # agent-to-agent invocation paths that risked dead-loops and token waste.
     # All delivery roles now report only to the orchestrator (hub-and-spoke).
+    # Wired: cross-deployment invocation guard validates each relationship.
     try:
+        from regent.application.agent_invocation_guard import (
+            check_cross_deployment_invocation,
+        )
+
         tech = bindings.get("tech")
         test = bindings.get("test")
         ux = bindings.get("ux")
@@ -190,6 +195,20 @@ async def materialize_delivery_roles(
                 AgentLifecycleService.assert_producer_reviewer_separation(
                     tech.deployment_id, reviewer.deployment_id
                 )
+                # Guard: verify this relationship is allowed.
+                guard_decision = check_cross_deployment_invocation(
+                    source_deployment_id=reviewer.deployment_id,
+                    target_deployment_id=tech.deployment_id,
+                    source_role=reviewer.role,
+                    target_role=tech.role,
+                )
+                if not guard_decision.allowed:
+                    logger.warning(
+                        "invocation guard denied relationship %s → %s: %s",
+                        reviewer.role, tech.role, guard_decision.reason,
+                        extra={"goal_id": str(goal_id)},
+                    )
+                    continue
                 await life.add_relationship(
                     session,
                     organization_version_id=organization_version_id,

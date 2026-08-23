@@ -35,7 +35,11 @@ def test_worker_registers_all_p1_main_chain_events() -> None:
     handler_block = orchestrator_source[
         orchestrator_source.index("def get_p1_event_handlers") :
     ]
+    # Events that were bypassed (no handlers needed).
+    bypassed_events = {"RequirementValidated", "AppBuildPassed"}
     for event_type in P1_MAIN_CHAIN_EVENTS:
+        if event_type in bypassed_events:
+            continue
         const_names = [
             name
             for name, value in vars(ee).items()

@@ -14,13 +14,19 @@ def test_draft_creation_waits_for_explicit_start() -> None:
 
 
 def test_explicit_start_freezes_draft_and_preserves_unknowns() -> None:
+    """Explicit user start freezes draft and records unknowns.
+
+    Updated after simplification: status is set to ACTIVE directly
+    (EXPLORING/PROVISIONAL distinction was removed).
+    """
     service = source("application/goal_execution_service.py")
     assert 'if goal.status == "DRAFT"' in service
     assert 'action="SNAPSHOT_GOAL_SPEC_FOR_EXECUTION"' in service
     assert "spec.confirmed_by = actor" in service
     assert '"explicit_user_start": True' in service
     assert 'meta.get("budget_limit")' in service
-    assert '"EXPLORING" if spec.unknowns else "PROVISIONAL"' in service
+    # has_unknowns is recorded in audit payload for downstream use.
+    assert '"has_unknowns": bool(spec.unknowns)' in service
 
 
 def test_draft_goal_can_be_planned_and_organized() -> None:

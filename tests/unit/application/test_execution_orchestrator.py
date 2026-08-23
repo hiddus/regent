@@ -143,29 +143,39 @@ def test_make_idempotency_key_differs_for_different_inputs() -> None:
 
 
 def test_orchestrator_has_all_r2_to_r6_handlers() -> None:
-    """ExecutionOrchestrator has handler methods for all R2-R6 events."""
+    """ExecutionOrchestrator has handler methods for all R2-R6 events.
+
+    Updated after simplification: handle_requirement_validated and
+    handle_app_build_passed were removed (bypass pipeline).
+    """
     orchestrator = ExecutionOrchestrator(sessions=None)
     assert hasattr(orchestrator, "handle_discovery_round_requested")
     assert hasattr(orchestrator, "handle_discovery_completed")
     assert hasattr(orchestrator, "handle_requirement_requested")
-    assert hasattr(orchestrator, "handle_requirement_validated")
     assert hasattr(orchestrator, "handle_capability_resolution_requested")
     assert hasattr(orchestrator, "handle_capability_resolution_satisfied")
     assert hasattr(orchestrator, "handle_generation_run_requested")
     assert hasattr(orchestrator, "handle_workspace_snapshot_ready")
     assert hasattr(orchestrator, "handle_dependency_resolution_requested")
     assert hasattr(orchestrator, "handle_app_build_requested")
-    assert hasattr(orchestrator, "handle_app_build_passed")
     assert hasattr(orchestrator, "handle_preview_deployment_requested")
     assert hasattr(orchestrator, "handle_preview_deployment_succeeded")
     assert hasattr(orchestrator, "handle_release_approval_completed")
 
 
 def test_get_p1_event_handlers_maps_all_events() -> None:
-    """get_p1_event_handlers returns a handler for every P1 main chain event."""
+    """get_p1_event_handlers returns a handler for every P1 main chain event.
+
+    Updated after simplification: REQUIREMENT_VALIDATED and APP_BUILD_PASSED
+    are bypassed and no longer have handlers.
+    """
     orchestrator = ExecutionOrchestrator(sessions=None)
     handlers = get_p1_event_handlers(orchestrator)
+    # Events that were bypassed (no handlers needed).
+    bypassed_events = {"RequirementValidated", "AppBuildPassed"}
     for event_type in P1_MAIN_CHAIN_EVENTS:
+        if event_type in bypassed_events:
+            continue
         assert event_type in handlers, f"missing handler for {event_type}"
         assert callable(handlers[event_type])
 

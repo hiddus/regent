@@ -306,12 +306,44 @@ class ExecutionOrchestrator:
             milestone_plan = await ensure_milestone_plan(session, goal=goal, spec=spec)
             current = current_milestone(milestone_plan)
 
-            # ── Fast-path bypass for simple goals ──────────────────────────
-            # When a goal is small, self-contained, and doesn't need external
-            # evidence or multi-stage discovery, skip the entire Discovery →
-            # Requirement → Capability pipeline and go straight to Generation.
-            # This eliminates the primary information-loss path that caused
-            # "generated apps are simple demos" (root cause A from failure analysis).
+            # ── Goal classification → org mode → bypass decision ─────────
+            # Wired: GoalClassifier + organization_mode_selector drive the
+            # bypass vs full-pipeline decision.  The legacy hardcoded SMALL-
+            # scale check is retained as a fallback for explicit opt-in.
+            from regent.application.organization_mode_selector import (
+                select_mode_from_metadata,
+            )
+
+            goal_input = str(goal.original_input or "").strip()
+            org_mode, goal_profile = select_mode_from_metadata(
+                goal_input,
+                metadata=dict(goal.metadata_json or {}),
+                goal_scale=getattr(milestone_plan, "goal_scale", None),
+                spec_constraints=dict(spec.explicit_constraints or {}),
+                spec_success_criteria=dict(spec.success_criteria or {}),
+            )
+            # Persist classification in metadata for downstream (monitor, repair).
+            goal_meta = dict(goal.metadata_json or {})
+            goal_meta["goal_profile"] = goal_profile.as_dict()
+            goal_meta["org_mode"] = org_mode.as_dict()
+            goal.metadata_json = goal_meta
+
+            logger.info(
+                "goal classified: mode=%s domain=%s scale=%s",
+                org_mode.mode_id, goal_profile.domain, goal_profile.scale,
+                extra={"goal_id": str(goal_id)},
+            )
+
+            # Mode-driven bypass: agile / hub_spoke / batch skip Discovery.
+            if org_mode.mode_id in ("agile", "hub_spoke", "batch"):
+                await self._bypass_pipeline_to_generation(
+                    session, goal, spec, milestone_plan, current,
+                    execution_event_id, actor,
+                    org_mode=org_mode,
+                )
+                return
+
+            # Legacy explicit opt-in fallback (direct_generation metadata flag).
             if self._is_direct_generation_goal(goal, spec, milestone_plan):
                 await self._bypass_pipeline_to_generation(
                     session, goal, spec, milestone_plan, current,
@@ -479,12 +511,18 @@ class ExecutionOrchestrator:
         current: Any,
         execution_event_id: str,
         actor: str,
+        *,
+        org_mode: Any | None = None,
     ) -> None:
         """Emit GENERATION_RUN_REQUESTED directly — no intermediate records.
 
         Bypass mode skips the entire Discovery → Requirement → Capability
         pipeline.  The generation handler recognises ``bypass=True`` in the
         payload and derives everything from the goal itself.
+
+        When ``org_mode`` is provided (from GoalClassifier), its mode_id is
+        stamped into the generation payload so downstream handlers know
+        whether monitoring/repair should be enabled.
         """
         goal_id = goal.id
         project_id = goal.app_project_id
@@ -500,6 +538,11 @@ class ExecutionOrchestrator:
             "idempotency_key": gen_idempotency,
             "bypass": True,
         }
+        # Carry org_mode so downstream handlers enable monitoring/repair.
+        if org_mode is not None:
+            gen_payload["org_mode_id"] = org_mode.mode_id
+            gen_payload["enable_monitoring"] = org_mode.enable_monitoring
+            gen_payload["enable_repair_loop"] = org_mode.enable_repair_loop
         # Carry session metadata if present.
         goal_meta = dict(goal.metadata_json or {})
         sid = str(goal_meta.get("project_agent_session_id") or "").strip()
@@ -4187,6 +4230,14 @@ class ExecutionOrchestrator:
                             "product_surface_ready": True,
                         },
                     )
+                # Wired: behavior monitoring for hub_spoke goals (non-blocking).
+                await self._maybe_run_behavior_monitoring(
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    deployment_id=deployment_id,
+                    endpoint=endpoint,
+                    actor=actor,
+                )
                 # Advance milestone or ACHIEVE just like CONTINUE path.
                 await self._continue_or_advance_milestone(
                     goal_id=goal_id,
@@ -4208,6 +4259,92 @@ class ExecutionOrchestrator:
                 extra={"goal_id": str(goal_id), "deployment_id": str(deployment_id)},
             )
             raise
+
+    # ---------------------------------------------------------------------------
+    # Behavior monitoring + repair loop (wired for hub_spoke mode)
+    # ---------------------------------------------------------------------------
+
+    async def _maybe_run_behavior_monitoring(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        project_id: uuid.UUID,
+        deployment_id: uuid.UUID,
+        endpoint: str,
+        actor: str,
+    ) -> None:
+        """Run behavior monitor + repair loop when org_mode enables it.
+
+        Called from preview-succeeded paths.  Non-blocking: exceptions are
+        caught and logged so the main ACHIEVE flow is never disturbed.
+        """
+        try:
+            async with self._sessions() as session:
+                goal = await session.get(GoalModel, goal_id)
+                if goal is None:
+                    return
+                meta = dict(goal.metadata_json or {})
+                org_mode = meta.get("org_mode") or {}
+                if not org_mode.get("enable_monitoring"):
+                    return
+                public_url = await self._resolve_public_preview_url(
+                    deployment_id, endpoint
+                )
+                if not public_url or not public_url.startswith(("http://", "https://")):
+                    return
+                goal_profile = meta.get("goal_profile") or {}
+
+            # Run independent observation.
+            from regent.application.runtime_behavior_monitor import (
+                RuntimeBehaviorMonitor,
+            )
+
+            monitor = RuntimeBehaviorMonitor()
+            observations = await monitor.observe(
+                goal_id, public_url, goal_profile=goal_profile
+            )
+            obs_dicts = [
+                {
+                    "metric_name": o.metric_name,
+                    "metric_value": o.metric_value,
+                    "anomaly": o.anomaly,
+                    "severity": o.severity,
+                    "detail": o.detail,
+                }
+                for o in observations
+            ]
+
+            # Store observations in metadata for audit.
+            async with self._sessions() as session:
+                goal = await session.get(GoalModel, goal_id)
+                if goal is not None:
+                    meta = dict(goal.metadata_json or {})
+                    meta["last_behavior_observations"] = obs_dicts[-10:]
+                    meta["behavior_monitor_ran_at"] = str(
+                        datetime.utcnow().isoformat()
+                    )
+                    goal.metadata_json = meta
+
+            # If repair loop is enabled and anomalies found, run repair.
+            if org_mode.get("enable_repair_loop"):
+                from regent.application.behavior_repair_loop import BehaviorRepairLoop
+
+                repair = BehaviorRepairLoop()
+                decision = await repair.evaluate_and_repair(
+                    self._sessions, goal_id, obs_dicts
+                )
+                if decision.action == "REPAIR":
+                    logger.info(
+                        "behavior repair triggered: %s",
+                        decision.reason,
+                        extra={"goal_id": str(goal_id)},
+                    )
+        except Exception:
+            logger.warning(
+                "behavior monitoring/repair skipped (non-fatal)",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
 
     async def handle_quality_approval_completed(self, payload: dict[str, Any]) -> None:
         """GAC-Q1: QualityApprovalCompleted → ACHIEVE or WAITING_HUMAN (never calm EXHAUST)."""

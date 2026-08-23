@@ -590,31 +590,38 @@ class TestDomainEventHandlers:
         assert FAILURE_COMPLIANCE == "FAILURE_COMPLIANCE"
 
     def test_reorganization_triggered_in_v3_events(self) -> None:
-        """REORGANIZATION_TRIGGERED is in V3_DOMAIN_EVENTS."""
-        from regent.application.execution_events import (
-            REORGANIZATION_TRIGGERED,
-            V3_DOMAIN_EVENTS,
-        )
-        assert REORGANIZATION_TRIGGERED in V3_DOMAIN_EVENTS
+        """REORGANIZATION_TRIGGERED was removed during dead-constant cleanup.
+
+        This test now verifies the constant is absent (intentional removal).
+        """
+        from regent.application.execution_events import V3_DOMAIN_EVENTS
+        # REORGANIZATION_TRIGGERED was removed in simplification.
+        assert "ReorganizationTriggered" not in V3_DOMAIN_EVENTS
 
     def test_constraint_violated_in_v3_events(self) -> None:
-        """CONSTRAINT_VIOLATED is in V3_DOMAIN_EVENTS."""
-        from regent.application.execution_events import (
-            CONSTRAINT_VIOLATED,
-            V3_DOMAIN_EVENTS,
-        )
-        assert CONSTRAINT_VIOLATED in V3_DOMAIN_EVENTS
+        """CONSTRAINT_VIOLATED was removed during dead-constant cleanup.
+
+        This test now verifies the constant is absent (intentional removal).
+        """
+        from regent.application.execution_events import V3_DOMAIN_EVENTS
+        # CONSTRAINT_VIOLATED was removed in simplification.
+        assert "ConstraintViolated" not in V3_DOMAIN_EVENTS
 
     def test_organization_selected_in_v3_events(self) -> None:
-        """ORGANIZATION_SELECTED is in V3_DOMAIN_EVENTS."""
-        from regent.application.execution_events import (
-            ORGANIZATION_SELECTED,
-            V3_DOMAIN_EVENTS,
-        )
-        assert ORGANIZATION_SELECTED in V3_DOMAIN_EVENTS
+        """ORGANIZATION_SELECTED was removed during dead-constant cleanup.
+
+        This test now verifies the constant is absent (intentional removal).
+        """
+        from regent.application.execution_events import V3_DOMAIN_EVENTS
+        # ORGANIZATION_SELECTED was removed in simplification.
+        assert "OrganizationSelected" not in V3_DOMAIN_EVENTS
 
     def test_event_handlers_registered(self) -> None:
-        """Domain event handlers are registered in the dispatch table."""
+        """Domain event handlers are registered in the dispatch table.
+
+        Updated after simplification: ReorganizationTriggered,
+        ConstraintViolated, and OrganizationSelected handlers were removed.
+        """
         from unittest.mock import MagicMock
         from regent.application.execution_orchestrator import (
             ExecutionOrchestrator,
@@ -623,6 +630,11 @@ class TestDomainEventHandlers:
         mock_sessions = MagicMock()
         orchestrator = ExecutionOrchestrator(mock_sessions)
         handlers = get_p1_event_handlers(orchestrator)
-        assert "ReorganizationTriggered" in handlers
-        assert "ConstraintViolated" in handlers
-        assert "OrganizationSelected" in handlers
+        # Verify core handlers are present.
+        assert "GoalExecutionRequested" in handlers
+        assert "GenerationRunRequested" in handlers
+        assert "PreviewDeploymentSucceeded" in handlers
+        # Removed handlers are absent (intentional).
+        assert "ReorganizationTriggered" not in handlers
+        assert "ConstraintViolated" not in handlers
+        assert "OrganizationSelected" not in handlers

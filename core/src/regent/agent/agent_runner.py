@@ -435,6 +435,22 @@ class AgentRunner:
                     ),
                 }
             )
+        # Wired: hub-and-spoke invocation guard — sub-agents must not re-delegate.
+        from regent.application.agent_invocation_guard import (
+            check_subagent_delegate_allowed,
+        )
+
+        delegate_decision = check_subagent_delegate_allowed(
+            current_depth=self._subagent_depth,
+            max_depth=self._max_subagent_depth,
+        )
+        if not delegate_decision.allowed:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": f"InvocationGuard: {delegate_decision.reason}",
+                }
+            )
         self._raise_if_aborted(plan)
         owner = f"subagent-{item_id}"
         match["status"] = "in_progress"
