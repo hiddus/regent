@@ -29,6 +29,8 @@ Regent 是一支能够自由探索、持续实践、自我组织并从真实经�
 
 核心不变式：**LLM 只能提出结构化 Command，状态转换由确定性 Application Service 执行。** 详见 [`core/README.md`](./core/README.md)。
 
+> 近期代码演进（2026-08-13 之后）：组织修复脚手架已落地并接入执行主链——hub-and-spoke 执行纪律（`config.max_subagent_depth=1`）、规则式目标分类、组织模式选择、运行时行为监测（含 SPA JS 深度分析）、行为修复环自动再调度与 worker 周期监测 tick（护栏：ACTIVE / 无存活 run / `max_iterations` 上限 / 预算）。详见 [`STATUS.md`](./STATUS.md) 与 [`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md) §25。
+
 ---
 
 ## 快速开始
@@ -54,7 +56,7 @@ API 默认监听 `:8000`，PostgreSQL 默认发布到宿主 `:5432`（仅开发�
 ### 方式 B：本地开发（源码安装）
 
 ```bash
-cd core
+# 仓库根（pyproject.toml 在仓库根，包 regent-core 构建自 core/src/regent）
 pip install -e ".[dev]"     # 安装运行 + 开发依赖（要求 Python >=3.12,<3.14）
 
 regent-api                  # 启动 FastAPI 服务（REST API + 静态资源）
@@ -85,6 +87,11 @@ mypy                        # 严格类型检查
 | `deploy/` | 部署相关 |
 | `docs/` | 规范、计划、审计、决策记录 |
 | `compose.yaml` | 本地 Compose（与服务器 Path A 手工编排不同） |
+| `capabilities/` | 认证能力池（声明 + resolver/sandbox 运行器） |
+| `archive/` | 历史产物 / 报告归档（非核心） |
+| `canvases/` | 设计画布产物（`.canvas.tsx`，非核心） |
+| `deliverables/` | 生成的对外交付物（非核心） |
+| `regent-pptx/` | PPT 构建工程（非核心） |
 
 各子目录均有自己的 `README.md`，可逐级深入。
 

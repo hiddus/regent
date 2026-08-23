@@ -1,7 +1,7 @@
 # Regent 技术架构与实施规范
 
 > 状态：CURRENT  
-> 日期：2026-08-11（§0.1 诚实更正：M6 CLAMPED、generation_strategy/Hive 代码默认、0044–0047/Permit 委派接线边界；历史 08-01 段仅追溯）
+> 日期：2026-08-23（§0.1 诚实更正：M6 CLAMPED、generation_strategy/Hive 代码默认、0044–0047/Permit 委派接线边界；组织修复脚手架落地但主链未接线；历史 08-01 段仅追溯）
 > 性质：权威执行基线（Owner 批准）  
 > 配套需求：[`Regent-PRD.md`](./Regent-PRD.md)  
 > 产品定义（当前唯一规范源，仅引用不复述正文）：[`docs/definitions/REGENT-DEFINITION-3.0.txt`](docs/definitions/REGENT-DEFINITION-3.0.txt)（`REGENT-DEFINITION-3.0`，取代 2.0）
@@ -29,6 +29,17 @@
 3. 读取真实敏感数据、接触真人、写共享状态、公开传播或产生财务/法律影响的动作，按影响、可逆性、暴露范围和数据敏感度授权。扩大现实影响需要证据，探索本身不需要先“证明资格”。
 
 截至本次更正，OrganizationExperiment、LearningUpdate 和 ExecutionEvent 仍属于可调用基础服务；在被实际调度器、模型与工具调用链消费前，不得对外宣称“生产环境已实现完全自主组织演化、在线学习或全链路因果审计”。
+#### 2026-08-23 组织修复与编排精简（脚手架登记）
+
+2026-08-13 之后合入的"组织修复"提交（hub-and-spoke 执行纪律、规则式目标分类、组织模式选择、运行时行为监测与 SPA JS 深度分析、行为修复循环）均已实现并具备单元测试，但**截至登记时未被 `execution_orchestrator`、Worker 或 API 路由消费**（仅内部引用 + 测试可达）。约束：
+
+- **hub-and-spoke**：已通过 `config.max_subagent_depth=1` 落地（默认禁止 sub-agent 二次委派）；完整 `agent_invocation_guard` 与交付角色间调用约束已实现单测，主链消费待接入；
+- **目标分类与组织模式选择**：规则驱动、不调用 LLM，结果为"推荐而非强制"；
+- **运行时行为监测**：独立后台观察器（含 `interactive-app` 的 SPA JS 深度分析），尚不经由新路由暴露；
+- **编排器精简**：`execution_orchestrator.py` 移除 7 个旧处理器（requirement_validated / app_build_passed / reorganization_triggered / constraint_violated / organization_selected / adaptive_organization 等），新增"直达生成"旁路（`_is_direct_generation_goal` / `_bypass_pipeline_to_generation`）；分类驱动的自动模式选择仍依赖未接线模块。
+
+上述模块属"底座可测、未端到端"，不得对外表述为生产主链已消费。
+
 > 附录：  
 > - [`docs/appendices/State-Machines-and-Invariants.md`](docs/appendices/State-Machines-and-Invariants.md)  
 > - [`docs/appendices/Durable-Execution-and-External-Effects.md`](docs/appendices/Durable-Execution-and-External-Effects.md)  
@@ -183,6 +194,8 @@ P2 前期继续采用模块化单体。除非测量证明 Outbox 已成为瓶颈
 | `ReorganizationTrigger` | 触发重构的事件 |
 
 **智能体团队是可自由演化的运行组织**。系统不预设单 Agent、最小团队、固定模板或动态拓扑为默认答案；团队可在资源池内并行探索、创建临时角色、分化、组合和重组。Eval Harness 提供现实反馈和资源配置信息，不批准思想、假设、沙箱实验或组织演化。
+
+> 近期落地（2026-08-23，脚手架）：组织运行纪律新增 `application/agent_invocation_guard.py`（hub-and-spoke：交付角色只向编排器汇报、禁止 sub-agent 二次委派，由 `config.max_subagent_depth=1` 落地）；目标侧新增规则式 `application/goal_classifier.py`（`GoalProfile`：scale/domain/complexity/iteration_need/monitoring_need）与 `application/organization_mode_selector.py`（据 profile 推荐 `WATERFALL/AGILE/HUB_SPOKE/BATCH`）。三者已单测，**尚未接入编排器 / API 主链**，结果为推荐而非强制（详见 §0.1 / §25）。固定 Hive 模板 `pm-dev-independent-qa-v1` 作为独立 opt-in 固定模板并存，hub-and-spoke 是动态运行纪律，二者不互斥。
 
 ---
 
@@ -728,7 +741,7 @@ POST /v1/uploads
 ```
 
 **其它已挂载族（规范未逐一枚举，以实现为准）：**  
-`/v1/works`、`/v1/observations`、`/v1/baselines`、`/v1/governance`、`/v1/side-effects`、`/v1/experiments`、`/v1/self-improvement-runs`、`/v1/tools`、`/v1/memories`、`/v1/eval-runs`、`/v1/scheduler`、`/v1/runtime-profiles`、`/v1/webhooks`、`/v1/reports`、`/v1/public-deploy`、`/v1/deployments/*`、`/v2/*`（aar1）。
+`/v1/works`、`/v1/observations`、`/v1/baselines`、`/v1/governance`、`/v1/side-effects`、`/v1/experiments`、`/v1/self-improvement-runs`、`/v1/tools`、`/v1/memories`、`/v1/eval-runs`、`/v1/scheduler`、`/v1/runtime-profiles`、`/v1/webhooks`、`/v1/reports`、`/v1/public-deploy`、`/v1/deployments/*`、`/v2/*`（aar1）；**近期新增**：`/v1/conversations`、`/events`（SSE 实时事件）、`/v1/app-projects`、`/v1/app-guidance`、`/v1/app-delivery`、`/v1/app-previews`、`/v1/product-creation`、`/v1/harness-evolution`、`/v1/feedback-loop`、`/v1/human-tasks`、`/v1/uploads`，以及运维族 `/v1/health`、`/v1/doctor`、`/v1/ops/environment/heal`、`/v1/workflow-presets`。
 
 **run-think-learn（L1–L3，2026-08-02）**：`POST .../drafts` 产出 `plan` / `needs_user_fork` / `auto_started`；`needs_user_fork=true` 时跳过 C1 auto-start。guidance 命令含 `SELECT_OPTION`（迁移 `0042` 扩展 `ck_conversation_commands_type`）。对话消息 `GOAL_PLAN_PROPOSED` / `FORK_SELECTED`。`goal.metadata.failure_lessons` 同时接受新 shape（`summary`/`avoid`）与交付缺口旧 shape（`gap_reasons`/`learned_constraints`）；`lessons_for_acceptance` 归一化后注入 generation `acceptance_contract`。细节见 [`docs/direction-note-run-think-learn-2026-08-02.md`](docs/direction-note-run-think-learn-2026-08-02.md)、[`docs/execution-plan-run-think-learn-2026-08-02.md`](docs/execution-plan-run-think-learn-2026-08-02.md)。
 
@@ -788,7 +801,7 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 
 ## 25. 当前实现状态
 
-> 截至 2026-07-31，代码统计：core 含多 Agent 补足模块（metrics/MAST/member_contract/TaskFeatures/DispatchDecision/ExecutionPlanItem 等）与 GQ 生成质量控制流，迁移 head `20260731_0041`。
+> 截至 2026-08-23，代码统计：core 含多 Agent 补足模块（metrics/MAST/member_contract/TaskFeatures/DispatchDecision/ExecutionPlanItem 等）与 GQ 生成质量控制流，迁移 head `20260810_0047`（0044 预算预留 / 0045 LearningUpdate / 0046 OrganizationExperiment / 0047 ExecutionEvent）。
 
 ### 已完成
 
@@ -814,6 +827,30 @@ Dead Letter 重放需授权、操作者与原因，并继续使用原业务幂�
 - **下一步**：**HALTED = M6 观察窗**（[`docs/m6-canary-watch-plan-2026-08-01.md`](docs/m6-canary-watch-plan-2026-08-01.md)）：须先 Offline Qual；成本护栏未过前不扩流量、不开 GQ-4。CD-6…12 与 agent-core 计划继续作为工程参照；**不得把历史「已开 5%」写成当前 ACTIVE**。
 - **API 挂载（F-1 修复）**：human_tasks / uploads / webhooks / reports / public_deploy 已在 `api/main.py` `include_router`。
 - **近期迭代（2026-08-02/03，登记于代码核查 2026-08-03）**：混合控制平面 H0–H2（`application/agent_control.py` / `agent_loop_exit.py` / `live_action.py`：abort/permission/ask 工具/只读时间线）、Session Work Plan W0–W4（`application/work_plan.py` / `project_agent_session.py`：Step-0 门禁 + 计划审批）、控制台可观测性（`agent/progress_event.py` + `api/events.py` SSE + ProgressEvent）、Agent 内核 W4 收口（`agent/subagent.py` / `skills.py` / `context_assembler.py` / `verification.py`）、交付缺口恢复与诊断交付（`delivery_gap_recovery.py` / `diagnostic_delivery.py` / `delivery_success_policy.py`）。均已接线生产路径；产品语义见 `docs/decision-note-*` 与 `docs/execution-plan-*` 2026-08-02/03。
+
+### 组织修复脚手架（2026-08-23，已接线主链）
+
+> 2026-08-13 之后合入；均实现 + 单测。commit `40e5378` 起接入执行主链；行为修复环自动再调度与 worker 周期监测 tick 于 2026-08-23 补齐。仍未接线：`check_cross_deployment_invocation`；组织模式为一次性选择（运行中重评估未实现）。
+
+- **Hub-and-spoke 执行纪律**：`application/agent_invocation_guard.py`（`MAX_EFFECTIVE_DELEGATE_DEPTH=1`、`check_subagent_delegate_allowed`、`check_cross_deployment_invocation`）；交付角色 `{product,tech,test,ux,ops}` 只向编排器汇报、互不调用；`config.max_subagent_depth` 默认 `3→1`（已落地）。完整 guard 主链消费待接入。
+- **规则式目标分类**：`application/goal_classifier.py`（`GoalProfile`：scale/domain/complexity/iteration_need/monitoring_need；规则驱动、不调用 LLM），结果写入 `goal.metadata_json["goal_profile"]`。
+- **组织模式选择**：`application/organization_mode_selector.py`（`WATERFALL/AGILE/HUB_SPOKE/BATCH`），据 `GoalProfile` 推荐；agile/hub_spoke/batch 走编排器"直达生成"旁路（一次性选择，运行中不重选）。
+- **运行时行为监测**：`application/runtime_behavior_monitor.py`（独立后台观察器；指标：内容体量 / 对话真实感 / 角色多样性 / 世界观一致性；`domain=interactive-app` 触发 **SPA JS 深度分析**：抓取脚本并统计角色 / 场景 / 周期 / 对话护栏 / 角色深度）；触发点 = `PREVIEW_DEPLOYMENT_SUCCEEDED` 回调 + `application/behavior_monitor_tick.py` worker 周期 tick（默认 600s）。不经新路由暴露。
+- **行为修复环（闭环）**：`application/behavior_repair_loop.py` 消费观测，REPAIR 决策合并写入 `goal.metadata_json["session_steer_brief"]`（外来 steering 优先保留在前，自有旧笔记替换不累积），并经 `GoalExecutionService.start` 以 `guidance-continue:behavior-repair:<goal>:<uuid>` 幂等键自动再调度（与用户 RESUME 同通道，start-time 策略全适用）。护栏 = 目标 ACTIVE + 无存活 run（CREATED/PERMIT_PENDING/QUEUED/RUNNING）+ `org_mode.max_iterations` 修复上限（缺省 3）+ 预算未 blocked，与 steering 写入、`behavior_repair_retrigger_claim`（TTL 300s）同在 `with_for_update` 行锁事务内原子判定，防并发双触发。
+- **Hive 仍为独立 opt-in 固定模板**：`pm-dev-independent-qa-v1`（PRD §10.3）与新 hub-and-spoke 纪律并存；hub-and-spoke 是动态运行纪律，Hive 是固定模板，`ROLLOUT_NOT_ALLOWED` 不变。
+
+### 近期缺陷修复（2026-08-13 → 08-23）
+
+- **Defect #8 冻结计划白名单**：`application/planned_path_policy.py` 新增允许前缀 `source/` 与后缀 `.sh` / `.conf`，使顶层 `source/` 交付树与脚本 / 配置 byproduct 通过 `is_path_within_frozen_plan` 校验。
+- **Defect #11 静态产物路由**：`infrastructure/runtime_preview.py` 在无 `runtime_profile` 时按 `_artifact_looks_static`（含 `index.html` 且无 Python 入口）路由至 `StaticPreviewDeploymentProvider`；`infrastructure/deployment.py` `_locate_index` 深搜嵌套 `source/static/index.html`（Defect #9）。
+- **Defect #12 预算账目**：`application/budget_ledger.py` 将悬空 `run_id` 外键引用置空（不中止），`settle` 复用 `_existing_run_id` 保持有效 / null `run_id`。
+- **Ship-first 工作区语义**：`infrastructure/workspace_writer.py` 的 `REPLACE` 在目标缺失时降级为 `CREATE`；陈旧 `expected_previous_hash` 仅告警不取消；`planned_path_policy.is_incidental_byproduct` 丢弃 `__pycache__` / `.pytest_cache` / `.regent_*.json` / `.pyc` 等 byproduct。
+- **Agent 防自循环**：`agent/agent_runner.py` 滑动窗口指纹（`REPEAT_CALL_WARN_AFTER=3`、`REPEAT_CALL_ASK_AFTER=6`、`REPEAT_CALL_WINDOW=12`）拦截连续重复工具调用与 A/B 交替重复，≥6 触发 AskUser、≥3 回灌 RepeatedToolCall 错误而不重执行。
+- **预算预留键**：`application/budget_ledger.py` `_resolve_live_key` 用"下一空闲后缀"单次查询替换有界探测（原 ~16 epoch 后耗尽）；已结算 / 释放的保留键派生新键 `{key}#r{attempt}` 避免重试死锁。
+- **引导澄清轮次**：`application/app_guidance_service.py` 将 fork 决议与边界编号答案计入 `clarification_rounds`（门禁 `rounds >= 2`）。
+- **预览资源白名单**：`api/main.py` `preview_file` 按扩展名（`.html/.css/.js/.mjs/.json/.svg/.png/.jpg/.jpeg/.gif/.webp/.ico/.txt/.map`）放行媒体类型，未知后缀 404。
+- **Docker 构建**：`core/Dockerfile` 去重 `skill_packs` 强制包含、pip 升级前先升级 pip/setuptools/wheel 解决 hatchling 冲突。
+- **控制台对话化**：`apps/regent-console` 移除 ~147 行，改为对话优先（后端 `/console` 挂载不变）。
 
 ### 已知非阻塞限制
 

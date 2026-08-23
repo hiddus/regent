@@ -1,7 +1,7 @@
 # Regent 产品定义与需求文档
 
 > 状态：CURRENT  
-> 日期：2026-08-10（产品定位升级为“围绕经营目标持续工作的智能体团队”，并确立开放探索式进化；其余实现状态沿用 2026-08-03 基线）
+> 日期：2026-08-23（产品定位升级为“围绕经营目标持续工作的智能体团队”，并确立开放探索式进化；其余实现状态沿用 2026-08-03 基线；2026-08-23 登记组织修复脚手架——hub-and-spoke 纪律、规则式目标分类、运行时行为监测，均已实现但主链未接线）
 > 性质：权威执行基线（Owner 批准）  
 > 配套技术规范：[`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md)  
 > 测量框架：[`Regent-Measurement-Decision-Framework.md`](./Regent-Measurement-Decision-Framework.md)  
@@ -84,6 +84,22 @@ regent/
 - Core 只表达目标、能力、组织、工作、执行、证据、策略和资源。
 - 每个 App 拥有独立源码、依赖、数据、测试与部署，可以脱离 Core 运行。
 - 具体内容类型、订阅方式和业务指标不得成为 Core 领域对象。
+
+---
+
+### 0.5 近期架构演进登记（2026-08-23）
+
+> 本条登记 2026-08-13 之后落地的架构改动，属代码级底座，不立即改变对外产品语义。
+
+近期提交引入一组"组织修复"底座模块，统一以规则与确定性服务实现，默认不额外调用 LLM 推断：
+
+- **Hub-and-spoke 执行纪律**：`application/agent_invocation_guard.py` 通过 `config.max_subagent_depth=1` 落地（默认禁止 sub-agent 二次委派），并定义交付角色 `{product,tech,test,ux,ops}` 之间"只向编排器汇报、互不调用"的约束与跨部署调用环检测。其余 guard 逻辑已实现并单测，主链消费待接入。
+- **规则式目标分类**：`application/goal_classifier.py` 依据目标规模 / 领域 / 复杂度 / 迭代需求 / 监测需求给出 `GoalProfile`（**规则驱动、不调用 LLM**），写入 `goal.metadata_json["goal_profile"]`；配套的 `application/organization_mode_selector.py` 据 profile 推荐 `WATERFALL / AGILE / HUB_SPOKE / BATCH` 组织模式。
+- **运行时行为监测**：`application/runtime_behavior_monitor.py` 作为独立后台观察器，对已发布预览按指标（内容体量、对话真实感、角色多样性、世界观一致性）做异常检测；对 `domain=interactive-app` 额外做 **SPA JS 深度分析**（抓取脚本、统计角色 / 场景 / 周期 / 对话护栏 / 角色深度）。`behavior_repair_loop.py` 消费观测驱动修复：REPAIR 决策合并写入 steering（用户指令优先），并在护栏内（目标 ACTIVE、无存活 run、`org_mode.max_iterations` 上限、预算未 blocked）经用户 RESUME 同通道自动再调度；`behavior_monitor_tick.py` 在 worker 主循环按可配置间隔（默认 600s）周期重观测。
+
+> **接线状态（2026-08-23 复核更正）**：上述模块**已接入主链**——commit `40e5378` 起目标分类于执行启动时调用并持久化 `goal_profile`，组织模式选择驱动 agile/hub_spoke/batch 直达生成旁路，行为监测接线于 `PREVIEW_DEPLOYMENT_SUCCEEDED` 回调（gate：`org_mode.enable_monitoring`）；同日补齐修复环自动再调度与 worker 周期监测 tick（见上条）。**仍未接线**：`agent_invocation_guard.check_cross_deployment_invocation`（已实现待接入）；组织模式为一次性选择，里程碑边界重评估未实现（见架构对比文档 R2）。本节不构成对外的夸大表述依据；与既有口径一致（见 Tech-Spec §0.1 / §25）。
+
+- **执行编排器精简（2026-08-23）**：`execution_orchestrator.py` 移除 7 个旧处理器（requirement_validated / app_build_passed / reorganization_triggered / constraint_violated / organization_selected / adaptive_organization 等），并新增"直达生成"旁路（`_is_direct_generation_goal` / `_bypass_pipeline_to_generation`），缩短纯生成型目标的路径。
 
 ---
 
@@ -602,7 +618,11 @@ Regent 不以“单个 Agent 一次性生成完整项目”、固定团队模板
   - GQ-4 默认切换（PENDING：DecisionRecord 未 ACCEPTED）；
   - G0 ExternalOperation **跨 provider 真实网络 query→resolve 全路径**（核心闭环已落地，仅此切片待合入）；
   - SelfImprovementRun 产品门禁（候选，`ROLLOUT_NOT_ALLOWED`）；
-  - MAST 失败码生产接入（已定义 9 码，尚未接入生产分类路径）。
+  - MAST 失败码生产接入（已定义 9 码，尚未接入生产分类路径）；
+  - `agent_invocation_guard.check_cross_deployment_invocation` 接线（已实现，主链消费待接入）；
+  - 组织模式运行中重评估（里程碑边界 / 目标修订后重选 org_mode，属自适应编排缺口）。
+
+> **更正（2026-08-23 代码核查）**：原列于此的 **组织修复脚手架**（hub-and-spoke 守卫、目标分类、组织模式选择、运行时行为监测与修复环）与**"直达生成"旁路**，经核查已实现、单测并接入执行主链与 Worker（commit `40e5378` 起接线；行为修复环自动再调度与周期监测 tick 于 2026-08-23 补齐，护栏内运行，见 §0.5），已从本"未实现"清单移除，其剩余缺口以上面两行单列。本节此前滞后于实现，以本次核查为准。
 
 > **更正（2026-08-01 代码核查）**：原列于此的 **P2-3 Impact Graph、P2-5 AgentEnvelope HMAC、G0 ExternalOperation 核心闭环** 经代码核查**均已实质实现并有单测**（见 `docs/registered-unimplemented-2026-07-30.md` 与 `core/src/regent/application/impact_graph_service.py` / `envelope_v1.py` / `external_operation_service.py`），已从本"未实现"清单移除。本节此前滞后于实现，以本次核查为准。
 

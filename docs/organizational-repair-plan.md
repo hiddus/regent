@@ -1,5 +1,7 @@
 # Regent 组织修复计划
 
+> **落地状态（2026-08-23 标注）**：本计划为历史规划文档。其中阶段 1（subagent 深度收紧、hub-and-spoke 纪律）、目标分类、组织模式选择、运行时行为监测均已实现并接入执行主链（commit `40e5378` 起）；worker 周期监测 tick（本文 §"Worker 主循环"提案）以 `application/behavior_monitor_tick.py` 落地（默认 600s）；`behavior_repair_loop` 已从"仅写 `session_steer_brief`"演进为**护栏内自动再调度**（合并写入 steering + 行锁事务 + retrigger claim，见 `Regent-Architecture-Comparison-2026-08-23.md` §3 R3 与 `Regent-Plan.md` §15.5）。本文代码片段为提案原文，与最终实现有出入，以代码为准。
+
 ## 执行摘要
 
 基于对 6065 行 `execution_orchestrator.py`、615 行 `delivery_role_swarm.py`、475 行 `agent_task_service.py`、514 行 `delivery_role_runtime.py`、321 行 `delivery_role_agents.py`、1475 行 `agent_runner.py` 的完整分析，制定以下修复计划。

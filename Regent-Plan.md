@@ -1,6 +1,6 @@
 # Regent Vibe Coding 项目计划书
 
-> 更新：2026-08-10（确立开放探索、实践进化与现实影响分级治理）
+> 更新：2026-08-23（确立开放探索、实践进化与现实影响分级治理；登记组织修复脚手架与近期缺陷修复）
 
 > 状态：唯一有效编码基线  
 > 配套需求：[Regent-PRD.md](./Regent-PRD.md)  
@@ -499,3 +499,59 @@ P1 整体交付，按依赖关系分批编码但不拆分验收：
 - Goal metadata 与 App 对话持久保存 QUEUED、PLANNING、GENERATING、PREVIEW_READY 或 FAILED 阶段。
 - CONTINUE 在 READY 时启动、FAILED 时重试、运行中只返回真实状态，不再伪装执行。
 - Outbox 增加指数退避、最大尝试和 DEAD_LETTER；健康检查公开失败与死信计数。
+
+## 15. 组织修复脚手架与近期缺陷修复（2026-08-23）
+
+> 2026-08-13 之后合入；与 §12（多 Agent 补足）/ §13（生成质量）/ §14（对话式交付）并行，属代码级底座。
+
+### 15.1 组织修复脚手架（已实现，2026-08-23 起 main chain 已接线）
+
+> 更正：commit `40e5378`（feat: wire scaffolding modules into main chain）已将下表模块接入执行主链。原"未接线"登记作废。
+
+| 模块 | 文件 | 职责 | 接线状态 |
+|---|---|---|---|
+| Hub-and-spoke 执行纪律 | `application/agent_invocation_guard.py` | 交付角色只向编排器汇报、禁止 sub-agent 二次委派（`MAX_EFFECTIVE_DELEGATE_DEPTH=1`）；跨部署调用环检测 | depth 限制已在 `agent_runner.py:439` 生效；`check_cross_deployment_invocation` 已实现未接线 |
+| 规则式目标分类 | `application/goal_classifier.py` | `GoalProfile`（scale/domain/complexity/iteration_need/monitoring_need），不调用 LLM | **已接线**：`execution_orchestrator.py:318` 启动执行时调用，结果持久化进 `goal.metadata_json` |
+| 组织模式选择 | `application/organization_mode_selector.py` | 据 profile 推荐 `WATERFALL/AGILE/HUB_SPOKE/BATCH` | **已接线**：agile/hub_spoke/batch 走 `_bypass_pipeline_to_generation` 旁路；一次性选择，运行中不重选（自适应重评估见 §15.5 R2）；`max_iterations` 已有消费方 = 修复环迭代上限（见下行，缺省 3 次） |
+| 运行时行为监测 | `application/runtime_behavior_monitor.py` | 观察已发布预览（内容体量/对话真实感/角色多样性/世界观一致性）；`interactive-app` 触发 SPA JS 深度分析 | 接线于 `PREVIEW_DEPLOYMENT_SUCCEEDED` 回调（`execution_orchestrator.py:4380`，gate：`org_mode.enable_monitoring`）；**worker 主循环另有周期 tick**（`application/behavior_monitor_tick.py`，默认 600s、可配置开关，单 goal 复观测间隔 600s） |
+| 行为修复循环 | `application/behavior_repair_loop.py` | 消费观测并驱动修复 | **已闭环（2026-08-23）**：REPAIR 决策合并写入 `session_steer_brief`（用户/系统 steering 优先保留在前），并经 `GoalExecutionService.start` 以 `guidance-continue:behavior-repair:` 幂等键自动再调度；护栏（ACTIVE / 无存活 run / 迭代上限 / 预算）在 goal 行锁事务内原子判定（见 §15.5 R3） |
+
+> 上述模块均已实现、具备单元测试且已进主链。"行为修复环"已于 2026-08-23 打通端到端（观测→REPAIR→合并 steering→护栏内自动再调度→agent 消费→再观测确认），可作为"运行时自修复"的验收依据；但自适应编排（运行中重评估组织模式）仍属 §15.5 R2 未竟项。Hive 固定模板 `pm-dev-independent-qa-v1` 作为独立 opt-in 模板并存，与 hub-and-spoke 动态纪律不互斥。
+
+### 15.2 执行编排器精简（2026-08-23）
+
+`execution_orchestrator.py` 移除 7 个旧处理器（requirement_validated / app_build_passed / reorganization_triggered / constraint_violated / organization_selected / adaptive_organization 等），并新增"直达生成"旁路（`_is_direct_generation_goal` / `_bypass_pipeline_to_generation`），缩短纯生成型目标的路径。分类驱动的自动模式选择仍依赖 §15.1 未接线模块。
+
+### 15.3 近期缺陷修复（2026-08-13 → 08-23）
+
+| 缺陷 / 主题 | 文件 | 修复 |
+|---|---|---|
+| #8 冻结计划白名单 | `application/planned_path_policy.py` | 允许前缀 `source/`、后缀 `.sh`/`.conf`，使顶层交付树与脚本/配置通过 `is_path_within_frozen_plan` |
+| #9 / #11 静态产物路由 | `infrastructure/runtime_preview.py`、`infrastructure/deployment.py` | 无 `runtime_profile` 时按 `_artifact_looks_static` 路由静态产物；`_locate_index` 深搜嵌套 `source/static/index.html` |
+| #12 预算账目 | `application/budget_ledger.py` | 悬空 `run_id` 外键引用置空（不中止）；`settle` 复用 `_existing_run_id` |
+| Ship-first 工作区 | `infrastructure/workspace_writer.py`、`planned_path_policy.py` | `REPLACE` 目标缺失降级为 `CREATE`；陈旧 `expected_previous_hash` 仅告警；丢弃 `.regent_*`/`__pycache__` 等 byproduct |
+| Agent 防自循环 | `agent/agent_runner.py` | 滑动窗口指纹（warn@3 / ask@6 / window 12）拦截连续与交替重复工具调用 |
+| 预算预留键 | `application/budget_ledger.py` | "下一空闲后缀"单次查询替换有界探测；已释放键派生 `{key}#r{attempt}` 避免重试死锁 |
+| 引导澄清轮次 | `application/app_guidance_service.py` | fork 决议与边界编号答案计入 `clarification_rounds`（门禁 `rounds >= 2`） |
+| 预览资源白名单 | `api/main.py` | 按扩展名放行媒体类型（html/css/js/svg/png/.../map），未知后缀 404 |
+| Docker 构建 | `core/Dockerfile` | 去重 `skill_packs` 强制包含；pip 升级前先升级 pip/setuptools/wheel 解决 hatchling 冲突 |
+| 控制台对话化 | `apps/regent-console` | 移除 ~147 行，改为对话优先（后端 `/console` 挂载不变） |
+| 监测元数据落库 | `execution_orchestrator.py`、`behavior_monitor_tick.py` | 监测结果写 `goal.metadata_json`（含 `behavior_monitor_preview_url`）缺事务提交，此前根本不落库——已包 `session.begin()` 修复；不修则 worker tick 永远扫不到可观测目标 |
+
+### 15.4 与既有"明确不做"的关系
+
+- 不把 hub-and-spoke / 目标分类 / 运行时监测当作已端到端启用的能力宣称（沿用 §12.5 / §13.6 的不夸大口径）；
+- 不引入框架替换 Kernel（§12.5 不变）；目标分类与组织模式选择为规则实现，不新增 LLM 推断成本；
+- 运行时监测仅做内容/行为层面的异常观察，不替代产品 Observation 的 Gate 语义（PRD §7 / Tech-Spec §12）。
+
+### 15.5 架构对齐三硬要求（2026-08-23 确立）
+
+> 完整差距分析与行动清单见 [`Regent-Architecture-Comparison-2026-08-23.md`](./Regent-Architecture-Comparison-2026-08-23.md)。要求为验收级约束，非方向性口号。
+
+**R1 单 Agent 架构与 Codex 的 ARC-AGI-3 打法差别不能过大。** 操作化定义（依据 OpenAI 官方复现与 ARC Prize 技术报告）：单 Agent ReAct 工具循环 + 推理过程留存 + 上下文压缩 + 同轨迹纠错恢复。现状：范式已对齐；缺口为压缩时的推理状态保留（无显式策略）、无步数效率度量（RHAE 类指标）、工具面无浏览器/通用环境观察。
+
+**R2 在单 Agent 基础上，多 Agent 必须能自适应编排。** 现状：分类→模式→旁路已接线，但为纯规则一次性选择；团队主体仍是固定模板 hive；`max_iterations` 已有消费方（修复环迭代上限，2026-08-23）。自适应最低验收线：里程碑边界/目标修订后可重评估组织模式；护栏内允许 LLM 参与分类判断。确定性 Application Service 不变式不向竞品"计划持有权交给 agent"的模式让步。
+
+**R3 目标一次输入后不得卡死，必须能持续调整优化。** 三通道：① 控制台对话（已闭环：CORRECT→spec v+1→steering 注入，领先竞品）；② 架构自进化（人工门内运转，符合治理口径）；③ 运行时反馈→自修复（**2026-08-23 已闭环**：`BehaviorRepairLoop` 的 REPAIR 决策经 `GoalExecutionService.start` 以 `guidance-continue:behavior-repair:` 幂等键自动再调度，护栏 = 目标 ACTIVE + 无存活 run + `org_mode.max_iterations` 修复上限（缺省 3）+ 预算未 blocked；`application/behavior_monitor_tick.py` 在 worker 主循环按 `behavior_monitor_interval_seconds`（缺省 600s）周期重观测 ACTIVE 目标并进入修复环，监测不再是一次性部署回调）。单测覆盖：再调度触发/默认关闭/迭代上限/非 ACTIVE/存活 run/预算 blocked 六分支，tick 的到期观测/跳过条件/无修复环路径。`max_iterations` 自此有了真实消费方（同时兑现 R2 的该项缺口）。
+
+**并发与覆盖加固（2026-08-23，同日追加）**：① steering **合并写入**而非覆盖——修复环先剥离自己上次的笔记（`behavior_repair_own_brief`），把用户/系统 steering 保留在前、修复指令追加在后，用户指令不再被机器覆盖；② 全部 retrigger 护栏（ACTIVE / 迭代上限 / 存活 run / claim）与 steering 写入纳入**同一 `with_for_update` 行锁事务**，并发修复串行化，消除 check-then-start 竞态；③ 新增 `behavior_repair_retrigger_claim`（TTL 300s，test-and-set 于同一锁内），防止部署回调与 worker tick 双通道重复触发机器执行。单测增至 26 个（含 steering 合并、claim 互斥、TTL 过期分支）。
