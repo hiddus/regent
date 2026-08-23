@@ -175,7 +175,12 @@ class StaticPreviewDeploymentProvider:
             if index is None:
                 raise ValueError("preview requires index.html in build artifact")
             if index.parent != target_dir:
-                shutil.copy2(index, target_dir / "index.html")
+                # Defect #11: artifacts frequently nest the site entry (e.g.
+                # source/static/index.html). Copy the entry directory's files to
+                # the root so relative asset references keep resolving.
+                for item in index.parent.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, target_dir / item.name)
             index_path = target_dir / "index.html"
             html = index_path.read_text(encoding="utf-8")
             # Fail closed: static-html must be fully rendered (no Jinja/Mustache left).
@@ -380,7 +385,12 @@ class StaticPreviewDeploymentProvider:
         ):
             if candidate.is_file():
                 return candidate
-        return None
+        # Deeper layouts (e.g. source/static/index.html): pick the shallowest match.
+        nested = sorted(
+            (p for p in target_dir.rglob("index.html") if p.is_file()),
+            key=lambda p: (len(p.parts), str(p)),
+        )
+        return nested[0] if nested else None
 
     @staticmethod
     def _resolve_artifact(uri: str) -> Path | None:

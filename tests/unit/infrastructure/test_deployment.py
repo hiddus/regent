@@ -140,3 +140,39 @@ async def test_static_preview_publishes_genuine_site_without_event_hooks(
     )
     assert result.status == "SUCCEEDED", result.evidence
     assert result.endpoint
+
+
+@pytest.mark.asyncio
+async def test_static_preview_resolves_nested_entry_dir(tmp_path: Path) -> None:
+    """Defect #11: source/static/index.html layouts must deploy, with assets at root."""
+    css_body = "y" * 900
+    html = (
+        "<html><head><title>小镇</title>"
+        "<style>body{margin:0}main{max-width:900px}"
+        + css_body
+        + "</style></head><body><main>"
+        "<h1>虚拟小镇</h1>"
+        '<section><p>居民按昼夜节律生活，地图展示位置。</p>'
+        "<p>深夜无人出门，白天在集市交流。</p></section>"
+        "</main></body></html>"
+    )
+    artifact = tmp_path / "artifact.zip"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("source/static/index.html", html)
+        zf.writestr("source/static/style.css", "body{}")
+        zf.writestr("README.md", "town")
+    artifact.write_bytes(buf.getvalue())
+    provider = StaticPreviewDeploymentProvider(tmp_path / "previews", base_url="")
+    result = await provider.deploy(
+        DeploymentRequest(
+            build_artifact_uri=artifact.resolve().as_uri(),
+            environment="preview",
+            idempotency_key="static-nested-1",
+            correlation_id="corr",
+        )
+    )
+    assert result.status == "SUCCEEDED", result.evidence
+    # Entry dir files copied to the preview root for relative asset resolution.
+    served = list((tmp_path / "previews").rglob("style.css"))
+    assert served, "assets from the nested entry dir must be published"
