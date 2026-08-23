@@ -61,6 +61,37 @@ def _local_path(uri: str | None) -> Path | None:
     return path if path.exists() else None
 
 
+def _artifact_looks_static(artifact_uri: str | None) -> bool:
+    """True when the build artifact is a static site (index.html, no Python entry).
+
+    Used only when no runtime profile is frozen; the static provider keeps its
+    own fail-closed content checks, so this cannot greenwash a placeholder.
+    """
+    artifact = _local_path(artifact_uri)
+    if artifact is None:
+        return False
+    try:
+        if zipfile.is_zipfile(artifact):
+            with zipfile.ZipFile(artifact) as zf:
+                names = zf.namelist()
+        elif artifact.is_dir():
+            names = [
+                p.relative_to(artifact).as_posix()
+                for p in artifact.rglob("*")
+                if p.is_file()
+            ]
+        else:
+            return False
+    except OSError:
+        return False
+    has_index = any(n == "index.html" or n.endswith("/index.html") for n in names)
+    has_py_entry = any(
+        n in {"src/app.py", "app.py"} or n.endswith(("/src/app.py", "/app.py"))
+        for n in names
+    )
+    return has_index and not has_py_entry
+
+
 def _entry_exists(root: Path, entry_module: str) -> bool:
     """Accept file path, dotted module, or package with __init__.py."""
     direct = root / entry_module
@@ -290,6 +321,14 @@ class RuntimePreviewDeploymentProvider:
         )
         # Ship-first: default missing profile to runtime process, never static zip greenwash.
         preview_type = profile.preview_type if profile else "runtime"
+        if profile is None and _artifact_looks_static(request.build_artifact_uri):
+            # Defect #11: Goals without a frozen runtime_profile defaulted to
+            # runtime preview and failed on pure-static sites with
+            # "entry module missing: src.app". Detect the static shape from the
+            # artifact itself (index.html present, no Python HTTP entry) and
+            # route to the static provider, which still enforces its own
+            # real-content checks (no greenwash).
+            preview_type = "static"
         if preview_type == "static" or preview_type == "none":
             result = await self._static.deploy(request)
             self._deployments[request.idempotency_key] = result

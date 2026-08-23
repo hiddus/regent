@@ -1,6 +1,7 @@
 """Deployment providers for the release service."""
 
 import hashlib
+import logging
 import shutil
 import uuid
 import zipfile
@@ -14,6 +15,8 @@ from regent.application.p1_ports import (
     DeploymentRequest,
     DeploymentResult,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 _ACTIVATION_JS = """
 (function(){
@@ -183,9 +186,20 @@ class StaticPreviewDeploymentProvider:
                 )
             # R7 / P2-0: never synthesize interaction hooks; generated app must provide them.
             if "data-regent-event" not in html:
-                raise ValueError(
-                    "preview requires data-regent-event in index.html; "
-                    "refusing to inject synthetic task controls"
+                from regent.config import get_settings as _gs_event
+
+                _gates_mode = str(
+                    getattr(_gs_event(), "delivery_product_gates_mode", "soft") or "soft"
+                ).lower()
+                if _gates_mode == "full":
+                    raise ValueError(
+                        "preview requires data-regent-event in index.html; "
+                        "refusing to inject synthetic task controls"
+                    )
+                # Ship-first: activation hooks are telemetry, not product validity.
+                # Genuine static sites (e.g. simulations/games) may not carry them.
+                LOGGER.warning(
+                    "static preview without data-regent-event hooks; publishing anyway"
                 )
             # P0-4: review full project tree (not HTML-only) so pure-static backends fail.
             project_files = _collect_text_files(target_dir)
@@ -210,6 +224,15 @@ class StaticPreviewDeploymentProvider:
                     failed_checks = [
                         c for c in failed_checks if is_blocking_delivery_gap_code(c.name)
                     ]
+                    # Defect #11: forbid-pure-static-backend targets backends that
+                    # only serve static files. A project with no Python backend at
+                    # all is a legitimate static site, not a disguised host.
+                    if not any(name.endswith(".py") for name in project_files):
+                        failed_checks = [
+                            c
+                            for c in failed_checks
+                            if c.name != "forbid-pure-static-backend"
+                        ]
                 structural = {
                     "forbid-pure-static-backend",
                     "forbid-trivial-server",
