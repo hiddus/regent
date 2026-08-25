@@ -11,6 +11,7 @@ export default function App() {
   const ws = useWorkspace()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sending, setSending] = useState(false)
+  const [sendQueue, setSendQueue] = useState<string[]>([])
   const [confirming, setConfirming] = useState(false)
   const [pendingSend, setPendingSend] = useState<{ text: string; startedAt: number; state: 'processing' | 'failed'; error?: string } | null>(null)
   const [projectViewOpen, setProjectViewOpen] = useState(true)
@@ -35,6 +36,8 @@ export default function App() {
   }, [ws.messages.length, lastMessageId])
 
   const handleNew = useCallback(() => {
+    setSendQueue([])
+    setPendingSend(null)
     ws.setCurrentProject(null)
     ws.setCurrentConv(null)
     ws.setMessages([])
@@ -42,7 +45,7 @@ export default function App() {
     ws.setHint('')
   }, [ws])
 
-  const handleSend = useCallback(async (text: string) => {
+  const processSend = useCallback(async (text: string) => {
     setPendingSend({ text, startedAt: Date.now(), state: 'processing' })
     setSending(true)
     try {
@@ -88,6 +91,17 @@ export default function App() {
       setSending(false)
     }
   }, [ws])
+
+  const handleSend = useCallback((text: string) => {
+    setSendQueue(queue => [...queue, text])
+  }, [])
+
+  useEffect(() => {
+    if (sending || sendQueue.length === 0) return
+    const [next, ...rest] = sendQueue
+    setSendQueue(rest)
+    void processSend(next)
+  }, [processSend, sendQueue, sending])
 
   const handleSelectOption = useCallback(async (
     projectId: string,
@@ -269,7 +283,8 @@ export default function App() {
         <Composer
           onSend={handleSend}
           onUpload={handleUpload}
-          disabled={sending}
+          busy={sending}
+          queuedCount={sendQueue.length}
           goalStatus={ws.status?.goal?.status || ws.currentProject?.status || null}
         />
       </main>

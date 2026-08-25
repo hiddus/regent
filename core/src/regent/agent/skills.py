@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 SKILLS_ROOT = Path(__file__).resolve().parent / "skill_packs"
+MAX_SELECTED_SKILL_CHARS = 2_800
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.S)
 
 
@@ -255,13 +256,20 @@ def _merge_lessons(
     lessons = path.read_text(encoding="utf-8").strip()
     if not lessons:
         return guidance
+    if len(lessons) > 1_600:
+        lessons = "...[older lessons omitted]\n" + lessons[-1_600:]
     block = (
         "\n\n## Evolved harness lessons (self-evolution)\n"
         "These lessons were accepted only after strict score improvement. "
         "Follow them; do not weaken product QA gates.\n\n"
         f"{lessons}\n"
     )
-    return (guidance or "") + block
+    merged = (guidance or "") + block
+    if len(merged) <= MAX_SELECTED_SKILL_CHARS:
+        return merged
+    # Preserve the stable contract head and the newest evolved lesson tail.
+    head_budget = MAX_SELECTED_SKILL_CHARS - min(len(block), 1_700) - 30
+    return merged[: max(800, head_budget)] + "\n...[guidance condensed]\n" + block[-1_700:]
 
 
 def list_builtin_skill_ids(*, root: Path | None = None) -> list[str]:
@@ -329,6 +337,39 @@ _CJK_WEB_HINTS = (
 )
 
 
+def _routing_token_matches(token: str, raw: str) -> bool:
+    needle = str(token or "").strip().lower()
+    if not needle:
+        return False
+    text = str(raw or "").lower()
+    if any("\u4e00" <= ch <= "\u9fff" for ch in needle):
+        return needle in text
+    # Bare substring matching made `ui` match `requires`. Treat underscores
+    # and punctuation as separators so contract keys still route correctly.
+    suffix = r"[a-z0-9]*" if len(needle) >= 5 and " " not in needle else ""
+    pattern = rf"(?<![a-z0-9]){re.escape(needle)}{suffix}(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
+def _routing_token_score(token: str, raw: str) -> int:
+    needle = str(token or "").strip().lower()
+    normalized = str(raw or "").lower()
+    required_capabilities = re.findall(
+        r'\brequires?_([a-z0-9_]+)\b', normalized
+    )
+    required = len(needle) >= 4 and any(
+        capability == needle
+        or capability.startswith(needle)
+        or needle.startswith(capability)
+        for capability in required_capabilities
+    )
+    if not required and not _routing_token_matches(token, raw):
+        return 0
+    # A hard acceptance-contract flag must survive the two-skill prompt budget,
+    # even when a broad domain skill matches several words in the description.
+    return 20 if required else 3
+
+
 def select_skills_for_goal(
     goal_text: str,
     *,
@@ -336,45 +377,61 @@ def select_skills_for_goal(
     root: Path | None = None,
     lessons_workspace: Path | None = None,
     gap_codes: list[str] | None = None,
+    max_skills: int = 2,
 ) -> list[SkillManifest]:
-    """Lightweight keyword router with progressive disclosure (catalog → full load)."""
+    """Score the catalog, then load only the few skills useful for this turn."""
     if not enabled:
         return []
     raw = goal_text or ""
     text = raw.lower()
     catalog = load_skill_catalog(root=root)
-    chosen_ids: list[str] = []
+    scores: dict[str, int] = {}
     for entry in catalog:
-        if any(token.lower() in text or token in raw for token in entry.applies_when):
-            chosen_ids.append(entry.skill_id)
+        positive = sum(
+            _routing_token_score(token, raw) for token in entry.applies_when
+        )
+        if positive:
+            scores[entry.skill_id] = positive
     # Route by open delivery / live-QA gap codes (PenguinHarness evaluate→skill).
     for gap in gap_codes or []:
         head = str(gap).split(":", 1)[-1].strip()
         for entry in catalog:
             if head in entry.gap_codes or str(gap) in entry.gap_codes:
-                chosen_ids.append(entry.skill_id)
+                scores[entry.skill_id] = scores.get(entry.skill_id, 0) + 10
     # English web shapes.
-    if not chosen_ids and any(k in text for k in ("app", "web", "flask", "api", "site")):
+    if not scores and any(k in text for k in ("app", "web", "flask", "api", "site")):
         ids = {e.skill_id for e in catalog}
         if "runtime-contract" in ids:
-            chosen_ids.append("runtime-contract")
+            scores["runtime-contract"] = 2
     # W4: Chinese product goals often miss English tokens — inject defaults.
     has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in raw)
-    if not chosen_ids and (
+    if not scores and (
         any(h in raw for h in _CJK_WEB_HINTS)
         or (has_cjk and len(raw.strip()) >= 4)
     ):
         ids = {e.skill_id for e in catalog}
-        for sid in ("runtime-contract", "web-app-scaffold", "persistence", "ui", "product"):
+        for rank, sid in enumerate(("runtime-contract", "product"), start=1):
             if sid in ids:
-                chosen_ids.append(sid)
-    # Deduplicate preserving order; load full guidance only now.
-    seen: set[str] = set()
-    chosen: list[SkillManifest] = []
-    for sid in chosen_ids:
-        if sid in seen:
+                scores[sid] = 3 - rank
+    # Apply negative routing only to shortlisted metadata matches. Full
+    # guidance for unrelated skills is never loaded.
+    for sid in list(scores):
+        try:
+            manifest = load_skill_manifest(sid, root=root)
+        except (FileNotFoundError, OSError, ValueError, KeyError):
+            scores.pop(sid, None)
             continue
-        seen.add(sid)
+        penalty = sum(
+            5 for token in manifest.anti_examples
+            if _routing_token_matches(token, raw)
+        )
+        scores[sid] -= penalty
+        if scores[sid] <= 0:
+            scores.pop(sid, None)
+    # Deduplicate preserving order; load full guidance only now.
+    chosen: list[SkillManifest] = []
+    ranked_ids = sorted(scores, key=lambda sid: (-scores[sid], sid))
+    for sid in ranked_ids[: max(0, int(max_skills))]:
         chosen.append(
             load_skill_manifest(
                 sid, root=root, lessons_workspace=lessons_workspace

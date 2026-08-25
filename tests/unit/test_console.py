@@ -18,3 +18,13 @@ def test_console_is_a_persistent_conversation_workspace() -> None:
     assert "conversation_id" in types
     assert "PREVIEW_READY" in hooks
     assert "execution_stage" in hooks
+
+
+def test_console_supports_explicit_steering_and_queued_messages() -> None:
+    app = (_SRC / "App.tsx").read_text(encoding="utf-8")
+    composer = (_SRC / "components" / "Composer.tsx").read_text(encoding="utf-8")
+    assert "sendQueue" in app
+    assert "queuedCount" in composer
+    assert "[${intent}]" in composer
+    for label in ("补充信息", "纠正方向", "询问进度", "继续执行"):
+        assert label in composer

@@ -123,6 +123,8 @@ def micro_compact(
         else set()
     )
 
+    assistant_indices = [i for i, m in enumerate(messages) if m.role == "assistant"]
+    stale_reasoning = set(assistant_indices[:-2])
     compacted: list[ChatMessage] = []
     for i, msg in enumerate(messages):
         if i in clear_tool_set and msg.content and msg.content != "[cleared]":
@@ -132,7 +134,7 @@ def micro_compact(
                     content="[cleared]",
                     tool_call_id=msg.tool_call_id,
                     name=msg.name,
-                    reasoning_content=getattr(msg, "reasoning_content", None),
+                    reasoning_content=None,
                 )
             )
             continue
@@ -157,10 +159,22 @@ def micro_compact(
                         tool_calls=new_calls,
                         tool_call_id=msg.tool_call_id,
                         name=msg.name,
-                        reasoning_content=getattr(msg, "reasoning_content", None),
+                        reasoning_content=None,
                     )
                 )
                 continue
+        if i in stale_reasoning and getattr(msg, "reasoning_content", None):
+            compacted.append(
+                ChatMessage(
+                    role=msg.role,
+                    content=msg.content,
+                    tool_calls=list(msg.tool_calls or []),
+                    tool_call_id=msg.tool_call_id,
+                    name=msg.name,
+                    reasoning_content=None,
+                )
+            )
+            continue
         compacted.append(msg)
     return compacted
 
@@ -271,13 +285,6 @@ class ContextCompactor:
             text = (msg.content or "")[:2_000]
             if text:
                 blob_parts.append(f"[{prefix}] {text}")
-            # Retain reasoning content from assistant turns (Codex Harness
-            # "retained reasoning" pattern).  Truncate to 1000 chars to keep
-            # the summary compact while preserving the model's chain-of-thought.
-            reasoning = getattr(msg, "reasoning_content", None)
-            if msg.role == "assistant" and reasoning:
-                reasoning_text = reasoning[:1_000]
-                blob_parts.append(f"[reasoning] {reasoning_text}")
         blob = "\n".join(blob_parts[-40:])
         if self._summarizer is not None:
             return await self._summarizer.summarize(blob)

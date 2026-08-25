@@ -177,6 +177,11 @@ def _ensure_preview_deps(workspace: Path, profile: RuntimeProfileV1 | None) -> d
             req_text = reqs.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             req_text = ""
+    if not req_text.strip() and profile is not None and not profile.install_command:
+        # A custom runtime profile may intentionally use only the Python
+        # standard library. Do not invent Flask/FastAPI dependencies from the
+        # project_shape label and attempt a network install.
+        return {"skipped": True, "reason": "profile_declares_no_install"}
     if not req_text.strip() and profile is None:
         return {"skipped": True, "reason": "no_requirements"}
     packages = _runtime_packages(profile, req_text)

@@ -78,6 +78,37 @@ def test_assemble_includes_skill_guidance() -> None:
     assert "SQLite persistence" in static_blob
 
 
+def test_non_web_prompt_does_not_invent_web_delivery_contract() -> None:
+    assembler = ContextAssembler(
+        plan={"goal_anchor_text": "实现一个 CSV 去重命令行工具"},
+        toolkit=_toolkit(),
+    )
+    prompt = assembler.system_prompt()
+    assert "non-Web/general delivery" in prompt
+    assert "HTTP app object MUST" not in prompt
+
+
+def test_generic_desktop_application_is_not_misclassified_as_web() -> None:
+    assembler = ContextAssembler(
+        plan={"goal_anchor_text": "实现一个本地桌面应用"},
+        toolkit=_toolkit(),
+    )
+    assert "non-Web/general delivery" in assembler.system_prompt()
+
+
+def test_retrieved_memory_is_a_separate_evidence_gated_segment() -> None:
+    assembler = ContextAssembler(
+        plan={
+            "goal_anchor_text": "build api",
+            "retrieved_memory": "- verified_memory=1 relevance=3 use sqlite",
+        },
+        toolkit=_toolkit(),
+    )
+    segment = assembler.static_prefix_text()
+    assert "RELEVANT VERIFIED MEMORY" in segment
+    assert "verified_memory=1" in segment
+
+
 def test_assemble_omits_skill_segment_when_empty() -> None:
     assembler = ContextAssembler(plan={"goal_anchor_text": "x"}, toolkit=_toolkit())
     messages = assembler.assemble(turn=0, conversation=[])

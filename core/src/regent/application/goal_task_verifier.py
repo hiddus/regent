@@ -43,8 +43,7 @@ class GoalTaskVerdict:
             "passed": self.passed,
             "summary": self.summary,
             "criteria": [
-                {"label": c.label, "passed": c.passed, "detail": c.detail}
-                for c in self.criteria
+                {"label": c.label, "passed": c.passed, "detail": c.detail} for c in self.criteria
             ],
             "skipped_reason": self.skipped_reason,
         }
@@ -54,7 +53,10 @@ class GoalTaskVerdict:
 # Each entry: (regex matching criterion text, check function name).
 _CRITERION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:页面|page|screen|视图).*(?:登录|login|sign.?in)", re.I), "has_login_page"),
-    (re.compile(r"(?:页面|page|screen|视图).*(?:注册|register|sign.?up)", re.I), "has_register_page"),
+    (
+        re.compile(r"(?:页面|page|screen|视图).*(?:注册|register|sign.?up)", re.I),
+        "has_register_page",
+    ),
     (re.compile(r"(?:表单|form|输入|input).*(?:提交|submit)", re.I), "has_submit_form"),
     (re.compile(r"(?:列表|list|目录|catalog).*(?:展示|display|show)", re.I), "has_list_display"),
     (re.compile(r"(?:搜索|search|查询|find)", re.I), "has_search"),
@@ -106,8 +108,8 @@ async def verify_goal_task_completion(
         criteria_map = _extract_criteria_labels(goal_input)
     if not criteria_map:
         return GoalTaskVerdict(
-            passed=True,
-            summary="no specific task criteria to verify (proxy QA authoritative)",
+            passed=False,
+            summary="success criteria could not be compiled into executable task checks",
             skipped_reason="no_criteria_matched",
         )
 
@@ -132,7 +134,11 @@ async def verify_goal_task_completion(
 
         for check_name in check_names:
             result = await _run_task_check(
-                http, preview_url, home_html, home_lower, check_name,
+                http,
+                preview_url,
+                home_html,
+                home_lower,
+                check_name,
             )
             results.append(result)
 
@@ -161,48 +167,62 @@ async def _run_task_check(
         if not ok:
             # Check for a login link.
             ok = bool(re.search(r'href=["\'][^"\']*(?:login|signin|sign-in)', home_lower))
-        return TaskCriterion("has_login_page", ok, "login page/link found" if ok else "no login surface detected")
+        return TaskCriterion(
+            "has_login_page", ok, "login page/link found" if ok else "no login surface detected"
+        )
 
     if check_name == "has_register_page":
         ok = any(kw in home_lower for kw in ("register", "sign-up", "signup", "注册"))
         if not ok:
             ok = bool(re.search(r'href=["\'][^"\']*(?:register|signup|sign-up)', home_lower))
-        return TaskCriterion("has_register_page", ok, "register surface found" if ok else "no register surface")
+        return TaskCriterion(
+            "has_register_page", ok, "register surface found" if ok else "no register surface"
+        )
 
     if check_name == "has_submit_form":
         ok = "<form" in home_lower
         if not ok:
             ok = bool(re.search(r'<input[^>]+type=["\'](?:submit|button)', home_lower))
-        return TaskCriterion("has_submit_form", ok, "form/submit found" if ok else "no form element")
+        return TaskCriterion(
+            "has_submit_form", ok, "form/submit found" if ok else "no form element"
+        )
 
     if check_name == "has_list_display":
         ok = home_lower.count("<article") >= 1 or home_lower.count("<li") >= 3
         if not ok:
             ok = bool(re.search(r'class=["\'][^"\']*(?:card|item|list|grid)', home_lower))
-        return TaskCriterion("has_list_display", ok, "list/card elements found" if ok else "no list surface")
+        return TaskCriterion(
+            "has_list_display", ok, "list/card elements found" if ok else "no list surface"
+        )
 
     if check_name == "has_search":
-        ok = '<input' in home_lower and any(
-            kw in home_lower for kw in ('type="search"', 'type="text"', 'placeholder="search', 'placeholder="搜索')
+        ok = "<input" in home_lower and any(
+            kw in home_lower
+            for kw in ('type="search"', 'type="text"', 'placeholder="search', 'placeholder="搜索')
         )
         if not ok:
-            ok = bool(re.search(r'(?:search|查询|搜索)', home_lower))
+            ok = bool(re.search(r"(?:search|查询|搜索)", home_lower))
         return TaskCriterion("has_search", ok, "search input found" if ok else "no search surface")
 
     if check_name == "has_responsive":
-        ok = 'viewport' in home_lower and 'meta' in home_lower
+        ok = "viewport" in home_lower and "meta" in home_lower
         if not ok:
-            ok = bool(re.search(r'@media\s', home_lower))
-        return TaskCriterion("has_responsive", ok, "viewport/media query found" if ok else "no responsive signals")
+            ok = bool(re.search(r"@media\s", home_lower))
+        return TaskCriterion(
+            "has_responsive", ok, "viewport/media query found" if ok else "no responsive signals"
+        )
 
     if check_name == "has_navigation":
         ok = any(tag in home_lower for tag in ("<nav", 'role="navigation"'))
         if not ok:
             # Multiple internal links imply navigation.
             from regent.application.live_preview_qa import _pick_nav_candidates
+
             nav_urls = _pick_nav_candidates(home_html, base_url=base_url, limit=3)
             ok = len(nav_urls) >= 2
-        return TaskCriterion("has_navigation", ok, "navigation structure found" if ok else "no navigation")
+        return TaskCriterion(
+            "has_navigation", ok, "navigation structure found" if ok else "no navigation"
+        )
 
     if check_name == "has_tests":
         # Check for test files in the product — requires probing /tests or similar.
@@ -210,21 +230,32 @@ async def _run_task_check(
             try:
                 resp = await http.get(base_url.rstrip("/") + test_path)
                 if resp.status_code < 400:
-                    return TaskCriterion("has_tests", True, f"test directory reachable at {test_path}")
+                    return TaskCriterion(
+                        "has_tests", True, f"test directory reachable at {test_path}"
+                    )
             except Exception:
                 pass
         # Fallback: check home page for test references.
-        ok = bool(re.search(r'(?:test|spec)\.(?:js|ts|py)', home_lower))
+        ok = bool(re.search(r"(?:test|spec)\.(?:js|ts|py)", home_lower))
         return TaskCriterion("has_tests", ok, "test references found" if ok else "no test evidence")
 
     if check_name == "has_api_routes":
-        ok = bool(re.search(r'(?:/api/|fetch\(|axios\.|xhr|endpoint)', home_lower))
-        return TaskCriterion("has_api_routes", ok, "API route references found" if ok else "no API evidence")
+        ok = bool(re.search(r"(?:/api/|fetch\(|axios\.|xhr|endpoint)", home_lower))
+        return TaskCriterion(
+            "has_api_routes", ok, "API route references found" if ok else "no API evidence"
+        )
 
     if check_name == "has_data_persistence":
-        ok = any(kw in home_lower for kw in ("localstorage", "sessionstorage", "indexeddb", "数据库", "database"))
+        ok = any(
+            kw in home_lower
+            for kw in ("localstorage", "sessionstorage", "indexeddb", "数据库", "database")
+        )
         if not ok:
-            ok = bool(re.search(r'(?:/api/|fetch\(|post\(|put\(|delete\()', home_lower))
-        return TaskCriterion("has_data_persistence", ok, "persistence signals found" if ok else "no data persistence evidence")
+            ok = bool(re.search(r"(?:/api/|fetch\(|post\(|put\(|delete\()", home_lower))
+        return TaskCriterion(
+            "has_data_persistence",
+            ok,
+            "persistence signals found" if ok else "no data persistence evidence",
+        )
 
-    return TaskCriterion(check_name, True, f"check {check_name} auto-passed (unknown)")
+    return TaskCriterion(check_name, False, f"unsupported task check: {check_name}")

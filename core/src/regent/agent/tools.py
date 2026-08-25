@@ -28,7 +28,11 @@ TOOL_SPECS: list[ToolSpec] = [
                 "directory": {
                     "type": "string",
                     "description": "Relative directory to list (default '.').",
-                }
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Legacy alias for directory.",
+                },
             },
             "additionalProperties": False,
         },
@@ -259,6 +263,50 @@ TOOL_SPECS: list[ToolSpec] = [
         },
     ),
 ]
+
+
+def validate_tool_call(call: ToolCall) -> None:
+    """Fail closed on malformed tool actions before they can mutate state.
+
+    Providers normally enforce the JSON schema, but Regent's local protocol is
+    the final authority, analogous to an environment action guard.
+    """
+    spec = next((item for item in TOOL_SPECS if item.name == call.name), None)
+    if spec is None:
+        raise ValueError(f"unknown tool: {call.name}")
+    _validate_schema_value(dict(call.arguments or {}), spec.parameters, path=call.name)
+
+
+def _validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
+    expected = schema.get("type")
+    type_ok = {
+        "object": lambda item: isinstance(item, dict),
+        "array": lambda item: isinstance(item, list),
+        "string": lambda item: isinstance(item, str),
+        "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+        "boolean": lambda item: isinstance(item, bool),
+        "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
+    }
+    if expected in type_ok and not type_ok[expected](value):
+        raise ValueError(f"{path} must be {expected}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path} must be one of {schema['enum']}")
+    if expected == "object":
+        properties = dict(schema.get("properties") or {})
+        for key in schema.get("required") or []:
+            if key not in value:
+                raise ValueError(f"{path}.{key} is required")
+        if schema.get("additionalProperties") is False:
+            unknown = sorted(set(value) - set(properties))
+            if unknown:
+                raise ValueError(f"{path} has unknown arguments: {', '.join(unknown)}")
+        for key, item in value.items():
+            child = properties.get(key)
+            if isinstance(child, dict):
+                _validate_schema_value(item, child, path=f"{path}.{key}")
+    elif expected == "array" and isinstance(schema.get("items"), dict):
+        for index, item in enumerate(value):
+            _validate_schema_value(item, schema["items"], path=f"{path}[{index}]")
 
 
 class CommandSandbox(Protocol):
@@ -565,9 +613,12 @@ class WorkspaceToolkit:
         )
 
     async def execute(self, call: ToolCall) -> str:
+        validate_tool_call(call)
         try:
             if call.name == "list_files":
-                directory = str(call.arguments.get("directory") or ".")
+                directory = str(
+                    call.arguments.get("directory") or call.arguments.get("path") or "."
+                )
                 return json.dumps(self.list_tree(directory), ensure_ascii=False)
             if call.name == "glob":
                 pattern = str(call.arguments["pattern"])

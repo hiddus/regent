@@ -2494,3 +2494,30 @@ body {
   margin-bottom: 4px;
   font-weight: 600;
 }
+.composer-intents {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 7px;
+  min-height: 28px;
+}
+
+.composer-intents button {
+  border: 1px solid var(--border, #d9d9df);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.composer-intents button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.composer-queue-status {
+  margin-left: auto;
+  color: var(--muted, #777);
+  font-size: 12px;
+}

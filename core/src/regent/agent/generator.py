@@ -124,6 +124,19 @@ class AgenticCodeGenerator:
             or self._project_memory.load_regent_md(project_id)
             or _load_regent_md(plan)
         )
+        if self._sessions is not None and not plan.get("retrieved_memory"):
+            org_memory = await self._project_memory.relevant_verified_memory(
+                str(plan.get("org_key") or "default"),
+                query=str(plan.get("goal_anchor_text") or ""),
+            )
+            project_memory = await self._project_memory.relevant_verified_memory(
+                f"project:{project_id}",
+                query=str(plan.get("goal_anchor_text") or ""),
+                include_unmatched=True,
+            ) if project_id else ""
+            retrieved = "\n".join(x for x in (project_memory, org_memory) if x)
+            if retrieved:
+                plan = {**plan, "retrieved_memory": retrieved}
 
         toolkit = WorkspaceToolkit(sandbox, command_sandbox=build_agent_sandbox())
         prior_gaps = _gaps_from_plan(plan)

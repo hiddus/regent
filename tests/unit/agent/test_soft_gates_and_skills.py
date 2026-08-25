@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -102,3 +103,32 @@ def test_select_skills_uses_catalog() -> None:
     ids = {s.skill_id for s in skills}
     assert "web-app-scaffold" in ids or "runtime-contract" in ids
     assert all(s.guidance for s in skills)
+    assert len(skills) <= 2
+
+
+def test_skill_router_can_use_acceptance_contract_text() -> None:
+    skills = select_skills_for_goal(
+        'Flask 反馈收集表单\n{"requires_persistence": true}'
+    )
+    assert "persistence" in {skill.skill_id for skill in skills}
+
+
+def test_frozen_m0_tasks_keep_contract_critical_skills() -> None:
+    task_set_path = Path(__file__).parents[3] / "fixtures" / "agent_core_m0_task_set_v1.json"
+    tasks = json.loads(task_set_path.read_text(encoding="utf-8"))["tasks"]
+    selected: dict[str, set[str]] = {}
+    for task in tasks:
+        routing_text = "\n".join(
+            (
+                task["description"],
+                json.dumps(task["success_criteria"], ensure_ascii=False, sort_keys=True),
+            )
+        )
+        skills = select_skills_for_goal(routing_text)
+        assert len(skills) <= 2
+        selected[task["id"]] = {skill.skill_id for skill in skills}
+
+    assert "evidence" in selected["m0-04"]
+    assert "persistence" in selected["m0-05"]
+    assert "test-harness" in selected["m0-06"]
+    assert "test-harness" in selected["m0-09"]

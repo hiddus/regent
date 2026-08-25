@@ -677,10 +677,11 @@ class OrganizationService:
         """
         from regent.application.aar1_contract import (
             CERTIFIED_HIVE_TEMPLATE_ID,
+            SINGLE_AGENT_TEMPLATE_ID,
             certified_hive_preferred,
             is_certified_hive_topology,
         )
-        from regent.application.hive_policy import force_single_agent
+        from regent.application.hive_policy import hive_opt_in_allowed
         from regent.application.hive_runtime import materialize_hive_topology
         from regent.application.organization_engine import OrganizationEngine
         from regent.config import get_settings
@@ -728,11 +729,12 @@ class OrganizationService:
                 (goal_obj_for_features.metadata_json if goal_obj_for_features else {})
                 or {}
             )
-            preferred = (
-                None
-                if force_single_agent(goal_meta)
-                else certified_hive_preferred(enabled=settings.aar1_certified_hive)
+            hive_requested = hive_opt_in_allowed(goal_meta)
+            preferred = certified_hive_preferred(
+                enabled=settings.aar1_certified_hive and hive_requested
             )
+            if preferred is None:
+                preferred = SINGLE_AGENT_TEMPLATE_ID
             measured_baseline = goal_meta.get("single_agent_baseline_success_rate")
             work_count = len(works)
             task_features = TaskFeatures(
@@ -874,7 +876,9 @@ class OrganizationService:
                     "phase": "contract",
                     "engine_selected": template_id,
                     "legacy_dual_write": False,
-                    "certified_hive_opt_in": bool(preferred),
+                    "certified_hive_opt_in": bool(
+                        hive_requested and preferred == CERTIFIED_HIVE_TEMPLATE_ID
+                    ),
                     "available_capabilities": sorted(available),
                 }
                 goal_obj.metadata_json = meta

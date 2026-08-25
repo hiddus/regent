@@ -496,3 +496,51 @@ def test_sidebar_exhausted_is_not_complete_label() -> None:
     assert "继续尝试" in source
     assert "DEPLOY_NOT_SUCCEEDED: '部署未成功，正在重试'" in source
     assert "DEPLOY_NOT_SUCCEEDED_NEEDS_HUMAN: '部署失败，需要你介入'" in source
+
+
+@pytest.mark.asyncio
+async def test_quality_approval_resolves_waiting_goal_before_achieve(db_sessions) -> None:
+    from regent.infrastructure.models import AppProjectModel, GoalModel
+
+    project_id = uuid.uuid4()
+    goal_id = uuid.uuid4()
+    async with db_sessions() as session, session.begin():
+        session.add(
+            AppProjectModel(
+                id=project_id,
+                name="review-project",
+                product_intent="review delivered preview",
+                status="ACTIVE",
+                created_by="test",
+            )
+        )
+        session.add(
+            GoalModel(
+                id=goal_id,
+                app_project_id=project_id,
+                original_input="build a reviewed product",
+                status="WAITING_HUMAN",
+                version=2,
+                created_by="test",
+                correlation_id=uuid.uuid4(),
+                metadata_json={
+                    "execution_stage": "DELIVERED_AWAITING_REVIEW",
+                    "pending_quality_task_id": str(uuid.uuid4()),
+                },
+            )
+        )
+
+    await ExecutionOrchestrator(db_sessions).handle_quality_approval_completed(
+        {
+            "goal_id": str(goal_id),
+            "actor": "owner",
+            "approved": True,
+            "feedback": "accepted",
+        }
+    )
+
+    async with db_sessions() as session:
+        goal = await session.get(GoalModel, goal_id)
+        assert goal is not None
+        assert goal.status == "ACHIEVED"
+        assert goal.metadata_json["quality_approved_by"] == "owner"

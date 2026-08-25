@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -9,7 +10,7 @@ from regent.application.learning_update_service import (
     ProposeLearningUpdate,
 )
 from regent.domain.errors import DomainError, ErrorCode
-from regent.infrastructure.models import LearningUpdateModel
+from regent.infrastructure.models import AppProjectModel, GoalModel, LearningUpdateModel
 
 
 def proposal(**overrides):
@@ -110,3 +111,60 @@ async def test_rollback_reference_must_target_same_object(db_sessions) -> None:
                 rollback_update_id=original.id,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_failure_candidate_is_idempotent_and_applied_by_later_plan(db_sessions) -> None:
+    project_id = uuid.uuid4()
+    goal_id = uuid.uuid4()
+    async with db_sessions() as session, session.begin():
+        session.add(
+            AppProjectModel(
+                id=project_id,
+                name="learning-project",
+                product_intent="learn from generation failures",
+                status="ACTIVE",
+                created_by="test",
+            )
+        )
+        session.add(
+            GoalModel(
+                id=goal_id,
+                app_project_id=project_id,
+                original_input="build app",
+                status="ACTIVE",
+                version=1,
+                created_by="test",
+                correlation_id=uuid.uuid4(),
+                metadata_json={},
+            )
+        )
+
+    service = LearningUpdateService(db_sessions)
+    first = await service.propose_failure_constraint(
+        goal_id=goal_id,
+        org_key=f"project:{project_id}",
+        failure_code="SMOKE_FAILED",
+        summary="GET / returned 500",
+        avoid="verify the root route before submit",
+    )
+    replay = await service.propose_failure_constraint(
+        goal_id=goal_id,
+        org_key=f"project:{project_id}",
+        failure_code="SMOKE_FAILED",
+        summary="GET / returned 500",
+        avoid="verify the root route before submit",
+    )
+    assert replay.id == first.id
+    assert first.status == "PROPOSED"
+
+    applied = await service.apply_pending_for_goal(
+        goal_id=goal_id,
+        consumer_type="generation_plan",
+        consumer_ref="plan-2",
+    )
+    assert applied == [first.id]
+    async with db_sessions() as session:
+        refreshed = await session.get(LearningUpdateModel, first.id)
+        assert refreshed is not None
+        assert refreshed.status == "APPLIED"

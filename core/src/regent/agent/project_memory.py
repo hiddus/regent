@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,7 @@ class ProjectMemoryService:
         structure: list[str],
         gaps: list[str],
         verification_summary: str,
+        verification_passed: bool | None = None,
     ) -> str:
         """Incremental distill without requiring an LLM call."""
         sections: dict[str, list[str]] = {
@@ -86,7 +88,9 @@ class ProjectMemoryService:
                 sections[current].append(stripped)
 
         if goal_text:
-            sections["Goal lessons"].append(f"- Goal: {goal_text[:240]}")
+            item = f"- Goal: {goal_text[:240]}"
+            if item not in sections["Goal lessons"]:
+                sections["Goal lessons"].append(item)
         for hint in stack_hints:
             item = f"- {hint}"
             if item not in sections["Tech stack"]:
@@ -95,12 +99,16 @@ class ProjectMemoryService:
             item = f"- {path}"
             if item not in sections["Structure"]:
                 sections["Structure"].append(item)
+        if verification_passed is True:
+            sections["Known constraints / gaps"] = []
         for gap in gaps[:12]:
             item = f"- {gap}"
             if item not in sections["Known constraints / gaps"]:
                 sections["Known constraints / gaps"].append(item)
         if verification_summary:
-            sections["Verification"].append(f"- {verification_summary[:300]}")
+            item = f"- {verification_summary[:300]}"
+            if item not in sections["Verification"]:
+                sections["Verification"].append(item)
 
         lines = ["# REGENT.md", "", "Project memory distilled from delivery runs.", ""]
         for title, items in sections.items():
@@ -134,6 +142,7 @@ class ProjectMemoryService:
             structure=structure,
             gaps=gaps,
             verification_summary=verification_summary,
+            verification_passed=verification_passed,
         )
         if project_id:
             self.write_regent_md(project_id, distilled)
@@ -161,7 +170,16 @@ class ProjectMemoryService:
                 )
             )
             if verification_passed and stack:
-                await self._memories.admit(
+                pattern_key = json.dumps(
+                    {
+                        "pattern": "verified_delivery_stack",
+                        "stack": sorted(stack),
+                        "generator_ref": generator_ref,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                await self._memories.reinforce_semantic(
                     AdmitMemory(
                         org_key=org_key,
                         kind=MemoryKind.SEMANTIC_PATTERN.value,
@@ -173,7 +191,9 @@ class ProjectMemoryService:
                         },
                         actor=actor,
                         goal_id=goal_id,
-                    )
+                    ),
+                    memory_key=pattern_key,
+                    verification_threshold=2,
                 )
         return distilled
 
@@ -186,9 +206,84 @@ class ProjectMemoryService:
         if self._memories is None:
             return []
         rows = await self._memories.query_by_kind(
-            org_key, MemoryKind.SEMANTIC_PATTERN.value, limit=limit
+            org_key,
+            "semantic.",
+            limit=max(limit * 4, limit),
+            verified_only=True,
         )
-        return [dict(r.content_json or {}) for r in rows]
+        return [dict(r.content_json or {}) for r in rows[:limit]]
+
+    async def relevant_verified_memory(
+        self,
+        org_key: str,
+        *,
+        query: str,
+        limit: int = 4,
+        max_chars: int = 4_000,
+        include_unmatched: bool = False,
+    ) -> str:
+        """Return a small, evidence-gated memory slice for the current goal.
+
+        CANDIDATE memories are deliberately excluded: an unverified run must not
+        become an instruction merely because it was recorded recently.
+        """
+        if self._memories is None or not org_key or not query.strip():
+            return ""
+        rows = await self._memories.query_by_kind(
+            org_key, "semantic.", limit=50, verified_only=True
+        )
+        query_tokens = _memory_tokens(query)
+        ranked: list[tuple[int, Any]] = []
+        for row in rows:
+            content = dict(row.content_json or {})
+            blob = json.dumps(content, ensure_ascii=False, sort_keys=True)
+            overlap = len(query_tokens & _memory_tokens(blob))
+            if overlap or include_unmatched:
+                ranked.append((max(1, overlap), row))
+        ranked.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
+        lines: list[str] = []
+        for score, row in ranked[:limit]:
+            content = {
+                key: value
+                for key, value in dict(row.content_json or {}).items()
+                if not str(key).startswith("_")
+            }
+            lines.append(
+                f"- verified_memory={row.id} relevance={score} "
+                f"created_at={getattr(row, 'created_at', '')} "
+                + json.dumps(content, ensure_ascii=False, sort_keys=True)[:900]
+            )
+        return "\n".join(lines)[:max_chars]
+
+    async def record_verified_user_fact(
+        self,
+        *,
+        project_id: uuid.UUID | str,
+        goal_id: uuid.UUID | None,
+        actor: str,
+        target: str,
+        detail: str,
+    ) -> None:
+        """Persist explicit human steering as a verified project-scoped fact."""
+        if self._memories is None or not str(detail).strip():
+            return
+        content = {
+            "rule": str(detail).strip()[:1200],
+            "target": str(target or "other")[:64],
+            "authority": "explicit_user_instruction",
+        }
+        await self._memories.reinforce_semantic(
+            AdmitMemory(
+                org_key=f"project:{project_id}",
+                kind=MemoryKind.SEMANTIC_RULE.value,
+                content=content,
+                actor=actor,
+                goal_id=goal_id,
+                verified=True,
+            ),
+            memory_key=json.dumps(content, ensure_ascii=False, sort_keys=True),
+            verification_threshold=1,
+        )
 
 
 def _clip_regent_md(content: str) -> str:
@@ -202,6 +297,16 @@ def _clip_regent_md(content: str) -> str:
         text = encoded[: REGENT_MD_MAX_BYTES - 20].decode("utf-8", errors="ignore")
         text += "\n...[truncated]"
     return text
+
+
+def _memory_tokens(text: str) -> set[str]:
+    lowered = str(text or "").lower()
+    words = set(re.findall(r"[a-z0-9_\-]{3,}|[\u4e00-\u9fff]{2,}", lowered))
+    # Chinese goals often have no spaces; character bigrams give a cheap,
+    # deterministic relevance signal without introducing an embedding call.
+    cjk = "".join(re.findall(r"[\u4e00-\u9fff]", lowered))
+    words.update(cjk[i : i + 2] for i in range(max(0, len(cjk) - 1)))
+    return words
 
 
 def _infer_stack(files: dict[str, str]) -> list[str]:

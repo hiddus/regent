@@ -3,14 +3,18 @@ import { useState, useRef, useEffect } from 'react'
 interface ComposerProps {
   onSend: (text: string) => void
   onUpload: (file: File) => void
-  disabled: boolean
+  disabled?: boolean
+  busy?: boolean
+  queuedCount?: number
   goalStatus?: string | null
 }
 
 export function Composer({
   onSend,
   onUpload,
-  disabled,
+  disabled = false,
+  busy = false,
+  queuedCount = 0,
   goalStatus,
 }: ComposerProps) {
   const [text, setText] = useState('')
@@ -31,6 +35,13 @@ export function Composer({
     setText('')
   }
 
+  const sendWithIntent = (intent: string) => {
+    const trimmed = text.trim()
+    if (!trimmed || disabled) return
+    onSend(`[${intent}] ${trimmed}`)
+    setText('')
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -40,6 +51,17 @@ export function Composer({
 
   return (
     <div className="composer-wrap">
+      <div className="composer-intents" aria-label="消息意图">
+        <button type="button" disabled={disabled || !text.trim()} onClick={() => sendWithIntent('补充信息')}>补充</button>
+        <button type="button" disabled={disabled || !text.trim()} onClick={() => sendWithIntent('纠正方向')}>纠错</button>
+        <button type="button" disabled={disabled || !text.trim()} onClick={() => sendWithIntent('询问进度')}>问进度</button>
+        <button type="button" disabled={disabled || !text.trim()} onClick={() => sendWithIntent('继续执行')}>继续</button>
+        {(busy || queuedCount > 0) && (
+          <span className="composer-queue-status">
+            {queuedCount > 0 ? `已排队 ${queuedCount} 条` : 'Regent 正在处理，可继续输入'}
+          </span>
+        )}
+      </div>
       <div className="composer">
         <textarea
           ref={textareaRef}

@@ -1,7 +1,4 @@
-"""Multi-agent / Hive policy: multi-agent is the product default.
-
-Single-agent (Primary-only) requires an explicit opt-out on the goal.
-"""
+"""Multi-agent / Hive policy with explicit, evidence-bearing opt-in."""
 
 from __future__ import annotations
 
@@ -32,10 +29,13 @@ def force_single_agent(metadata: dict[str, Any] | None) -> bool:
 
 
 def hive_opt_in_allowed(metadata: dict[str, Any] | None) -> bool:
-    """True when multi-agent / Hive orchestration is allowed (default on)."""
-    return not force_single_agent(metadata)
+    """True only when the goal explicitly requests collaborative execution."""
+    meta = dict(metadata or {})
+    if force_single_agent(meta):
+        return False
+    return meta.get("hive_enabled") is True or meta.get("enable_hive") is True
 
 
 def coding_default_is_primary(metadata: dict[str, Any] | None) -> bool:
-    """True only when explicitly forced to a single Primary Agent."""
-    return force_single_agent(metadata)
+    """Single Agent is primary unless Hive was explicitly enabled."""
+    return not hive_opt_in_allowed(metadata)

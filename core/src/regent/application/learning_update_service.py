@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -110,6 +111,87 @@ class LearningUpdateService:
             session.add(model)
             await session.flush()
             return model
+
+    async def propose_failure_constraint(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        org_key: str,
+        failure_code: str,
+        summary: str,
+        avoid: str,
+        evidence_refs: list[Any] | None = None,
+        actor: str = "regent-learning-loop",
+    ) -> LearningUpdateModel:
+        """Create an idempotent, goal-scoped learning candidate from a failure."""
+        normalized = {
+            "failure_code": str(failure_code)[:128],
+            "summary": str(summary)[:400],
+            "avoid": str(avoid)[:400],
+        }
+        digest = hashlib.sha256(repr(sorted(normalized.items())).encode("utf-8")).hexdigest()[:24]
+        target_key = f"failure-constraint:{normalized['failure_code']}"
+        candidate_version = f"lesson-{digest}"
+        async with self._sessions() as session:
+            existing = await session.scalar(
+                select(LearningUpdateModel).where(
+                    LearningUpdateModel.org_key == org_key,
+                    LearningUpdateModel.target_type == "generation_constraint",
+                    LearningUpdateModel.target_key == target_key,
+                    LearningUpdateModel.candidate_version == candidate_version,
+                )
+            )
+            if existing is not None:
+                return existing
+        return await self.propose(
+            ProposeLearningUpdate(
+                org_key=org_key,
+                goal_id=goal_id,
+                target_type="generation_constraint",
+                target_key=target_key,
+                base_version="unlearned-v1",
+                candidate_version=candidate_version,
+                before={"constraint": None},
+                after=normalized,
+                evidence_refs=list(evidence_refs or []),
+                applicability={"goal_id": str(goal_id), "stage": "generation"},
+                invalidation={"on": "verified recurrence or human rejection"},
+                ttl_seconds=30 * 24 * 60 * 60,
+                actor=actor,
+            )
+        )
+
+    async def apply_pending_for_goal(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        consumer_type: str,
+        consumer_ref: str,
+    ) -> list[uuid.UUID]:
+        """Record which proposed constraints a later plan actually consumed."""
+        async with self._sessions() as session:
+            updates = list(
+                await session.scalars(
+                    select(LearningUpdateModel).where(
+                        LearningUpdateModel.goal_id == goal_id,
+                        LearningUpdateModel.target_type == "generation_constraint",
+                        LearningUpdateModel.status == "PROPOSED",
+                    )
+                )
+            )
+        applied: list[uuid.UUID] = []
+        for update in updates:
+            await self.record_application(
+                ApplyLearningUpdate(
+                    update_id=update.id,
+                    consumer_type=consumer_type,
+                    consumer_ref=consumer_ref,
+                    applied_version=update.candidate_version,
+                    read_context={"goal_id": str(goal_id)},
+                )
+            )
+            applied.append(update.id)
+        return applied
 
     async def record_application(
         self, command: ApplyLearningUpdate

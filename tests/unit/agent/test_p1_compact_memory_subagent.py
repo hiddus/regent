@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from regent.agent.compact import (
@@ -17,6 +20,8 @@ from regent.agent.subagent import SubagentBrief, SubagentRunner
 from regent.agent.tools import WorkspaceToolkit
 from regent.agent.types import AgentBudget, ChatMessage, ChatResponse, ChatUsage, ToolCall
 from regent.agent.types import BudgetExhaustedError
+from regent.application.memory_service import AdmitMemory, MemoryKind, MemoryService
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def test_micro_compact_clears_old_tool_results() -> None:
@@ -36,6 +41,17 @@ def test_micro_compact_clears_old_tool_results() -> None:
     tool_msgs = [m for m in compacted if m.role == "tool"]
     assert sum(1 for m in tool_msgs if m.content == "[cleared]") == 4
     assert all(m.content != "[cleared]" for m in tool_msgs[-8:])
+
+
+def test_micro_compact_drops_stale_raw_reasoning() -> None:
+    messages = [
+        ChatMessage(role="assistant", content=f"decision {i}", reasoning_content=f"raw {i}")
+        for i in range(4)
+    ]
+    compacted = micro_compact(messages)
+    assert compacted[0].reasoning_content is None
+    assert compacted[1].reasoning_content is None
+    assert compacted[-1].reasoning_content == "raw 3"
 
 
 def test_micro_compact_strips_old_write_file_bodies() -> None:
@@ -143,6 +159,116 @@ def test_regent_md_clip_and_distill(tmp_path: Path) -> None:
     huge = "line\n" * 500
     clipped = _clip_regent_md(huge)
     assert clipped.count("\n") <= 201
+
+
+def test_successful_verification_removes_resolved_gap_memory(tmp_path: Path) -> None:
+    svc = ProjectMemoryService(projects_root=tmp_path)
+    old = svc.distill_regent_md(
+        existing="",
+        goal_text="build",
+        stack_hints=[],
+        structure=[],
+        gaps=["SMOKE_FAILED: old failure"],
+        verification_summary="failed",
+        verification_passed=False,
+    )
+    current = svc.distill_regent_md(
+        existing=old,
+        goal_text="build",
+        stack_hints=[],
+        structure=[],
+        gaps=[],
+        verification_summary="passed",
+        verification_passed=True,
+    )
+    assert "old failure" not in current
+
+
+@pytest.mark.asyncio
+async def test_relevant_memory_uses_verified_semantic_rows_only() -> None:
+    svc = ProjectMemoryService()
+    memories = AsyncMock()
+    memories.query_by_kind.return_value = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            created_at=datetime.now(UTC),
+            content_json={"pattern": "verified_delivery_stack", "stack": ["sqlite"]},
+        )
+    ]
+    svc._memories = memories  # type: ignore[attr-defined]  # noqa: SLF001
+
+    result = await svc.relevant_verified_memory(
+        "org", query="build a sqlite application"
+    )
+
+    assert "verified_memory=" in result
+    assert "sqlite" in result
+    assert memories.query_by_kind.await_args.kwargs["verified_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_project_hard_rule_can_be_recalled_without_keyword_overlap() -> None:
+    svc = ProjectMemoryService()
+    memories = AsyncMock()
+    memories.query_by_kind.return_value = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            created_at=datetime.now(UTC),
+            content_json={"rule": "不要使用 GraphQL", "authority": "explicit_user_instruction"},
+        )
+    ]
+    svc._memories = memories  # type: ignore[attr-defined]  # noqa: SLF001
+    result = await svc.relevant_verified_memory(
+        "project:p",
+        query="build an admin dashboard",
+        include_unmatched=True,
+    )
+    assert "不要使用 GraphQL" in result
+
+
+@pytest.mark.asyncio
+async def test_semantic_pattern_requires_two_distinct_goal_observations(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    service = MemoryService(db_sessions)
+    first_goal = uuid.uuid4()
+    second_goal = uuid.uuid4()
+
+    first = await service.reinforce_semantic(
+        AdmitMemory(
+            org_key="org",
+            kind=MemoryKind.SEMANTIC_PATTERN.value,
+            content={"pattern": "sqlite-stack"},
+            actor="test",
+            goal_id=first_goal,
+        ),
+        memory_key="sqlite-stack",
+    )
+    again_same_goal = await service.reinforce_semantic(
+        AdmitMemory(
+            org_key="org",
+            kind=MemoryKind.SEMANTIC_PATTERN.value,
+            content={"pattern": "sqlite-stack"},
+            actor="test",
+            goal_id=first_goal,
+        ),
+        memory_key="sqlite-stack",
+    )
+    verified = await service.reinforce_semantic(
+        AdmitMemory(
+            org_key="org",
+            kind=MemoryKind.SEMANTIC_PATTERN.value,
+            content={"pattern": "sqlite-stack"},
+            actor="test",
+            goal_id=second_goal,
+        ),
+        memory_key="sqlite-stack",
+    )
+
+    assert first.status == "CANDIDATE"
+    assert again_same_goal.status == "CANDIDATE"
+    assert verified.status == "VERIFIED"
+    assert verified.content_json["_observation_count"] == 2
 
 
 class _Scripted:

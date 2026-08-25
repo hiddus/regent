@@ -78,6 +78,7 @@ class AdmitMemory:
     goal_id: uuid.UUID | None = None
     source_refs: list[Any] | None = None
     ttl_seconds: int | None = None  # V3: explicit TTL override
+    verified: bool = False
 
 
 class MemoryService:
@@ -92,7 +93,7 @@ class MemoryService:
                 id=uuid.uuid4(),
                 org_key=command.org_key,
                 goal_id=command.goal_id,
-                status="CANDIDATE",
+                status="VERIFIED" if command.verified else "CANDIDATE",
                 kind=command.kind,
                 content_json=command.content,
                 content_hash=digest,
@@ -129,6 +130,88 @@ class MemoryService:
             refreshed = await session.get(MemoryRecordModel, memory_id)
             assert refreshed is not None
             return refreshed
+
+    async def reinforce_semantic(
+        self,
+        command: AdmitMemory,
+        *,
+        memory_key: str,
+        verification_threshold: int = 2,
+    ) -> MemoryRecordModel:
+        """Accumulate independent evidence and promote a repeatable pattern.
+
+        A single successful run creates a candidate. The same stable pattern
+        must be observed on at least ``verification_threshold`` distinct Goals
+        before it can influence planning as VERIFIED memory.
+        """
+        if not command.kind.startswith("semantic."):
+            raise ValueError("reinforce_semantic requires a semantic memory kind")
+        key = str(memory_key).strip()
+        if not key:
+            raise ValueError("memory_key is required")
+        async with self._sessions() as session, session.begin():
+            rows = list(
+                await session.scalars(
+                    select(MemoryRecordModel).where(
+                        MemoryRecordModel.org_key == command.org_key,
+                        MemoryRecordModel.kind == command.kind,
+                        MemoryRecordModel.status.in_({"CANDIDATE", "VERIFIED"}),
+                    )
+                )
+            )
+            model = next(
+                (
+                    row
+                    for row in rows
+                    if str((row.content_json or {}).get("_memory_key") or "") == key
+                ),
+                None,
+            )
+            goal_ref = str(command.goal_id) if command.goal_id else ""
+            if model is None:
+                evidence = [goal_ref] if goal_ref else []
+                content = {
+                    **command.content,
+                    "_memory_key": key,
+                    "_evidence_goal_ids": evidence,
+                    "_observation_count": len(evidence) or 1,
+                }
+                model = MemoryRecordModel(
+                    id=uuid.uuid4(),
+                    org_key=command.org_key,
+                    goal_id=command.goal_id,
+                    status=(
+                        "VERIFIED" if verification_threshold <= 1 else "CANDIDATE"
+                    ),
+                    kind=command.kind,
+                    content_json=content,
+                    content_hash=canonical_hash(content),
+                    source_refs=list(command.source_refs or []),
+                    created_by=command.actor,
+                )
+                session.add(model)
+            else:
+                content = dict(model.content_json or {})
+                evidence = list(content.get("_evidence_goal_ids") or [])
+                if goal_ref and goal_ref not in evidence:
+                    evidence.append(goal_ref)
+                count = max(int(content.get("_observation_count") or 0), len(evidence))
+                if not goal_ref:
+                    count += 1
+                content.update(command.content)
+                content.update(
+                    {
+                        "_memory_key": key,
+                        "_evidence_goal_ids": evidence[-20:],
+                        "_observation_count": count,
+                    }
+                )
+                model.content_json = content
+                model.content_hash = canonical_hash(content)
+                if count >= max(1, int(verification_threshold)):
+                    model.status = "VERIFIED"
+            await session.flush()
+            return model
 
     async def verify(self, memory_id: uuid.UUID, *, actor: str) -> MemoryRecordModel:
         async with self._sessions() as session, session.begin():
@@ -173,15 +256,17 @@ class MemoryService:
         kind_prefix: str,
         *,
         limit: int = 50,
+        verified_only: bool = False,
     ) -> list[MemoryRecordModel]:
         """Query memories by kind prefix (e.g. 'episodic.' or 'semantic.rule')."""
         async with self._sessions() as session:
+            statuses = {"VERIFIED"} if verified_only else {"CANDIDATE", "VERIFIED"}
             stmt = (
                 select(MemoryRecordModel)
                 .where(
                     MemoryRecordModel.org_key == org_key,
                     MemoryRecordModel.kind.startswith(kind_prefix),
-                    MemoryRecordModel.status.in_({"CANDIDATE", "VERIFIED"}),
+                    MemoryRecordModel.status.in_(statuses),
                 )
                 .order_by(MemoryRecordModel.created_at.desc())
                 .limit(limit)

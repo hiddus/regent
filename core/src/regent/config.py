@@ -130,9 +130,9 @@ class Settings(BaseSettings):
     ] = "contract"
     aar1_envelope_hmac_key: SecretStr | None = None
     aar1_shadow_log_divergences: bool = True
-    # Product default: prefer certified multi-agent Hive (pm-dev-independent-qa-v1).
-    # Opt out per-goal via metadata force_single_agent / hive_enabled=false, or set env false.
-    aar1_certified_hive: bool = True
+    # Certified multi-agent Hive is available but requires explicit per-goal opt-in.
+    # Single Agent is the production default until a measured net benefit exists.
+    aar1_certified_hive: bool = False
     # Nested delegate_plan_item depth (0 = no delegation).
     # Default 1: only the main Agent may delegate; sub-agents cannot re-delegate.
     # This prevents A→B→A dead-loops and wasteful token burn.
