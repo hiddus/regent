@@ -27,6 +27,8 @@ NextAction = Literal["continue_fix", "self_repair", "replan_global", "stop"]
 
 DEFAULT_MIN_TOKENS = 2000
 DEFAULT_STAGNANT_STOP = 3
+# Consecutive insufficient_data verdicts before fail-closed stop.
+DEFAULT_INSUFFICIENT_DATA_STOP = 3
 
 _DELIVERY_GLOBS = (
     "templates/**/*",
@@ -465,8 +467,22 @@ def evaluate_cycle_roi(
     }
 
 
-def next_action_for_streak(stagnant_streak: int, *, stop_at: int = DEFAULT_STAGNANT_STOP) -> NextAction:
+def next_action_for_streak(
+    stagnant_streak: int,
+    *,
+    stop_at: int = DEFAULT_STAGNANT_STOP,
+    insufficient_data_streak: int = 0,
+    insufficient_data_stop: int = DEFAULT_INSUFFICIENT_DATA_STOP,
+) -> NextAction:
+    """Determine next action from stagnant streak AND insufficient_data streak.
+
+    Either streak reaching its threshold triggers stop.
+    """
     n = max(0, int(stagnant_streak))
+    id_n = max(0, int(insufficient_data_streak))
+    # insufficient_data fail-closed: token data missing repeatedly → stop.
+    if id_n >= max(1, int(insufficient_data_stop)):
+        return "stop"
     if n <= 0:
         return "continue_fix"
     if n == 1:
@@ -581,13 +597,23 @@ def apply_roi_on_exit(
     evaluation = evaluate_cycle_roi(cycle_start, snapshot, min_tokens=min_tokens)
 
     streak = int(prior.get("stagnant_streak") or 0)
+    insufficient_data_streak = int(prior.get("insufficient_data_streak") or 0)
     if evaluation["verdict"] == "stagnant":
         streak += 1
+        insufficient_data_streak = 0  # reset insufficient_data on real stagnant
     elif evaluation["verdict"] == "progressed":
         streak = 0
-    # baseline / insufficient_data: keep streak (don't reset, don't increment)
+        insufficient_data_streak = 0
+    elif evaluation["verdict"] == "insufficient_data":
+        insufficient_data_streak += 1
+        # Do NOT reset stagnant_streak — preserve cross-phase pressure.
+    # baseline: keep both streaks (don't reset, don't increment)
 
-    next_action = next_action_for_streak(streak, stop_at=stagnant_stop) if enforced else "continue_fix"
+    next_action = next_action_for_streak(
+        streak,
+        stop_at=stagnant_stop,
+        insufficient_data_streak=insufficient_data_streak,
+    ) if enforced else "continue_fix"
     if not enforced:
         next_action = "continue_fix"
 
@@ -612,6 +638,7 @@ def apply_roi_on_exit(
         "updated_at": utc_now_iso(),
         "enforced": bool(enforced),
         "stagnant_streak": streak,
+        "insufficient_data_streak": insufficient_data_streak,
         "next_action": next_action,
         "verdict": evaluation["verdict"],
         "summary": evaluation["summary"],
@@ -736,7 +763,10 @@ def authorize_resume_by_roi(
         }
 
     streak = int(roi.get("stagnant_streak") or 0)
-    next_action = str(roi.get("next_action") or next_action_for_streak(streak, stop_at=stagnant_stop))
+    id_streak = int(roi.get("insufficient_data_streak") or 0)
+    next_action = str(roi.get("next_action") or next_action_for_streak(
+        streak, stop_at=stagnant_stop, insufficient_data_streak=id_streak,
+    ))
     constraints = list(roi.get("repair_constraints") or [])
     substantive = human_message_is_substantive(human_message)
 

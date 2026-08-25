@@ -90,6 +90,30 @@ def looks_like_plan_query(message: str) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _PLAN_REQUEST_PATTERNS)
 
 
+def _deterministic_control_intent(
+    message: str, *, goal_status: str, has_pending_task: bool
+) -> str | None:
+    """Classify only unambiguous control utterances without a model call."""
+    text = re.sub(r"[\s。！!？?，,]+", "", str(message or "").lower())
+    if not text:
+        return None
+    if text in {"暂停", "先暂停", "先停一下", "暂停执行", "pause", "stop", "hold"}:
+        return "PAUSE"
+    if goal_status == "PAUSED" and text in {
+        "继续", "继续执行", "恢复", "恢复执行", "resume", "continue", "go"
+    }:
+        return "RESUME"
+    if text in {
+        "进度", "当前进度", "进度怎么样", "现在做到哪里了", "状态", "status", "progress"
+    }:
+        return "QUERY"
+    if has_pending_task and text in {"批准", "同意", "确认", "可以", "approve", "yes"}:
+        return "APPROVE"
+    if has_pending_task and text in {"拒绝", "不同意", "不行", "reject", "no"}:
+        return "REJECT"
+    return None
+
+
 def build_reviewable_plan_response(context: dict[str, Any]) -> str:
     """Stable user-facing plan contract; excludes raw runtime state and model narration."""
     goal = dict(context.get("goal") or {})
@@ -141,6 +165,41 @@ def build_reviewable_plan_response(context: dict[str, Any]) -> str:
         section("预算与停止条件", [f"本项目预算上限：{budget}" if budget is not None else "预算上限尚未设置。", *stop_conditions]),
         section("下一动作", [next_action]),
     ])
+
+
+def _guidance_model_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Whitelist only state needed to classify a conversational command."""
+    project = dict(context.get("project") or {})
+    goal = dict(context.get("goal") or {})
+    meta = dict(goal.get("metadata") or {})
+    spec = dict(context.get("goal_spec") or {})
+    preview = dict(context.get("preview") or {})
+    pending = list(context.get("pending_human_tasks") or [])
+    return {
+        "project": {key: project.get(key) for key in ("name", "product_intent", "status") if project.get(key) is not None},
+        "goal": {
+            "id": goal.get("id"), "objective": goal.get("objective"),
+            "status": goal.get("status"), "version": goal.get("version"),
+            "execution_stage": goal.get("execution_stage"),
+            "metadata": {
+                key: meta.get(key)
+                for key in ("needs_user_fork", "pending_fork_options", "goal_clarity_state", "confirmation_state", "work_plan_approved", "execution_mode")
+                if meta.get(key) is not None
+            },
+        },
+        "goal_spec": {
+            key: spec.get(key)
+            for key in ("version", "status", "explicit_constraints", "success_criteria", "unknowns")
+            if spec.get(key) is not None
+        },
+        "work_states": dict(context.get("work_states") or {}),
+        "preview": {key: preview.get(key) for key in ("status", "endpoint", "failure_summary") if preview.get(key) is not None},
+        "pending_human_tasks": [
+            {key: item.get(key) for key in ("id", "task_type", "prompt") if item.get(key) is not None}
+            for item in pending[:3] if isinstance(item, dict)
+        ],
+        "active_corrections": list(context.get("active_corrections") or [])[-5:],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +411,62 @@ class AppGuidanceService:
         )
         normalized_message = str(message or "").strip().lower()
 
+        control_intent = _deterministic_control_intent(
+            message,
+            goal_status=goal_status,
+            has_pending_task=bool(context.get("pending_human_tasks") or []),
+        )
+        if control_intent is not None:
+            interpretation = GuidanceInterpretation(
+                command_type=control_intent,
+                summary=str(message).strip()[:300],
+                rejection_reason=(message if control_intent == "REJECT" else None),
+            )
+            return await self._dispatch(
+                project_id,
+                message,
+                actor,
+                interpretation,
+                "regent-core:deterministic-control",
+            )
+
+        # Console intent chips use a tiny, explicit protocol.  Handle these
+        # deterministically instead of spending a model call guessing whether
+        # the user is correcting, supplementing, querying, or continuing.
+        # The original message is still persisted verbatim for auditability.
+        explicit_intents = {
+            "[补充信息]": "CORRECT",
+            "[纠正方向]": "CORRECT",
+            "[询问进度]": "QUERY",
+            "[继续执行]": "CONTINUE",
+        }
+        for prefix, command_type in explicit_intents.items():
+            if normalized_message.startswith(prefix.lower()):
+                detail = message[len(prefix):].strip()
+                pending_tasks = context.get("pending_human_tasks") or []
+                if (
+                    str((context.get("goal") or {}).get("status") or "")
+                    == "WAITING_HUMAN"
+                    and pending_tasks
+                    and command_type in {"CORRECT", "CONTINUE"}
+                ):
+                    command_type = "APPROVE"
+                interpretation = GuidanceInterpretation(
+                    command_type=command_type,
+                    summary=detail or prefix.strip("[]"),
+                    correction_target=(
+                        "requirements" if prefix == "[补充信息]" else "other"
+                    ) if command_type == "CORRECT" else None,
+                    correction_detail=detail if command_type in {"CORRECT", "APPROVE"} else None,
+                )
+                return await self._dispatch(
+                    project_id,
+                    message,
+                    actor,
+                    interpretation,
+                    "regent-console:explicit-intent",
+                )
+
         # The Goal Owner may explicitly defer unresolved choices to bounded
         # implementation-time validation. Treat that as a decision, not as a
         # reason to repeat the same questions forever.
@@ -445,9 +560,19 @@ class AppGuidanceService:
                     project_id, message, actor, interpretation, "regent-core:fork-match"
                 )
 
+        model_context = _guidance_model_context(context)
         generated = await self._provider.generate_structured(
-            system_prompt=self._system_prompt(context, history),
-            user_prompt=str({"current_state": context, "recent_messages": history, "user_message": message}),
+            system_prompt=self._system_prompt(model_context, history),
+            user_prompt=json.dumps(
+                {
+                    "current_state": model_context,
+                    "recent_messages": history,
+                    "user_message": message,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
             response_model=GuidanceInterpretation,
         )
         interpretation = generated.output
@@ -657,6 +782,7 @@ class AppGuidanceService:
             "ordinary single-step messages — chaining is capped and should be used sparingly.",
         ])
         return "\n".join(parts)
+
 
     # ------------------------------------------------------------------
     # Context gathering
@@ -1964,6 +2090,17 @@ class AppGuidanceService:
                 **spec_content,
             )
             session.add(next_spec)
+            # --- Outer loop: correction accumulation baseline merge ---
+            if len(corrections) >= 3 and len(corrections) % 3 == 0:
+                from regent.application.goal_revision_service import GoalRevisionService
+
+                await GoalRevisionService(self._sessions).assess_and_revise(
+                    goal_id=goal_id,
+                    trigger="correction_accumulation",
+                    actor=actor,
+                    revision_context={"corrections_count": len(corrections)},
+                    session=session,
+                )
             metadata["clarification_rounds"] = int(metadata.get("clarification_rounds") or 0) + 1
             if interpretation.feasibility_verdict is not None:
                 metadata["feasibility_verdict"] = effective_feasibility_verdict(
@@ -2106,6 +2243,24 @@ class AppGuidanceService:
                 resume_note = f" 修正已落盘；续跑：{recovery.message}"
         except Exception as exc:  # noqa: BLE001 — correction must still succeed
             resume_note = f" 修正已落盘；自动续跑暂未触发（{type(exc).__name__}）。"
+
+        # Explicit human corrections are authoritative project memory. Keep
+        # this best-effort so memory infrastructure can never block steering.
+        try:
+            from regent.agent.project_memory import ProjectMemoryService
+
+            await ProjectMemoryService(self._sessions).record_verified_user_fact(
+                project_id=project_id,
+                goal_id=goal_id,
+                actor=actor,
+                target=target,
+                detail=detail,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to persist verified user correction memory",
+                extra={"project_id": str(project_id), "goal_id": str(goal_id)},
+            )
 
         response = f"已记录修正: [{target}] {detail}.{resume_note}"
         return GuidanceReceipt(command_id, "CORRECT", None, False, response)

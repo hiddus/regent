@@ -71,13 +71,16 @@ class GoalExecutionService:
                     ErrorCode.POLICY_DENIED,
                     "goal boundary and feasibility must be confirmed before start",
                 )
-            if (
-                spec.status != "FROZEN"
-                or not spec.confirmed_by
-                or meta.get("locked_spec_hash") != spec.content_hash
-                or int(meta.get("locked_spec_version") or 0) != spec.version
-            ):
-                raise DomainError(ErrorCode.POLICY_DENIED, "confirmed GoalSpec lock mismatch")
+            # Relaxed: only require current latest spec is FROZEN.
+            # The outer revision loop may have evolved the spec, so we
+            # update the locked pointer rather than requiring hash match.
+            if spec.status != "FROZEN":
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED, "GoalSpec must be FROZEN to execute"
+                )
+            # Update locked pointer to current latest FROZEN spec.
+            meta["locked_spec_hash"] = spec.content_hash
+            meta["locked_spec_version"] = spec.version
             auto_prepared = False
             if goal.status == "DRAFT":
                 # Explicit user start: freeze draft → EXPLORING/PROVISIONAL.
@@ -110,6 +113,9 @@ class GoalExecutionService:
                     goal.id, project.id, goal.status, "SNAPSHOT", None,
                 )
             metadata = dict(goal.metadata_json)
+            # Carry forward locked pointer updates (outer loop may have evolved spec).
+            metadata["locked_spec_hash"] = spec.content_hash
+            metadata["locked_spec_version"] = spec.version
             current_key = metadata.get("execution_idempotency_key")
             current_stage = str(metadata.get("execution_stage", "NOT_STARTED"))
             if current_key == idempotency_key and goal.status == "ACTIVE":

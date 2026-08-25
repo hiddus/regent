@@ -46,6 +46,19 @@ def _preview(value: Any, limit: int = 240) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _reserved_input_tokens(
+    estimated: int, *, context_window: int, max_output: int
+) -> int:
+    """Reserve bounded uncertainty, not an entire unused context window."""
+    return max(
+        1,
+        min(
+            context_window - max_output,
+            max(int(estimated) + 1_024, int(int(estimated) * 1.25)),
+        ),
+    )
+
+
 async def _emit(
     on_event: Callable[[dict[str, Any]], Awaitable[None]] | None,
     payload: dict[str, Any],
@@ -86,6 +99,7 @@ class AgentRunResult:
 # (A,B,A,B,...) are caught, not only strict consecutive repeats.
 REPEAT_CALL_WARN_AFTER = 3
 REPEAT_CALL_ASK_AFTER = 6
+MAX_TOOL_CALLS_PER_TURN = 12
 # Window large enough that a two-call alternating loop (A,B,A,B,...) still
 # reaches REPEAT_CALL_ASK_AFTER occurrences of each call.
 REPEAT_CALL_WINDOW = 12
@@ -552,8 +566,28 @@ class AgentRunner:
                 else str(g)
                 for g in (prior_gaps or [])
             ]
+            acceptance_for_skills = dict(plan.get("acceptance_contract") or {})
+            skill_routing_text = "\n".join(
+                (
+                    str(plan.get("goal_anchor_text") or ""),
+                    json.dumps(
+                        acceptance_for_skills.get("success_criteria") or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                    json.dumps(
+                        plan.get("runtime_profile")
+                        or acceptance_for_skills.get("runtime_profile")
+                        or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                )
+            )
             skills = select_skills_for_goal(
-                str(plan.get("goal_anchor_text") or ""),
+                skill_routing_text,
                 enabled=True,
                 lessons_workspace=lessons_ws if lessons_ws.is_dir() else None,
                 gap_codes=prior_gap_codes,
@@ -600,6 +634,10 @@ class AgentRunner:
         compact_events: list[dict[str, Any]] = []
         repair_branch_log: list[dict[str, Any]] = []
         ledger = AgentRunLedger()
+        ledger.notes.append(
+            "prompt_segment_chars="
+            + json.dumps(assembler.segment_char_sizes(), ensure_ascii=False, sort_keys=True)
+        )
         input_tokens = 0
         output_tokens = 0
         model_ref = ""
@@ -616,7 +654,8 @@ class AgentRunner:
         last_gap_fingerprint: str | None = None
         turns_since_plan_update = 0
         # P0-2: Marginal ROI circuit breaker state.
-        _prev_gap_count: int = 0
+        _prev_gap_codes: set[str] = set()
+        _tokens_at_prev_verification: int = 0
         _roi_stagnant_rounds: int = 0
         # P0-3: Same-gap no-improvement circuit breaker state.
         _prev_primary_gap: str | None = None
@@ -743,9 +782,10 @@ class AgentRunner:
                 from regent.application.budget_ledger import COST_MODEL_INPUT
 
                 estimated_input = estimate_tokens(messages)
-                worst_input = max(
+                worst_input = _reserved_input_tokens(
                     estimated_input,
-                    self._context_window_tokens - self._model_max_output_tokens,
+                    context_window=self._context_window_tokens,
+                    max_output=self._model_max_output_tokens,
                 )
                 worst_cost = (
                     worst_input * self._model_input_rate
@@ -884,7 +924,7 @@ class AgentRunner:
                 break
 
             submitted_this_turn = False
-            for call in assistant.tool_calls:
+            for call_index, call in enumerate(assistant.tool_calls):
                 ledger.add_tool_invocation(1)
                 tool_spec = next((spec for spec in TOOL_SPECS if spec.name == call.name), None)
                 if tool_spec is None or tool_spec.max_cost is None:
@@ -895,6 +935,57 @@ class AgentRunner:
                 self._repeat_call_count = sum(
                     1 for past in self._recent_call_fps if past == fp
                 )
+                # ── A-B-A-B alternating pattern detection ──────────────
+                # If the window contains exactly 2 distinct fingerprints
+                # each appearing >=3 times, it's an alternating loop.
+                _alternating_detected = False
+                if len(self._recent_call_fps) >= 6:
+                    _unique_fps = set(self._recent_call_fps)
+                    if len(_unique_fps) == 2:
+                        _counts = {
+                            f: sum(1 for x in self._recent_call_fps if x == f)
+                            for f in _unique_fps
+                        }
+                        if all(c >= 3 for c in _counts.values()):
+                            _alternating_detected = True
+                if _alternating_detected:
+                    from regent.application.agent_control import AskUserRequiredError
+                    from regent.application.agent_loop_exit import build_ask_envelope
+
+                    detail = (
+                        f"A-B-A-B alternating tool-call loop detected: "
+                        f"2 distinct calls each repeated {min(_counts.values())}+ times "
+                        f"within last {len(self._recent_call_fps)} calls"
+                    )
+                    await _emit(
+                        on_event,
+                        {
+                            "type": "progress_loop",
+                            "turn": turn,
+                            "summary": "A-B-A-B 交替工具调用循环",
+                            "detail": detail,
+                        },
+                    )
+                    envelope = build_ask_envelope(
+                        question=(
+                            "两个工具调用在交替循环中（A→B→A→B→…）且无进展。"
+                            "请换方向、跳过，或补充约束后继续。"
+                        ),
+                        why_blocked=detail[:400],
+                        ask_type="progress_loop",
+                        gap_kind="ALTERNATING_LOOP",
+                        options=[
+                            {"id": "continue_fix", "label": "换思路继续修"},
+                            {"id": "skip_item", "label": "跳过并改计划"},
+                            {"id": "stop", "label": "停止本轮"},
+                        ],
+                        suggested="continue_fix",
+                    )
+                    raise AskUserRequiredError(
+                        envelope["question"],
+                        options=list(envelope.get("options") or []),
+                        envelope=envelope,
+                    )
                 if self._repeat_call_count >= REPEAT_CALL_ASK_AFTER:
                     from regent.application.agent_control import AskUserRequiredError
                     from regent.application.agent_loop_exit import build_ask_envelope
@@ -935,7 +1026,13 @@ class AgentRunner:
                         envelope=envelope,
                     )
                 step0_block = self._step0_blocks_write(plan, call.name)
-                if step0_block:
+                if call_index >= MAX_TOOL_CALLS_PER_TURN:
+                    result_text = (
+                        "ERROR: ToolBatchLimit: this turn proposed more than "
+                        f"{MAX_TOOL_CALLS_PER_TURN} actions. Re-observe current state, "
+                        "then submit a smaller next batch."
+                    )
+                elif step0_block:
                     result_text = f"ERROR: WorkPlanRequired: {step0_block}"
                 elif self._repeat_call_count >= REPEAT_CALL_WARN_AFTER:
                     # Do not re-execute: feed back an error so the model changes
@@ -1200,20 +1297,37 @@ class AgentRunner:
             fingerprint = gap_fingerprint([g.code for g in verification.gaps])
             gap_repeat[primary] = gap_repeat.get(primary, 0) + 1
             # ── P0-2: Marginal ROI circuit breaker ──────────────────────
-            # If gap count didn't shrink enough vs previous round, count stagnant.
-            cur_gap_count = len(verification.gaps)
+            # Measure verified gap resolution per tokens spent. Merely changing
+            # files or replacing one failed check with another is not progress.
+            cur_gap_codes = {g.code for g in verification.gaps}
+            cur_gap_count = len(cur_gap_codes)
             from regent.config import get_settings as _gs_roi
 
             _roi_settings = _gs_roi()
             _roi_min_frac = float(_roi_settings.roi_min_improvement_fraction)
             _roi_max_stagnant = int(_roi_settings.roi_consecutive_stagnant_rounds)
-            if _prev_gap_count > 0:
-                improvement = (_prev_gap_count - cur_gap_count) / max(_prev_gap_count, 1)
+            resolved_codes: set[str] = set()
+            introduced_codes: set[str] = set()
+            tokens_since_verification = max(
+                0, input_tokens + output_tokens - _tokens_at_prev_verification
+            )
+            if _prev_gap_codes:
+                resolved_codes = _prev_gap_codes - cur_gap_codes
+                introduced_codes = cur_gap_codes - _prev_gap_codes
+                improvement = (
+                    len(resolved_codes) - 0.5 * len(introduced_codes)
+                ) / max(len(_prev_gap_codes), 1)
                 if improvement < _roi_min_frac:
                     _roi_stagnant_rounds += 1
                 else:
                     _roi_stagnant_rounds = 0
-            _prev_gap_count = cur_gap_count
+                ledger.notes.append(
+                    "repair_roi:"
+                    f"resolved={len(resolved_codes)},introduced={len(introduced_codes)},"
+                    f"tokens={tokens_since_verification},improvement={improvement:.3f}"
+                )
+            _prev_gap_codes = cur_gap_codes
+            _tokens_at_prev_verification = input_tokens + output_tokens
             if _roi_stagnant_rounds >= _roi_max_stagnant:
                 ledger.notes.append(
                     f"marginal_roi_stop:stagnant={_roi_stagnant_rounds}"
@@ -1223,7 +1337,7 @@ class AgentRunner:
                 break
             # ── P0-3: Same-gap no-improvement circuit breaker ───────────
             _gap_stagnant_limit = int(_roi_settings.gap_stagnant_stop_after)
-            if primary == _prev_primary_gap:
+            if primary == _prev_primary_gap and not resolved_codes:
                 _same_gap_stagnant += 1
             else:
                 _same_gap_stagnant = 1

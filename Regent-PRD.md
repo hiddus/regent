@@ -99,7 +99,9 @@ regent/
 
 > **接线状态（2026-08-23 复核更正）**：上述模块**已接入主链**——commit `40e5378` 起目标分类于执行启动时调用并持久化 `goal_profile`，组织模式选择驱动 agile/hub_spoke/batch 直达生成旁路，行为监测接线于 `PREVIEW_DEPLOYMENT_SUCCEEDED` 回调（gate：`org_mode.enable_monitoring`）；同日补齐修复环自动再调度与 worker 周期监测 tick（见上条）。**仍未接线**：`agent_invocation_guard.check_cross_deployment_invocation`（已实现待接入）；组织模式为一次性选择，里程碑边界重评估未实现（见架构对比文档 R2）。本节不构成对外的夸大表述依据；与既有口径一致（见 Tech-Spec §0.1 / §25）。
 
-- **执行编排器精简（2026-08-23）**：`execution_orchestrator.py` 移除 7 个旧处理器（requirement_validated / app_build_passed / reorganization_triggered / constraint_violated / organization_selected / adaptive_organization 等），并新增"直达生成"旁路（`_is_direct_generation_goal` / `_bypass_pipeline_to_generation`），缩短纯生成型目标的路径。
+- **执行编排器精简（2026-08-23）**：`execution_orchestrator.py` 移除 7 个旧处理器（requirement_validated / app_build_passed / reorganization_triggered / constraint_violated / organization_selected / adaptive_organization 等），并新增“直达生成”旁路（`_is_direct_generation_goal` / `_bypass_pipeline_to_generation`），缩短纯生成型目标的路径。
+
+- **目标进化外环（Goal Revision Loop）（2026-08-25）**：`application/goal_revision_service.py` 在里程碑边界、交付失败用尽、修正累积、用户方向信号四个检查点，评估当前 GoalSpec 是否仍充分，若否创建进化版本（旧版 SUPERSEDED）。与内环（GoalAnchor 防漂移）构成两层稳态架构。`feedback_service.py` 新增 `PIVOT` 决策类型（重复 REVISE 未通过 gate → spec 本身可能不足）。GoalAnchor 拆分为方向锚点（稳定）与规格锚点（可进化），`validate_goal_alignment` 支持 spec_text 作为主要对齐目标。FROZEN 检查放宽为只验证“当前最新 spec 是 FROZEN”，允许外环进化后更新 locked 指针。
 
 ---
 

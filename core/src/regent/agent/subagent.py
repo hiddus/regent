@@ -22,6 +22,42 @@ class SubagentBrief:
     plan_item_key: str | None = None
 
 
+@dataclass(slots=True)
+class SubagentHandoffV1:
+    """Structured handoff contract from child agent to parent (P2-5).
+
+    Ensures parent can reason about child's work without replaying the
+    sidechain transcript.  Every field is populated from the run result.
+    """
+
+    # What was the task?
+    task_objective: str = ""
+    # What was actually executed / delivered?
+    executed_scope: list[str] = field(default_factory=list)
+    # Key assumptions made during execution
+    current_assumptions: list[str] = field(default_factory=list)
+    # Key evidence (file paths, test results, observations)
+    key_evidence: list[str] = field(default_factory=list)
+    # Files modified with brief content summary
+    modified_files: list[str] = field(default_factory=list)
+    # Verification results (pass/fail per check)
+    verification_results: list[dict[str, Any]] = field(default_factory=list)
+    # Approaches tried and rejected (with reason)
+    rejected_approaches: list[str] = field(default_factory=list)
+    # Tool / environment failures encountered
+    tool_failures: list[str] = field(default_factory=list)
+    # Unresolved issues / open questions
+    unresolved_issues: list[str] = field(default_factory=list)
+    # Known risks for downstream consumers
+    risks: list[str] = field(default_factory=list)
+    # Suggested next steps
+    next_steps: list[str] = field(default_factory=list)
+    # Constraints that must be inherited by subsequent agents
+    inherited_constraints: list[str] = field(default_factory=list)
+    # Budget remaining (tokens)
+    budget_remaining: dict[str, int] = field(default_factory=dict)
+
+
 @dataclass
 class SubagentResult:
     brief: SubagentBrief
@@ -31,6 +67,7 @@ class SubagentResult:
     input_tokens: int = 0
     output_tokens: int = 0
     turns: int = 0
+    handoff: SubagentHandoffV1 | None = None
 
 
 class SubagentRunner:
@@ -250,6 +287,63 @@ class SubagentRunner:
             "sidechain_omitted": True,
         }
         passed = None if result.verification is None else result.verification.passed
+        # ── Build structured handoff contract (SubagentHandoffV1) ──────
+        handoff = SubagentHandoffV1(
+            task_objective=brief.milestone_title or brief.milestone_key,
+            executed_scope=[
+                f"wrote {len(result.files)} files: {', '.join(sorted(result.files.keys())[:10])}"
+            ],
+            modified_files=sorted(result.files.keys()),
+            verification_results=(
+                [
+                    {
+                        "verdict": result.verification.verdict,
+                        "summary": result.verification.summary,
+                        "passed": result.verification.passed,
+                    }
+                ]
+                if result.verification
+                else []
+            ),
+            unresolved_issues=(
+                [
+                    f"{g.code}: {g.detail}"
+                    for g in (result.verification.gaps if result.verification else [])
+                ]
+                if result.verification and not result.verification.passed
+                else []
+            ),
+            budget_remaining={
+                "input_tokens": max(0, self._budget.max_tokens - result.input_tokens - result.output_tokens),
+            },
+        )
+        # Extract failure lessons from ledger for rejected_approaches.
+        for note in result.ledger.notes:
+            if "stagnant" in note or "stop" in note or "loop" in note:
+                handoff.rejected_approaches.append(note)
+        # Extract tool failures from transcript.
+        for t_turn in result.transcript:
+            if t_turn.role == "tool" and "ERROR" in (t_turn.content or ""):
+                handoff.tool_failures.append(t_turn.content[:200])
+        handoff.tool_failures = handoff.tool_failures[:8]
+        handoff.rejected_approaches = handoff.rejected_approaches[:4]
+        # Inherit constraints from verification gaps.
+        if result.verification:
+            for g in result.verification.gaps:
+                if "constraint" in g.code.lower() or "policy" in g.code.lower():
+                    handoff.inherited_constraints.append(f"{g.code}: {g.detail}")
+        handoff.inherited_constraints = handoff.inherited_constraints[:8]
+        # Add handoff to summary for parent consumption.
+        summary["handoff"] = {
+            "task_objective": handoff.task_objective,
+            "executed_scope": handoff.executed_scope,
+            "modified_files": handoff.modified_files,
+            "unresolved_issues": handoff.unresolved_issues,
+            "rejected_approaches": handoff.rejected_approaches,
+            "tool_failures": handoff.tool_failures,
+            "inherited_constraints": handoff.inherited_constraints,
+            "budget_remaining": handoff.budget_remaining,
+        }
         await self._writeback_plan_item(
             brief, status="completed" if passed is not False else "failed"
         )
@@ -269,6 +363,7 @@ class SubagentRunner:
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             turns=result.turns,
+            handoff=handoff,
         )
 
     async def run_large_milestones(

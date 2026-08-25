@@ -82,6 +82,7 @@ def build_goal_anchored_prompt(
     base_prompt: str,
     *,
     goal_text: str,
+    spec_summary: str = "",
     success_criteria: dict | None = None,
     first_deliverable: str = "",
     retry_context: str = "",
@@ -90,14 +91,19 @@ def build_goal_anchored_prompt(
 
     Returns a new dict with a ``_goal_anchor`` section injected,
     plus the user_prompt enriched with explicit goal text.
+
+    ``spec_summary`` is the current spec interpretation (may have evolved).
+    ``goal_text`` is the stable original direction.
     """
     anchor_block = (
         "\n\n"
         "═══════════════════════════════════════════════════════\n"
         "GOAL ANCHOR — THIS IS YOUR PRIMARY OBJECTIVE\n"
         "═══════════════════════════════════════════════════════\n"
-        f"\nORIGINAL USER GOAL: {goal_text}\n"
+        f"\nDIRECTION (stable): {goal_text}\n"
     )
+    if spec_summary:
+        anchor_block += f"\nCURRENT UNDERSTANDING (may evolve): {spec_summary}\n"
     if first_deliverable:
         anchor_block += f"\nFIRST DELIVERABLE: {first_deliverable}\n"
     if success_criteria:
@@ -108,7 +114,9 @@ def build_goal_anchored_prompt(
     if retry_context:
         anchor_block += f"\n⚠️ RETRY — PREVIOUS ATTEMPT FAILED:\n{retry_context}\n"
     anchor_block += (
-        "\nCRITICAL: Every file you generate MUST directly serve this goal. "
+        "\nCRITICAL: Every file you generate MUST directly serve the current "
+        "understanding above. The direction is stable; the specific interpretation "
+        "may have evolved. "
         "If the goal says 'timestamp', your page MUST show a timestamp. "
         "If the goal says 'news digest', your page MUST show news items. "
         "Do NOT generate unrelated templates, forms, or demo stubs.\n"
@@ -121,6 +129,7 @@ def validate_goal_alignment(
     html: str,
     goal_text: str,
     *,
+    spec_text: str = "",
     success_criteria: dict | None = None,
     first_deliverable: str = "",
 ) -> GoalAlignmentResult:
@@ -129,7 +138,12 @@ def validate_goal_alignment(
     Uses keyword-based heuristic checks. This is a fast, deterministic
     gate — not a replacement for LLM-based review, but a first line
     of defense against completely off-target generation.
+
+    When ``spec_text`` is provided, it is used as the primary alignment
+    target (the spec may have evolved). ``goal_text`` is the fallback.
     """
+    # Use spec_text as primary alignment target when available.
+    alignment_text = spec_text if spec_text else goal_text
     details: list[str] = []
     visible = re.sub(r"<[^>]+>", " ", html)
     visible = re.sub(r"\s+", " ", visible).strip().lower()
@@ -138,8 +152,8 @@ def validate_goal_alignment(
     h1_match = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.I | re.S)
     h1_text = h1_match.group(1).strip().lower() if h1_match else ""
 
-    # 1. Goal keyword alignment
-    keywords = extract_goal_keywords(goal_text)
+    # 1. Goal keyword alignment (use evolved spec if available)
+    keywords = extract_goal_keywords(alignment_text)
     if keywords:
         hits = sum(
             1 for kw in keywords

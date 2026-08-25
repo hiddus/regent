@@ -81,6 +81,35 @@ class TestBuildGoalAnchoredPrompt:
         result = build_goal_anchored_prompt("base", goal_text="test")
         assert "RETRY" not in result
 
+    def test_direction_label_stable(self):
+        result = build_goal_anchored_prompt(
+            "base", goal_text="Build a crosswalk platform",
+        )
+        assert "DIRECTION (stable)" in result
+        assert "Build a crosswalk platform" in result
+
+    def test_spec_summary_included_when_provided(self):
+        result = build_goal_anchored_prompt(
+            "base", goal_text="Build X",
+            spec_summary="Focus on EU-US data transfer first",
+        )
+        assert "CURRENT UNDERSTANDING (may evolve)" in result
+        assert "Focus on EU-US data transfer first" in result
+
+    def test_spec_summary_omitted_when_empty(self):
+        result = build_goal_anchored_prompt(
+            "base", goal_text="Build X",
+        )
+        assert "CURRENT UNDERSTANDING" not in result
+
+    def test_critical_instruction_references_current_understanding(self):
+        result = build_goal_anchored_prompt(
+            "base", goal_text="test",
+            spec_summary="evolved understanding",
+        )
+        assert "current understanding" in result
+        assert "direction is stable" in result
+
 
 class TestValidateGoalAlignment:
     def test_aligned_timestamp_page(self):
@@ -188,6 +217,35 @@ class TestValidateGoalAlignment:
             "Show current timestamp",
         )
         assert len(result.details) > 0
+
+    def test_spec_text_used_as_primary_alignment_target(self):
+        """When spec_text is provided, it should be used instead of goal_text."""
+        html = """
+        <html><head><title>EU Data Transfer</title></head>
+        <body><main>
+        <h1>Crosswalk EU-US Compliance</h1>
+        <p>Transfer mechanisms for EU-US data</p>
+        </main></body></html>
+        """
+        # Original goal is generic, but spec_text is specific
+        result = validate_goal_alignment(
+            html,
+            "Build a compliance platform",
+            spec_text="Crosswalk EU-US data transfer compliance tool",
+        )
+        # Should be aligned because spec_text keywords match
+        assert result.aligned is True
+
+    def test_goal_text_fallback_when_no_spec(self):
+        """Without spec_text, goal_text is used (backward compatible)."""
+        html = """
+        <html><head><title>Timestamp</title></head>
+        <body><h1>Show timestamp</h1></body></html>
+        """
+        result = validate_goal_alignment(
+            html, "Show current timestamp",
+        )
+        assert result.aligned is True
 
 
 class TestValidateGoalAlignmentSemantic:

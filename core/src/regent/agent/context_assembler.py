@@ -9,7 +9,9 @@ invalidates the entire prefix cache.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from typing import Any
 
 from regent.agent.tools import WorkspaceToolkit
@@ -19,20 +21,93 @@ from regent.agent.types import ChatMessage, VerificationGap
 _BUDGETS = {
     "goal_anchor": 8_000,
     "skill_guidance": 6_000,
-    "project_memory": 24_000,
+    "project_memory": 8_000,
+    "retrieved_memory": 4_000,
     # Tree-only; no file fulltext (use read_file tool).
     "workspace_state": 8_000,
     "todo_state": 4_000,
-    "recent_failures": 16_000,
+    "recent_failures": 8_000,
     "conversation_context": 6_000,
     "evidence_context": 8_000,
 }
 
 
+# ---------------------------------------------------------------------------
+# Content-aware clipping (replaces naive _clip for structured content)
+# ---------------------------------------------------------------------------
+
+
 def _clip(text: str, budget: int) -> str:
+    """Legacy character-boundary clip — kept for segments without structure."""
     if len(text) <= budget:
         return text
     return text[: budget - 20] + "\n...[truncated]"
+
+
+def _clip_lines(text: str, budget: int) -> str:
+    """Clip at line boundaries so structured blocks are never split mid-line."""
+    if len(text) <= budget:
+        return text
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    total = 0
+    for line in lines:
+        if total + len(line) > budget - 40:
+            break
+        out.append(line)
+        total += len(line)
+    out.append("\n...[truncated at line boundary]")
+    return "".join(out)
+
+
+def _clip_json_list(text: str, budget: int) -> str:
+    """Clip a JSON array or object by preserving complete entries.
+
+    Falls back to _clip_lines when the text is not valid JSON.
+    """
+    if len(text) <= budget:
+        return text
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return _clip_lines(text, budget)
+    # If it's a dict rendered with indent, drop last-level keys.
+    if isinstance(obj, dict):
+        return _clip_lines(text, budget)
+    if not isinstance(obj, list):
+        return _clip_lines(text, budget)
+    # Drop items from the end until it fits.
+    while len(obj) > 1:
+        try:
+            candidate = json.dumps(obj, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            return _clip_lines(text, budget)
+        if len(candidate) <= budget - 40:
+            return candidate
+        obj = obj[:-1]
+    return json.dumps(obj, ensure_ascii=False, indent=2) + "\n...[items truncated]"
+
+
+def _clip_sentences(text: str, budget: int) -> str:
+    """Clip at sentence boundaries (period / newline) for prose text."""
+    if len(text) <= budget:
+        return text
+    # Split on sentence-ending punctuation or newlines.
+    parts = re.split(r"(?<=[.。!！?？\n])\s*", text)
+    out: list[str] = []
+    total = 0
+    for part in parts:
+        if total + len(part) > budget - 40:
+            break
+        out.append(part)
+        total += len(part)
+    out.append("\n...[truncated at sentence boundary]")
+    return "".join(out)
+
+
+def _segment_fingerprint(text: str) -> str:
+    """Stable short hash for dedup of assembled segments."""
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
 def _join_segments(segments: list[str]) -> str:
@@ -63,36 +138,51 @@ class ContextAssembler:
     def system_prompt(self) -> str:
         entry = "src.app:app"
         acceptance = dict(self._plan.get("acceptance_contract") or {})
-        profile = acceptance.get("runtime_profile") or {}
+        profile = self._plan.get("runtime_profile") or acceptance.get("runtime_profile") or {}
         if isinstance(profile, dict):
             mod = str(profile.get("entry_module") or "src.app").strip() or "src.app"
             obj = str(profile.get("entry_object") or "app").strip() or "app"
             entry = f"{mod}:{obj}"
-        return (
+        base = (
             "You are Regent's delivery agent. Build a real, runnable product — not a demo poster.\n"
             "Use tools to write files, install deps, run tests, and smoke-check endpoints.\n"
             "Rules:\n"
             "- Step 0: before write_file/edit_file/run_command, call todo_write with a concrete checklist "
             "(usually ≥3 steps). Keep at most one in_progress; mark completed as you go.\n"
             "- Before submit: every todo must be completed or cancelled; open items block delivery.\n"
+            "- Work as an evidence loop: state the current hypothesis and expected observable result, "
+            "take the shortest useful tool action, compare actual vs expected, then update the plan.\n"
+            "- For a new or weak hypothesis, prefer 1–2 mutating actions before re-observing. "
+            "Use larger batches only when prior tool evidence supports the sequence.\n"
+            "- Never repeat an unchanged failed action without new evidence or a changed hypothesis.\n"
             "- If requirements are unclear or a risky choice is needed, call ask_user_question "
             "(structured options) instead of guessing.\n"
-            f"- HTTP app object MUST live at `{entry}` (Profile entry_module:entry_object).\n"
-            "- Smoke only the Profile/criteria declared routes (usually `/`). "
-            "Do NOT invent `/health` or `/ready` unless the Profile declares them.\n"
-            "- Preview must start a real HTTP process that serves the app; static zip alone is not enough "
-            "for flask/fastapi Goals.\n"
             "- Prefer persistence + empty states over fake placeholder users/cards.\n"
-            "- Visual quality is mandatory: designed CSS (layout, typography, color), `<main>`, "
-            "and working list→detail navigation. Browser-default unstyled pages fail product QA.\n"
-            "- Prefer relative href/src (no leading `/`) so Preview path-prefix proxy keeps CSS "
-            "and detail pages working.\n"
             "- Stay within planned_paths when possible; create supporting files as needed.\n"
-            "- When done, ensure requirements.txt, README.md, and a working entrypoint exist.\n"
-            "- Do not claim success until you have verified the app can start AND the public "
-            "Preview URL loads styles + at least one content detail route.\n"
             "- Workspace context only lists paths; call read_file before editing unknown content.\n"
             "- When RECENT FAILURES / failure envelopes appear, fix those exact errors before new features.\n"
+        )
+        goal = f"{self._goal_text} {self._first_deliverable}".lower()
+        runtime_kind = str(profile.get("kind") or profile.get("runtime") or "").lower() if isinstance(profile, dict) else ""
+        is_web = bool(runtime_kind in {"http", "web", "flask", "fastapi"} or any(
+            token in goal for token in (
+                "web", "website", "http", "flask", "fastapi", "网页", "网站", "页面"
+            )
+        ))
+        if not is_web:
+            return base + (
+                "Task profile: non-Web/general delivery. Do not invent HTTP, Preview, CSS, "
+                "or route requirements unless the Goal explicitly asks for them. Verify using "
+                "the repository's native tests and acceptance criteria.\n"
+            )
+        return base + (
+            "Task profile: Web/HTTP delivery.\n"
+            f"- HTTP app object MUST live at `{entry}` (Profile entry_module:entry_object).\n"
+            "- Smoke only declared routes; do not invent `/health` or `/ready`.\n"
+            "- Preview must start a real HTTP process for Flask/FastAPI Goals.\n"
+            "- Visual quality requires designed CSS, `<main>`, and working list→detail navigation.\n"
+            "- Prefer relative href/src so Preview path-prefix proxy keeps assets working.\n"
+            "- Verify startup and the public Preview, including styles and a content detail route.\n"
         )
 
     def static_prefix_text(self) -> str:
@@ -102,6 +192,7 @@ class ContextAssembler:
                 self._goal_anchor_segment(),
                 self._skill_guidance_segment(),
                 self._project_memory_segment(),
+                self._retrieved_memory_segment(),
                 self._conversation_segment(),
                 self._evidence_segment(),
             ]
@@ -149,13 +240,15 @@ class ContextAssembler:
         return messages
 
     def _goal_anchor_segment(self) -> str:
+        """Build goal anchor — success criteria JSON is PROTECTED from destructive truncation."""
         lines = ["══════ GOAL ANCHOR ══════"]
         if self._goal_text:
-            lines.append(f"Original goal: {self._goal_text}")
+            lines.append(f"Direction (stable): {self._goal_text}")
         if self._first_deliverable:
-            lines.append(f"First deliverable: {self._first_deliverable}")
+            lines.append(f"Current understanding (may evolve): {self._first_deliverable}")
         if self._success_criteria:
             lines.append("Success criteria:")
+            # PROTECTED: serialize fully, then clip by line boundary (never mid-JSON).
             lines.append(json.dumps(self._success_criteria, ensure_ascii=False, indent=2))
         acceptance = self._plan.get("acceptance_contract") or {}
         if acceptance.get("full_goal_success_criteria"):
@@ -165,7 +258,8 @@ class ContextAssembler:
             )
         if self._planned_paths:
             lines.append("Planned paths: " + ", ".join(self._planned_paths[:40]))
-        return _clip("\n".join(lines), _BUDGETS["goal_anchor"])
+        # Use _clip_lines to avoid splitting JSON mid-structure.
+        return _clip_lines("\n".join(lines), _BUDGETS["goal_anchor"])
 
     def _skill_guidance_segment(self) -> str:
         """M5: inject selected Skill guidance into the user turn (not just metadata)."""
@@ -182,12 +276,89 @@ class ContextAssembler:
             ]
             if ids:
                 header += "\nSelected: " + ", ".join(ids)
-        return _clip(header + "\n" + guidance, _BUDGETS["skill_guidance"])
+        return _clip_lines(header + "\n" + guidance, _BUDGETS["skill_guidance"])
 
     def _project_memory_segment(self) -> str:
         if not self._regent_md.strip():
             return ""
-        return _clip("══════ REGENT.md ══════\n" + self._regent_md, _BUDGETS["project_memory"])
+        # Workspace paths and old verification logs already have dedicated,
+        # fresher segments. Keep only durable project knowledge here.
+        selected: list[str] = []
+        keep = False
+        for line in self._regent_md.splitlines():
+            if line.startswith("## "):
+                keep = line[3:].strip() in {
+                    "Goal lessons",
+                    "Tech stack",
+                    "Known constraints / gaps",
+                }
+            if keep:
+                selected.append(line)
+        memory = "\n".join(selected).strip() or self._regent_md
+        return _clip_lines("══════ PROJECT HARD MEMORY ══════\n" + memory, _BUDGETS["project_memory"])
+
+    def _retrieved_memory_segment(self) -> str:
+        memory = str(self._plan.get("retrieved_memory") or "").strip()
+        if not memory:
+            return ""
+        return _clip_sentences(
+            "══════ RELEVANT VERIFIED MEMORY ══════\n"
+            "Use only when applicable; current user instructions win.\n"
+            + memory,
+            _BUDGETS["retrieved_memory"],
+        )
+
+    def segment_char_sizes(self) -> dict[str, int]:
+        """Expose prompt composition for cost/quality diagnostics."""
+        segments = {
+            "goal": self._goal_anchor_segment(),
+            "skills": self._skill_guidance_segment(),
+            "project_memory": self._project_memory_segment(),
+            "retrieved_memory": self._retrieved_memory_segment(),
+            "conversation_context": self._conversation_segment(),
+            "evidence": self._evidence_segment(),
+            "workspace": self._workspace_segment(),
+            "todos": self._todo_segment(),
+            "failures": self._failures_segment(),
+        }
+        return {name: len(value) for name, value in segments.items() if value}
+
+    def segment_fingerprints(self) -> dict[str, str]:
+        """Return per-segment content fingerprints for dedup diagnostics."""
+        sizes = self.segment_char_sizes()
+        # Rebuild segments to get text for fingerprinting.
+        segments = {
+            "goal": self._goal_anchor_segment(),
+            "skills": self._skill_guidance_segment(),
+            "project_memory": self._project_memory_segment(),
+            "retrieved_memory": self._retrieved_memory_segment(),
+            "conversation_context": self._conversation_segment(),
+            "evidence": self._evidence_segment(),
+            "workspace": self._workspace_segment(),
+            "todos": self._todo_segment(),
+            "failures": self._failures_segment(),
+        }
+        return {
+            name: _segment_fingerprint(text)
+            for name, text in segments.items()
+            if text
+        }
+
+    def assemble_diagnostics(self, *, turn: int, conversation: list[ChatMessage]) -> dict[str, Any]:
+        """Return diagnostic info for prompt observability (P2-8)."""
+        sizes = self.segment_char_sizes()
+        fps = self.segment_fingerprints()
+        total_chars = sum(sizes.values())
+        # Estimate tokens at ~4 chars/token.
+        estimated_tokens = total_chars // 4
+        return {
+            "turn": turn,
+            "segment_chars": sizes,
+            "segment_fingerprints": fps,
+            "total_chars": total_chars,
+            "estimated_tokens": estimated_tokens,
+            "conversation_messages": len(conversation),
+        }
 
     def _conversation_segment(self) -> str:
         """CD-4.3: retrieved conversation snippets (guidance history, user
@@ -196,24 +367,35 @@ class ContextAssembler:
         Reads ``plan["conversation_snippets"]`` — a list of either plain strings
         or ``{"role": ..., "content": ...}`` dicts. Absent/empty by default; the
         caller (delivery pipeline) is responsible for retrieval/ranking.
+
+        DEDUP: snippets whose content fingerprint matches a live conversation
+        message are silently dropped to avoid double-injection.
         """
         snippets = self._plan.get("conversation_snippets") or []
         if not snippets:
             return ""
+        # Build fingerprint set from live conversation for dedup.
+        live_fps: set[str] = set()
+        # Live conversation is not directly available here; use plan hint.
+        live_msgs = self._plan.get("_live_conversation_messages") or []
+        for msg in live_msgs:
+            content = str(msg.get("content") or "").strip()
+            if content:
+                live_fps.add(_segment_fingerprint(content))
         lines = ["══════ CONVERSATION CONTEXT ══════"]
         for item in snippets:
             if isinstance(item, dict):
                 role = str(item.get("role") or "user").strip() or "user"
                 text = str(item.get("content") or item.get("text") or "").strip()
-                if text:
+                if text and _segment_fingerprint(text) not in live_fps:
                     lines.append(f"[{role}] {text}")
             else:
                 text = str(item).strip()
-                if text:
+                if text and _segment_fingerprint(text) not in live_fps:
                     lines.append(f"- {text}")
         if len(lines) == 1:
             return ""
-        return _clip("\n".join(lines), _BUDGETS["conversation_context"])
+        return _clip_lines("\n".join(lines), _BUDGETS["conversation_context"])
 
     def _evidence_segment(self) -> str:
         """CD-4.3: retrieved evidence snippets (discovery sources, observed data)
@@ -243,7 +425,7 @@ class ContextAssembler:
                     lines.append(f"- {text}")
         if len(lines) == 1:
             return ""
-        return _clip("\n".join(lines), _BUDGETS["evidence_context"])
+        return _clip_lines("\n".join(lines), _BUDGETS["evidence_context"])
 
     def _workspace_segment(self) -> str:
         """Tree-only workspace view — no file fulltext (prompt-cache + cost)."""
@@ -257,13 +439,13 @@ class ContextAssembler:
         if recent:
             lines.append("Recent writes:")
             lines.extend(f"  - {rel}" for rel in recent)
-        return _clip("\n".join(lines), _BUDGETS["workspace_state"])
+        return _clip_lines("\n".join(lines), _BUDGETS["workspace_state"])
 
     def _todo_segment(self) -> str:
         if not self._toolkit.todos:
             return "══════ TODOS ══════\n(none yet — create with todo_write)"
         blob = json.dumps(self._toolkit.todos, ensure_ascii=False, indent=2)
-        return _clip("══════ TODOS ══════\n" + blob, _BUDGETS["todo_state"])
+        return _clip_json_list("══════ TODOS ══════\n" + blob, _BUDGETS["todo_state"])
 
     def _failures_segment(self) -> str:
         acceptance = self._plan.get("acceptance_contract") or {}
@@ -357,4 +539,4 @@ class ContextAssembler:
                 lines.append(gap.artifact_snippet[:2_000])
         if len(lines) == 1:
             return ""
-        return _clip("\n".join(lines), _BUDGETS["recent_failures"])
+        return _clip_lines("\n".join(lines), _BUDGETS["recent_failures"])

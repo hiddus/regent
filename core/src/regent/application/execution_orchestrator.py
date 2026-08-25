@@ -326,6 +326,9 @@ class ExecutionOrchestrator:
             goal_meta = dict(goal.metadata_json or {})
             goal_meta["goal_profile"] = goal_profile.as_dict()
             goal_meta["org_mode"] = org_mode.as_dict()
+            # Sync locked pointer with current latest FROZEN spec (outer loop may have evolved).
+            goal_meta["locked_spec_hash"] = spec.content_hash
+            goal_meta["locked_spec_version"] = spec.version
             goal.metadata_json = goal_meta
 
             logger.info(
@@ -1530,6 +1533,26 @@ class ExecutionOrchestrator:
         failure_lessons = lessons_for_acceptance(goal_meta, limit=8)
         if failure_lessons:
             acceptance_contract["failure_lessons"] = failure_lessons
+            try:
+                from regent.application.learning_update_service import LearningUpdateService
+
+                applied_learning_ids = await LearningUpdateService(
+                    self._sessions
+                ).apply_pending_for_goal(
+                    goal_id=goal_id,
+                    consumer_type="generation_plan",
+                    consumer_ref=idempotency_key or f"goal:{goal_id}:generation",
+                )
+                if applied_learning_ids:
+                    acceptance_contract["applied_learning_update_ids"] = [
+                        str(item) for item in applied_learning_ids
+                    ]
+            except Exception:
+                logger.warning(
+                    "failure learning application record skipped",
+                    extra={"goal_id": str(goal_id)},
+                    exc_info=True,
+                )
         # Always surface latest gap reasons (not only attainment policy path).
         prior_gaps = list(
             goal_meta.get("delivery_gap_reasons") or payload.get("gap_reasons") or []
@@ -3384,6 +3407,8 @@ class ExecutionOrchestrator:
         live_overturn = False
         swarm_result: dict[str, Any] | None = None
         swarm_overturn = False
+        task_verdict: Any | None = None
+        task_overturn = False
         try:
             from regent.application.generation_hive_executor import (
                 run_hive_live_content_review,
@@ -3593,7 +3618,17 @@ class ExecutionOrchestrator:
                     success_criteria,
                     goal_input=goal_text,
                 )
-                if not task_verdict.passed and task_verdict.skipped_reason == "":
+                async with self._sessions() as _gs_tv, _gs_tv.begin():
+                    _g_tv = await _gs_tv.get(GoalModel, goal_id, with_for_update=True)
+                    if _g_tv is not None:
+                        _meta_tv = dict(_g_tv.metadata_json or {})
+                        _meta_tv["goal_task_verdict"] = task_verdict.as_dict()
+                        _g_tv.metadata_json = _meta_tv
+                if (
+                    not task_verdict.passed
+                    and task_verdict.skipped_reason != "no_criteria_matched"
+                ):
+                    task_overturn = True
                     logger.warning(
                         "goal task completion verification failed",
                         extra={
@@ -3601,22 +3636,15 @@ class ExecutionOrchestrator:
                             "verdict": task_verdict.as_dict(),
                         },
                     )
-                    # Task failure is a soft signal — log but don't block.
-                    # The proxy QA + swarm are still authoritative for now.
-                    # This data feeds into the DELIVERED_AWAITING_REVIEW state.
-                    async with self._sessions() as _gs_tv, _gs_tv.begin():
-                        _g_tv = await _gs_tv.get(GoalModel, goal_id, for_update=True)
-                        if _g_tv is not None:
-                            _meta_tv = dict(_g_tv.metadata_json or {})
-                            _meta_tv["goal_task_verdict"] = task_verdict.as_dict()
-                            _g_tv.metadata_json = _meta_tv
             except Exception as task_exc:
+                task_overturn = True
                 logger.warning(
-                    "goal task verification skipped (non-blocking)",
+                    "goal task verification failed closed",
                     extra={"goal_id": str(goal_id)},
                     exc_info=True,
                 )
-            return True, qa, public_url
+            if not task_overturn:
+                return True, qa, public_url
 
         logger.warning(
             "live preview product QA failed — refusing preview success",
@@ -3692,6 +3720,25 @@ class ExecutionOrchestrator:
                         token = str(gap).strip()
                         if token and token not in fails:
                             fails.append(token)
+                    metadata["live_preview_qa_failures"] = fails[:10]
+                if task_overturn:
+                    task_dict = (
+                        task_verdict.as_dict()
+                        if task_verdict is not None
+                        else {
+                            "passed": False,
+                            "summary": "goal task verification unavailable",
+                            "criteria": [],
+                            "skipped_reason": "verifier_exception",
+                        }
+                    )
+                    metadata["goal_task_verdict"] = task_dict
+                    fails = list(metadata.get("live_preview_qa_failures") or [])
+                    fails.insert(
+                        0,
+                        "goal-task-verification: "
+                        + str(task_dict.get("summary") or "failed")[:240],
+                    )
                     metadata["live_preview_qa_failures"] = fails[:10]
                 # Force next Session to confront the exact broken URLs, not CSS fluff.
                 failures = metadata["live_preview_qa_failures"]
@@ -4217,6 +4264,74 @@ class ExecutionOrchestrator:
                             "decision_id": str(decision.id),
                         },
                     )
+            elif decision.decision == "PIVOT":
+                # Outer loop: spec itself may be inadequate — evolve it,
+                # then re-enter generation with the updated spec.
+                from regent.application.goal_revision_service import GoalRevisionService
+
+                pivot_result = await GoalRevisionService(
+                    self._sessions
+                ).assess_and_revise(
+                    goal_id=goal_id,
+                    trigger="delivery_failure",
+                    actor=actor,
+                    revision_context={
+                        "gate_status": gate.status,
+                        "reorg_exhausted": True,
+                    },
+                )
+                if pivot_result.revised:
+                    # Spec evolved — downgrade to REVISE path.
+                    round_id = await loop_service.handle_revise(
+                        decision.id, actor=actor
+                    )
+                    async with self._sessions() as session, session.begin():
+                        goal = await session.get(GoalModel, goal_id)
+                        if goal is not None:
+                            metadata = dict(goal.metadata_json or {})
+                            metadata["execution_stage"] = "DISCOVERING"
+                            metadata["last_revise_discovery_round_id"] = str(round_id)
+                            goal.metadata_json = metadata
+                        await self._append_conversation_event(
+                            session,
+                            project_id,
+                            "PIVOT_SPEC_EVOLVED",
+                            (
+                                f"目标规格已进化（v{pivot_result.old_spec_version} → "
+                                f"v{pivot_result.new_spec_version}），正在基于新理解重新生成。"
+                            ),
+                            {
+                                "goal_id": str(goal_id),
+                                "old_version": pivot_result.old_spec_version,
+                                "new_version": pivot_result.new_spec_version,
+                                "decision_id": str(decision.id),
+                            },
+                        )
+                else:
+                    # Cannot evolve spec further — need human intervention.
+                    await transitions.transition_goal(
+                        TransitionContext(
+                            goal_id, expected_version, actor, correlation_id
+                        ),
+                        GoalCommand.WAIT_FOR_HUMAN,
+                    )
+                    async with self._sessions() as session, session.begin():
+                        goal = await session.get(GoalModel, goal_id)
+                        if goal is not None:
+                            metadata = dict(goal.metadata_json or {})
+                            metadata["execution_stage"] = "WAITING_HUMAN"
+                            metadata["termination"] = {
+                                "reason": "pivot_exhausted_needs_human",
+                                "gate_status": gate.status,
+                            }
+                            goal.metadata_json = metadata
+                        await self._append_conversation_event(
+                            session,
+                            project_id,
+                            "HUMAN_TASK_REQUIRED",
+                            "目标规格进化已达上限，需要你介入调整方向。",
+                            {"goal_id": str(goal_id)},
+                        )
 
             if not smoke_result.passed and decision.decision == "CONTINUE":
                 # Defensive: smoke fail should not CONTINUE; already handled via gate SUM.
@@ -4424,7 +4539,7 @@ class ExecutionOrchestrator:
             expected_version = goal.version
             correlation_id = goal.correlation_id
 
-        if status != "ACTIVE":
+        if status not in {"ACTIVE", "WAITING_HUMAN"}:
             logger.info(
                 "quality approval skipped: goal not active",
                 extra={"goal_id": str(goal_id), "status": status},
@@ -4433,10 +4548,11 @@ class ExecutionOrchestrator:
 
         if not approved:
             # User rejected quality — wait for direction, do not calm-EXHAUST as "任务结束".
-            await TransitionService(self._sessions).transition_goal(
-                TransitionContext(goal_id, expected_version, actor, correlation_id),
-                GoalCommand.WAIT_FOR_HUMAN,
-            )
+            if status == "ACTIVE":
+                await TransitionService(self._sessions).transition_goal(
+                    TransitionContext(goal_id, expected_version, actor, correlation_id),
+                    GoalCommand.WAIT_FOR_HUMAN,
+                )
             async with self._sessions() as session, session.begin():
                 goal = await session.get(GoalModel, goal_id)
                 if goal is not None:
@@ -4463,6 +4579,21 @@ class ExecutionOrchestrator:
                 )
             return
 
+        # Approval may arrive while the delivery is deliberately parked in
+        # WAITING_HUMAN. Resolve that gate first, then perform the audited
+        # ACTIVE → ACHIEVED transition.
+        if status == "WAITING_HUMAN":
+            await TransitionService(self._sessions).transition_goal(
+                TransitionContext(goal_id, expected_version, actor, correlation_id),
+                GoalCommand.HUMAN_RESOLVED,
+            )
+            async with self._sessions() as session:
+                resumed = await session.get(GoalModel, goal_id)
+                if resumed is None:
+                    return
+                expected_version = resumed.version
+                correlation_id = resumed.correlation_id
+
         # Approved → ACHIEVE
         await TransitionService(self._sessions).transition_goal(
             TransitionContext(goal_id, expected_version, actor, correlation_id),
@@ -4474,7 +4605,10 @@ class ExecutionOrchestrator:
                 metadata = dict(goal.metadata_json or {})
                 metadata["execution_stage"] = "ACHIEVED"
                 metadata["quality_approved_by"] = actor
+                metadata["quality_verified_by"] = actor
                 metadata["quality_feedback"] = feedback_text
+                metadata.pop("pending_quality_task_id", None)
+                metadata.pop("awaiting_human_intervention", None)
                 goal.metadata_json = metadata
             await self._append_conversation_event(
                 session,
@@ -4483,6 +4617,8 @@ class ExecutionOrchestrator:
                 "目标已完成！",
                 {"goal_id": str(goal_id)},
             )
+        # --- Project lifecycle: suggest next steps after ACHIEVE ---
+        await self._suggest_project_next_steps(session, project_id, goal_id)
         logger.info(
             "goal achieved after quality approval",
             extra={"goal_id": str(goal_id), "actor": actor},
@@ -4720,6 +4856,20 @@ class ExecutionOrchestrator:
                         "gac": "GAC-E2",
                     },
                 )
+                # --- Outer loop: milestone boundary revision check ---
+                from regent.application.goal_revision_service import GoalRevisionService
+
+                revision_result = await GoalRevisionService(self._sessions).assess_and_revise(
+                    goal_id=goal_id,
+                    trigger="milestone_boundary",
+                    actor=actor,
+                    revision_context={
+                        "completed_milestone": attained.title,
+                        "next_milestone": nxt.title,
+                        "completed_ordinal": attained.ordinal,
+                    },
+                    session=session,
+                )
                 await self._emit_milestone_discovery(
                     session,
                     goal=goal,
@@ -4753,6 +4903,16 @@ class ExecutionOrchestrator:
                 goal_scale=goal_scale,
                 has_preview=has_preview,
             )
+            task_verdict_meta = dict(metadata.get("goal_task_verdict") or {})
+            if task_verdict_meta and task_verdict_meta.get("passed") is not True:
+                if task_verdict_meta.get("skipped_reason") == "no_criteria_matched":
+                    # Mechanical checks can deliver an unverified product for
+                    # explicit human review, but cannot claim hard achievement.
+                    allow_achieve = has_preview
+                    achieve_reason = "soft_pass_preview"
+                else:
+                    allow_achieve = False
+                    achieve_reason = "goal_task_verification_failed"
             # Soft ACHIEVE also requires Live product QA to have passed.
             product_ready = metadata.get("product_surface_ready") in (True, "true", "1")
             live_qa = dict(metadata.get("live_preview_qa") or {})
@@ -4858,6 +5018,18 @@ class ExecutionOrchestrator:
 
         if is_soft_pass:
             # Delivered but NOT achieved — awaiting human product acceptance.
+            work_id, run_id = await self._ensure_work_and_run_for_goal(
+                goal_id, purpose="quality-acceptance", actor=actor
+            )
+            quality_task_id = await HumanTaskService(self._sessions).create(
+                goal_id=goal_id,
+                work_id=work_id,
+                run_id=run_id,
+                task_type="QUALITY_APPROVAL",
+                prompt="请审阅已交付的预览，并确认是否满足产品目标与成功标准。",
+                requested_by=actor,
+                due_at=datetime.now(UTC) + timedelta(hours=24),
+            )
             await transitions.transition_goal(
                 TransitionContext(goal_id, version, actor, corr),
                 GoalCommand.WAIT_FOR_HUMAN,
@@ -4867,9 +5039,10 @@ class ExecutionOrchestrator:
                 if goal is not None:
                     metadata = dict(goal.metadata_json or {})
                     metadata["execution_stage"] = "DELIVERED_AWAITING_REVIEW"
-                    metadata["quality_verified_by"] = actor
+                    metadata["delivered_by"] = actor
+                    metadata["pending_quality_task_id"] = str(quality_task_id)
+                    metadata["awaiting_human_intervention"] = True
                     metadata.pop("halt", None)
-                    metadata.pop("awaiting_human_intervention", None)
                     metadata.pop("awaiting_verification", None)
                     goal.metadata_json = metadata
                 await self._append_conversation_event(
@@ -4882,6 +5055,7 @@ class ExecutionOrchestrator:
                         "deployment_id": str(deployment_id),
                         "delivery_verification": verification,
                         "achieve_reason": achieve_reason,
+                        "task_id": str(quality_task_id),
                         "gac": "P0-4-split",
                     },
                 )
@@ -4924,6 +5098,8 @@ class ExecutionOrchestrator:
                     "achieve_reason": achieve_reason,
                 },
             )
+            # --- Project lifecycle: suggest next steps after ACHIEVE ---
+            await self._suggest_project_next_steps(session, project_id, goal_id)
         logger.info(
             "goal achieved with verification",
             extra={
@@ -5816,6 +5992,33 @@ class ExecutionOrchestrator:
                 extra={"goal_id": str(goal_id)},
                 exc_info=True,
             )
+        try:
+            from regent.application.learning_update_service import LearningUpdateService
+
+            await LearningUpdateService(self._sessions).propose_failure_constraint(
+                goal_id=goal_id,
+                org_key=f"project:{project_id}",
+                failure_code=str(error_code or "GENERATION_FAILED"),
+                summary=summary,
+                avoid=(
+                    "Avoid this verified failure mode on the next generation; "
+                    "apply the concrete failure lesson before adding new features."
+                ),
+                evidence_refs=[
+                    {
+                        "generation_run_id": (
+                            str(generation_run_id) if generation_run_id else None
+                        ),
+                        "generation_plan_id": str(plan_id) if plan_id else None,
+                    }
+                ],
+            )
+        except Exception:
+            logger.warning(
+                "generation learning candidate skipped",
+                extra={"goal_id": str(goal_id)},
+                exc_info=True,
+            )
 
     @staticmethod
     async def _append_conversation_message(
@@ -5849,6 +6052,47 @@ class ExecutionOrchestrator:
                 metadata_json=metadata,
                 created_by="regent-core",
             )
+        )
+
+    async def _suggest_project_next_steps(
+        self,
+        session: AsyncSession,
+        project_id: uuid.UUID,
+        goal_id: uuid.UUID,
+    ) -> None:
+        """Project lifecycle: after goal ACHIEVE, suggest next steps.
+
+        Checks goal metadata for auto_maintain flag. If enabled,
+        emits a PROJECT_LIFECYCLE_SUGGESTION event prompting the user
+        to decide the next phase (maintenance, new feature, or archive).
+        """
+        goal = await session.get(GoalModel, goal_id)
+        if goal is None:
+            return
+        goal_meta = dict(goal.metadata_json or {})
+        # Only suggest if goal/project has auto_maintain enabled.
+        if not goal_meta.get("auto_maintain"):
+            return
+        await self._append_conversation_event(
+            session,
+            project_id,
+            "PROJECT_LIFECYCLE_SUGGESTION",
+            (
+                "当前阶段目标已完成。项目已启用自动维护模式。"
+                "请选择下一步方向：\n"
+                "1. 创建维护目标（持续监控和优化）\n"
+                "2. 启动新功能阶段\n"
+                "3. 归档项目"
+            ),
+            {
+                "goal_id": str(goal_id),
+                "project_id": str(project_id),
+                "suggested_actions": [
+                    "create_maintenance_goal",
+                    "start_new_phase",
+                    "archive_project",
+                ],
+            },
         )
 
     @staticmethod

@@ -271,6 +271,18 @@ class FeedbackService:
                 )
             )
 
+    async def _recent_decisions(self, goal_id: uuid.UUID, limit: int = 3) -> list[IterationDecisionModel]:
+        """Return the most recent iteration decisions for a goal."""
+        async with self._sessions() as session:
+            return list(
+                await session.scalars(
+                    select(IterationDecisionModel)
+                    .where(IterationDecisionModel.goal_id == goal_id)
+                    .order_by(IterationDecisionModel.created_at.desc())
+                    .limit(limit)
+                )
+            )
+
     async def decide(self, command: CreateIterationDecision) -> IterationDecisionModel:
         async with self._sessions() as session, session.begin():
             existing = await session.scalar(
@@ -296,8 +308,19 @@ class FeedbackService:
                     "of the primary hypothesis"
                 )
             elif gate.status == "FAILED":
-                decision = "STOP"
-                rationale = "one or more frozen metric gates failed"
+                # PIVOT: repeated REVISE without gate passage → spec itself
+                # may be inadequate, not just the implementation.
+                recent = await self._recent_decisions(gate.goal_id, limit=3)
+                revise_count = sum(1 for d in recent if d.decision == "REVISE")
+                if revise_count >= 2:
+                    decision = "PIVOT"
+                    rationale = (
+                        f"repeated REVISE ({revise_count}x) without gate passage "
+                        "— spec itself may be inadequate"
+                    )
+                else:
+                    decision = "STOP"
+                    rationale = "one or more frozen metric gates failed"
             else:
                 raise DomainError(
                     ErrorCode.INVALID_STATE,
