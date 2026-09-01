@@ -124,3 +124,36 @@ ops/archive/
 
 # pytest temp preview
 .pytest-tmp-preview-val/
+
+# ---------------------------------------------------------------------------
+# 2026-08-31 补录：历史未覆盖的本地产物（推送前安全整理）
+# ---------------------------------------------------------------------------
+
+# pytest 临时工作目录（历史规则只覆盖 .pytest-tmp*，实际产生了 .pytest-quality-* /
+# .pytest_arc_* / .pytest_tmpN 等命名，全部漏网）
+.pytest-quality-*/
+.pytest_arc*/
+.pytest_tmp*/
+.pytest-cache/
+.pytest_last_run.txt
+
+# 本地运行日志（可能含真实路径与服务器信息）
+*.log
+
+# 本地工具与编辑器状态目录（非项目源码）
+.cursor/
+.slidep/
+.workbuddy/
+.vt2_accept/
+.vt_delivery/
+
+# 环境变量 / 凭证 dump（含明文服务器 IP，绝不提交）
+docs/_env_keys_dump.txt
+*_keys_dump*
+docs/_tmp_*.txt
+docs/_cw_ws_snapshot/
+
+# 诊断探针输出（与既有 ops/_*.py 同逻辑，历史只忽略了脚本未忽略其输出）
+ops/_*.txt
+ops/_*.json
+ops/_*.out
