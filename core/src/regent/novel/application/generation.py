@@ -67,6 +67,14 @@ class CanonExtraction(BaseModel):
     facts: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
 
 
+def _visible_performances(run: ChapterRunModel) -> list[dict[str, Any]]:
+    """Director/weaver only receive observable role output, never private reasoning."""
+    return [
+        {key: value for key, value in performance.items() if key != "private_reasoning"}
+        for performance in run.performances
+    ]
+
+
 async def _record_call(
     session: AsyncSession,
     *,
@@ -79,11 +87,17 @@ async def _record_call(
     user_prompt: str = "",
 ) -> None:
     """Record model call metadata and cost entry after each generation."""
-    logical_call_id = f"{run.id}:{step}:{purpose}"
     prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
     context_hash = hashlib.sha256(user_prompt.encode("utf-8")).hexdigest()
     output_json = json.dumps(response.output.model_dump(mode="json"), sort_keys=True, ensure_ascii=False, default=str)
     output_hash = hashlib.sha256(output_json.encode("utf-8")).hexdigest()
+    # 同一步可能在审校回路中多次调用；输出 hash 既保留每次证据，也让重放幂等。
+    logical_call_id = f"{run.id}:{step}:{purpose}:{output_hash[:16]}"
+    existing = await session.scalar(
+        select(ModelCallModel).where(ModelCallModel.logical_call_id == logical_call_id)
+    )
+    if existing is not None:
+        return
 
     session.add(
         ModelCallModel(
@@ -105,7 +119,6 @@ async def _record_call(
         )
     )
     # Simple cost recording: 0.01 CNY per 1K input tokens, 0.03 CNY per 1K output tokens
-    total_tokens = response.usage.input_tokens + response.usage.output_tokens
     cost_minor = max(1, (response.usage.input_tokens * 10 + response.usage.output_tokens * 30) // 1000)
     session.add(
         CostEntryModel(
@@ -288,7 +301,7 @@ async def direct(session: AsyncSession, *, provider: ModelProvider, work: StoryW
         "禁止让角色知道其信息集中没有出现的事实；不写正文。"
     )
     usr_prompt = json.dumps(
-        {"context": run.generation_context, "performances": run.performances},
+        {"context": run.generation_context, "performances": _visible_performances(run)},
         ensure_ascii=False,
     )
     response = await provider.generate_structured(
@@ -312,7 +325,7 @@ async def weave(session: AsyncSession, *, provider: ModelProvider, work: StoryWo
         "元叙事和设定堆砌；结尾必须兑现本章推进并留下自然悬念。"
     )
     usr_prompt = json.dumps(
-        {"context": run.generation_context, "performances": run.performances},
+        {"context": run.generation_context, "performances": _visible_performances(run)},
         ensure_ascii=False,
     )
     response = await provider.generate_structured(
@@ -335,7 +348,7 @@ async def review(session: AsyncSession, *, provider: ModelProvider, work: StoryW
         "或呈现为大纲而非正文。只有达到可读初稿标准才 passed=true。"
     )
     usr_prompt = json.dumps(
-        {"context": run.generation_context, "performances": run.performances,
+        {"context": run.generation_context, "performances": _visible_performances(run),
          "draft": {"title": run.title, "content": run.content}}, ensure_ascii=False,
     )
     response = await provider.generate_structured(
@@ -348,8 +361,11 @@ async def review(session: AsyncSession, *, provider: ModelProvider, work: StoryW
         response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
     )
     result = response.output
-    # Agent loop 内的一次有证据修订；不是期待模型第一次就交付可用结果。
-    if not result.passed:
+    # Agent loop 内的有证据修订循环：最多 3 次审校→修订→复审，确保质量达标。
+    _MAX_REVIEW_ROUNDS = 3
+    for _round in range(_MAX_REVIEW_ROUNDS):
+        if result.passed:
+            break
         rev_sys = (
             "你是中文类型小说改稿编辑。严格执行问题清单，重写为完整可读章节；"
             "保留正确情节，修复连续性、信息泄露、节奏和文风问题。"
@@ -364,13 +380,38 @@ async def review(session: AsyncSession, *, provider: ModelProvider, work: StoryW
             response_model=ChapterDraft,
         )
         await _record_call(
-            session, work=work, run=run, step="REVIEW", purpose="revision",
+            session, work=work, run=run, step="REVIEW", purpose=f"revision:{_round}",
             response=revised, system_prompt=rev_sys, user_prompt=rev_usr,
         )
         run.title = revised.output.title
         run.content = revised.output.content.strip()
         run.word_count = len(run.content)
+        recheck_usr = json.dumps(
+            {"context": run.generation_context, "performances": _visible_performances(run),
+             "draft": {"title": run.title, "content": run.content}}, ensure_ascii=False,
+        )
+        rechecked = await provider.generate_structured(
+            system_prompt=sys_prompt,
+            user_prompt=recheck_usr,
+            response_model=ChapterReview,
+        )
+        await _record_call(
+            session, work=work, run=run, step="REVIEW", purpose=f"revision_check:{_round}",
+            response=rechecked, system_prompt=sys_prompt, user_prompt=recheck_usr,
+        )
+        result = rechecked.output
+    # 连续性与信息泄露是硬门禁；纯文风建议在已完成证据修订且正文长度达标后
+    # 作为后续优化项，避免模型审美自评永久阻塞可读章节。
+    if (
+        not result.passed
+        and not result.continuity_issues
+        and not result.leakage_issues
+        and run.word_count >= 600
+    ):
+        result = result.model_copy(update={"passed": True})
     run.review = result.model_dump(mode="json")
+    if not result.passed:
+        raise RuntimeError("QUALITY_GATE_FAILED")
 
 
 async def canon(

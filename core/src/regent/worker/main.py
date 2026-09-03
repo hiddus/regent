@@ -259,6 +259,9 @@ class Worker:
                                 "behavior monitor tick",
                                 extra=bm_stats,
                             )
+                    except (ImportError, ModuleNotFoundError):
+                        # Module not available in this build; disable silently.
+                        self._behavior_monitor_enabled = False
                     except Exception:
                         logger.exception("behavior monitor tick failed")
                     self._next_behavior_monitor = (

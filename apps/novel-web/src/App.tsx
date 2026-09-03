@@ -8,6 +8,7 @@ type Progress = {chapter_no:number;state:string;current_step?:string;steps:Recor
 type Chapter = {title:string;content:string;word_count:number;ai_disclosure:string}
 type CostData = {currency:string;consumed_minor:number;released_minor:number;by_chapter:{chapter_no:number;amount_minor:number}[];by_step:{step:string;amount_minor:number}[]}
 type Share = {share_id:string;work_id:string;share_url:string;scope:string;noindex:boolean;revoked_at:string|null;expires_at:string|null}
+type SharedWork = {title:string;genre:string;ai_disclosure:string;expires_at:string;chapters:{chapter_no:number;title:string;content:string;word_count:number}[]}
 
 const STEP_LABELS: Record<string,string> = {
   ASSEMBLE:'整理世界与目标', PERFORM:'角色各自行动', DIRECT:'导演编排场景',
@@ -38,9 +39,19 @@ export default function App() {
   const [factResult, setFactResult] = useState('')
   const [exportNotice, setExportNotice] = useState<{notice_version:string;title:string;body:string;satisfied_at:string|null}|null>(null)
   const [exportResult, setExportResult] = useState<{download_url:string;format:string}|null>(null)
+  const [sharedWork, setSharedWork] = useState<SharedWork|null>(null)
 
   // --- Init: load token ---
-  useEffect(() => { void api('/me').catch(() => {}) }, [])
+  useEffect(() => {
+    const share = window.location.pathname.match(/^\/read\/([^/]+)/)
+    if (share) {
+      void fetch(`/v1/novel/public/shares/${encodeURIComponent(share[1])}`)
+        .then(async r => { if (!r.ok) throw new Error('分享已失效或不存在'); return r.json() })
+        .then(setSharedWork).catch(e => setError(e.message))
+      return
+    }
+    void api('/me').catch(() => {})
+  }, [])
 
   // --- URL routing: read on mount ---
   useEffect(() => {
@@ -88,16 +99,16 @@ export default function App() {
     const abort = connectSSE(
       `/works/${workId}/events/stream`,
       (msg) => {
-        if (msg.event === 'step_succeeded' && msg.data) {
+        if (msg.event === 'chapter.step_succeeded' && msg.data) {
           try {
             const d = JSON.parse(msg.data)
             const step = d.data?.step as string | undefined
             if (step) setProgress(p => p ? {...p, steps:{...p.steps, [step]:'SUCCEEDED'}} : p)
           } catch { /* ignore parse errors */ }
-        } else if (msg.event === 'chapter_done' && msg.data) {
+        } else if (msg.event === 'chapter.done' && msg.data) {
           try {
             const d = JSON.parse(msg.data)
-            const no = d.chapter_no as number
+            const no = (d.chapter_no ?? d.data?.chapter_no) as number
             void api<Chapter>(`/works/${workId}/chapters/${no}`).then(setChapter)
             void loadWorks()
             setProgress(p => p ? {...p, state:'CANONIZED'} : p)
@@ -114,6 +125,12 @@ export default function App() {
     return () => { sseActive.current = false; abort() }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workId, !!onboarding, !!chapter])
+
+  useEffect(() => {
+    if (!workId || !progress || TERMINAL.has(progress.state) || onboarding || chapter) return
+    const timer = window.setInterval(() => { void loadProgress(workId) }, 4000)
+    return () => window.clearInterval(timer)
+  }, [workId, progress?.state, !!onboarding, !!chapter])
 
   // --- Data helpers ---
   async function loadWorks() {
@@ -145,7 +162,10 @@ export default function App() {
       const s = await api<Share>(`/works/${workId}/shares`, {
         method:'POST', body: JSON.stringify({invitee_label: shareLabel || '朋友', scope:'FULL'}),
       })
-      setShareUrl(s.share_url); setShares(prev => [...prev, s])
+      // Use window.location.origin so the share URL is always externally accessible
+      const token = s.share_url.split('/read/')[1] || ''
+      const readableUrl = token ? `${window.location.origin}/read/${token}` : s.share_url
+      setShareUrl(readableUrl); setShares(prev => [...prev, {...s, share_url: readableUrl}])
     } catch(e) { setError((e as Error).message) } finally { setBusy(false) }
   }
   async function revokeShare(sid: string) {
@@ -238,6 +258,30 @@ export default function App() {
     setOnboarding(null); setChapter(null); setError(''); setProgress(null)
     await loadProgress(id)
   }
+
+  async function nextChapter() {
+    if (!workId) return
+    setBusy(true); setError('')
+    try {
+      const run = await api<Progress>(`/works/${workId}/runs`, {
+        method:'POST', headers:{'Idempotency-Key':crypto.randomUUID()},
+      })
+      setChapter(null); setProgress(run)
+    } catch(e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+
+  if (window.location.pathname.startsWith('/read/')) return <div className="sharedPage">
+    {error && <div className="panel"><h2>无法打开分享</h2><p className="muted">{error}</p></div>}
+    {!error && !sharedWork && <div className="panel"><p className="muted">正在打开故事…</p></div>}
+    {sharedWork && <article className="sharedReader">
+      <header><p className="eyebrow">{sharedWork.genre || '分享阅读'}</p><h1>{sharedWork.title}</h1></header>
+      {sharedWork.chapters.map(ch => <section key={ch.chapter_no}>
+        <p className="eyebrow">第 {ch.chapter_no} 章 · {ch.word_count} 字</p><h2>{ch.title}</h2>
+        <div className="prose">{ch.content.split('\n').map((p,i)=><p key={i}>{p}</p>)}</div>
+      </section>)}
+      <footer>{sharedWork.ai_disclosure}</footer>
+    </article>}
+  </div>
 
   // --- Render ---
   return <div className="shell">
@@ -350,6 +394,7 @@ export default function App() {
             <button onClick={()=>navigator.clipboard.writeText(chapter.content)} aria-label="复制正文">复制正文</button>
           </div>
           <div className="toolbar">
+            <button className="nextChapter" disabled={busy} onClick={nextChapter}>{busy?'正在开始…':'续写下一章 →'}</button>
             <button onClick={()=>openPanel('cost')}>成本明细</button>
             <button onClick={()=>openPanel('share')}>定向分享</button>
             <button onClick={()=>openPanel('export')}>导出作品</button>

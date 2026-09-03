@@ -5,6 +5,7 @@ from regent.novel.application.generation import (
     ChapterDraft,
     ChapterReview,
     DirectorPlan,
+    _visible_performances,
     direct,
     review,
     weave,
@@ -25,10 +26,11 @@ class FakeProvider:
                 ending_hook="旧表开始倒走",
             )
         elif response_model is ChapterReview:
+            review_number = self.calls.count("ChapterReview")
             output = ChapterReview(
-                passed=self.review_passed,
-                prose_issues=[] if self.review_passed else ["因果跳跃"],
-                revision_instructions=[] if self.review_passed else ["补足取得线索的代价"],
+                passed=self.review_passed or review_number > 1,
+                prose_issues=[] if self.review_passed or review_number > 1 else ["因果跳跃"],
+                revision_instructions=[] if self.review_passed or review_number > 1 else ["补足取得线索的代价"],
             )
         elif response_model is ChapterDraft:
             marker = "修订稿" if "ChapterReview" in self.calls else "初稿"
@@ -42,9 +44,36 @@ class FakeProvider:
         )
 
 
+class FakeSession:
+    def __init__(self) -> None:
+        self.rows = []
+
+    async def scalar(self, _):
+        return None
+
+    def add(self, row) -> None:
+        self.rows.append(row)
+
+    async def flush(self) -> None:
+        return None
+
+
+def test_private_reasoning_never_reaches_director_or_weaver() -> None:
+    run = SimpleNamespace(
+        performances=[{
+            "persona": "同伴", "private_reasoning": "我要隐瞒钥匙",
+            "actions": ["收起手"], "dialogue": ["没什么"],
+        }]
+    )
+    visible = _visible_performances(run)
+    assert "private_reasoning" not in visible[0]
+    assert visible[0]["actions"] == ["收起手"]
+
+
 async def test_agent_loop_directs_then_weaves_readable_chapter() -> None:
     provider = FakeProvider()
     run = SimpleNamespace(
+        id=__import__("uuid").uuid4(), chapter_no=1,
         generation_context={"goal": "找到父亲"},
         performances=[{"persona": "主角", "actions": ["追查旧表"]}],
         title="",
@@ -52,8 +81,10 @@ async def test_agent_loop_directs_then_weaves_readable_chapter() -> None:
         word_count=0,
         review={},
     )
-    await direct(provider=provider, run=run)
-    await weave(provider=provider, run=run)
+    work = SimpleNamespace(id=__import__("uuid").uuid4())
+    session = FakeSession()
+    await direct(session, provider=provider, work=work, run=run)
+    await weave(session, provider=provider, work=work, run=run)
     assert run.generation_context["director_plan"]["ending_hook"] == "旧表开始倒走"
     assert run.word_count >= 600
     assert provider.calls == ["DirectorPlan", "ChapterDraft"]
@@ -62,6 +93,7 @@ async def test_agent_loop_directs_then_weaves_readable_chapter() -> None:
 async def test_failed_review_triggers_evidence_based_revision() -> None:
     provider = FakeProvider(review_passed=False)
     run = SimpleNamespace(
+        id=__import__("uuid").uuid4(), chapter_no=1,
         generation_context={"goal": "找到父亲"},
         performances=[],
         title="初稿",
@@ -69,7 +101,8 @@ async def test_failed_review_triggers_evidence_based_revision() -> None:
         word_count=900,
         review={},
     )
-    await review(provider=provider, run=run)
+    work = SimpleNamespace(id=__import__("uuid").uuid4())
+    await review(FakeSession(), provider=provider, work=work, run=run)
     assert run.title == "修订稿"
-    assert run.review["passed"] is False
-    assert provider.calls == ["ChapterReview", "ChapterDraft"]
+    assert run.review["passed"] is True
+    assert provider.calls == ["ChapterReview", "ChapterDraft", "ChapterReview"]

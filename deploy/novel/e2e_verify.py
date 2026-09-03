@@ -171,22 +171,43 @@ def main() -> None:
         run_id = body.get("run_id", body.get("data", {}).get("run_id", ""))
         print(f"  Run ID: {run_id}")
 
-        # --- Step 9: Check run progress ---
-        time.sleep(2)
-        resp = _api(r, "GET", f"/works/{work_id}/runs", token=token)
-        body = check("List runs", resp)
+        # --- Step 9: Poll until chapter 1 is CANONIZED (max 180s) ---
+        print("\n  Waiting for chapter 1 to be generated...")
+        chapter_ok = False
+        for attempt in range(60):
+            time.sleep(3)
+            resp = _api(r, "GET", f"/works/{work_id}/runs", token=token)
+            prog = resp.get("body", {}) if isinstance(resp, dict) else {}
+            state = prog.get("state", "")
+            steps = prog.get("steps", {})
+            current = prog.get("current_step", "")
+            if state == "CANONIZED":
+                print(f"  [OK] Chapter 1 CANONIZED after ~{(attempt+1)*3}s")
+                chapter_ok = True
+                break
+            if state in ("TERMINAL_FAILED",):
+                print(f"  [FAIL] Chapter 1 TERMINAL_FAILED at step {current}")
+                fail_count += 1
+                break
+            if attempt % 5 == 0:
+                succeeded = [k for k,v in steps.items() if v == "SUCCEEDED"]
+                print(f"  ... state={state} step={current} succeeded={succeeded}")
+        if not chapter_ok and state != "TERMINAL_FAILED":
+            print(f"  [FAIL] Chapter 1 not CANONIZED after 180s (state={state})")
+            fail_count += 1
 
-        # --- Step 10: Try to read chapter 1 ---
-        resp = _api(r, "GET", f"/works/{work_id}/chapters/1", token=token)
-        status = resp.get("status", -1)
-        if status == 200:
-            check("Read chapter 1", resp)
-        elif status in (404, 409, 425):
-            print(f"\n[INFO] Chapter 1 not ready yet (HTTP {status}) — expected for async run")
-            print("  (Worker needs time to generate)")
-            ok_count += 1
-        else:
-            check("Read chapter 1", resp, expect_status=200)
+        # --- Step 10: Read chapter 1 ---
+        if chapter_ok:
+            resp = _api(r, "GET", f"/works/{work_id}/chapters/1", token=token)
+            ch_body = check("Read chapter 1", resp)
+            wc = ch_body.get("word_count", 0)
+            content = ch_body.get("content", "")
+            if wc < 100 or not content:
+                print(f"  [FAIL] Chapter 1 has no meaningful content (word_count={wc})")
+                fail_count += 1
+            else:
+                print(f"  Chapter 1: {wc} chars")
+                ok_count += 1
 
         # --- Step 11: Check events ---
         resp = _api(r, "GET", f"/works/{work_id}/events", token=token)

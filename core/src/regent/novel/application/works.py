@@ -769,8 +769,26 @@ async def start_run(
     session: AsyncSession, *, owner_id: uuid.UUID, work_id: uuid.UUID
 ) -> RunProgressOut:
     work = await _get_owned_work(session, work_id=work_id, owner_id=owner_id)
-    assert_story_work_transition(work.state, StoryWorkState.RUNNING.value)
-    work.state = StoryWorkState.RUNNING.value
+    latest_run = await session.scalar(
+        select(ChapterRunModel)
+        .where(
+            ChapterRunModel.work_id == work_id,
+            ChapterRunModel.branch_id == work.branch_id,
+        )
+        .order_by(ChapterRunModel.chapter_no.desc(), ChapterRunModel.attempt.desc())
+        .limit(1)
+    )
+    _blocked_states = {ChapterRunState.QUEUED.value, ChapterRunState.RUNNING.value}
+    if latest_run is not None and latest_run.state in _blocked_states:
+        raise Conflict(
+            "a chapter is already active",
+            current_version=int(latest_run.version),
+            conflict_summary={"chapter_no": latest_run.chapter_no, "state": latest_run.state},
+        )
+    # READY/DONE 需要状态迁移；RUNNING 表示上一章完成后继续下一章，不做自迁移。
+    if work.state != StoryWorkState.RUNNING.value:
+        assert_story_work_transition(work.state, StoryWorkState.RUNNING.value)
+        work.state = StoryWorkState.RUNNING.value
     work.version += 1
 
     chapter_no = int(work.latest_chapter_no) + 1
@@ -1290,6 +1308,46 @@ async def revoke_share(
             event_type="share.revoked",
             data={"share_id": str(share_id)},
         )
+
+
+async def get_public_share(session: AsyncSession, *, token: str) -> dict[str, Any]:
+    """Capability-link read path: no login, read-only, expiry/revoke fail closed."""
+    row = await session.scalar(select(ShareModel).where(ShareModel.token == token))
+    now = datetime.now(UTC)
+    if row is None or row.revoked_at is not None or (row.expires_at and row.expires_at <= now):
+        raise NotFound("share not found")
+    work = await session.get(StoryWorkModel, row.work_id)
+    if work is None or work.deleted_at is not None:
+        raise NotFound("share not found")
+    query = (
+        select(ChapterRunModel)
+        .where(
+            ChapterRunModel.work_id == work.id,
+            ChapterRunModel.branch_id == work.branch_id,
+            ChapterRunModel.state == ChapterRunState.CANONIZED.value,
+        )
+        .order_by(ChapterRunModel.chapter_no)
+    )
+    if row.from_chapter is not None:
+        query = query.where(ChapterRunModel.chapter_no >= row.from_chapter)
+    if row.to_chapter is not None:
+        query = query.where(ChapterRunModel.chapter_no <= row.to_chapter)
+    chapters = (await session.scalars(query)).all()
+    return {
+        "title": work.title,
+        "genre": work.genre,
+        "ai_disclosure": AI_DISCLOSURE,
+        "expires_at": row.expires_at,
+        "chapters": [
+            {
+                "chapter_no": chapter.chapter_no,
+                "title": chapter.title,
+                "content": chapter.content,
+                "word_count": chapter.word_count,
+            }
+            for chapter in chapters
+        ],
+    }
 
 
 async def get_export_notice(
