@@ -8,7 +8,7 @@ import os
 import sys
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
@@ -637,7 +637,9 @@ def create_app() -> FastAPI:
         return preview_file(project_id, release_id, filename)
 
     @app.get("/", include_in_schema=False)
-    async def root() -> RedirectResponse:
+    async def root() -> Response:
+        if os.path.isfile("/app/static/index.html"):
+            return FileResponse("/app/static/index.html")
         return RedirectResponse("/console/")
 
     # Novel C 端：统一错误 envelope（code/message/request_id/retryable/available_actions）
@@ -674,6 +676,26 @@ def create_app() -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(reports_router)
     app.include_router(public_deploy_router)
+
+    # ---- novel-web SPA (served from /app/static when present) ----
+    _static = "/app/static"
+    if os.path.isdir(_static):
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        app.mount("/", StaticFiles(directory=_static), name="novel-web")
+
+        @app.middleware("http")
+        async def _spa_fallback(request: Request, call_next):
+            resp = await call_next(request)
+            if resp.status_code == 404:
+                path = request.url.path
+                if (
+                    not path.startswith(("/v1/", "/health", "/console", "/docs", "/openapi", "/redoc"))
+                    and os.path.isfile(f"{_static}/index.html")
+                ):
+                    return FileResponse(f"{_static}/index.html")
+            return resp
+
     return app
 
 

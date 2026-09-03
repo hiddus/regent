@@ -194,21 +194,20 @@ def main() -> None:
         events = body.get("events", body.get("data", {}).get("events", []))
         print(f"  Event count: {len(events)}")
 
-        # --- Step 12: Check novel-web frontend ---
-        result = r.run("curl -s -o /dev/null -w '%{http_code}' http://novel-web:80/ 2>&1")
+        # --- Step 12: Check frontend (served by API on port 8000) ---
+        result = r.run("curl -s -o /dev/null -w '%{http_code}' http://regent-api:8000/ 2>&1")
         frontend_status = result.out.strip()
         if frontend_status == "200":
-            print(f"\n[PASS] novel-web frontend accessible (HTTP {frontend_status})")
+            print(f"\n[PASS] Frontend accessible via API port (HTTP {frontend_status})")
             ok_count += 1
         else:
-            # Try via the published port
-            result2 = r.run("curl -s -o /dev/null -w '%{http_code}' http://localhost:8088/ 2>&1")
+            result2 = r.run("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/ 2>&1")
             frontend_status2 = result2.out.strip()
             if frontend_status2 == "200":
-                print(f"\n[PASS] novel-web frontend accessible via host port (HTTP {frontend_status2})")
+                print(f"\n[PASS] Frontend accessible via host port (HTTP {frontend_status2})")
                 ok_count += 1
             else:
-                print(f"\n[FAIL] novel-web frontend NOT accessible (internal={frontend_status}, host={frontend_status2})")
+                print(f"\n[FAIL] Frontend NOT accessible (internal={frontend_status}, host={frontend_status2})")
                 fail_count += 1
 
         # --- Summary ---
