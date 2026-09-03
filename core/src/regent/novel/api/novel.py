@@ -93,7 +93,7 @@ def _content_disposition(filename: str) -> str:
 
 
 async def _session(request: Request):
-    async with request.app.state.sessions() as session:
+    async with request.app.state.sessions() as session, session.begin():
         yield session
 
 
@@ -252,7 +252,7 @@ async def create_work(
         genre=payload.genre,
         client_nonce=payload.client_nonce,
     )
-    await session.commit()
+
     out = CreateWorkResponse(
         work_id=str(work.id),
         state=WorkStateOut(work.state),
@@ -266,7 +266,7 @@ async def create_work(
         body=out,
         response_ref=str(work.id),
     )
-    await session.commit()
+
     return out
 
 
@@ -301,7 +301,7 @@ async def delete_work(
         payload={"work_id": str(work_id)},
     )
     await works_app.soft_delete_work(session, owner_id=principal.id, work_id=work_id)
-    await session.commit()
+
     return Response(status_code=204)
 
 
@@ -324,7 +324,7 @@ async def answer_clarify(
         answers=payload.answers,
         accept_defaults=payload.accept_defaults,
     )
-    await session.commit()
+
     return out
 
 
@@ -348,7 +348,7 @@ async def confirm_direction(
     _, path = await works_app.confirm_direction(
         session, owner_id=principal.id, work_id=work_id, card_id=payload.card_id
     )
-    await session.commit()
+
     out = path.model_dump(mode="json")
     await _store_idempotency(
         session,
@@ -357,7 +357,7 @@ async def confirm_direction(
         payload=body,
         body=out,
     )
-    await session.commit()
+
     return out
 
 
@@ -397,7 +397,7 @@ async def update_critical_path(
     path, impact = await works_app.update_critical_path(
         session, owner_id=principal.id, work_id=work_id, payload=payload
     )
-    await session.commit()
+
     return {
         "critical_path": path.model_dump(mode="json"),
         "impact": impact.model_dump(mode="json"),
@@ -457,7 +457,7 @@ async def start_run(
     if cached is not None:
         return cached.response_body
     out = await works_app.start_run(session, owner_id=principal.id, work_id=work_id)
-    await session.commit()
+
     body = out.model_dump(mode="json")
     await _store_idempotency(
         session,
@@ -466,7 +466,7 @@ async def start_run(
         payload={"work_id": str(work_id)},
         body=body,
     )
-    await session.commit()
+
     return body
 
 
@@ -496,7 +496,7 @@ async def advance_step(
         work_id=work_id,
         chapter_no=chapter_no,
     )
-    await session.commit()
+
     return out
 
 
@@ -507,7 +507,7 @@ async def pause_work(
     principal: CurrentPrincipal,
 ) -> Any:
     state = await works_app.pause_work(session, owner_id=principal.id, work_id=work_id)
-    await session.commit()
+
     return {"state": state.value, "worker_released": True}
 
 
@@ -518,7 +518,7 @@ async def resume_work(
     principal: CurrentPrincipal,
 ) -> Any:
     state = await works_app.resume_work(session, owner_id=principal.id, work_id=work_id)
-    await session.commit()
+
     return {"state": state.value}
 
 
@@ -585,7 +585,7 @@ async def resolve_decision(
         confirm_nonce=payload.confirm_nonce,
         resolved_by="user",
     )
-    await session.commit()
+
     body = out.model_dump(mode="json")
     await _store_idempotency(
         session,
@@ -594,7 +594,7 @@ async def resolve_decision(
         payload=payload.model_dump(mode="json"),
         body=body,
     )
-    await session.commit()
+
     return body
 
 
@@ -622,7 +622,7 @@ async def report_fact(
     out = await works_app.report_fact(
         session, owner_id=principal.id, work_id=work_id, payload=payload
     )
-    await session.commit()
+
     return out
 
 
@@ -661,7 +661,7 @@ async def create_share(
         invitee_label=payload.invitee_label,
         base_url=base,
     )
-    await session.commit()
+
     dumped = out.model_dump(mode="json")
     await _store_idempotency(
         session,
@@ -671,7 +671,7 @@ async def create_share(
         body=dumped,
         response_ref=out.share_id,
     )
-    await session.commit()
+
     return dumped
 
 
@@ -685,7 +685,7 @@ async def revoke_share(
     await works_app.revoke_share(
         session, owner_id=principal.id, work_id=work_id, share_id=share_id
     )
-    await session.commit()
+
     return Response(status_code=204)
 
 
@@ -718,7 +718,7 @@ async def acknowledge_export_notice(
         work_id=work_id,
         notice_version=payload.notice_version,
     )
-    await session.commit()
+
     return out
 
 
@@ -744,7 +744,7 @@ async def export_work(
     out = await works_app.export_work(
         session, owner_id=principal.id, work_id=work_id, payload=payload, base_url=base
     )
-    await session.commit()
+
     dumped = out.model_dump(mode="json")
     await _store_idempotency(
         session,
@@ -754,7 +754,7 @@ async def export_work(
         body=dumped,
         response_ref=out.export_id,
     )
-    await session.commit()
+
     return dumped
 
 
@@ -809,7 +809,7 @@ async def appeal_moderation(
     out = await works_app.appeal_moderation(
         session, owner_id=principal.id, work_id=work_id, case_id=case_id, reason=reason
     )
-    await session.commit()
+
     return out
 
 

@@ -671,7 +671,7 @@ class IdempotencyRecordModel(NovelBase):
     __table_args__ = (UniqueConstraint("scope", "idempotency_key", name="uq_novel_idem"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(512), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     response_ref: Mapped[str] = mapped_column(String(255), default="", nullable=False)
