@@ -17,13 +17,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from regent.model import ModelProvider
+from regent.model.provider import StructuredModelResponse
 from regent.novel.domain.states import ChapterStep
 from regent.novel.infrastructure.models import (
     CanonCommitModel,
     ChapterRunModel,
+    CostEntryModel,
     CriticalNodeModel,
     CriticalPathModel,
     InformationSetModel,
+    ModelCallModel,
     PersonaSpecModel,
     StoryGoalModel,
     StoryWorkModel,
@@ -62,6 +65,63 @@ class ChapterReview(BaseModel):
 
 class CanonExtraction(BaseModel):
     facts: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+
+
+async def _record_call(
+    session: AsyncSession,
+    *,
+    work: StoryWorkModel,
+    run: ChapterRunModel,
+    step: str,
+    purpose: str,
+    response: StructuredModelResponse,
+    system_prompt: str = "",
+    user_prompt: str = "",
+) -> None:
+    """Record model call metadata and cost entry after each generation."""
+    logical_call_id = f"{run.id}:{step}:{purpose}"
+    prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+    context_hash = hashlib.sha256(user_prompt.encode("utf-8")).hexdigest()
+    output_json = json.dumps(response.output.model_dump(mode="json"), sort_keys=True, ensure_ascii=False, default=str)
+    output_hash = hashlib.sha256(output_json.encode("utf-8")).hexdigest()
+
+    session.add(
+        ModelCallModel(
+            id=uuid.uuid4(),
+            logical_call_id=logical_call_id,
+            work_id=work.id,
+            run_id=run.id,
+            chapter_no=run.chapter_no,
+            step=step,
+            purpose=purpose,
+            provider="openai_compatible",
+            model=response.model,
+            prompt_hash=prompt_hash,
+            context_hash=context_hash,
+            status="SUCCEEDED",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            output_hash=output_hash,
+        )
+    )
+    # Simple cost recording: 0.01 CNY per 1K input tokens, 0.03 CNY per 1K output tokens
+    total_tokens = response.usage.input_tokens + response.usage.output_tokens
+    cost_minor = max(1, (response.usage.input_tokens * 10 + response.usage.output_tokens * 30) // 1000)
+    session.add(
+        CostEntryModel(
+            id=uuid.uuid4(),
+            work_id=work.id,
+            chapter_no=run.chapter_no,
+            step=step,
+            logical_call_id=logical_call_id,
+            funding_pool="platform",
+            funding_source="platform_grant",
+            amount_minor=cost_minor,
+            currency="CNY",
+            entry_kind="CONSUME",
+        )
+    )
+    await session.flush()
 
 
 async def _latest_goal(session: AsyncSession, work_id: uuid.UUID) -> StoryGoalModel:
@@ -200,72 +260,112 @@ async def perform(
             ),
             response_model=Performance,
         )
+        sys_prompt = (
+            "你正在扮演一个小说人物。只能依据给出的角色设定与已知事实行动；"
+            "绝不能使用或猜测未提供的信息。输出人物在本章的行动表演，不写完整章节。"
+        )
+        usr_prompt = json.dumps(
+            {
+                "persona": persona.name, "identity": persona.identity,
+                "drives": persona.drives, "voice": persona.voice,
+                "known_facts": grants,
+                "scene_context": {k: v for k, v in run.generation_context.items() if k != "canon"},
+            }, ensure_ascii=False,
+        )
+        await _record_call(
+            session, work=work, run=run, step="PERFORM", purpose=f"persona:{persona.name}",
+            response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
+        )
         return response.output.model_dump(mode="json")
 
     # Hive 的唯一触发处：信息隔离的角色表演可安全并行。
     run.performances = list(await asyncio.gather(*(one(persona) for persona in personas)))
 
 
-async def direct(*, provider: ModelProvider, run: ChapterRunModel) -> None:
+async def direct(session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel) -> None:
+    sys_prompt = (
+        "你是小说导演。将角色的独立表演编排为因果清晰的场景计划。"
+        "禁止让角色知道其信息集中没有出现的事实；不写正文。"
+    )
+    usr_prompt = json.dumps(
+        {"context": run.generation_context, "performances": run.performances},
+        ensure_ascii=False,
+    )
     response = await provider.generate_structured(
-        system_prompt=(
-            "你是小说导演。将角色的独立表演编排为因果清晰的场景计划。"
-            "禁止让角色知道其信息集中没有出现的事实；不写正文。"
-        ),
-        user_prompt=json.dumps(
-            {"context": run.generation_context, "performances": run.performances},
-            ensure_ascii=False,
-        ),
+        system_prompt=sys_prompt,
+        user_prompt=usr_prompt,
         response_model=DirectorPlan,
+    )
+    await _record_call(
+        session, work=work, run=run, step="DIRECT", purpose="scene_plan",
+        response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
     )
     context = dict(run.generation_context)
     context["director_plan"] = response.output.model_dump(mode="json")
     run.generation_context = context
 
 
-async def weave(*, provider: ModelProvider, run: ChapterRunModel) -> None:
+async def weave(session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel) -> None:
+    sys_prompt = (
+        "你是中文类型小说写作者。依据导演计划和角色表演写一章可直接阅读的正文。"
+        "目标 1800–2600 个中文字符；用动作、对话和具体感官推动情节，避免总结式大纲、"
+        "元叙事和设定堆砌；结尾必须兑现本章推进并留下自然悬念。"
+    )
+    usr_prompt = json.dumps(
+        {"context": run.generation_context, "performances": run.performances},
+        ensure_ascii=False,
+    )
     response = await provider.generate_structured(
-        system_prompt=(
-            "你是中文类型小说写作者。依据导演计划和角色表演写一章可直接阅读的正文。"
-            "目标 1800–2600 个中文字符；用动作、对话和具体感官推动情节，避免总结式大纲、"
-            "元叙事和设定堆砌；结尾必须兑现本章推进并留下自然悬念。"
-        ),
-        user_prompt=json.dumps(
-            {"context": run.generation_context, "performances": run.performances},
-            ensure_ascii=False,
-        ),
+        system_prompt=sys_prompt,
+        user_prompt=usr_prompt,
         response_model=ChapterDraft,
+    )
+    await _record_call(
+        session, work=work, run=run, step="WEAVE", purpose="prose",
+        response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
     )
     run.title = response.output.title
     run.content = response.output.content.strip()
     run.word_count = len(run.content)
 
 
-async def review(*, provider: ModelProvider, run: ChapterRunModel) -> None:
+async def review(session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel) -> None:
+    sys_prompt = (
+        "你是严格的小说编辑。检查正文是否违反既有事实、泄露角色未知信息、缺少因果推进，"
+        "或呈现为大纲而非正文。只有达到可读初稿标准才 passed=true。"
+    )
+    usr_prompt = json.dumps(
+        {"context": run.generation_context, "performances": run.performances,
+         "draft": {"title": run.title, "content": run.content}}, ensure_ascii=False,
+    )
     response = await provider.generate_structured(
-        system_prompt=(
-            "你是严格的小说编辑。检查正文是否违反既有事实、泄露角色未知信息、缺少因果推进，"
-            "或呈现为大纲而非正文。只有达到可读初稿标准才 passed=true。"
-        ),
-        user_prompt=json.dumps(
-            {"context": run.generation_context, "performances": run.performances,
-             "draft": {"title": run.title, "content": run.content}}, ensure_ascii=False,
-        ),
+        system_prompt=sys_prompt,
+        user_prompt=usr_prompt,
         response_model=ChapterReview,
+    )
+    await _record_call(
+        session, work=work, run=run, step="REVIEW", purpose="edit_check",
+        response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
     )
     result = response.output
     # Agent loop 内的一次有证据修订；不是期待模型第一次就交付可用结果。
     if not result.passed:
+        rev_sys = (
+            "你是中文类型小说改稿编辑。严格执行问题清单，重写为完整可读章节；"
+            "保留正确情节，修复连续性、信息泄露、节奏和文风问题。"
+        )
+        rev_usr = json.dumps(
+            {"draft": run.content, "issues": result.model_dump(mode="json"),
+             "context": run.generation_context}, ensure_ascii=False,
+        )
         revised = await provider.generate_structured(
-            system_prompt=(
-                "你是中文类型小说改稿编辑。严格执行问题清单，重写为完整可读章节；"
-                "保留正确情节，修复连续性、信息泄露、节奏和文风问题。"
-            ),
-            user_prompt=json.dumps(
-                {"draft": run.content, "issues": result.model_dump(mode="json"),
-                 "context": run.generation_context}, ensure_ascii=False,
-            ),
+            system_prompt=rev_sys,
+            user_prompt=rev_usr,
             response_model=ChapterDraft,
+        )
+        await _record_call(
+            session, work=work, run=run, step="REVIEW", purpose="revision",
+            response=revised, system_prompt=rev_sys, user_prompt=rev_usr,
         )
         run.title = revised.output.title
         run.content = revised.output.content.strip()
@@ -287,13 +387,18 @@ async def canon(
     )
     if existing is not None:
         return
+    canon_sys = (
+        "从已完成章节提取后续必须保持一致的客观事实。每项使用 statement、"
+        "entities、known_by、confidence 字段；只提取正文明确成立的事实，不推测。"
+    )
     response = await provider.generate_structured(
-        system_prompt=(
-            "从已完成章节提取后续必须保持一致的客观事实。每项使用 statement、"
-            "entities、known_by、confidence 字段；只提取正文明确成立的事实，不推测。"
-        ),
+        system_prompt=canon_sys,
         user_prompt=run.content,
         response_model=CanonExtraction,
+    )
+    await _record_call(
+        session, work=work, run=run, step="CANON", purpose="fact_extraction",
+        response=response, system_prompt=canon_sys, user_prompt=run.content,
     )
     latest = await session.scalar(
         select(CanonCommitModel)
@@ -320,10 +425,10 @@ async def execute_step(
     elif step == ChapterStep.PERFORM:
         await perform(session, provider=provider, work=work, run=run)
     elif step == ChapterStep.DIRECT:
-        await direct(provider=provider, run=run)
+        await direct(session, provider=provider, work=work, run=run)
     elif step == ChapterStep.WEAVE:
-        await weave(provider=provider, run=run)
+        await weave(session, provider=provider, work=work, run=run)
     elif step == ChapterStep.REVIEW:
-        await review(provider=provider, run=run)
+        await review(session, provider=provider, work=work, run=run)
     elif step == ChapterStep.CANON:
         await canon(session, provider=provider, work=work, run=run)
