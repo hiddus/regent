@@ -1,917 +1,369 @@
-# Novel Engine 技术架构规范
+# Novel Engine 技术规范
 
-> **版本**：v3.3 · **建立**：2026-08-31 · **状态**：DRAFT
-> **v3.3 变更**（对齐 PRD v3.3 的商业模式）：① **§6.6 新增广告计量与收益结算**——引入 `WorkLedger`（作品账本）与 `QuotaLedger`（免费额度账本），确立「广告收入 → 先回收创作成本 → 再分成」的结算顺序与四条架构约束；② 明确 **`QuotaLedger` 是平台净承担成本的唯一上界**，在架构层阻断 PRD §4.8.3 的垫付死亡谷——垫付模式损失无界，额度模式损失恒等于已发放额度；③ **`WorkLedger.debit` 与额度无关、必须始终记账**，否则"先回收后分成"失去依据并退化为事实垫付；④ 锚点作品在 `publish_snapshot` 接口层被拒绝（守卫 **G-14**），拦截点不得依赖 UI；⑤ 分成资格绑定推荐位，未过门槛作品收入仅回收不分成（PRD §4.8.4 第一道反套利闸）；⑥ 净额先于入账（FR-8.8），避免刷量收入冲抵成本形成假回收；⑦ §11.3 新增两条成本护栏（补贴有上界 / 分成不得先于回收）；⑧ 新增未决技术项 T-16（分成比例与 CPM 实测）与 T-17（刷量识别阈值）。
-> **文档定位**：技术实现权威源。需求以 [PRD](./Novel-Engine-PRD.md) 为准，本文负责"如何实现"，执行顺序以 [Plan](./Novel-Engine-Plan.md) 为准。
-> **v3.0 变更**（对齐 PRD v3.0 的 C 端定位）：① 新增 **L-1 引导层**（§3.3，含约束 O-1~O-4）；② 新增 `StoryGoal`（§4.1）与 `CriticalPath`（§4.3）两个一等对象，数据模型章节整体重编号；③ 新增**作品多样性指标**（§6.4，闭合 PRD FR-7.1 的"阈值定义见 Tech-Spec"）；④ 对象层与 Regent `GoalSpec` / `Plan` 的对应关系明确化（§1.3）；⑤ 新增**零门槛实现约束**（§3.2）与引导层上下文隔离（§10.3）；⑥ 引导层成本单列（§11.1）；⑦ 新增 **C 端漏斗观测**（§12.1）；⑧ 新增未决项 T-7~T-10。
-> **v3.1 变更**（对齐 PRD v3.1 的分阶段策略）：① **§3.3.1 新增 B 路径：锚点创作**——`structure_extractor` 只抽结构、`variation_gate` 强制变异，新增约束 O-5~O-8，展示层用具体作品做钩子、实现层存 `StructureProfile` 结构向量；② **§6.4.5 新增同源锚点池**——与源作品（0.45，合规判据）与同锚点池（0.50，体验判据）两级判定，均严于全局池；③ **§2.2 明确阶段一不做原生 App** 的五条理由与转正期三项预留；④ **§12.1.1 新增 A/B 分路径埋点**与三条禁止条款（退出机制的数据基础，不可后置）；⑤ 新增未决项 T-11~T-13。
-> **v3.2 变更**（对齐 PRD v3.2 的 U-13 收敛）：① **§6.5 新增公共内容池**——以「已生成内容的复用边际成本为零」为唯一立足点，给出消费侧按需生成（≈¥180/月，亏约 6 倍）与只读分发（≈¥0）的成本对照，明确 FR-7.10 是**存在性前提**而非优化项；② 确立**阅读路径不触发生成**的架构约束——生成与分发物理分离，阅读服务不得持有 `ModelRouter` 引用，由守卫 **G-12** 落地；③ 公开授权为**逐部、显式、可撤回**的快照操作，由守卫 **G-13** 保证界面无默认勾选态（对应 PRD 护栏 H7）；④ §11.3 成本护栏新增"阅读路径不得产生生成成本"；⑤ 新增未决项 T-14（公共池质量门槛阈值）与 T-15（公共池内容冷启动）。
-
----
-
-## 0. 与 PRD 的对应关系
-
-| PRD 条款 | 本文对应章节 |
-|---|---|
-| §0.2 C 端三动作契约 / R-0.2.1 | §3.3 引导层、§4.1 StoryGoal、§4.3 CriticalPath |
-| §0.3 核心范式（剧本定死，Agent 是演员） | §1 架构总纲、§3 分层 |
-| §0.4 恒定属性（含零专业门槛） | §3、§3.2 自由度边界、§5 导演层 |
-| §1.3 R-1.3.1 可插拔硬约束 | §7 |
-| §4.0 FR-0.x 引导层 | §3.3、§4.1 |
-| §4.1 FR-1.0 / FR-1.4–1.7 目标与关键路径 | §4.1、§4.3 |
-| §4.1 FR-1.11 / FR-1.12 场景无关 + 场景包 | §4.2、§7 |
-| §4.2–4.5 功能需求 | §3、§4、§5 |
-| §4.7 FR-7.1 专属性（多样性） | §6.4 |
-| §4.7 FR-7.6 同源锚点判定池 | §6.4.5 |
-| §4.7 FR-7.7–7.10 创作 + 阅读双环（公开授权 / 公共池 / 质量门槛 / 阅读不触发生成） | **§6.5**、§11.3 成本护栏 |
-| §4.8 FR-8.1–8.9 广告变现与补贴退坡（作品账本 / 先回收后分成 / 免费额度 / 锚点不可变现） | **§6.6**、§11.3 成本护栏 |
-| §0.8 分阶段策略（锚点的引入与退出） | §3.3.1 B 路径、§6.4.5、§12.1.1 |
-| §4.0 FR-0.10–0.15 锚点创作 | §3.3.1（约束 O-5~O-8） |
-| §5.5 NFR-5.1–5.5 交付形态 | §2.2 |
-| §4.7 FR-7.2–7.5 专属性（私有 / 版权 / 导出 / 不训练） | §2 部署形态、§13 T-10 |
-| §6 A1.2 声纹区分度指标 | §6.1–6.3 |
-| §7.1 双北极星（启动率 + 完成率） | §12.1 C 端漏斗观测 |
-| §7.2 H6 零门槛不被侵蚀 | §3.2、§10.3、§12.1 |
-| §5 非功能需求（含 NFR-1.6 免费额度） | §11 成本工程、§12 观测 |
-
----
-
-## 1. 架构总纲
-
-### 1.1 核心不变式
-
-> **LLM 只提出结构化变更，状态转换由确定性代码执行。**
-
-继承自 Regent 核心不变式（v2.0 起为**同源内核**，非借鉴）。在 Novel Engine 中具体化为三条：
-
-1. 角色 Agent 只输出结构化 `Performance`，不直接修改世界状态。
-2. 剧本的剧情结果由 `SceneCard` 定死，表演层的输出不得改变它。
-3. 越界判定由确定性规则优先执行；LLM 仅用于规则无法覆盖的模糊判定（OOC 抽样），且其输出不自我认证。
-
-### 1.2 因果方向
-
-```
-用户自然语言（一句话）
-   → StoryGoal（用户目标，定死）
-   → ScenarioSpec（设定，定死）
-   → CriticalPath（关键路径 10–20 节点，用户唯一调整界面）
-   → 卷 / 章 / 场景卡（定死，用户默认不过目）
-   → 角色 Agent 表演（Agent 自由度唯一所在）
-   → 导演层确定性校验
-   → 叙述者编织成文（不新增剧情）
-   → 评审 → 入 canon
-```
-
-**状态是因，正文是果。** 这条是判断范式是否被破坏的简易标准——任何让"正文先产生、状态后抽取"的实现都是退化。
-
-**链路单向且逐级收紧**：上游对象锁定后，下游只能在其约束内展开。用户的两个调整入口分别位于 `StoryGoal`（改目标 → 全量重生成）与 `CriticalPath`（改节点 → 增量重生成受影响章节），**不存在直接编辑场景卡的主路径**（对应 PRD FR-1.10）。
-
-### 1.3 与 Regent 的关系（v2.0：内核同源，非借鉴）
-
-v2.0 起，Regent 的多 Agent 治理原语**即是本引擎的内核**，两者为同一套机制在不同实例化场景下的表达：
-
-| Regent | Novel Engine | 关系 |
-|---|---|---|
-| `GoalSpec` 锁定（FROZEN 后方可执行） | **`StoryGoal`** 锁定（确认后方可生成设定） | **同一对象在不同场景的实例化** |
-| `Plan` 的关键节点序列 | **`CriticalPath`**（10–20 节点） | **同一对象**；用户审批粒度均为节点级而非步骤级 |
-| Plan 展开为可执行步骤 | CriticalPath 展开为卷/章/场景卡 | 同一机制 |
-| Session Work Plan 审批 | 关键路径审批（**非场景卡审批**，见 FR-1.10） | 同一机制，粒度上移 |
-| `RoleSpec` | `PersonaSpec` | 同一机制 |
-| Agent 在 Plan 约束下执行 | 演员在剧本约束下表演 | 同一机制 |
-| Application Service 确定性执行 + 护栏 | 导演层 | 同一机制 |
-| hub-and-spoke（互不二次委派） | 角色只读自己的信息集 | **同一约束的两种表述**（= 叙事学有限视角原则） |
-| ExecutionPermit | 关键节点挂起裁决 | 同一机制 |
-| 行为监测 + 修复环 | 表演越界检测 + 重演 | 同一机制 |
-| 交付状态机（无死端转移） | 推演断点续跑 | 同一机制 |
-
-> **关键等价**：Regent 的 hub-and-spoke 纪律（`MAX_EFFECTIVE_DELEGATE_DEPTH=1`，角色只向编排器汇报、互不二次委派）与叙事学的「有限视角原则」是同一约束的两种表述。角色读不到彼此内心，只能经由世界状态观察对方行为。
-
----
-
-## 2. 技术栈与部署形态
-
-| 层 | 选型 | 说明 |
-|---|---|---|
-| 后端 | Python 3.12+ / FastAPI | 与 `regent-core` 同源 |
-| 任务执行 | Worker + 持久化队列 | 长任务异步执行，支持断点续跑 |
-| 前端 | React 19 + Vite + TypeScript | 与 `regent-console` 同源 |
-| **交付形态** | **阶段一：Web（PWA）；转正期：同一代码库套原生壳** | PRD NFR-5.1–5.5；理由见 §2.2 |
-| 持久化 | 初期沿用文件型，**M2 前**评估 PostgreSQL | `store.py` 单文件 1549 行为已知技术债；v3.0 因 C 端多用户隔离（G-9）前移评估时点 |
-| 部署 | 海外云（API 调用）或自托管（推理） | 见 PRD §5.3 / NFR-3.6 |
-| 模型 | **开源为主：DeepSeek 系列**（V3 默认，R1 用于关键拍） | 支持自托管 vLLM 后端，NFR-1.5 |
-
-**模型策略（U-2 已决）：**
-
-- **默认主模型**：DeepSeek-V3（强中文长文创作 + 低成本 + 支持 prompt cache）。
-- **关键拍强模型**：死亡 / 背叛 / 揭露 / 开战等关键节点，可切换 DeepSeek-R1（推理增强）或更强闭源模型做单点提升，由 `ModelRouter` 按拍类型路由。
-- **自托管可选**：NFR-1.5 路径，数据不出域，边际成本趋近零，作为规模化后的成本/合规增强。
-
-**包结构：**
-
-```
-novel-engine                 # 独立包，复用 Regent 内核（同源）
-├── domain/                  # 领域模型（本文 §4）
-├── layers/
-│   ├── onboarding/          # L-1 引导层（自然语言 → StoryGoal → 候选，§3.3）
-│   ├── script/              # L0 设定 + L1 剧本（含 CriticalPath 生成与展开）
-│   ├── performance/         # L2 表演（角色 Agent）
-│   ├── director/            # L3 导演（确定性护栏）
-│   └── narration/          # L4 成文
-├── knowledge/               # 可插拔场景包 / 套路知识库（§7）
-├── continuity/             # 一致性审查
-├── models/                 # ModelRouter（DeepSeek V3/R1 + 自托管）
-└── adapters/
-    └── regent/             # Regent 内核复用适配（§8，同源而非桥接）
-```
-
-**不依赖**（由本产品 Director 层与配额模块替代）：Regent 的目标治理链、ExecutionPermit 链、证据审计链、预算账本的"独立副本"——因内核同源，这些以同一实现承载，不重复造轮子。
-
-### 2.1 专属性的实现约束（对应 PRD FR-7.2–7.5 · v3.0 新增）
-
-"专属于客户自己"不只是文案承诺，须落到四条可检查的实现约束：
-
-| PRD 条款 | 实现约束 | 检查方式 |
-|---|---|---|
-| FR-7.2 私有优先 | 作品默认 `visibility=private`；所有读接口强制按 `owner_id` 过滤，**不存在"忘记加过滤即全量可见"的查询路径**（过滤在仓储层而非应用层） | 仓储层单测：不带 `owner_id` 调用直接抛错 |
-| FR-7.3 版权归用户 | 生成物不写入任何共享 canon；`KnowledgePack` 是只读输入，不因用户作品被回写 | `KnowledgePack` 以只读方式加载，无写接口 |
-| FR-7.4 可完整导出 | 导出须包含 `StoryGoal` / `ScenarioSpec` / `CriticalPath` / `PersonaSpec` / 全部正文，且为**自洽的可迁移包**（不含仅本平台可解析的内部 ID 引用） | 导出包能在空实例中还原并续写 |
-| FR-7.5 不用于训练 | 用户数据默认不进入任何训练/微调/评测集；跨作品相似度索引（§6.4.2）只存**嵌入与结构摘要**，不存正文，且用户删除作品时同步删除索引条目 | 删除作品后索引查询返回空 |
-
-> **§6.4 与 FR-7.5 的张力已消解**：多样性检测需要"看到别人的作品"，但只需看到 `CriticalPath` 的 `event_type` 序列与设定嵌入，不需要正文。索引存摘要不存正文，是这条张力的唯一可行解。正文表层相似度（权重 0.1）只用 SimHash 指纹，同样不落正文。
-
----
-
-### 2.2 阶段一为何不做原生 App（v3.1 新增）
-
-交付形态不是偏好问题，由锚点功能的性质决定。
-
-| # | 理由 | 性质 |
-|---|---|---|
-| 1 | **上架审核与锚点功能结构性冲突**。锚点创作属 UGC 版权风险功能，App Store / Google Play 在**上架审核环节**即可能驳回。这是第一个版本就会遇到的当下风险，不是"量大了才被查"的远期风险 | **决定性** |
-| 2 | **迭代速度是测试阶段的生命线**。M2 含 14+ 切片与多轮外部用户测试；App 每次改动须发版 + 审核（1–7 天）且版本碎片化 | 高 |
-| 3 | **下载摩擦推高样本成本**。验证 AS-4/AS-5 需大量样本，"下载 App 试一下"在点击 → 安装 → 注册链路流失极高 | 高 |
-| 4 | **海外中文用户的传播链在微信内**。Web 链接可在微信内直接打开转发；App 下载链接在微信内转化极差 | 中高 |
-| 5 | **IAP 扭曲付费验证**。App 虚拟商品强制走 IAP 抽成 30%（小企业计划 15%），会污染阶段一对 AS-1 的验证 | 中 |
-
-**为转正期预留（NFR-5.2–5.4，须在阶段一就做，否则返工成本极高）：**
-
-- 前端**业务层与 UI 层严格分离**，UI 层可整体替换——目标为同一代码库经 Capacitor 类方案打包为原生 App。
-- 移动端体验按**原生标准**做，不做"桌面网站缩在手机里"：响应式、可加主屏幕、已生成章节离线缓存、全屏阅读模式。
-- 通知机制抽象为**可切换接口**（邮件 / Web Push / 原生推送），业务代码不写死渠道。阶段一用邮件兜底（A2.6），转正期切原生推送。
-
-> **两个时点宜重合**：移除锚点入口与发布原生 App 应是**同一个产品事件**。这样转型有明确事件承载，用户接受度远高于在 Web 上静默下线功能，且上架审核的版权问题随之自然消解。
-
----
-
-## 3. 系统分层
-
-| 层 | 职责 | LLM 参与 |
-|---|---|---|
-| **L-1 引导** | 自然语言 → `StoryGoal`；澄清追问；生成 `ScenarioSpec` 候选；自然语言修改 → 结构化 diff | **是**（仅在设定期） |
-| **L0 设定** | `ScenarioSpec`：世界观、人物小传、规则、禁忌 | 生成期是，运行期否 |
-| **L1 剧本** | `CriticalPath` → 卷 → 章 → 场景卡 | 生成期是，运行期否 |
-| **L2 表演** | 每在场角色独立 Agent 输出 `Performance` | **是（核心）** |
-| **L3 导演** | 越界校验、打回重演、关键节点挂起 | 规则否，OOC 抽样是 |
-| **L4 成文** | 按 POV 视角编织正文 | 是 |
-
-### 3.1 一章的执行流程
-
-```
-加载场景卡序列（本章）
-  for scene in scenes:
-      for character in scene.participants:
-          pack = assemble_character_context(character, scene)   # 信息集裁剪
-          perf = persona_agent.perform(pack)                    # 独立采样
-          verdict = director.check(perf, scene, character)      # 确定性优先
-          while verdict.rejected and retries < MAX_RETRIES:
-              perf = persona_agent.perform(pack, feedback=verdict.reason)
-              verdict = director.check(...)
-          if verdict.key_node: suspend_for_human(...)           # P5 关键裁决
-      world_state.apply(performances)                           # 确定性应用
-  chapter_text = narrator.weave(performances, pov)              # 不新增剧情
-  review = continuity.check(...) + reader_council.score(...)    # 评审
-  if review.passed: canon.apply(chapter)                        # 入 canon
-```
-
-### 3.2 自由度边界（实现约束）
-
-| 维度 | 实现约束 |
-|---|---|
-| 剧本结果不可变 | `Performance` 不得包含 `SceneCard.required_beats` 之外的剧情结果声明；违反即 FR-3.2 越界 |
-| 角色独立采样 | 禁止在同一 prompt 中请求多个角色的台词（对应 PRD §0.3-2） |
-| 信息集裁剪 | 上下文装配函数必须由确定性代码执行，不得交由 LLM 判断"该给什么" |
-| 重演有上限 | `MAX_RETRIES` 为配置项，超限转挂起，禁止无限重试（FR-3.6） |
-| 场景无关 | 引擎核心不得包含任何品类/场景特有的硬编码规则（对应 FR-1.11）；规则一律由 `ScenarioSpec.rules` + `KnowledgePack` 提供 |
-| **零门槛** | 主路径 API 不得要求客户端提交结构化设定字段。`POST /stories` 的必填参数只有一个自由文本 `intent`；`ScenarioSpec` / `SceneCard` 的结构化写入接口仅暴露给专业模式（对应 PRD H6） |
-
-### 3.3 L-1 引导层（v3.0 新增）
-
-**职责：把「任何人的一句话」变成「引擎能消费的定死契约」。** 这是 C 端定位的实现层，对应 PRD §4.0 FR-0.x。
-
-```
-用户自由文本 intent
-  → goal_extractor.extract(intent)              # 抽取已有要素，识别缺口
-  → if gaps: clarifier.ask(gaps)                # ≤3 轮 × ≤3 问，选项式
-  → StoryGoal（结构化） + goal_summary（自然语言回述）
-  → 用户确认 goal_summary（不看字段表）
-  → scenario_proposer.propose(goal, k=2..3)     # 生成 2–3 个 ScenarioSpec 候选
-  → 用户选择其一
-  → [可选] user_nl_edit → diff_translator.translate(nl, target)  # 自然语言 → 结构化 diff
-  → ScenarioSpec 锁定
-```
-
-**四条实现约束：**
-
-| # | 约束 | 理由 |
-|---|---|---|
-| O-1 | `clarifier` 的追问轮次与每轮问题数由配置上限强制截断（默认 3 × 3），达上限即以场景包默认值补齐并在 `StoryGoal.assumptions` 中记录假设 | 防止追问无限延长导致流失（FR-0.2） |
-| O-2 | `diff_translator` 输出必须是**结构化 diff**，由确定性代码 apply，**禁止让 LLM 直接重写整个 `ScenarioSpec`** | 与核心不变式一致；整体重写会累积语义漂移（同 §4.2 的记忆官约束） |
-| O-3 | `scenario_proposer` 的候选之间必须存在可度量差异（见 §6.4 候选差异度），差异不足则重采样 | 候选雷同等于没有选择（FR-0.4） |
-| O-4 | 引导层的所有 LLM 调用均在设定期，**不进入推演热路径**，故不计入单章成本预算 | 成本模型隔离（§11） |
-
-> **专业模式的定位**：专业模式复用同一套领域对象，只是绕过 L-1 直接写 `ScenarioSpec` / `SceneCard`。**它是 L-1 的旁路，不是 L-1 的前置**——普通用户路径不得依赖任何专业模式接口。
-
-#### 3.3.1 B 路径：锚点创作（v3.1 新增）
-
-**对应 PRD §0.8 / FR-0.10–0.15。** 阶段一起量入口，转正期移除。
-
-```
-用户选择一个 AnchorWork（锚点作品）
-  → structure_extractor.extract(anchor)          # 只抽结构，见 O-5
-      → StructureProfile {
-            event_type_sequence: list[EventType],   # 事件类型序列
-            emotional_arc:      list[float],        # 情绪弧（按卷章归一化）
-            payoff_density:     list[float],        # 爽点密度分布
-            volume_pacing:      PacingProfile,      # 卷章节奏
-            conflict_types:     list[ConflictType], # 核心冲突类型
-        }
-  → profile_summary（自然语言回述："这本书的节奏是……"）
-  → 用户确认 + 自然语言微调（"主角换成女的""结局别是悲剧"）
-  → variation_gate.vary(profile, user_edits, seed) # 强制变异，见 O-6
-      → 变异维度：主角配置 / 背景设定 / 节点顺序 / 事件类型替换 / 冲突类型替换
-      → 变异后计算与源作品的结构相似度 + 与同锚点池的相似度
-      → 未过阈值则继续变异（上限 2 次），仍不过则回落 clarifier 追问
-  → StoryGoal（与 A 路径同一对象，字段同样必须填满）
-  → 汇入 A 路径的 scenario_proposer 之后的同一条链路
-```
-
-**四条新增实现约束：**
-
-| # | 约束 | 理由 |
-|---|---|---|
-| **O-5** | `structure_extractor` 的输出**只能是结构参数**，不得包含源作品的角色名、地名、世界观专名、设定专名、原文片段；实现上须经专名过滤与实体泛化两道确定性处理，不依赖 LLM 自觉 | PRD R-0.8.1；这是合规底线，不可由 prompt 保证 |
-| **O-6** | `StructureProfile` **不得直接展开为 `CriticalPath`**，必须经 `variation_gate` 变异并过相似度阈值；变异失败须回落追问或要求用户改锚点，禁止降级放行 | FR-0.13；也是合规留痕的必要条件 |
-| **O-7** | A/B 两路径的所有埋点必须携带 `entry_path ∈ {anchor, freeform}` 字段，且**该字段在会话创建时一次性写入、不可变更** | FR-0.15；数据一旦混合无法回溯分离 |
-| **O-8** | 锚点路径的 LLM 调用同样不进入推演热路径，但其**成本需单独归集**（区别于 A 路径） | 锚点路径多出抽取与变异两轮调用，需独立观测其对免费额度的消耗 |
-
-> **关键设计：展示层与实现层分离。** 用户看到的是具体作品（"像《XXX》"——直观、有画面、有动机），系统内部存和算的是 `StructureProfile` 结构参数向量（可统计、可聚合、可去版权化）。**两边的好处都拿到，版权风险留在思想层面。** 这也是 U-8 可被实证验证的基础：同一抽取器若不加改动即可处理玄幻/都市/悬疑/言情多品类源作品，即为领域无关性的实证。
-
-> **对 A 路径无侵入**：`StoryGoal`、`CriticalPath`、L0–L4 全部不变。锚点只是 `StoryGoal` 的一个输入源，不是替代品——这样在转正期移除锚点入口时，引擎主体一行代码都不用改。
-
----
-
-## 4. 数据模型
-
-### 4.1 StoryGoal（用户初始目标，一等对象 · v3.0 新增）
-
-**对应 Regent `GoalSpec`。** 用户"设定初始目标"这一动作的落点，是 `ScenarioSpec` 与 `CriticalPath` 的唯一上游。
-
-```python
-class StoryGoal(BaseModel):
-    id: str
-    project_id: str
-
-    raw_intent: str                    # 用户原始自由文本，原样保留（可追溯）
-    premise: str                       # 一句话故事内核
-    protagonist_intent: str            # 主角意向（身份/处境/想要什么）
-    desired_ending: str                # 期望结局（可为 "开放"）
-    core_emotion: list[str]            # 核心情感（复仇快感 / 成长 / 虐恋 / 权谋…）
-    target_length: int                 # 目标字数
-    genre_hint: str | None             # 品类倾向，None = 由系统推断
-    taboos: list[str]                  # 用户不想看到的（硬约束，导演层直接消费）
-    references: list[str]              # 参考作品（风格锚点，非抄袭源）
-
-    assumptions: list[Assumption]      # 系统在追问不足时补齐的假设，须对用户可见
-    diversity_seed: str                # 多样性种子，保障"专属"（FR-7.1 / §6.4）
-    status: Literal["draft", "confirmed", "frozen"]
-```
-
-**三条约束：**
-
-| # | 约束 | 理由 |
-|---|---|---|
-| SG-1 | `raw_intent` 原样保留、永不覆写 | 后续任何重生成都以用户原话为准，避免多轮加工后偏离本意 |
-| SG-2 | `assumptions` 中的每条假设必须在 UI 上向用户显式呈现 | 对应 PRD §3.3"以场景包默认值补齐并明确告知假设" |
-| SG-3 | `taboos` 是**跨层硬约束**：既约束设定生成，也直接注入导演层判定（等同 `ScenarioSpec.taboos`） | 用户说"不要虐主"，必须在 150 章里持续生效，而非仅影响第一版设定 |
-
-> `status` 转 `frozen` 后修改 `StoryGoal` 触发**全量重生成**（设定 + 关键路径），并要求用户二次确认——这是与 `CriticalPath` 增量修改的关键区别。
-
-### 4.2 ScenarioSpec（场景设定，定死契约）
-
-领域无关的通用场景定义，**替代 v1.x 中"Story Bible"的品类特指**，使引擎可承载任意用户自建场景。
-
-```python
-class ScenarioSpec(BaseModel):
-    id: str
-    project_id: str
-    genre: str                     # 场景包标识，如 "cn_webnovel" / "custom"
-    world: str                     # 世界观
-    rules: list[ScenarioRule]      # 场景定义规则（引擎消费通用类型，不硬编码）
-    taboos: list[str]              # 世界禁忌
-    characters: list[PersonaSpec]  # 人物小传（定死）
-    # ... 其他设定字段
-```
-
-```python
-class ScenarioRule(BaseModel):
-    """引擎内置通用规则类型，由场景包/用户提供具体内容"""
-    kind: Literal["numeric", "resource", "geographic", "custom_assert"]  # 通用类型
-    name: str
-    expression: str                # 确定性可求值表达式 / 断言
-    severity: Literal["hard", "soft"]   # hard=越界打回；soft=告警
-```
-
-### 4.3 CriticalPath（关键路径，一等对象 · v3.0 新增）
-
-**对应 Regent `Plan` 的关键节点序列。用户"调整关键路径"这一动作的唯一界面，也是 C 端介入频次得以受控的机制所在。**
-
-```python
-class CriticalPath(BaseModel):
-    id: str
-    project_id: str
-    nodes: list[CriticalNode]          # 有序，10–20 个（上限见 U-11）
-    status: Literal["draft", "confirmed", "frozen"]
-    version: int                       # 每次用户调整递增，用于影响范围追溯
-
-
-class CriticalNode(BaseModel):
-    seq: int                           # 序号
-    anchor_chapter: int                # 预计位置（第 N 章附近，非硬绑定）
-    event_type: KeyNodeType            # 事件类型（见下）
-    summary: str                       # 一句话描述（用户可读、可改写）
-    involved_characters: list[str]
-    impact: list[int]                  # 影响的章节区间（由系统计算）
-    locked: bool                       # 用户锁定后，重规划不得改动此节点
-    requires_verdict: bool             # 是否需挂起等待人的裁决（对应 ExecutionPermit）
-
-
-KeyNodeType = Literal[
-    "death", "betrayal", "revelation", "war",
-    "breakthrough", "alliance", "separation", "reunion",
-    "turning_point", "ending", "custom",
-]
-```
-
-**四条约束：**
-
-| # | 约束 | 理由 |
-|---|---|---|
-| CP-1 | `nodes` 长度受配置上限约束（默认 10–20）。生成器若产出更多须合并，更少须细化 | 节点过多则退化为章级审批（违反 H6）；过少则用户失去掌控感（AS-5） |
-| CP-2 | 用户修改 `CriticalPath` 触发**增量重生成**：仅重生成 `impact` 覆盖的章级剧本，`locked` 节点及其已完成章节不动 | 全量重生成会废弃已完成内容，C 端不可接受 |
-| CP-3 | `anchor_chapter` 是软约束，允许剧本展开时前后浮动；`seq` 顺序是硬约束 | 章节位置需为叙事节奏留余量，但因果顺序不可乱 |
-| CP-4 | `requires_verdict=True` 的节点在推演到达时必须挂起，**不得因提升完成率而自动通过**（PRD H4） | 关键节点裁决是"人指导方向"的落点 |
-
-**与 `SceneCard` 的关系**：`CriticalPath` 是用户面向的**粗粒度剧本**，`SceneCard` 是引擎消费的**细粒度剧本**。二者由 `script.expand(critical_path) -> list[SceneCard]` 单向展开，用户默认只见前者（FR-1.10）。
-
-### 4.4 PersonaSpec（人物小传，定死契约）
-
-```python
-class PersonaSpec(BaseModel):
-    id: str
-    project_id: str
-    name: str
-
-    # 定死字段
-    identity: str              # 身份 · 出身
-    values: list[str]          # 价值观 · 底线 · 软肋
-    taboos: list[str]          # 绝不会做的事（人设红线）
-    voice: VoiceSpec           # 声纹特征 —— 见下
-    goals: list[Goal]          # 卷级可变，章级定死
-    beliefs: list[Belief]      # 对世界的认知，【允许错误】
-
-    # 运行期派生，不可由 LLM 直接写入
-    information_set: InformationSet
-```
-
-```python
-class VoiceSpec(BaseModel):
-    """声纹特征 —— 独立成字段，直接服务于声纹分离目标（PRD §0.3-2）"""
-    lexicon: list[str]         # 高频用词 / 口头禅
-    syntax: str                # 句式特征（长短句、倒装、省略）
-    register: str              # 语域（文雅 / 粗粝 / 官话 / 市井）
-    rhetoric: list[str]        # 惯用修辞（比喻偏好、典故来源）
-    emotional_expression: str  # 情绪表达方式（外放 / 压抑 / 反讽）
-    forbidden: list[str]       # 该角色绝不会用的表达
-```
-
-```python
-class Belief(BaseModel):
-    content: str
-    is_true: bool              # 【可为 False】—— 误解与偏见的来源
-    source: str                # 该信念如何形成
-```
-
-### 4.5 SceneCard（场景卡，剧本原子）
-
-```python
-class SceneCard(BaseModel):
-    id: str
-    chapter_number: int
-    location: str
-    time_marker: str
-    participants: list[str]           # 角色 ID
-
-    scene_goal: str                   # 本场剧情目标
-    required_beats: list[str]         # 必达节点（FR-1.5）
-    emotional_arc: tuple[str, str]    # 情绪起点 → 终点
-    pov_character: str                # POV 角色
-    foreshadow_ops: list[ForeshadowOp]  # 埋 / 收 伏笔指令
-    constraints: list[str]            # 本场禁止发生的事
-    key_node: KeyNodeType | None      # 是否触发关键节点裁决
-```
-
-> novelMaker 现有的 `ChapterPlan`（含 `pov_character_id`、目标字段）**即为 `SceneCard` 的原型**，应升级而非替换。
-
-### 4.6 InformationSet（信息集）
-
-```python
-class InformationSet(BaseModel):
-    """角色应当知道的事 —— 由确定性代码装配，非 LLM 判断"""
-    witnessed: list[EventId]     # 亲身经历
-    informed: list[EventId]      # 被明确告知
-    observed: list[EventId]      # 当场观察
-    secrets: list[SecretId]      # 该角色独有的秘密
-
-    def excludes(self) -> list[EventId]:
-        """明确排除：其他角色内心、未在场事件、读者已知但他不知的信息"""
-```
-
-### 4.7 Performance（表演输出）
-
-```python
-class Performance(BaseModel):
-    character_id: str
-    scene_id: str
-    dialogue: list[DialogueLine]   # 台词（含语气、停顿、打断）
-    action: list[str]              # 动作与神态
-    inner: list[str]               # 内心活动与情绪层次
-    reaction: list[Reaction]       # 对其他角色言行的即时反应
-
-    # 硬性约束：不得包含剧本外的结果声明
-```
-
----
-
-## 5. 导演层判定规则
-
-判定顺序固定，**规则优先，LLM 兜底**。规则来源为 `ScenarioSpec.rules` + `KnowledgePack`（引擎不内置品类特有规则）。
-
-| 序 | 判定项 | 方式 | 越界处置 | PRD |
-|---|---|---|---|---|
-| 1 | 信息泄露 | **确定性**：表演内容与 `InformationSet` 比对 | 打回重演 | FR-3.4 |
-| 2 | 场景规则违反 | 确定性规则引擎（消费 `ScenarioRule` 通用类型） | 打回重演 | FR-3.1 |
-| 3 | 剧本偏离 | 确定性比对 `required_beats` / `scene_goal` | 打回重演 | FR-3.2 |
-| 4 | 关键节点 | 确定性触发 `key_node` | **挂起等人裁决** | FR-3.7 |
-| 5 | 人设 OOC | LLM 抽样（唯一允许 LLM 判定的项） | 打回重演 | FR-3.3 |
-
-**第 5 项的护栏**：LLM 判定 OOC 时，其输出**不得自我认证**——必须引用 `PersonaSpec` 中的具体字段（`taboos` / `voice.forbidden` / `values`）作为依据，否则判定无效。
-
-**重演上限**：`MAX_RETRIES` 默认 3，可配置。超限转挂起并附全部重演记录（FR-3.6）。
-
----
-
-## 6. 声纹区分度指标（对应 PRD A1.2）
-
-### 6.1 指标定义
-
-对同一场戏中每对角色 (A, B) 的台词计算区分度，取场景内最小值作为该场得分。
-
-| 子指标 | 计算方式 | 权重 |
-|---|---|---|
-| 词汇差异 | 双方台词词集的 Jaccard 距离 | 0.3 |
-| 句长分布差异 | 句长分布的 JS 散度 | 0.2 |
-| 功能词差异 | 语气词、句末助词、人称代词使用频率的余弦距离 | 0.3 |
-| 声纹特征命中 | 台词是否体现各自 `VoiceSpec` 的 `lexicon` / `syntax` / `register` | 0.2 |
-
-### 6.2 阈值
-
-**M0 阶段实测标定，标定后写入本文，后续不得事后放宽。**
-
-标定方法：取 M0 产出的一章，邀请人工对角色台词做盲测辨别（混淆矩阵），将"人工可辨别"对应的分数下界设为阈值。
-
-### 6.3 实现位置
-
-`novel-engine/continuity/voice_metrics.py`，随每章评审执行，结果入 `metrics`。
-
-### 6.4 作品多样性指标（对应 PRD FR-7.1 · v3.0 新增）
-
-**问题**：C 端场景下，成千上万用户共用同一批场景包与同一套套路知识库。若设定生成对用户输入不敏感，产出会向"场景包默认值"收敛，"专属于自己的小说"承诺即被破坏。这与声纹趋同是同一类结构性缺陷，只是发生在**作品之间**而非角色之间。
-
-#### 6.4.1 多样性来源（三处强制注入）
-
-| 来源 | 注入点 | 说明 |
-|---|---|---|
-| 用户目标差异 | `StoryGoal.premise` / `protagonist_intent` / `desired_ending` / `core_emotion` | 由 L-1 引导层从自然语言抽取，是差异的**主要**来源 |
-| 多样性种子 | `StoryGoal.diversity_seed` | 随作品生成的随机种子，参与设定生成与候选排序，**同一 `StoryGoal` 重跑须可复现** |
-| 候选强制分叉 | `scenario_proposer` / `critical_path_proposer` | 见 §3.3 约束 O-3：k 个候选必须在可度量维度上相异，不得只做措辞改写 |
-
-> `diversity_seed` 只影响生成，不影响判定。导演层、评审层、一致性检查**不得读取** `diversity_seed`，否则质量门会随种子漂移。
-
-#### 6.4.2 指标定义：跨作品相似度
-
-对作品 X 与同场景包下的历史作品集合 H 计算相似度，取 `max` 作为 X 的跨作品相似度得分。
-
-| 子指标 | 计算方式 | 权重 | 备注 |
-|---|---|---|---|
-| 关键路径结构相似度 | 两作 `CriticalPath` 的 `event_type` 序列的归一化编辑距离（转相似度） | 0.4 | 主指标：结构撞车比措辞撞车严重得多 |
-| 设定相似度 | `ScenarioSpec` 关键字段（世界观、规则体系、核心冲突）的嵌入余弦相似度 | 0.3 | |
-| 人物配置相似度 | 主要 `PersonaSpec` 的 `identity` / `values` / `goals` 嵌入相似度的匹配均值 | 0.2 | 按最优匹配配对后取均值 |
-| 正文表层相似度 | 首 3 章正文的 SimHash 距离（转相似度） | 0.1 | 权重最低：表层撞句多为文风模板所致，非结构问题 |
-
-**比较范围**：同 `KnowledgePack` 内、最近 N 部作品（N 由容量决定，M2 取 N=200，后续按索引成本调整）。跨场景包不比较。
-
-#### 6.4.3 阈值与处置
-
-| 得分 | 处置 |
-|---|---|
-| < 0.55 | 通过 |
-| 0.55 – 0.70 | 告警：记入 `metrics`，触发 `critical_path_proposer` 重新出候选（换种子，最多 2 次） |
-| > 0.70 | 阻断：不得进入 L1 剧本展开，必须回到 L-1 补充澄清追问（追问指向相似度贡献最大的子指标） |
-
-> **阈值须于 M2 实测标定**（当前值为工程初值）。标定方法：取 M2 阶段同一场景包下 30 部作品做人工两两盲测"是否觉得是同一个故事的变体"，将"人工判为变体"的分数下界设为阻断阈值。标定后写入本文，**不得事后放宽**（同 §6.2 纪律）。
-
-#### 6.4.4 实现位置
-
-`novel-engine/continuity/diversity_metrics.py`。执行时机：`CriticalPath` 定稿时（**在**剧本展开之前）与首 3 章完成时各一次。前者拦结构撞车，后者拦表层撞车。
-
-> 首次执行必须早于剧本展开——一旦 150 章剧本已展开再判定撞车，回退成本不可接受。
-
-#### 6.4.5 同源锚点池（对应 PRD FR-7.6 · v3.1 新增）
-
-**为什么全局池不够**：锚点阶段用户主动要求"像某一本作品"。若只做全局池判定，不同锚点之间的差异会掩盖同锚点内部的雷同——**系统判定为"足够不同"，用户却觉得"同一个锚点下每个人都写得很像"**。而后者恰恰是用户最先感知到的"不专属"。
-
-**判定改为两级，且必须都过：**
-
-| 级别 | 比较对象 | 阈值 | 说明 |
-|---|---|---|---|
-| **与源作品** | 变异后的 `CriticalPath` vs 源作品抽取的 `event_type_sequence` | **0.45**（严于全局） | 这是**合规判据**而非仅质量判据：结构过于接近源作品，法律上即接近衍生作品 |
-| **同锚点池** | 变异后的 `CriticalPath` vs 同一 `AnchorWork` 下其他作品 | **0.50**（严于全局 0.55） | 这是**体验判据**：拦截"同锚点撞车" |
-
-> 两处阈值均严于全局池（0.55）。理由是锚点路径下用户已有主观预期，雷同的感知阈值更低。
-
-**锚点集中度监控**：若单一 `AnchorWork` 下的作品数占比超过阈值（初值 20%），应对新用户做差异化引导（推荐其他同品类锚点），避免同锚点池内变异空间耗尽。这是 §0.8.2 中"锚点分散"前提的守护机制——**若用户高度集中于头部少数作品，锚点路径的多样性优势即失效**。
-
-#### 6.5 公共内容池（对应 PRD FR-7.7–7.10 · v3.2 新增）
-
-**本节存在的全部理由是一句话**：消费侧的经济性完全建立在**「已生成内容的复用边际成本为零」**之上。
-
-| 模式 | 单用户月成本 | 市场可收 | 结论 |
-|---|---|---|---|
-| 消费侧按需生成（每人读的都现生成） | ≈¥180（月读 3 部 × ¥60） | ≈¥30 | **亏约 6 倍** |
-| 公共池只读分发 | ≈¥0（仅存储与分发成本） | ≈¥30 | 成立 |
-
-> 成本基数取 §11.2 的 DeepSeek-V3 开 cache 档（¥40–50/部）与 V3+R1 混合档（¥60–85/部）的中位，按 ¥60/部估算。
-
-因此 **FR-7.10 是消费侧唯一的成本护栏**：阅读路径一旦触发生成调用，双环的经济性立即崩塌。这不是"优化项"而是**存在性前提**。
-
-**四条架构约束：**
-
-1. **只读分发**——公共池保存已生成章节的只读副本，阅读请求不经过生成管线。
-2. **生成与分发物理分离**——阅读服务不得持有 `ModelRouter` 引用（由守卫 **G-12** 断言）。这是把 FR-7.10 从"口头约定"变成"结构性不可能"的唯一方式。
-3. **公开为快照操作**——授权公开时快照作品至公共池；撤回后停止新增分发并使已分发副本下线。
-4. **质量门槛进推荐位**——复用 M1 的 Reader Council 评分作为筛选依据（FR-7.9），未过门槛的作品仅可检索、不进推荐位。
-
-```
-用户显式授权公开（逐部、无默认勾选）           # FR-7.7 / G-13
-  → publish_snapshot(work)
-      → PublicWork { work_id, title, summary, chapters[], quality_score, published_at }
-  → quality_gate(quality_score)                # FR-7.9
-      → 进推荐位 / 仅可检索
-  → 阅读请求 → 只读分发                         # FR-7.8；不经过 ModelRouter，FR-7.10 / G-12
-
-用户撤回公开 → unpublish(work)                 # FR-7.7；停止新增分发，副本下线
-```
-
-> **与 FR-7.2 的关系**：作品"默认私有"不变。公开是**显式、逐部、可撤回**的操作——由 G-13 保证界面上不存在默认勾选态或批量授权入口。公共池的内容量压力不得反向侵蚀这条默认值（PRD 护栏 H7）。
+> 版本：v4.2
 >
-> **未决**：质量门槛的具体阈值待 M1 评分体系标定后确定（T-14）。
+> 更新：2026-09-03
+>
+> 状态：ACTIVE — 当前技术实现唯一权威源
 
-#### 6.6 广告计量与收益结算（对应 PRD §4.8 FR-8.x · v3.3 新增）
+## 1. 架构原则
 
-**本节解决一个 §6.5 未覆盖的问题**：公共池把消费侧的边际成本降到了 ≈¥0，但**创作侧的成本仍在，且大部分收不回来**。§6.5 证明了"读"是便宜的，本节处理"写"的钱从哪来、按什么顺序分。
+### 1.1 执行拓扑
 
-**核心数据模型：**
+持续 Agent loop 是唯一主流程：
 
+`intake → global plan → rolling chapter plan → context compile → character performance → direct → render → extract/verify/commit → evaluate`
+
+- Agent loop 是主核心流程，负责持续规划、执行、检查、提交、恢复和人机互动。
+- Hive 是 loop 内的局部执行器，不是候选架构、质量增强开关或研究变量。
+- 仅当一个步骤同时满足两个条件时启用 Hive：① 各工作线程必须持有彼此隔离的信息；② 工作线程之间没有前置依赖、可以并发执行。任一条件不满足，均由主 loop 顺序执行。
+- 典型 Hive 场景是同一场景内多个角色基于各自 `InformationSet` 独立表演。导演依赖角色表演结果，不得与其输入并行；普通候选评价若无信息隔离要求，也不因“可以并行”而启用 Hive。
+- 不存在“单 Agent 对多 Agent”的全局架构二选一，也不实现一次调用生成复杂长篇。
+- 人工 gate 仅用于目标变化、不可逆节点、证据冲突或自动修复超限。
+
+### 1.2 分层
+
+| 层 | 所有权 |
+|---|---|
+| Novel Domain | 作品、目标、关键路径、章、场景、角色、知识边界、Canon、裁决 |
+| Novel Application | loop、状态机、局部重演、发布、分享、导出、评测 |
+| Regent Core | TaskRuntime、ModelGateway、ArtifactStore、Permit、Observation、lease/timer/outbox |
+| Novel Web | C 端路由、用户态投影、SSE、PWA、阅读 |
+| Internal Ops | 现有 Regent Console，不进入 C 端 bundle |
+
+禁止把通用 `Goal`/`Work`/`ProjectAgentSession` 直接暴露为小说 API；它们只能通过适配器承载领域行为。
+
+## 2. 仓库与构建边界
+
+建议新增：
+
+```text
+core/src/regent/novel/
+  domain/
+  application/
+  ports/
+  infrastructure/
+apps/novel-web/
+tests/novel/
+fixtures/novel_eval/
 ```
-WorkLedger {                       # 作品账本，一部作品一条
-  work_id
-  generation_cost                  # 累计创作消耗（每章生成后 debit）
-  repaid_amount                    # 已由广告收入回收的金额
-  status: accruing | repaying | settled
-}
 
-QuotaLedger {                      # 用户免费额度账本
-  user_id
-  quota_granted                    # 授予额度（平台净承担的成本上界）
-  quota_consumed
-  policy_version                   # 额度策略版本；退坡只改新版本，不改已有记录（FR-8.3 不追溯 / FR-8.5 提前公示）
+- `apps/regent-console` 固定为 `/internal/ops` 或独立构建产物。
+- C 端不得 import `ArtifactPanel`、`ToolTrace`、源码浏览器、经营面板等内部组件。
+- `apps/regent-desktop` 不作为阶段一交付入口。
+- 私有 `novelMaker` 以冻结 commit 迁移；迁移清单逐模块标注直接迁移、适配、重写或不迁移。
+
+## 3. 领域模型
+
+### 3.1 核心聚合
+
+| 对象 | 关键字段 |
+|---|---|
+| `StoryWork` | id, owner_id, title, genre, state, public_state, branch_id, version |
+| `StoryGoal` | raw_intent, normalized_goal, assumptions, locked_at, version |
+| `CriticalPath` | nodes, dependency_edges, frozen_through_chapter, version |
+| `CriticalNode` | type, promise, preconditions, consequences, requires_human |
+| `ChapterRun` | work_id, branch_id, chapter_no, state, current_step, version |
+| `SceneCard` | goal, participants, location, must_reach, forbidden, pov |
+| `PersonaSpec` | identity, drives, voice, stable_traits, version |
+| `InformationSet` | persona_id, scene_id, grants, exclusions, context_hash |
+| `Performance` | intention, action, utterance, provenance, model_call_ids |
+| `CanonCommit` | parent_version, facts, source_hash, validation_id, created_at |
+| `DecisionRequest` | node_id, options, default, deadline, impact, version |
+| `PublicWork` | immutable published snapshot; later phase only |
+| `OnboardingSession` | user_id, work_id, clarify_round, question_count, assumptions, locked_at |
+| `ExportNotice` | user_id, work_id, notice_version, satisfied_at |
+| `ModerationCase` | work_id, chapter_no, target_type, decision, reason_code, appealed_at, resolved_at |
+
+`ExportNotice` 承载 PRD FR-23 的“首次导出前告知”：**拦截判据为 `satisfied_at` 为空或 `notice_version` 不等于当前条款版本**——条款升级后必须重新告知，不能让老用户永久停留在旧版本。每次告知另写一条 append-only 告知日志用于举证，但**拦截只查 `ExportNotice`，不查日志**。
+
+### 3.2 Canon 与知识边界
+
+- Canon 为 append-only 版本链，不原地修改。
+- 模型不能直接写 Canon，必须经过 `extract → verify → commit`。
+- `ContextCompiler` 是确定性纯函数：相同 snapshot、角色和场景产生相同 `ContextManifest`。
+- `KnowledgeGrant` 至少标注事实、角色、获得时间、来源、版本和可见范围。
+- 角色 Agent 只获得一次性、限定 work/scene/persona/context_hash/expiry 的 capability，不能查询完整 Canon。
+- 路径依赖边类型至少包括 causal、temporal、knowledge、foreshadow、object_state。
+
+### 3.3 状态机
+
+`StoryWork`：
+
+`ONBOARDING | READY | RUNNING | PENDING_DECISION | PAUSED_QUOTA | PAUSED_COST | RECOMPUTING | FAILED | DONE | CANCELLED | ARCHIVED`
+
+`ChapterRun`：
+
+`QUEUED | RUNNING | PENDING_DECISION | RETRYABLE_FAILED | TERMINAL_FAILED | CANONIZED | SUPERSEDED | CANCELLED`
+
+`ChapterStep`：
+
+`ASSEMBLE | PERFORM | DIRECT | WEAVE | REVIEW | CANON`
+
+步骤状态：`PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED`。
+
+人工等待和配额暂停必须释放 worker。状态转换采用 expected_version 条件更新，失败返回冲突，不允许静默覆盖。
+
+## 4. 章执行协议
+
+1. 锁定输入 snapshot 与路径版本。
+2. 生成确定性 ContextManifest 和角色 InformationSet。
+3. 为每个逻辑模型调用创建预算预留。
+4. 模型调用在数据库事务外执行，结果写不可变 `ModelCall`。
+5. 硬导演检查泄密、时间/空间、人物状态、必达节点和规则。
+6. 软导演检查节奏、声纹、趣味性；不得覆盖硬规则结果。
+7. 失败按依赖图重演最小子图；超过上限创建 DecisionRequest。
+8. 正文通过后抽取 FactCandidate。
+9. 短事务锁 ChapterRun：校验版本，写正文、CanonCommit、成本结算、状态和 outbox 事件。
+10. 失败不得出现“Canon 已提交但成本/正文不可达”或“记费但成功产物丢失”。
+
+声纹质量不属于 Canon 状态机：声纹不达标阻断 `Performance/Prose` 接受并触发重演，不得表述为“阻断入 Canon”。
+
+## 5. 幂等与恢复
+
+| 操作 | 逻辑幂等键 |
+|---|---|
+| 新建作品 | `user_id:client_nonce` |
+| 章节步骤 | `work_id:branch_id:chapter_no:step:input_version` |
+| 模型调用 | `provider:model:prompt_hash:context_hash:purpose` |
+| 裁决提交 | `decision_id:decision_version:client_nonce` |
+| Canon 提交 | `work_id:branch_id:chapter_no:source_output_hash` |
+| 配额结算 | `logical_call_id:funding_pool` |
+| 分享/撤回/导出/发布/结算 | 强制 `Idempotency-Key` |
+
+- logical call 与 attempt 分离；已成功 logical call 恢复时复用，不重新付费。
+- 同键同参数返回首个结果；同键异参数返回 409。
+- checkpoint 至少为 `work + branch + chapter + step + input_version`。
+- 恢复响应包含 reused_calls、avoided_cost、last_sequence，允许用户验证未重跑。
+
+## 6. 成本、额度与账本
+
+- 金额统一 `amount_minor BIGINT + currency CHAR(3)`；禁止 Float。
+- `ModelCall` 是成本事实源：估算、预留、实际、缓存 token、供应商请求 id、usage 来源、价格版本。
+- 额度采用 `reserved → consumed/released` 两段式；失败或取消释放未消费额。
+- `QuotaLedger`、`WorkLedger` 和收入流水 append-only；余额由流水派生并与物化账户校验。
+- 资金来源分为 `platform_grant | user_paid | onboarding`。
+- generation scope 必须有 work_id/chapter/step；reading scope 禁止生成。
+- 结算顺序：广告/打赏净额确认 → 平台成本回收 → 用户分成。
+- 任何条件账户更新必须检查 row count，否则事务失败。
+- 现有非幂等 `record_cost` 不得用于小说生成路径。
+
+## 7. 身份、权限、审核与数据保留
+
+- 服务端从 session/token 解析 principal，不接受客户端 `actor` 作为授权依据。
+- 私有 work、chapter、canon、ledger、decision、export 查询必须过滤 owner_id/tenant_id。
+- 越权访问不得泄露资源是否存在。
+- 公共阅读与创作使用不同 router、依赖和数据库权限；阅读身份不能调用生成、修改 Canon 或读取私有 trace。
+- 裁决深链 token 绑定 user、decision、version、expiry、nonce；预览不消费，提交后失效。
+- 用户删除作品采用产品软删除；财务、授权和创作证据按法务确认的保留策略归档，不级联物理删除。
+- 内容审核结论写入 `ModerationCase`，记录 decision、reason_code 和证据引用；用户可申诉，结果回写 `appealed_at`/`resolved_at`。
+- **无审核结论不得视为已通过**——待审状态对作者可见，不得静默放行也不得静默吞掉作品。
+- 审核、投诉、申诉记录与创作证据适用同一保留策略；误判纠正路径必须留痕。
+
+## 8. API 契约
+
+OpenAPI 是唯一传输契约，并在 CI 中生成 TypeScript DTO。Novel 核心响应禁止 `Record<string, unknown>` 和任意 string 状态。
+
+最低 API：
+
+```text
+POST   /v1/novel/works
+GET    /v1/novel/works
+GET    /v1/novel/works/{work_id}
+POST   /v1/novel/works/{work_id}/directions
+PUT    /v1/novel/works/{work_id}/critical-path
+POST   /v1/novel/works/{work_id}/runs
+POST   /v1/novel/works/{work_id}/pause
+POST   /v1/novel/works/{work_id}/resume
+GET    /v1/novel/works/{work_id}/chapters/{chapter_no}
+GET    /v1/novel/works/{work_id}/decisions/{decision_id}
+POST   /v1/novel/works/{work_id}/decisions/{decision_id}/resolve
+POST   /v1/novel/works/{work_id}/facts/report
+POST   /v1/novel/works/{work_id}/shares
+DELETE /v1/novel/works/{work_id}/shares/{share_id}
+POST   /v1/novel/works/{work_id}/exports
+GET    /v1/novel/works/{work_id}/events
+```
+
+所有 mutation 支持幂等键。关键路径更新携带 expected_version/ETag；409 返回 current_version 和 conflict_summary。
+
+统一错误 envelope 含 code、message、request_id、retryable、available_actions。429 返回 Retry-After；204 不含 JSON body。
+
+## 9. 持久事件与 SSE
+
+```json
+{
+  "event_id": "uuid",
+  "sequence": 42,
+  "schema_version": 1,
+  "type": "decision.requested",
+  "occurred_at": "...",
+  "work_id": "...",
+  "branch_id": "...",
+  "chapter_no": 8,
+  "decision_id": "...",
+  "causation_id": "...",
+  "correlation_id": "...",
+  "data": {}
 }
 ```
 
-**结算顺序（不可颠倒）：**
+最低事件：work snapshot/state、story phase、critical path、chapter progress/done、decision requested/resolved/expired、pause/resume、quota/cost pause、recompute、recoverable failure、completion、ETA change、share revoked。
 
-```
-创作侧
-  每章生成 → cost = 单章成本（NFR-1.4 已要求对用户可见）
-           → quota_ledger.consume(user_id, cost)     # 优先抵扣免费额度
-           → work_ledger.debit(work_id, cost)        # 无论是否走额度，均记入作品账本
+- SSE 使用 `id: sequence`，支持 Last-Event-ID 或 after_seq。
+- 客户端按 sequence 去重；发现缺口立即请求 snapshot resync。
+- 超出保留窗返回 `resync_required`。
+- heartbeat 只表示连接存活；数据查询失败必须发送 `stream.degraded`，不能吞异常后保持伪健康。
+- transient 内存进度仅作提示，不能驱动权威状态。
 
-分发侧
-  阅读产生广告曝光 → net = anti_fraud.filter(raw)    # FR-8.8 先净额化，再入账
-                   → ad_revenue.record(work_id, net)
+## 10. 前端架构
 
-结算（周期触发）
-  settle(work_id, net):
-    1. repay = work_ledger.repay(work_id, net)       # 先回收创作成本（FR-8.2 / G-16）
-    2. 若 status == settled（成本已回收完毕）：
-         payout = split(net - repay, ratio)          # 再分成（FR-8.1）
-    3. 否则：本周期无分成，全部用于回收
+### 10.1 构建与路由
 
-  提现 → 分成比例 / 账期 / 门槛均对用户可见（FR-8.9）
-```
+新建 `apps/novel-web`，使用 React + TypeScript + Vite。路由：
 
-> **`QuotaLedger` 是平台净承担成本的唯一上界**，这是与"垫付式补贴"的根本区别：垫付模式的损失随作品数量无界增长，额度模式的损失恒等于已发放额度总额。**PRD §4.8.3 的死亡谷机理由此在架构层被阻断。**
->
-> **`WorkLedger.debit` 与免费额度无关，必须始终记账。** 即便创作完全由额度覆盖，作品账本仍须记录真实成本——否则 `settle` 的"先回收后分成"失去依据，会退化成"作品一公开即全额分成"，即事实上的垫付。
-
-**四条架构约束：**
-
-1. **分成不得先于回收**——`settle` 中 `split` 调用必须位于 `repay` 之后，且 `status != settled` 时分成金额为 0（FR-8.2 / 守卫 **G-16**）。
-2. **锚点作品不得进入分发与结算**——`publish_snapshot` 对 `anchor == true` 的作品直接拒绝（FR-8.4 / 守卫 **G-14**）。该字段随作品创建时确定且不可变更。**拦截点必须在接口层，不得依赖 UI 不提供入口**——UI 层拦截可被绕过，接口层拒绝才是结构性禁止（对应 PRD R-0.8.2 / §0.8.6）。
-3. **单账号生成量在入口处硬限**——在制作品数与月生成字数超限即拒绝新生成（FR-8.7 / 守卫 **G-15**），与额度无关、不可付费绕过。对应 PRD 护栏 H8。
-4. **净额先于入账**——`anti_fraud.filter` 在 `ad_revenue.record` **之前**（FR-8.8），使回收与分成均基于净额，避免"用刷量收入冲抵成本"的假回收。
-5. **结算规则对用户可见且可配置**——分成比例、账期、提现门槛须结构化暴露（FR-8.9），不得硬编码进结算逻辑——否则规则调整需发版，退坡公示（FR-8.5）无法执行。
-
-**分成资格与推荐位绑定（FR-8.6）**：仅 `quality_score` 过门槛（T-14 阈值）的作品参与分成。未过门槛的作品仍可产生广告收入，但该收入**全额用于回收创作成本**，不进入分成——这使"批量灌水"无收益，是 PRD §4.8.4 三道反套利闸的第一道。
-
-```
-发布资格
-  anchor == true            → publish_snapshot 拒绝（G-14）
-  quality_score < threshold → 可检索，不进推荐位，收入仅回收不分成（FR-8.6）
-  quality_score >= threshold → 进推荐位，回收完成后分成
+```text
+/works
+/create
+/works/:workId/path
+/works/:workId/progress
+/works/:workId/decisions/:decisionId
+/works/:workId/read/:chapterNo
+/works/:workId/share
+/works/:workId/export
 ```
 
-> **未决**：分成比例与 CPM 实测值（T-16）、刷量识别阈值（T-17）。当前引用番茄公开口径（分成 55%、CPM 0.5–15 元/千次）仅作占位，**须以自有流量实测替换后再上线结算**。
+URL 是状态；刷新后只凭 URL 和服务端 snapshot 恢复。登录和通知跳转保留 return URL。403、404、410 有不同页面。
 
----
+### 10.2 用户态投影
 
-## 7. 可插拔架构（PRD R-1.3.1 / FR-1.11）
+后端提供 `UXProjection`：public_stage、last_completed_artifact、next_milestone、eta_range、safe_to_leave、stale_at、action_required、available_actions。
 
-### 7.1 必须可插拔的模块
+前端不得自行从内部 step 猜用户态；未知状态映射为 `unknown_recoverable`，不能猜成成功或失败。
 
-| 模块 | 接口 | 阶段一实现 | 阶段二替换 |
-|---|---|---|---|
-| 场景包 / 套路知识库 | `KnowledgePack` | 中文网文场景包（复用 novelMaker `webnovel_knowledge.py`） | 西方类型文学 / 通用场景包 |
-| 文风模板 | `StyleTemplate` | 中文网文文风 | 英语类型小说文风 |
-| 评审标准 | `ReviewRubric` | 中文读者画像 | 英语读者画像 |
-| 读者评议画像 | `ReaderPersona` | 海外中文读者 | 英语母语读者 |
-| 内容分级规则 | `ContentPolicy` | 中文内容分级 | 目标市场分级 |
-| 场景规则集 | `ScenarioRule[]` | 由中文网文场景包提供 | 由目标场景包提供 |
+`DecisionView` 包含 trigger_summary、why_human、options[].near_term_consequence、reversibility、default_option、deadline、impact_level、confirm_nonce。
 
-### 7.2 约束
+### 10.3 PWA 与隐私
 
-- 引擎核心（L2/L3/L4）**不得直接引用**上述模块的常量，只能经由接口调用。
-- 新增语种/品类应为**新增一个 Pack 实例**，而非修改引擎代码。
-- 阶段一**不实现**阶段二的 Pack，仅保证接口存在且可被替换。
-- **领域无关性（FR-1.11）落地于此**：引擎核心不含任何品类硬编码规则，所有规则经 `ScenarioRule` 通用类型注入。
-- **L-1 引导层同样受此约束**：`scenario_proposer` 的候选来源必须是 `KnowledgePack` 提供的场景骨架，不得在引导层代码中硬编码任何品类（否则"零门槛"会以"锁死中文网文"为代价换取）。
+- app shell 与作品内容缓存分离。
+- 私有正文默认不进共享 Cache Storage。
+- 离线阅读必须由用户逐作品显式开启，并支持清除本地副本。
+- 裁决、公开、导出和付费 mutation 不离线排队；路径可保存本地草稿，但重连必须比较版本并由用户处理冲突。
+- Service Worker 不缓存 events、认证、支付、授权和导出接口；登出、撤回和删除触发 purge。
+- 任务运行期间禁止 SW 自动 reload。
 
-### 7.3 验收
+### 10.4 移动端等价
 
-Tech-Spec 验收项：在不修改 `layers/performance`、`layers/director`、`layers/narration` 任一文件的前提下，可通过配置切换 `KnowledgePack` / `ScenarioRule` 实现。
+- 360×640 视口必须完整完成三动作：目标输入、关键路径调整、重大裁决。
+- 关键路径调整必须提供上移、下移、替换、增、删、锁等显式操作；**拖拽、hover、右键和多指手势不得作为唯一手段**。
+- 桌面端可提高信息密度，但不得拥有移动端不具备的核心创作能力。
 
----
+## 11. 模型路由与可追溯性
 
-## 8. Regent 内核复用（v2.0：同源，非桥接）
+PRD 不固定厂商。路由类别：
 
-v2.0 起，下列 Regent 原语**即为本引擎的内核实现**，以同源代码承载，而非外部适配桥接：
+- 全局规划和软导演：高推理档；
+- 角色表演和正文：创作质量档，允许按题材选择；
+- 抽取、分类和检索重排：低成本结构化档；
+- 硬约束：代码/规则优先。
 
-| Regent 原语 | 本引擎实现 |
+每次调用记录供应商、精确模型版本、prompt 版本、sampling、上下文快照、支持时的 seed、usage 和输出 hash。Evaluator 与 Generator 使用不同模型家族并定期做漂移检查。
+
+## 12. 评测规范
+
+### 12.1 Schema
+
+必须定义 `ContextManifest`、`KnowledgeGrant`、`FactCandidate`、`CanonCommit`、`ValidationEvidence`、`ReplayScope`、`EvalRun`，均带版本、provenance 和 hash。
+
+### 12.2 指标
+
+硬指标：关键路径覆盖、每万字矛盾率、未知知识泄露率、Canon precision/recall、局部修复率与 blast radius、恢复副作用、成本和 p50/p95 时延。
+
+软指标：情节、人物、语言、世界、情绪和期待满足；作者与读者分组评价。
+
+Evaluator 每项返回证据片段与 rubric；无证据 abstain。至少 10–20% 样本双人复核，并报告一致性、与人评相关性和置信区间。
+
+### 12.3 阈值
+
+- 安全/逻辑硬门：严重泄密、严重 Canon 冲突、重复副作用原则上 0 容忍。
+- 质量门：相对冻结 novelMaker loop 在同模型和预算带下非劣，同时目标机制至少一项显著改善。
+- 成本收益门：采用 Pareto gate，不把质量、成本和时延揉成可任意加权总分。
+- 最终阈值由 5–10 seed pilot 标定后冻结；候选值不得直接宣传为生产 SLA。
+
+### 12.4 局部质量机制实验
+
+- E1 信息集裁剪 ON/OFF；
+- E2 硬导演 ON/OFF；
+- E3 全历史、层级摘要、摘要+实体召回；
+- E4 最小子图重演与整章重跑；
+- E5 未固化窗口 N=1/3/5；
+- E6 逐段聚合、摘要和双轨评价；
+- E7 20→50→100→150 章升级。
+
+每项预注册主/次指标、样本量、停止规则和失败后的删除/重设计动作。产品纠错保持开放，但能力评测使用 untouched cohort，不能为测量方便关闭真实功能。
+
+Hive 不在实验清单中。角色信息隔离由产品的角色知识边界承诺决定；当隔离后的多个角色任务可并发时，调度器必须使用 Hive。相关测试只验证路由判定、信息不串线、结果收敛和故障隔离是否正确，不验证“该不该使用 Hive”。
+
+## 13. 架构守卫
+
+| ID | 守卫 |
 |---|---|
-| Hive 多 Agent 编排 | 每个 `PersonaSpec` 注册为一个角色 Agent（同源编排器） |
-| `runtime_behavior_monitor` | `ConsistencyCheck` 协议：一致性审查 + 表演越界检测 |
-| `goal_revision_loop` | `RevisionPolicy` 协议：卷级剧本修订策略 |
-| 交付状态机 | 章节推演状态机（含断点续跑） |
-| 行为监测 + 修复环 | 越界 → 打回重演 → 护栏内再调度 |
-| ExecutionPermit | 关键节点挂起裁决（P5） |
+| G-01 | 不存在一次调用生成整部作品的正常路径 |
+| G-02 | 角色上下文由确定性 ContextCompiler 装配 |
+| G-03 | 每个角色只获得自己的 InformationSet |
+| G-04 | 硬导演先于软评审，软评审不能覆盖硬失败 |
+| G-05 | 重演有上限并限定最小依赖范围 |
+| G-06 | 模型不能直接写 Canon |
+| G-07 | Canon、账本和创作留痕 append-only |
+| G-08 | 所有生成调用有 work/chapter/step/cost_scope/logical_call_id |
+| G-09 | 恢复复用成功逻辑调用，不重复计费 |
+| G-10 | 金额不用浮点；余额可由流水重放 |
+| G-11 | 服务端主体决定权限，不采信客户端 actor |
+| G-12 | 无 owner/tenant 条件的私有读取 fail closed |
+| G-13 | 裁决和默认 timer 竞争仅一个结果成功 |
+| G-14 | 阅读、分享、导出链路不持有生成能力 |
+| G-15 | 导出参数白名单，字节流不经过 LLM，始终带 AI 标识 |
+| G-16 | C 端 bundle 不包含内部运维组件 |
+| G-17 | SSE 有持久 sequence、补帧、缺口和 resync 契约 |
+| G-18 | 私有正文默认不进入共享缓存 |
+| G-19 | 声纹失败阻断正文接受，不与 Canon 提交混为一个状态 |
+| G-20 | 自动 Judge 无人工校准不得作为发布 gate |
+| G-21 | 单次 onboarding 澄清轮次 ≤1、每轮问题数 ≤3；信息不足时写入 `assumptions` 后继续，不得无限追问 |
+| G-22 | 导出前校验 `ExportNotice`：`satisfied_at` 为空或 `notice_version` 不等于当前版本时阻断导出并重新告知 |
+| G-23 | 审核、投诉与申诉必须落 `ModerationCase`；无结论不得视为通过 |
+| G-24 | 调度器仅在 `requires_information_isolation=true` 且 `parallelizable=true` 时路由 Hive；其他步骤必须留在主 Agent loop，且该判定不得由模型自由决定 |
 
-**回灌路径**：本引擎打磨成熟的信息集裁剪、按角色维度的 prompt cache 策略、越界判定规则，反向贡献给 Regent 内核（同一代码库，双向演进）。
+守卫按其依赖对象所在里程碑落地，不要求 M0 在对象尚不存在时通过全部守卫。
 
----
+## 14. 当前代码复用矩阵
 
-## 9. novelMaker 借鉴与改造清单（v2.0：作为参考基座）
-
-### 9.1 直接复用（约 85%）
-
-fork 后作为基座直接复用：
-
-`store`（1549）、`planning`（104）、`ChapterPlan`、`governance`（451）、`scheduler`（529）、`state_graph_diagnostics`（539）、`state_graph_repair`（170）、`continuity`（301）、`reader_council`（342）、`hooks` / Hook Ledger、`retcon`（74）、`memory` + `vector_retrieval`（653）、`context_engine`（577）、`metrics`（71）、`webnovel_knowledge`（698）。
-
-> **`webnovel_knowledge.py` 在阶段一作为中文网文 starter 场景包直接复用**（PRD §1.3：阶段一为中文输出，不过早铺场景包）。
-
-### 9.2 拆解重组（约 15%）
-
-| 模块 | 行数 | 改造 |
+| 能力 | 当前状态 | 处置 |
 |---|---|---|
-| `writing.py` | 694 | 单 prompt 全知写作 → ① 分发给各角色 Agent 表演 ② 叙述者编织。**其 prompt 工程资产（文风控制、节奏、钩子）保留复用** |
-| `pipeline.execute_write` | ~90 | 单 prompt 成文 → 场景卡分发 → 表演 → 导演校验 → 编织 |
-| `canon.extract_chapter_update` | ~91 | 语义反转：从"事后反推状态"改为"事前/事中校验表演是否遵守剧本" |
+| worker lease/heartbeat、outbox、durable timer | 已有 | 直接复用/适配 |
+| ProjectAgentSession checkpoint/steering | 已有通用实现 | 适配为 StoryRun 外壳 |
+| Budget reserve/settle/release | 已有但金额和原子性需修复 | 迁移后复用 |
+| ExecutionEvent 审计 | 已有 | 扩展领域 payload，不能替代状态事件 |
+| HumanTask/WAITING_HUMAN | 已有 | 适配 DecisionRequest |
+| SSE 连接 | 已有 | 重做持久事件和补帧语义 |
+| C 端认证/owner 隔离 | 未满足 | M0 前置 |
+| 小说领域模型/API | 未实现 | 新建 |
+| Novel Web/PWA | 未实现 | 新建 |
+| 小说数据集与评测 | 未实现 | 新建 |
+| 公共池/账本/分成 | 未实现 | Later |
 
-### 9.3 已知技术债
+## 15. 研究依据
 
-| 债 | 影响 | 处置 |
+- [LongStoryEval](https://aclanthology.org/2025.acl-long.799/)：采用跨章证据聚合与卷/全书摘要双轨评价。
+- [ConStory-Bench](https://aclanthology.org/2026.findings-acl.410/)：采用事实/时间等错误 taxonomy 和前中后位置分桶。
+- [TimeChara](https://aclanthology.org/2024.findings-acl.197/)：按角色×时间点×在场情况建立知识边界。
+- [StoryWriter](https://arxiv.org/abs/2506.16445)：参考事件图与动态历史压缩，但不外推其短篇实验规模。
+- [PostgreSQL Numeric Types](https://www.postgresql.org/docs/current/datatype-numeric.html)：金额不使用浮点。
+- [SSE Last-Event-ID](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)：采用持久事件游标恢复。
+
+## 16. 修订记录
+
+| 日期 | 版本 | 说明 |
 |---|---|---|
-| `store.py` 单文件 1549 行 | 可维护性 | M2 前评估拆分 |
-| 文件型持久化（JSON） | 长篇规模性能 + **C 端多用户隔离** | **M2 前**评估 PostgreSQL（v3.0 前移） |
-| 无外部消息队列 | 多 worker 协调 | M3 前评估 |
-
----
-
-## 10. 上下文工程
-
-### 10.1 分层
-
-| 层 | 内容 | 更新策略 | 预算 |
-|---|---|---|---|
-| L0 | ScenarioSpec（结构化） | 仅确认变更时 | ~6k |
-| L0.5 | 卷摘要（已完结卷，每卷 ~500 字） | 每卷结束压缩 | ~4.5k |
-| L1 | 章摘要链（当前卷） | 每章追加，换卷压入 L0.5 | ~4.5k |
-| L2 | 近期正文（2–3 章） | 滑动窗口 | ~8k |
-| L3 | 当前场景（场景卡 + 本角色信息集） | 每次装配 | ~2k |
-
-**长篇增强**：150 章若不引入 L0.5 卷摘要，L1 摘要链将膨胀至 45k+ 并撑爆预算。引入后总量稳定在约 25k，与总篇幅解耦（PRD NFR-2.1）。
-
-### 10.2 角色 Agent 上下文装配（prompt cache 关键）
-
-```
-[稳定前缀 · 跨场跨章不变 · cache 命中]
-    角色小传（identity / values / voice / taboos / goals / beliefs）
-
-[半稳定 · 卷内不变]
-    本角色在本卷的经历与关系状态
-
-[易变后缀]
-    本场场景卡中属于我的部分
-    我的信息集（裁剪后）
-    本场其他角色的可见行为（不含内心）
-```
-
-**要求（FR-2.5）**：稳定前缀必须置于 prompt 最前且内容稳定，以利用 prompt cache。目标命中率 ≥60%（NFR-1.2）。
-
-**信息集裁剪必须由确定性代码执行**（`assemble_character_context`），不得由 LLM 判断该给什么。
-
-### 10.3 L-1 引导层的上下文（v3.0 新增）
-
-引导层不进入上述 L0–L3 分层，独立成一条**短生命周期**上下文：
-
-| 内容 | 预算 | 生命周期 |
-|---|---|---|
-| 用户原始自然语言 `raw_intent` | ~0.5k | 全程保留（SG-1 不可变） |
-| 澄清追问的问答历史（≤3 轮 × ≤3 问） | ~1.5k | `StoryGoal` 定稿后丢弃，仅保留结论与 `assumptions` |
-| `KnowledgePack` 场景骨架候选池 | ~3k | 候选选定后丢弃 |
-
-**要求**：引导层上下文**不得**污染角色 Agent 的稳定前缀。用户在引导阶段的措辞、被否决的候选、澄清过程的中间答案一律不进入 L0/L3——否则角色小传的 cache 前缀会因人而异，NFR-1.2 的 ≥60% 命中率无法达成。
-
----
-
-## 11. 成本工程（开源模型为主）
-
-### 11.1 成本结构（与 v1.x 同口径）
-
-每章 4–6 场 × 平均 2.5 个在场角色：
-
-| 环节 | 调用/章 | 输入 | 输出 |
-|---|---|---|---|
-| 角色表演 | ~12 | 60k | 9.6k |
-| 导演校验 | ~12 | 24k | 2.4k |
-| 叙述者编织 | 1 | 15k | 4k |
-| 评审 + 记忆 | ~3 | 25k | 2k |
-| **合计** | | **~124k** | **~18k** |
-
-150 章：约 18.6M in / 2.7M out。
-
-**L-1 引导层成本单列（v3.0 · 约束 O-4）**：
-
-| 环节 | 调用/部 | 输入 | 输出 |
-|---|---|---|---|
-| 目标抽取 + 澄清追问 | ≤4 | ~4k | ~2k |
-| 场景候选生成（k=2..3） | 1 | ~5k | ~4k |
-| 关键路径候选生成 | ≤3（含重出候选） | ~12k | ~9k |
-| 自然语言 → 结构化 diff | ≤10（按用户调整次数） | ~15k | ~4k |
-| **合计（一次性）** | | **~36k** | **~19k** |
-
-引导层是**一次性开销**（≈全书 0.2%），但它是"任何人都能用"的成本入口。三条纪律：
-
-- 引导层调用**不计入每章成本口径**，避免污染 NFR-1.3 每章预算判定。
-- 引导层必须走**便宜档模型**（V3，不用 R1）——它做的是抽取与改写，不是长程推理。
-- **未启动正文的用户也会消耗引导层成本**。这是 C 端与 v2.x 内部工具最大的成本结构差异：转化率越低，引导层成本占比越高。免费额度（NFR-1.6）须按"引导层 + 首章"整体定价，不能只按章计费。
-
-### 11.2 模型档位（U-2 已决：DeepSeek 为主）
-
-| 档位 | 未开 cache | 开 cache 后（估） |
-|---|---|---|
-| **DeepSeek-V3（默认）** | ~¥85/部 | **~¥40–50/部** |
-| DeepSeek-V3 + R1 关键拍混合 | ~¥110/部 | ~¥60–85/部 |
-| 自托管（vLLM，边际） | — | 趋近电费/折旧，远低于 API |
-| 海外闭源模型（对照，已弃用主档） | ~¥690/部 | ~¥230–280/部 |
-
-> 计价基准：DeepSeek-V3 ≈ $0.27/1M in（cache miss）/ $0.07/1M（cache hit）、$1.10/1M out；R1 约翻倍。汇率取 ¥7.2/$ 粗算，最终以 M1 实测为准。
-
-**结论**：开源模型将单部成本从海外闭源档的 ¥230–280 压至 **¥40–85**，成本护栏由"必做 blocker"降为"规模优化项"，但 NFR-1.1（≤¥100）/1.3/1.4 仍须满足。
-
-### 11.3 成本护栏
-
-- 总预算 / 单章预算双阈值，超限自动暂停（FR-6.3）。
-- 每章成本对用户可见（NFR-1.4）。
-- 重演次数计入成本，超限告警。
-- **阅读路径不得产生生成成本**（FR-7.10 / 守卫 G-12）：消费侧成本应仅含存储与分发，出现任何生成调用即为缺陷。这是消费侧经济的**存在性前提**而非优化项——详见 §6.5。
-- **平台净承担的创作补贴有上界**（FR-8.3）：补贴仅以免费额度形式发放，平台最大损失恒等于已发放额度总额。任何使平台在无上限承担创作成本的设计（如"作品未回本也照常分成"）均视为缺陷。这是 §6.6 `QuotaLedger` 存在的理由，也是 PRD §4.8.3 死亡谷的架构层阻断。
-- **分成不得先于成本回收**（FR-8.2 / 守卫 G-16）：`settle` 中回收未完成前分成金额必须为 0。顺序颠倒即恢复垫付结构。
-
-### 11.4 待实测修正项
-
-M1 后须用实测替换：cache 命中率、每场在场角色数分布、重演率、R1 关键拍占比。
-
----
-
-## 12. 观测与诊断
-
-| 观测项 | 用途 |
-|---|---|
-| 每章 token / 成本 / 重演次数 | 成本控制 |
-| 声纹区分度 | PRD A1.2 |
-| 一致性审查结果（设定 / 人物 / 时间线 / 规则体系） | 质量门 |
-| 读者评议分（主线 / 节奏 / 情绪） | 质量门 |
-| 伏笔台账状态与回收率 | 长程质量 |
-| 信息集裁剪命中诊断 | 排查信息泄露 |
-| 越界类型分布 | 反哺剧本层与导演规则 |
-| 模型路由分布（V3 / R1 / 自托管占比） | 成本与质量调优 |
-
-### 12.1 C 端漏斗观测（v3.0 新增，对应 PRD §7.1 双北极星）
-
-「零门槛」不能只靠主观判断，必须可观测。以下为 M2 起的必备埋点：
-
-| 观测项 | 用途 | 关联 |
-|---|---|---|
-| 输入 `raw_intent` → `StoryGoal` 定稿的流失率 | 定位引导层卡点 | 首作品启动率 |
-| 澄清追问的平均轮数与放弃率 | 追问是否已成为新门槛（H6 侵蚀信号） | 约束 O-1 |
-| 场景候选的选择分布（是否总选第 1 个） | 候选是否真的相异 | 约束 O-3 |
-| 关键路径调整次数分布 | P3 是否被真正使用；为 0 说明界面无效，过高说明剧本层弱 | FR-1.5 |
-| 关键节点裁决的响应时延与超时占比 | 挂起是否成为完成率杀手 | FR-5.x |
-| 跨作品相似度分布 | 专属性承诺是否成立 | §6.4 / FR-7.1 |
-| 结构化字段的主动展开率 | 若显著偏高，说明默认路径未跑通，用户被迫进专业模式 | R-0.2.1 |
-
-> **诊断纪律**：上述任一指标恶化时，优先怀疑"引导层/剧本层不够强"，而不是"给用户加一个字段让他自己填"。后者是 H6 的典型侵蚀路径。
-
-#### 12.1.1 A/B 分路径埋点（v3.1 新增，对应 FR-0.15）
-
-锚点阶段**所有**埋点必须携带 `entry_path ∈ {anchor, freeform}`，且该字段**在会话创建时一次性写入、不可变更**（约束 O-7）。这是退出机制的数据基础，不可后置——数据一旦混合便无法回溯分离。
-
-**必须可分别查询的指标：**
-
-| 指标 | A 路（锚点） | B 路（自由表达） | 用途 |
-|---|---|---|---|
-| 首作品启动率 | ✓ | ✓ | 退出条件 1：B ≥ A 的 80% |
-| 首章 Reader Council 评分 | ✓ | ✓ | 退出条件 2：B ≥ A |
-| 完成率 | ✓ | ✓ | 锚点路期望基线更高，压力更大 |
-| 引导层放弃率与澄清轮数 | ✓ | ✓ | 分别标定，不得合并取均值 |
-| A 路用户**第二次**创作选择 B 路的比例 | — | — | 退出条件 3：≥ 40% |
-
-> **三条禁止（v3.1 新增，退出机制的反侵蚀条款）**：
-> 1. **禁止**用 A 路的高转化掩盖 B 路的问题——合并报表会让 B 路的问题永远不可见。
-> 2. **禁止**用 A 路数据优化面向 B 路的系统——用锚点用户的行为数据训练系统，只会优化出"更适合锚点"的系统，与退出目标背道而驰。
-> 3. **禁止**只跑 A 路的外部用户测试——那是绕过 AS-4 而非证伪 AS-4（PRD A2.9）。
-
----
-
-## 13. 未决技术项
-
-| # | 未决项 | 阻塞 |
-|---|---|---|
-| T-1 | 模型选型（**U-2 已决**：DeepSeek 为主），待实测 V3 中文长篇质量与 R1 关键拍收益边界 | M0 |
-| T-2 | 声纹区分度阈值的标定方法落地 | M1 |
-| T-3 | 持久化方案切换时点（PostgreSQL） | M2 |
-| T-4 | 外部消息队列引入时点 | M3 |
-| T-5 | `KnowledgePack` / `ScenarioRule` 接口的确切签名 | M0（接口设计） |
-| T-6 | `ModelRouter` 路由策略（哪些拍用 R1 / 闭源，成本-质量权衡） | M1 |
-| T-7 | 跨作品相似度阈值标定（§6.4.3 当前为工程初值）与索引方案（N=200 的向量检索选型） | M2 |
-| T-8 | `diff_translator` 的 diff 表达能力边界：哪些自然语言修改可结构化落地、哪些必须回退为"重出候选"（约束 O-2） | M2 |
-| T-9 | 关键节点裁决的超时默认策略：默认放行 / 默认保守分支 / 挂起等待，三者对完成率与作品质量的影响（关联 Regent「阻塞交互无超时」缺陷，须同源解决） | M2 |
-| T-10 | 引导层放弃用户的成本回收：是否对未启动正文的会话做上下文丢弃与配额限制 | M2 |
-| T-11 | `structure_extractor` 的抽取粒度与可抽取性边界：哪些结构要素能被稳定抽取（章节级事件类型是否足够细？情绪弧如何量化？），以及跨品类抽取是否需要品类特定代码（决定 U-8 能否实证收敛） | M2 |
-| T-12 | 锚点集中度的监控与干预阈值：单 `AnchorWork` 占比达多少时启动差异化引导（初值 20%，见 §6.4.5） | M2 |
-| T-13 | 转正期的原生壳方案选型（Capacitor / React Native 桥接 / 双端重写）与阶段一代码的复用率实测 | M3 |
-| T-14 | 公共池质量门槛阈值：Reader Council 评分达到多少才进推荐位（FR-7.9），以及门槛过低/过高对消费侧留存的影响 | M1（评分体系标定后） |
-| T-15 | 公共池的内容冷启动：转正期初期公开作品不足时，消费侧是否无内容可推；若不足，是以编辑精选还是系统生成补足 | M-T |
-| T-16 | **分成比例与 CPM 实测值**（PRD U-17）：番茄公开口径（分成 55%、CPM 0.5–15 元/千次）仅作占位，须以自有流量与广告平台实测校准。该数值直接决定 §6.6 的回收周期与 PRD §4.8.5 的退坡曲线 | M-T（结算上线前） |
-| T-17 | **刷量识别阈值**（FR-8.8）：异常阅读模式 / 自读套利 / 机器流量的判定规则与误伤率。难点在于区分"作者自己反复读自己作品"（正常）与"自读套利"（作弊），误判会直接伤害真实创作者 | M-T |
+| 2026-09-02 | v4.0 | 基于最新代码和六角色复核重新生成；补齐小说领域、状态机、事务、成本、权限、事件、前端、PWA、评测和守卫，并明确真实复用边界。 |
+| 2026-09-02 | v4.1 | 补齐 PRD P0 需求的技术落点：`OnboardingSession`（澄清轮次）、`ExportNotice`（导出告知状态与条款版本重触发）、`ModerationCase`（审核与申诉）、§10.4 移动端等价；守卫增至 G-23。 |
+| 2026-09-03 | v4.2 | 将 Agent loop/Hive 关系提升为固定调度契约：Hive 仅由“信息隔离且可并发”双条件触发，删除独立/共享角色采样实验，并新增 G-24 确定性路由守卫。 |

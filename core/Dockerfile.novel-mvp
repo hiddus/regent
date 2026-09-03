@@ -1,0 +1,4 @@
+FROM regent-core:latest
+COPY core/src/regent /app/core/src/regent
+COPY core/migrations /app/core/migrations
+ENV PYTHONPATH=/app/core/src

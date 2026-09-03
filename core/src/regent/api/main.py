@@ -43,6 +43,7 @@ from regent.api.uploads import router as uploads_router
 from regent.api.webhooks import router as webhooks_router
 from regent.api.works import router as works_router
 from regent.api.preview_security import PREVIEW_CONTENT_SECURITY_POLICY
+from regent.novel.api.novel import register_exception_handlers, router as novel_router
 from regent.application.runtime_profile_service import RuntimeProfileService
 from regent.config import effective_runtime_profile, get_settings
 from regent.domain.errors import DomainError, ErrorCode
@@ -638,6 +639,10 @@ def create_app() -> FastAPI:
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
         return RedirectResponse("/console/")
+
+    # Novel C 端：统一错误 envelope（code/message/request_id/retryable/available_actions）
+    register_exception_handlers(app)
+    app.include_router(novel_router)
 
     app.include_router(goals_router)
     app.include_router(aar1_v2_router)

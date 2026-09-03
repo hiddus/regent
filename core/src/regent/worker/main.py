@@ -47,6 +47,7 @@ from regent.infrastructure.sandbox import (
 )
 from regent.infrastructure.workspace_writer import WorkspaceWriter
 from regent.model import ModelConfigurationError
+from regent.model import ModelProvider
 from regent.model.factory import build_model_provider
 from regent.runtime.dispatcher import OutboxDispatcher
 from regent.runtime.timers import DurableTimerService
@@ -71,6 +72,7 @@ class Worker:
         poll_seconds: float,
         heartbeat_seconds: float,
         event_engine: EventEngine | None = None,
+        novel_provider: ModelProvider | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.dispatcher = dispatcher
@@ -84,6 +86,7 @@ class Worker:
         self.poll_seconds = poll_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self.event_engine = event_engine
+        self.novel_provider = novel_provider
         self._stopping = asyncio.Event()
         self._reconciliation = None
         self._reconciliation_interval = 300.0
@@ -143,6 +146,18 @@ class Worker:
                             logger.info("advanced CREATED runs", extra={"count": n})
                     except Exception:
                         logger.exception("CREATED run reclaim failed")
+                if self.sessions is not None and self.novel_provider is not None:
+                    try:
+                        from regent.novel.application.works import advance_background_run
+
+                        async with self.sessions() as novel_session:
+                            progressed = await advance_background_run(
+                                novel_session, provider=self.novel_provider
+                            )
+                            if progressed is not None:
+                                await novel_session.commit()
+                    except Exception:
+                        logger.exception("novel Agent loop tick failed")
                 if self.scheduler is not None:
                     await self._scheduler_tick()
                 if self._reconciliation is not None and monotonic() >= self._next_reconciliation:
@@ -437,6 +452,7 @@ def create_worker() -> tuple[Worker, object]:
         poll_seconds=settings.worker_poll_seconds,
         heartbeat_seconds=max(1.0, settings.worker_lease_seconds / 3),
         event_engine=event_engine,
+        novel_provider=model_provider,
     )
     return worker, engine
 
