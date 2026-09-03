@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Regent 失败案例复盘 · 2 小时课堂</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; background:#0b1220; font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif; overflow:hidden; }
+  #stage { position:absolute; top:50%; left:50%; width:1280px; height:720px; transform:translate(-50%,-50%) scale(var(--s,1)); transform-origin:center center; background:#fff; }
+  .slide { position:absolute; inset:0; display:none; flex-direction:column; padding:46px 60px; color:#1E293B; }
+  .slide.active { display:flex; }
+  .kicker { display:inline-block; font-size:13px; font-weight:700; letter-spacing:.12em; color:#3B82F6; text-transform:uppercase; margin-bottom:10px; }
+  .kicker.warn { color:#EF4444; }
+  .kicker.dark { color:#06B6D4; }
+  h1 { font-size:30px; font-weight:800; line-height:1.2; color:#0F172A; margin-bottom:14px; }
+  h2 { font-size:20px; font-weight:700; color:#0F172A; margin:14px 0 8px; }
+  h3 { font-size:16px; font-weight:700; color:#3B82F6; margin:10px 0 6px; }
+  p,li { font-size:14.5px; line-height:1.55; color:#334155; }
+  .body { flex:1; overflow:hidden; }
+  .cols { display:flex; gap:22px; }
+  .col { flex:1; }
+  ul,ol { padding-left:20px; }
+  li { margin:5px 0; }
+  .num { color:#3B82F6; font-weight:800; }
+  .red { color:#EF4444; font-weight:700; }
+  .cyan { color:#0891B2; font-weight:700; }
+  .muted { color:#64748B; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; margin:8px 0; }
+  th { background:#0F172A; color:#fff; text-align:left; padding:6px 8px; font-weight:600; }
+  td { border:1px solid #E2E8F0; padding:5px 8px; vertical-align:top; }
+  tr:nth-child(even) td { background:#F8FAFC; }
+  pre { background:#0F172A; color:#E2E8F0; padding:14px 16px; border-radius:10px; font-family:"SFMono-Regular",Consolas,Menlo,monospace; font-size:12.5px; line-height:1.5; overflow:auto; white-space:pre; }
+  pre .c { color:#7DD3FC; } pre .k { color:#FCA5A5; } pre .g { color:#86EFAC; }
+  code { background:#EEF2FF; color:#3730A3; padding:1px 5px; border-radius:4px; font-size:12.5px; font-family:Consolas,Menlo,monospace; }
+  .card { background:#F8FAFC; border:1px solid #E2E8F0; border-left:4px solid #3B82F6; border-radius:8px; padding:12px 16px; margin:8px 0; }
+  .card.red { border-left-color:#EF4444; }
+  .card.cyan { border-left-color:#06B6D4; }
+  .card.gold { border-left-color:#F59E0B; }
+  .callout { background:#FEF2F2; border:1px solid #FECACA; border-radius:8px; padding:10px 14px; margin:8px 0; font-size:13.5px; }
+  .callout.blue { background:#EFF6FF; border-color:#BFDBFE; }
+  .callout.cyan { background:#ECFEFF; border-color:#A5F3FC; }
+  .pill { display:inline-block; background:#3B82F6; color:#fff; font-size:11px; font-weight:700; padding:2px 9px; border-radius:99px; margin-right:6px; }
+  .pill.r { background:#EF4444; } .pill.c { background:#0891B2; } .pill.g { background:#64748B; }
+  .hero { background:linear-gradient(135deg,#0F172A 0%,#1E293B 60%,#0F172A 100%); color:#fff; justify-content:center; }
+  .hero h1 { color:#fff; font-size:46px; }
+  .hero .sub { color:#94A3B8; font-size:18px; max-width:760px; line-height:1.6; }
+  .hero .big { position:absolute; right:60px; bottom:40px; font-size:200px; font-weight:800; color:rgba(59,130,246,.18); line-height:1; }
+  .foot { position:absolute; bottom:18px; left:60px; right:60px; display:flex; justify-content:space-between; align-items:center; font-size:11px; color:#94A3B8; }
+  .progress { position:absolute; top:0; left:0; height:4px; background:linear-gradient(90deg,#3B82F6,#06B6D4); transition:width .25s; }
+  .toc { columns:2; column-gap:30px; }
+  .toc .item { break-inside:avoid; margin:6px 0; padding:8px 12px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; font-size:13.5px; }
+  .toc .item b { color:#3B82F6; }
+  .metrics { display:flex; gap:16px; margin:14px 0; }
+  .metric { flex:1; background:#0F172A; color:#fff; border-radius:12px; padding:18px; text-align:center; }
+  .metric .v { font-size:42px; font-weight:800; color:#EF4444; }
+  .metric .l { font-size:13px; color:#94A3B8; margin-top:4px; }
+  .metric.blue .v { color:#60A5FA; } .metric.cyan .v { color:#22D3EE; }
+  svg { display:block; margin:0 auto; }
+  .legend { font-size:11.5px; color:#64748B; text-align:center; margin-top:6px; }
+  .tip { position:absolute; bottom:18px; left:60px; font-size:11px; color:#94A3B8; }
+</style>
+</head>
+<body>
+<div id="stage">
+<div class="progress" id="progress"></div>
+
+<!-- 1 COVER -->
+<section class="slide hero active">
+  <div class="kicker" style="color:#60A5FA">REGENT · 失败案例复盘课堂</div>
+  <h1>Regent 为什么会“失败”<br/>—— 一份写给团队的架构反思</h1>
+  <p class="sub">定义写得很漂亮，架构画得很完整，代码也堆了不少；可核心的单 Agent 闭环始终没端到端跑通。<br/>这是一次 2 小时的工程课堂：把真实的定义、架构、框架演变、失败证据与结论，原样摊开。</p>
+  <div class="big">00</div>
+  <div class="foot"><span>内部培训 · 严禁外传</span><span>基于 Regent-PRD / Plan / Technical-Spec（2026-08-11；定义 3.0）</span></div>
+</section>
+
+<!-- 2 AGENDA -->
+<section class="slide">
+  <div class="kicker">课堂地图 · 2 小时怎么用</div>
+  <h1>今天这 2 小时，我们来拆解五件事</h1>
+  <div class="body">
+    <div class="toc">
+      <div class="item"><b>第一章 · 定义与目标</b><br/>公式化定义、恒定属性、不变原则、北极星护栏、P0 能力、P1 毕业矩阵、多 Agent 评测协议、非目标</div>
+      <div class="item"><b>第二章 · 架构</b><br/>架构总览、系统边界、六要素引擎、权威对象树、Goal/Work/Run 三套状态机、Permit、ExternalOperation、生成策略</div>
+      <div class="item"><b>第三章 · 框架演变</b><br/>开发切片 S0–S8、多 Agent 计划 MA-0~6、单 Agent 质量基线 GQ-0~5、对话式交付 CD-0~12、实现状态大表</div>
+      <div class="item"><b>第四章 · 失败原因</b><br/>证据墙、五大根因、根因→漏掉的基本功、三个致命细节</div>
+      <div class="item"><b>第五章 · 结论</b><br/>Agent 怎么搭（7 步）、多 Agent 怎么搭、因果链总图、团队行动清单</div>
+      <div class="item"><b>贯穿主线</b><br/>定义/需求其实很优秀 → 全程在周边“敲边鼓” → 核心闭环从未跑通 → 每个根因对应一项被跳过的基本功</div>
+    </div>
+    <div class="callout blue"><b>阅读建议：</b>每一章都有“小结”，先把好的东西讲透，再讲它怎么塌的——这样大家才能真正学到“该往哪用力”。</div>
+  </div>
+  <div class="foot"><span>Regent 失败案例复盘</span><span>2 / 50</span></div>
+</section>
+
+<!-- 3 CH1 TRANSITION -->
+<section class="slide hero">
+  <div class="kicker" style="color:#60A5FA">第一章</div>
+  <h1>定义与目标</h1>
+  <p class="sub">先看清：它定义得有多好，才衬得这一次的失败有多可惜。<br/>这一章全部来自 PRD §0 / §5 / §6 / §8 / §10 / §12，原文照贴。</p>
+  <div class="big">01</div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>3 / 50</span></div>
+</section>
+
+<!-- 4 1.1 FORMULA -->
+<section class="slide">
+  <div class="kicker">1.1 · 公式化定义（PRD §0.1）</div>
+  <h1>Regent 到底是什么？一句话 + 一个公式</h1>
+  <div class="body">
+    <div class="card">Regent 接收人的自然语言 Goal，在明确的约束、资源、授权和治理边界内，<b>自主解释目标，发现并补齐能力，形成当前最合适的最小人机组织，创建并运营可脱离 Core 独立运行的应用</b>，并依据可验证的外部结果持续调整计划、能力和组织，直至目标达成、资源耗尽、不可恢复失败或被 Goal Owner 取消。</div>
+    <pre><span class="c"># 形式化：在 G/C/V/R_t/S_t 下寻找最优组织 O_t*</span>
+Regent(G, C, V, R_t, S_t) = arg max_{O_t ∈ 𝒪_Regent} U(O_t | G, C, V, R_t, S_t)
+
+<span class="k">约束：</span>
+  C(O_t) ≤ 0          满足所有约束
+  V(O_t) = True       符合治理与合规要求
+  R_t(O_t) ≥ R_min    资源可用且不低于阈值
+  S_{t+1} = Transition(S_t, O_t)   状态随执行不断演进
+  lim GoalAchieved(S_t, G) = True   持续迭代直至目标达成</pre>
+    <div class="callout cyan"><b>产品身份（PRD §0.1 原话）：</b>“Regent 的产品身份不是「更强的单一 Agent」，而是<b>管理 Agent 组织在约束与治理下自治运行的目标操作系统</b>。”</div>
+  </div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>4 / 50</span></div>
+</section>
+
+<!-- 5 1.2 ATTRIBUTES -->
+<section class="slide">
+  <div class="kicker">1.2 · 不可分割的恒定属性（复盘当时的 PRD §0.2，已被定义 3.0 取代）</div>
+  <h1>当时的七条“不可分割”的恒定属性</h1>
+  <div class="body"><ol>
+    <li><span class="num">1</span> <b>Goal 驱动</b>：唯一必需的用户输入是自然语言 Goal；GoalSpec 是解释结果，不是用户必须预先完成的需求。</li>
+    <li><span class="num">2</span> <b>边界内自治</b>：自治始终受约束、资源、授权、治理和人工接管约束。</li>
+    <li><span class="num">3</span> <b>能力可演进</b>：能发现能力缺口，并按 复用→配置→组合→构建→请求人类 的顺序补齐。</li>
+    <li><span class="num">4</span> <b>组织为执行手段</b>：根据目标形成最小人机组织；单 Agent、固定团队、多 Agent 都是候选实现。</li>
+    <li><span class="num">5</span> <b>独立 App 是目标成果</b>：生成的 App 拥有独立源码、依赖、数据、测试、部署，可脱离 Core 运行。</li>
+    <li><span class="num">6</span> <b>外部结果闭环</b>：依据可验证的外部 Evidence 与 Observation 调整，不是生成者自评或内部 smoke。</li>
+    <li><span class="num">7</span> <b>明确终止</b>：必须在成功、耗尽、失败或取消时形成有证据的终态。</li>
+  </ol>
+  <div class="callout">这 7 条每一条都是“基本功”。后文会看到：项目不是没写它们，而是写好之后，<b>没把每一条真正跑通</b>。</div>
+  <div class="callout"><b>口径更新（2026-08-10，定义 3.0）：</b>现行 PRD §0.2 是<b>九条</b>，不再是这七条——目标定方向不定路径 / 探索默认开放 / 在实践中进化 / 团队是生命组织 / 证据用于学习（非许可）/ 资源自治 / 边界落在现实影响上 / 自由但不脱离现实 / 长期连续开放演化。变化最大的是原第 7 条「明确终止」：3.0 的 ATTRIBUTE_7 是「边界落在现实影响上」，语义完全不同。本页保留当时七条用于复盘，引用现行规格请看 <code>docs/definitions/REGENT-DEFINITION-3.0.txt</code>。</div></div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>5 / 50</span></div>
+</section>
+
+<!-- 6 1.3 PRINCIPLES -->
+<section class="slide">
+  <div class="kicker">1.3 · 不变原则（PRD §0.3）</div>
+  <h1>十条不变原则——工程的“宪法”</h1>
+  <div class="body"><div class="cols"><div class="col"><ol>
+    <li><span class="num">1</span> 现实接触、探索开放、持续学习、自主组织；失败关闭只适用于越权或不可逆现实影响。</li>
+    <li><span class="num">2</span> Generated App 与 Core 分离；业务模型不反向固化进内核。</li>
+    <li><span class="num">3</span> PostgreSQL + Outbox + 不可变 Artifact + Permit + UNKNOWN 对账。</li>
+    <li><span class="num">4</span> 内部 Smoke 不得满足产品价值 Gate。</li>
+    <li><span class="num">5</span> Provider 不得注入缺失的业务功能。</li>
+  </ol></div><div class="col"><ol start="6">
+    <li><span class="num">6</span> <b>智能体团队是产品形态；成员与拓扑可以自由演化。</b>系统记录成本和结果并促进自然选择，不以事前净收益证明限制探索。</li>
+    <li><span class="num">7</span> 投票不能替代机器验证或真实 Observation。</li>
+    <li><span class="num">8</span> 团队可以自评、互评和继续实验；不可逆生产发布必须满足对应现实权限，并保留独立验证或人类接管通道。</li>
+    <li><span class="num">9</span> 禁止用源码字符串、类名存在或伪 Observation 代替行为验收。</li>
+    <li><span class="num">10</span> 变更门禁：定义以规范源为准；修改则新建定义 ID，禁止原地修改。</li>
+  </ol></div></div>
+  <div class="callout red"><b>失败伏笔：</b>原则 4、6、8、9 在后续实现中被反复突破——内部 smoke 充 Gate、多 Agent 默认化、生成者自评价、用源码字符串断言代替行为验收。这是“定义很好、落地很歪”的典型。</div></div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>6 / 50</span></div>
+</section>
+
+<!-- 7 1.4 BOUNDARY -->
+<section class="slide">
+  <div class="kicker">1.4 · 产品边界（PRD §0.4）</div>
+  <h1>Core 与 Apps 的边界</h1>
+  <div class="body">
+    <pre><span class="c"># 仓库边界（PRD §0.4 原文）</span>
+regent/
+├─ core/   # 通用自治组织运行内核（G/C/V/R/S/O 的通用实现）
+└─ apps/   # Regent 创建和运营的独立应用（目标成果）</pre>
+    <ul>
+      <li>Core 只表达<b>目标、能力、组织、工作、执行、证据、策略和资源</b>。</li>
+      <li>每个 App 拥有独立源码、依赖、数据、测试与部署，<b>可以脱离 Core 运行</b>。</li>
+      <li>具体内容类型、订阅方式和业务指标<b>不得成为 Core 领域对象</b>。</li>
+    </ul>
+    <div class="callout blue"><b>为什么这条重要：</b>“内核不掺业务”是 Agent 系统能复用的前提。一旦把具体 App 的业务模型塞进 Core，内核就腐化成某个产品的专属胶水，再多 Agent 也救不回来。</div>
+  </div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>7 / 50</span></div>
+</section>
+
+<!-- 8 1.5 NORTH STAR -->
+<section class="slide">
+  <div class="kicker">1.5 · 北极星与护栏（PRD §8）</div>
+  <h1>唯一北极星指标 + 八条不可抵消的护栏</h1>
+  <div class="body">
+    <pre><span class="c"># 北极星（PRD §8.1）</span>
+CostPerVerifiedSuccess
+ = (模型成本 + 工具成本 + 基础设施成本 + 人工成本 + 失败恢复成本)
+   / 独立验证成功的 Goal 数
+<span class="g">窗口：滚动 28 天 UTC；分母 ≥10 个 VerifiedSuccess，否则 INSUFFICIENT_EVIDENCE</span>
+<span class="g">决策：连续 2 窗 北极星 > 基线×1.20 或任一护栏红 → STOP 投资评审</span></pre>
+    <table>
+      <tr><th>护栏</th><th>红线</th></tr>
+      <tr><td>核心任务完成率</td><td class="red">&lt; 70%</td></tr>
+      <tr><td>证据不足率</td><td class="red">&gt; 30%</td></tr>
+      <tr><td>端到端 P95 延迟</td><td class="red">&gt; 4h</td></tr>
+      <tr><td>人工介入分钟 / VerifiedSuccess</td><td class="red">&gt; 120 min</td></tr>
+      <tr><td>重复副作用 / 未对账 UNKNOWN / 安全违规 / 内部流量误入决策</td><td class="red">&gt; 0 立即停</td></tr>
+    </table>
+    <div class="callout">护栏“不可被收益抵消”——这是度量体系的设计哲学，也是失败项目最该记住的一句话。</div>
+  </div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>8 / 50</span></div>
+</section>
+
+<!-- 9 1.6 P0 -->
+<section class="slide">
+  <div class="kicker">1.6 · P0 核心能力（PRD §5.1）</div>
+  <h1>P0：可靠、受治理的目标执行内核（10 条）</h1>
+  <div class="body"><ol>
+    <li>保存原始 Goal，生成版本化 GoalSpec，区分显式约束、系统推断和未知项。</li>
+    <li>持久化 Goal / Work / Run / Artifact / Evidence / HumanTask / Audit，进程重启后恢复。</li>
+    <li>从 Goal 与计划推导能力需求，区分能力、权限、资源、信息缺口和普通失败。</li>
+    <li>通过 复用 / 配置 / 组合 / 构建 / 请求人类 补齐能力。</li>
+    <li>根据能力覆盖组建最小组织，并能收缩、替换和解散。</li>
+    <li>在 <code>apps/&lt;app-id&gt;</code> 创建、构建和测试独立 App。</li>
+    <li>使用外部 Observation 和 Evidence 评价进展并重规划。</li>
+    <li>所有副作用行动经过策略判断和一次性 ExecutionPermit。</li>
+    <li>人工输入与审批使用独立 HumanTask，等待期间不占 Worker。</li>
+    <li>支持暂停、恢复、取消、预算限制、无进展停止和完整审计。</li>
+  </ol>
+  <div class="callout blue"><b>P0 完成定义（§5.3）：</b>5 条必须同时满足，<b>整体交付</b>。其中第 2 条“仅凭普通 Goal 形成可解释的最小组织，补齐至少一个能力缺口，并通过 <code>EVT_PARSER_GAP</code>”是单 Agent 闭环跑通的核心判据。</div></div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>9 / 50</span></div>
+</section>
+
+<!-- 10 1.7 BASELINES -->
+<section class="slide">
+  <div class="kicker">1.7 · 固定验收（PRD §5.2）</div>
+  <h1>两个写死的验收基线——可逐字段对拍</h1>
+  <div class="body"><div class="cols"><div class="col">
+    <h3>CSV_SUMMARY_BASELINE</h3>
+    <pre>Goal：读 orders.csv，生成 summary.json
+数据：1,12.50 / 2,7.50 / 3,INVALID / 4,10.00
+约束：禁网；不改输入；只写 output/
+输出：{"row_count":4,"valid_count":3,
+       "invalid_count":1,"total_amount":30.0}</pre>
+  </div><div class="col">
+    <h3>EVT_PARSER_GAP</h3>
+    <pre>输入：timestamp|category|value|crc32
+      共 6 行，1 行 CRC32 错误
+预置能力：无 EVT Parser
+输出：valid_count=5, invalid_count=1
+约束：断网；fixtures/ 只读；只写 output/</pre>
+  </div></div>
+  <div class="callout">自动验收必须证明：原始 Goal 保存、约束与推断分离、形成 Work/Run、<b>输出逐字段相等</b>、Evidence 含输入/输出哈希、<b>Worker 中断后恢复</b>、<b>幂等重放不产生第二份输出</b>。<br/>—— 这已经是“单 Agent 闭环 + 可恢复 + 幂等”的完整定义了。</div></div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>10 / 50</span></div>
+</section>
+
+<!-- 11 1.8 P1 MATRIX -->
+<section class="slide">
+  <div class="kicker">1.8 · P1 毕业矩阵（PRD §6.3）</div>
+  <h1>P1 Graduation：G1–G12 验收门槛（节选关键）</h1>
+  <div class="body"><table>
+    <tr><th>ID</th><th>验收项</th><th>成功阈值</th><th>失败结果</th></tr>
+    <tr><td>G1</td><td>事前未知 Goal</td><td>≥3 独立 Goal 全到 Decision</td><td>FAIL_KNOWN_GOAL</td></tr>
+    <tr><td>G2</td><td>合法外部证据</td><td>决策引用 EvidenceRef</td><td>FAIL_NO_EVIDENCE</td></tr>
+    <tr><td>G3</td><td>实质不同假设</td><td>≥2 假设，差异可机器列出</td><td>FAIL_NO_DIFF</td></tr>
+    <tr><td>G4</td><td>Requirement 驱动生成</td><td>Plan 哈希含 Requirement 摘要</td><td>FAIL_TEMPLATE</td></tr>
+    <tr><td>G5</td><td>可复现构建</td><td>哈希一致且 PASSED</td><td>FAIL_BUILD</td></tr>
+    <tr><td>G8</td><td>Durable 副作用</td><td>0 重复副作用；UNKNOWN 15min 内收敛</td><td>FAIL_SIDE_EFFECT</td></tr>
+    <tr><td>G9</td><td>凭据治理</td><td>0 明文密钥</td><td>FAIL_SECRET</td></tr>
+    <tr><td>G10</td><td>质量门禁</td><td>Ruff/mypy/Pytest/迁移全绿</td><td>FAIL_CI</td></tr>
+    <tr><td>G11</td><td>发布基线</td><td>可回滚上一 tag</td><td>FAIL_RELEASE</td></tr>
+    <tr><td>G12</td><td>证据包</td><td>100% 可解析</td><td>FAIL_PACK</td></tr>
+    <tr><td>G6</td><td>演进闭环可演示</td><td>≥1 次完整闭环 + 1 次独立路径</td><td>FAIL_NO_LOOP</td></tr>
+    <tr><td>G7</td><td>真实 Observation 决策</td><td>≥1 次唯一决策，Observation ≥3 条合格</td><td>FAIL_FAKE_OBS</td></tr>
+  </table>
+  <div class="callout blue"><b>分层：</b><code>SYSTEM_GRADUATED</code> = G1–G5、G8–G12；<code>PRODUCT_EVIDENCE_GRADUATED</code> = G6–G7。未满足时状态为 <code>P1_GRADUATION_REQUIRED</code>，<b>不得把剩余工作改名 P2</b>。</div></div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>11 / 50</span></div>
+</section>
+
+<!-- 12 1.9 MULTIAGENT PROTOCOL -->
+<section class="slide">
+  <div class="kicker">1.9 · 多 Agent 评测协议（PRD §10）</div>
+  <h1>“多 Agent 是需要被证明的策略，不是产品目标”</h1>
+  <div class="body">
+    <div class="card red">旧 PRD §10.1 原话（<b>已被定义 3.0 修订</b>）：<b>多 Agent 是需要被证明的执行策略，不是产品目标。</b>必须先以同一任务、模型、工具、权限和总预算运行<b>强单 Agent champion</b>，再决定是否允许固定模板或自适应组织进入候选。</div>
+    <div class="callout">现行口径（定义 3.0 ATTRIBUTE_2/4/6）：强单 Agent 只是<b>对照基线</b>，不是候选前置。候选拓扑在沙箱内默认可试；同预算冻结对比决定的是<b>何时扩大现实生产权限或晋级默认策略</b>。</div>
+    <h3>冻结对比要求（任何候选组织都必须报告）</h3>
+    <table>
+      <tr><th>维度</th><th>冻结要求</th></tr>
+      <tr><td>模型 / Prompt / 技能 / 工具 / 权限</td><td>集合与版本哈希一致（除组织形态差异）</td></tr>
+      <tr><td>Token</td><td>总 Token 与缓存 Token 分列</td></tr>
+      <tr><td>人工分钟</td><td>计入净收益</td></tr>
+      <tr><td>口径</td><td>pass@1 / pass@k 预先定义</td></tr>
+      <tr><td>coordination_token_share</td><td>≥20% 为工程告警线（非自动失败线）</td></tr>
+      <tr><td>error_amplification_factor / dispatch_entropy</td><td>故障注入与派工分布熵时间序列</td></tr>
+    </table>
+    <div class="callout">旧 §10.1 初始裁剪规则（<b>现仅作生产默认建议，不再限制候选</b>）：单 Agent 基线成功率 &gt;45% 时不默认建议多 Agent；强顺序依赖任务默认单 Agent；“中心化编排 + 独立验证”优先用于可分解且需独立验证的工作。沙箱内提出任意拓扑候选不受本规则约束。</div>
+  </div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>12 / 50</span></div>
+</section>
+
+<!-- 13 1.10 NONGOALS -->
+<section class="slide">
+  <div class="kicker">1.10 · 非目标 / 未实现（PRD §12）</div>
+  <h1>明确“不做”什么，以及“登记了但没实现”什么</h1>
+  <div class="body"><div class="cols"><div class="col">
+    <h3>非目标（红线）</h3>
+    <ul>
+      <li>无审批的全自动生产发布</li>
+      <li>无证据的“自治公司”叙事</li>
+      <li>用投票替代事实验证</li>
+      <li>把更多 Token / Agent 数作为成功指标</li>
+      <li>为单个 App 向 Core 加业务专用模型</li>
+      <li>自适应自由拓扑 Hive 的<b>生产扩流</b>：<code>ROLLOUT_NOT_ALLOWED</code>（沙箱试验不在红线内）</li>
+    </ul>
+  </div><div class="col">
+    <h3>已登记但未实现（不得宣称验收）</h3>
+    <ul>
+      <li>P2-4 最小 Eval Harness（仍实验骨架）</li>
+      <li>P2-5 自适应组织（生产默认化须 P2-4 正净收益；沙箱候选试验开放）</li>
+      <li>GQ-4 默认切换（DecisionRecord 未 ACCEPTED）</li>
+      <li>G0 ExternalOperation 跨 provider 真实网络 query→resolve 全路径</li>
+      <li>SelfImprovementRun 产品门禁（候选）</li>
+      <li><b>MAST 失败码生产接入</b>（已定义 9 码，尚未接入生产分类路径）</li>
+    </ul>
+  </div></div>
+  <div class="callout red"><b>后文关键证据：</b>“MAST 9 码已定义、零生产引用”本身就是“定义齐全、落地为零”的缩影。</div></div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>13 / 50</span></div>
+</section>
+
+<!-- 14 CH1 SUMMARY -->
+<section class="slide hero">
+  <div class="kicker" style="color:#60A5FA">第一章小结</div>
+  <h1>定义，是真的好。</h1>
+  <p class="sub">公式、10 条不变原则、当时的 7 条恒定属性（现行定义 3.0 为 9 条）、G1–G12 矩阵、冻结的多 Agent 评测协议、明确的非目标清单——<br/>任何一条单拎出来，都是成熟 Agent 系统的教科书级规格。<br/><br/><b style="color:#F87171">问题不在“想清楚了没有”，而在“做没做出来”。</b>带着这个落差，进入第二章：架构。</p>
+  <div class="big">01</div>
+  <div class="foot"><span>第一章 · 定义与目标</span><span>14 / 50</span></div>
+</section>
+
+<!-- 15 CH2 TRANSITION -->
+<section class="slide hero">
+  <div class="kicker" style="color:#60A5FA">第二章</div>
+  <h1>架构</h1>
+  <p class="sub">架构图也画得很完整：六要素引擎、三套状态机、Permit、ExternalOperation、权威对象树……<br/>这一章把 Technical-Spec 的核心架构原样搬进来，作为后面判断“哪里塌了”的参照系。</p>
+  <div class="big">02</div>
+  <div class="foot"><span>第二章 · 架构</span><span>15 / 50</span></div>
+</section>
+
+<!-- 16 2.1 ARCH OVERVIEW -->
+<section class="slide">
+  <div class="kicker">2.1 · 架构总览（Tech-Spec §1）</div>
+  <h1>总体架构：从目标到基础设施的五层</h1>
+  <div class="body">
+    <svg viewBox="0 0 1160 300" width="100%">
+      <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#3B82F6"/></marker></defs>
+      <rect x="430" y="10" width="300" height="44" rx="8" fill="#0F172A"/><text x="580" y="37" fill="#fff" font-size="15" text-anchor="middle">用户 / 企业目标 G</text>
+      <rect x="380" y="74" width="400" height="48" rx="8" fill="#EFF6FF" stroke="#3B82F6"/><text x="580" y="103" fill="#1E3A8A" font-size="13" text-anchor="middle">Constraint Engine (C) · Governance Engine (V)</text>
+      <rect x="350" y="142" width="460" height="58" rx="8" fill="#ECFEFF" stroke="#06B6D4"/><text x="580" y="164" fill="#0E7490" font-size="12" text-anchor="middle">Goal Engine · Organization Engine · Resource Engine</text><text x="580" y="183" fill="#0E7490" font-size="12" text-anchor="middle">Memory/State Engine · Event Engine</text>
+      <rect x="380" y="220" width="400" height="44" rx="8" fill="#FEF3F2" stroke="#EF4444"/><text x="580" y="247" fill="#991B1B" font-size="12.5" text-anchor="middle">Agent Mesh / Runtime（单 Agent / 固定 / 动态）</text>
+      <rect x="400" y="282" width="360" height="10" rx="3" fill="#64748B"/><text x="580" y="296" fill="#64748B" font-size="11" text-anchor="middle">Infrastructure：PostgreSQL / Redis / Docker</text>
+      <line x1="580" y1="54" x2="580" y2="74" stroke="#3B82F6" marker-end="url(#ar)"/>
+      <line x1="580" y1="122" x2="580" y2="142" stroke="#3B82F6" marker-end="url(#ar)"/>
+      <line x1="580" y1="200" x2="580" y2="220" stroke="#3B82F6" marker-end="url(#ar)"/>
+    </svg>
+    <div class="legend">原则：Kernel 不是 Agent，是管理者；组织 O_t 是决策变量不是固定架构；副作用必须满足 C(O_t)≤0、V(O_t)=True、R_t(O_t)≥R_min</div>
+    <div class="callout blue">优先级铁律：<b>事实完整性 → 安全与治理 → 可恢复性 → 产品证据可信度 → 结果质量 → 延迟成本 → 扩展便利性</b>。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>16 / 50</span></div>
+</section>
+
+<!-- 17 2.2 SYSTEM BOUNDARY -->
+<section class="slide">
+  <div class="kicker">2.2 · 系统边界（Tech-Spec §2）</div>
+  <h1>Core 内部 vs 外部 Provider</h1>
+  <div class="body">
+    <pre><span class="c"># Regent Core 包含的（通用能力，不含业务）</span>
+ API / Conversation / Projection
+ Goal &amp; Product Control Plane
+ Scheduler &amp; Execution Orchestrator
+ Governance / Permit / HumanTask / Secret
+ Evidence / Artifact / Observation / Audit
+ Capability / Runtime / Organization Registry
+ ExternalOperation / Eval Harness
+
+<span class="c"># 通过 ports + signed contracts 对接的外部 Provider</span>
+ Evidence Provider   Build Provider   Deployment Provider   Model Provider</pre>
+    <div class="callout red"><b>六条禁止：</b>Generated App 与 Core 相互 import；Agent 直接写状态；Provider 绕过 Permit；Conversation metadata 成为事实源；内部 smoke 满足产品 Gate；生成/部署阶段补造缺失业务功能。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>17 / 50</span></div>
+</section>
+
+<!-- 18 2.3 SIX ENGINES -->
+<section class="slide">
+  <div class="kicker">2.3 · 六要素引擎（Tech-Spec §4）</div>
+  <h1>六个引擎的职责划分</h1>
+  <div class="body"><table>
+    <tr><th>引擎</th><th>核心模块</th><th>职责</th></tr>
+    <tr><td><b>Goal</b></td><td>Interpreter / Decomposer / Versioning / StateMachine</td><td>自然语→GoalSpec；分解；冻结/修订；状态</td></tr>
+    <tr><td><b>Constraint</b></td><td>PolicyRegistry / BudgetMonitor / Checker / ViolationHandler</td><td>规则、预算、约束评估、失败关闭</td></tr>
+    <tr><td><b>Governance</b></td><td>Identity / Permit / HumanTask / Audit / Risk</td><td>权限、一次性 Permit、人工、审计、升级</td></tr>
+    <tr><td><b>Resource</b></td><td>CapabilityRegistry / GapResolver / ModelRouter / BudgetLedger</td><td>能力注册、缺口补齐、算力、成本账</td></tr>
+    <tr><td><b>Memory/State</b></td><td>StateStore / Outbox / Artifact / Evidence / WorkingMemory</td><td>持久化、事件投递、不可变、证据</td></tr>
+    <tr><td><b>Organization</b></td><td>Space / UtilityFunction / TopologyPlanner / ReorgTrigger</td><td>组织候选、效用评估、拓扑、重构</td></tr>
+  </table>
+  <div class="callout"><b>单 Agent 是生产默认与对照基线</b>；动态组织须 P2-4 Eval Harness 证正净收益才<b>晋级为生产默认策略</b>——沙箱内的动态组织候选试验本身默认开放，不以净收益为前置（定义 3.0 ATTRIBUTE_2/6/7）。</div></div>
+  <div class="foot"><span>第二章 · 架构</span><span>18 / 50</span></div>
+</section>
+
+<!-- 19 2.4 OBJECT TREE -->
+<section class="slide">
+  <div class="kicker">2.4 · 权威对象树（Tech-Spec §6）</div>
+  <h1>谁是“事实源”？对象层级一目了然</h1>
+  <div class="body">
+    <pre>AppProject
+└─ Goal
+   ├─ GoalSpec[]                         # 目标版本化
+   ├─ DiscoveryRound[] ─ EvidenceRef[] / ProductHypothesis[] / HypothesisDecision
+   ├─ RequirementRevision[] ─ CapabilityResolutionPlan
+   ├─ GenerationPlan ─ GenerationRun ─ FileChangeSet / WorkspaceSnapshot
+   ├─ DependencyResolution / AppBuild / ReleaseCandidate / Deployment[]
+   ├─ MetricBinding[] / Observation[] / GateEvaluation[] / IterationDecision[]
+   ├─ ExternalOperation[] / MemoryRecord[]
+   └─ EvalRun[] / ExperimentAssignment[]   (P2-4+)</pre>
+    <div class="callout blue"><b>权威性分层：</b>事实源（PG）唯一可写 → Artifact（不可变内容寻址）→ 投影（可重建）→ 模型输出（候选须校验）。删除投影后必须能从事实源 + Artifact 重建。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>19 / 50</span></div>
+</section>
+
+<!-- 20 2.5 GOAL SM -->
+<section class="slide">
+  <div class="kicker">2.5 · Goal 状态机（Plan §2 / Tech §7）</div>
+  <h1>Goal 状态机——第一套，也是最核心的一套</h1>
+  <div class="body">
+    <svg viewBox="0 0 1160 230" width="100%">
+      <defs><marker id="a1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#3B82F6"/></marker></defs>
+      <rect x="40" y="20" width="100" height="40" rx="7" fill="#EFF6FF" stroke="#3B82F6"/><text x="90" y="45" font-size="13" text-anchor="middle">DRAFT</text>
+      <rect x="200" y="20" width="100" height="40" rx="7" fill="#EFF6FF" stroke="#3B82F6"/><text x="250" y="45" font-size="13" text-anchor="middle">READY</text>
+      <rect x="360" y="20" width="100" height="40" rx="7" fill="#3B82F6"/><text x="410" y="45" fill="#fff" font-size="13" text-anchor="middle">ACTIVE</text>
+      <rect x="360" y="110" width="120" height="40" rx="7" fill="#FEF3F2" stroke="#EF4444"/><text x="420" y="135" font-size="12" text-anchor="middle">WAITING_HUMAN</text>
+      <rect x="360" y="180" width="100" height="40" rx="7" fill="#FFFBEB" stroke="#F59E0B"/><text x="410" y="205" font-size="12" text-anchor="middle">BLOCKED</text>
+      <rect x="540" y="110" width="120" height="40" rx="7" fill="#F1F5F9" stroke="#64748B"/><text x="600" y="135" font-size="12" text-anchor="middle">PAUSED</text>
+      <rect x="700" y="20" width="120" height="40" rx="7" fill="#0F172A"/><text x="760" y="45" fill="#fff" font-size="12" text-anchor="middle">ACHIEVED</text>
+      <rect x="860" y="20" width="120" height="40" rx="7" fill="#0F172A"/><text x="920" y="45" fill="#fff" font-size="12" text-anchor="middle">EXHAUSTED</text>
+      <rect x="700" y="90" width="120" height="40" rx="7" fill="#0F172A"/><text x="760" y="115" fill="#fff" font-size="12" text-anchor="middle">FAILED</text>
+      <rect x="860" y="90" width="120" height="40" rx="7" fill="#0F172A"/><text x="920" y="115" fill="#fff" font-size="12" text-anchor="middle">CANCELLED</text>
+      <line x1="140" y1="40" x2="200" y2="40" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="300" y1="40" x2="360" y2="40" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="460" y1="60" x2="420" y2="110" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="420" y1="150" x2="410" y2="180" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="460" y1="40" x2="700" y2="45" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="460" y1="40" x2="860" y2="45" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="460" y1="60" x2="760" y2="90" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="460" y1="60" x2="920" y2="90" stroke="#3B82F6" marker-end="url(#a1)"/>
+      <line x1="480" y1="130" x2="540" y2="130" stroke="#3B82F6" marker-end="url(#a1)"/>
+    </svg>
+    <div class="legend">ACTIVE ↔ PAUSED；ACTIVE/WAITING_HUMAN/BLOCKED → 四种终态。resume 只接受 PAUSED；终态不重开，改则新建 Goal 引原。</div>
+    <div class="callout"><b>EXHAUSTED 铁律：</b>只能由 Exhaustion Evaluator 提议 + 确定性规则确认；证据不足时进 <code>BLOCKED</code>，<b>不能</b>进 EXHAUSTED。这正是后文“交付缺口悬停、无出路的死胡同”的反面教材。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>20 / 50</span></div>
+</section>
+
+<!-- 21 2.6 WORK SM -->
+<section class="slide">
+  <div class="kicker">2.6 · Work 状态机（Plan §4）</div>
+  <h1>Work 状态机——逻辑工作单元</h1>
+  <div class="body">
+    <pre>PLANNED → READY → RUNNING → EVALUATING → ACCEPTED
+             ↘ WAITING_HUMAN          ↘ REJECTED → READY
+             ↘ BLOCKED
+RUNNING → UNKNOWN
+任意非终态 → CANCELLED</pre>
+    <ul>
+      <li><code>ACCEPTED</code> 终态，成果通过<b>独立</b>验收；<code>REJECTED</code> 可在修订后建新 Run。</li>
+      <li><code>UNKNOWN</code>：外部副作用无法确认，<b>必须先对账</b>。</li>
+      <li>后续 Observation 推翻已接受结果时，<b>不重开 ACCEPTED Work</b>，而是创建纠正 Work + Replan。</li>
+    </ul>
+    <div class="callout blue">关系：<code>Goal 1 ──* Work 1 ──* Run</code>。一个 Work 可多 Run，但同一时刻最多一个活动 Run；重试/换执行方式必须新建 Run，历史不覆盖。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>21 / 50</span></div>
+</section>
+
+<!-- 22 2.7 RUN SM -->
+<section class="slide">
+  <div class="kicker">2.7 · Run 状态机（Plan §5）</div>
+  <h1>Run 状态机——一次不可变尝试</h1>
+  <div class="body">
+    <pre>CREATED → PERMIT_PENDING → QUEUED → RUNNING
+RUNNING → EXECUTED | FAILED | UNKNOWN | CANCELLED
+PERMIT_PENDING → DENIED | EXPIRED | CANCELLED</pre>
+    <ul>
+      <li>所有终态均<b>不可修改</b>：EXECUTED（正常返回，不表示 Work 已验收）、FAILED、UNKNOWN、DENIED/EXPIRED/CANCELLED。</li>
+      <li>同一 Work 同时最多一个活动 Run。</li>
+      <li><code>UNKNOWN</code> 不得自动重试；Reconciler 必须用外部回执/幂等键/权威查询产生对账 Evidence，再建纠正 Work 或新 Run。</li>
+    </ul>
+    <div class="callout red"><b>失败伏笔：</b>“UNKNOWN 不得自动重试、必须走对账”是后文 pipeline 死锁的直接成因之一——当对账链路本身没接上时，Run 就永远卡在 UNKNOWN/FAILED_TERMINAL，无法标记终态。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>22 / 50</span></div>
+</section>
+
+<!-- 23 2.8 TRANSITION CONTRACT -->
+<section class="slide">
+  <div class="kicker">2.8 · 状态转换契约（Plan §6）</div>
+  <h1>每个状态转换必须登记的字段</h1>
+  <div class="body">
+    <pre>command
+aggregate_type / aggregate_id / expected_version
+allowed_from / target_state
+preconditions
+transaction_writes
+audit_type
+outbox_event
+error_code
+idempotency_key
+recovery_behavior</pre>
+    <div class="callout">同一事务必须完成：校验版本与状态 + 更新聚合 + 追加 Audit + 写 Outbox。<b>非法转换不得产生部分写入</b>；并发冲突返回稳定错误码，调用方重读后决定，不在服务端静默覆盖。</div>
+    <div class="card cyan">最低错误码集合：<code>INVALID_STATE</code> / <code>VERSION_CONFLICT</code> / <code>ACTIVE_RUN_EXISTS</code> / <code>PERMIT_REQUIRED</code> / <code>PERMIT_INVALID</code> / <code>RECONCILIATION_REQUIRED</code> / <code>GOAL_TERMINAL</code> / <code>POLICY_DENIED</code></div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>23 / 50</span></div>
+</section>
+
+<!-- 24 2.9 PERMIT -->
+<section class="slide">
+  <div class="kicker">2.9 · ExecutionPermit 生命周期（Plan §7 / Tech §10）</div>
+  <h1>一次性副作用授权：REQUESTED→GRANTED→CLAIMED→CONSUMED</h1>
+  <div class="body">
+    <svg viewBox="0 0 1160 150" width="100%">
+      <defs><marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0891B2"/></marker></defs>
+      <rect x="40" y="50" width="130" height="44" rx="7" fill="#ECFEFF" stroke="#0891B2"/><text x="105" y="77" font-size="12.5" text-anchor="middle">REQUESTED</text>
+      <rect x="230" y="50" width="130" height="44" rx="7" fill="#0891B2"/><text x="295" y="77" fill="#fff" font-size="12.5" text-anchor="middle">GRANTED</text>
+      <rect x="420" y="50" width="130" height="44" rx="7" fill="#0E7490"/><text x="485" y="77" fill="#fff" font-size="12.5" text-anchor="middle">CLAIMED</text>
+      <rect x="610" y="50" width="140" height="44" rx="7" fill="#0F172A"/><text x="680" y="77" fill="#fff" font-size="12.5" text-anchor="middle">CONSUMED</text>
+      <rect x="230" y="10" width="130" height="34" rx="7" fill="#FEF3F2" stroke="#EF4444"/><text x="295" y="32" font-size="12" text-anchor="middle">DENIED</text>
+      <rect x="420" y="110" width="130" height="34" rx="7" fill="#FEF3F2" stroke="#EF4444"/><text x="485" y="132" font-size="12" text-anchor="middle">EXPIRED/REVOKED</text>
+      <line x1="170" y1="72" x2="230" y2="72" stroke="#0891B2" marker-end="url(#a2)"/>
+      <line x1="360" y1="72" x2="420" y2="72" stroke="#0891B2" marker-end="url(#a2)"/>
+      <line x1="550" y1="72" x2="610" y2="72" stroke="#0891B2" marker-end="url(#a2)"/>
+      <line x1="295" y1="50" x2="295" y2="44" stroke="#EF4444"/><line x1="295" y1="44" x2="295" y2="10" stroke="#EF4444"/>
+      <line x1="485" y1="94" x2="485" y2="110" stroke="#EF4444"/>
+    </svg>
+    <div class="legend">不变量：Permit 1:1 ExternalOperation；claim 产生 local_fencing_token；CONSUMED 与 DISPATCHING 同事务固化；Lease 过期旧 Worker 不得提交，新 Worker 必须对账。</div>
+    <div class="callout blue">Permit 绑定 13 个字段（goalId/workId/runId/actorId/action/target/parameterHash/dataScope/networkScope/resourceLimit/validUntil/nonce/idempotencyKey），<b>不保存明文凭证</b>。Secret Broker 只向已验证 Permit 代执行。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>24 / 50</span></div>
+</section>
+
+<!-- 25 2.10 EXTERNAL OPERATION -->
+<section class="slide">
+  <div class="kicker">2.10 · ExternalOperation（Tech §9，G0）</div>
+  <h1>统一外部副作用控制对象</h1>
+  <div class="body">
+    <pre>PREPARED → DISPATCHING → SUCCEEDED | FAILED_TERMINAL | UNKNOWN
+                         → RECONCILING → SUCCEEDED | FAILED_TERMINAL | MANUAL_REVIEW</pre>
+    <div class="card red">最小闭环是 P1 Graduation G8 的<b>前置依赖，禁止推迟到 P2-1</b>。</div>
+    <h3>原子派发权（同 DB 事务，禁止网络 I/O）</h3>
+    <ul>
+      <li><code>PREPARED → DISPATCHING</code></li>
+      <li><code>Permit CLAIMED → CONSUMED</code></li>
+      <li>固化 <code>dispatch_generation</code> 与 <code>operation_key</code></li>
+    </ul>
+    <div class="callout"><b>关键语义：</b><code>CONSUMED</code> = 唯一派发权已持久化，<b>不是</b>供应商已收到请求。提交事务后才允许外部 I/O；重试复用同一 <code>operation_key</code>。必填：operation_key / request_digest / permit_id / local_fencing_token / dispatch_generation / external_id。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>25 / 50</span></div>
+</section>
+
+<!-- 26 2.11 AGENT MESH -->
+<section class="slide">
+  <div class="kicker">2.11 · Agent Mesh & 组织形态（Tech §5）</div>
+  <h1>通信体系与四种运行形态</h1>
+  <div class="body">
+    <pre>Agent A ──A2A──&gt; Agent B     (Agent 间协作与任务委托)
+Agent   ──MCP──&gt; Tool/API/Data (工具与外部服务调用)
+<span class="c"># 所有通信必须经治理引擎授权；跨 Agent 调用需 Permit 或预授权</span>
+生命周期：Create → Register → Discover → Deploy → Run → Communicate → Evaluate → Upgrade → Retire</pre>
+    <table>
+      <tr><th>组织形态</th><th>阶段</th></tr>
+      <tr><td><b>单 Agent</b></td><td>P0 / P1（默认）</td></tr>
+      <tr><td>固定模板</td><td>P1 候选（如 pm-dev-independent-qa-v1）</td></tr>
+      <tr><td>动态组织</td><td>P2-5（需实验验证）</td></tr>
+      <tr><td>人类参与</td><td>全阶段</td></tr>
+    </table>
+    <div class="callout blue">A2A 只作为未来跨组织互操作的边界投影；内部 Agent 继续用全轨迹可审计的 AgentEnvelope。第三方框架只能作为能力池内单个 Agent 封装，<b>不得替换 Kernel</b>。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>26 / 50</span></div>
+</section>
+
+<!-- 27 2.12 FACT/ARTIFACT -->
+<section class="slide">
+  <div class="kicker">2.12 · 事实源 / Artifact 边界（Tech §6 / §11）</div>
+  <h1>什么算“证据”？四类 Artifact</h1>
+  <div class="body"><div class="cols"><div class="col">
+    <h3>Evidence 分类</h3>
+    <ul>
+      <li><code>declared-intent</code>：用户声明</li>
+      <li><code>sourced-observation</code>：受控外部来源快照</li>
+      <li><code>build-verification</code>：构建与测试</li>
+      <li><code>product-observation</code>：真实用户行为</li>
+      <li><code>operational-observation</code>：内部 smoke</li>
+    </ul>
+  </div><div class="col">
+    <h3>不可变 Artifact 类型</h3>
+    <ul>
+      <li>GoalSpec / Evidence / HypothesisDecision</li>
+      <li>RequirementRevision / GenerationPlan</li>
+      <li>BuildReport / Observation / GateEvaluation</li>
+      <li>DecisionRecord / Permit / AuditLog</li>
+    </ul>
+  </div></div>
+  <div class="callout red"><b>铁律：</b>declared-intent 不能单独证明市场事实；<b>operational-observation 不能满足产品价值 Gate</b>；OBSERVED claim 必须引用 Evidence。UNTRUSTED_DATA 只能当数据，不得成为指令/授权/策略来源。</div></div>
+  <div class="foot"><span>第二章 · 架构</span><span>27 / 50</span></div>
+</section>
+
+<!-- 28 2.13 OUTBOX -->
+<section class="slide">
+  <div class="kicker">2.13 · Outbox 事件链（Tech §8）</div>
+  <h1>主链路事件顺序（可重放、可幂等）</h1>
+  <div class="body">
+    <pre>GoalExecutionRequested
+→ DiscoveryRoundRequested → DiscoveryCompleted
+→ RequirementRequested → RequirementValidated
+→ CapabilityResolutionRequested → CapabilityResolutionSatisfied
+→ GenerationRunRequested → WorkspaceSnapshotReady
+→ DependencyResolutionRequested
+→ AppBuildRequested → AppBuildPassed
+→ PreviewDeploymentRequested → PreviewDeploymentSucceeded
+→ ExternalObservationReceived
+→ GateEvaluationRequested → IterationDecisionRecorded</pre>
+    <div class="callout blue">事件必含：event_id / event_type / schema_version / 聚合 ID·版本 / idempotency_key / correlation_id / causation_id。Handler 职责：校验→幂等→同事务提交状态+Audit+下一 Outbox→外部 I/O 不持事务→失败退避→Dead Letter→UNKNOWN 不重复副作用→终态写稳定 failure_code。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>28 / 50</span></div>
+</section>
+
+<!-- 29 2.14 GENERATION STRATEGY -->
+<section class="slide">
+  <div class="kicker">2.14 · 生成策略（Tech §13.4–13.7）</div>
+  <h1>artifact-backed vs agentic：一个被反复“卡住”的开关</h1>
+  <div class="body">
+    <pre><span class="c"># generation_strategy 是运行时契约，不是装饰字段</span>
+artifact-backed → ArtifactBackedCodeGenerator   (模型完整源码 → 不可变 Artifact → FileChangeSet)
+agentic        → AgenticCodeGenerator          (多轮工具循环 + 真实验证)
+
+<span class="c"># 一致性不变式（GQ-1，fail-closed）</span>
+标签 / 实际对象类型 / generation_strategy 三者不一致 → 拒绝启动该 Run + 写 Evidence</pre>
+    <div class="card red">控制流与 canary 闸门已实现：Settings 代码默认 <code>generation_strategy=agentic</code>、<code>canary_gate=False</code>、<code>canary_percent=0</code>；<code>artifact-backed</code> 为 kill-switch / scaffold fallback。GQ-4 正式晋级需 DecisionRecord。M6 窗现为 <b>CLAMPED_PENDING_QUALIFICATION</b>（canary off；watch HALTED；next Offline Qual），<b>不等于 GQ-4</b>。</div>
+    <div class="callout">§13.5：artifact-backed 反馈晚、纠错贵，必须补“运行—读错—修改”会话内自纠正闭环；VerificationAgent 除 compileall+smoke 外要能跑 pytest，并把真实失败回灌同一生成会话。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>29 / 50</span></div>
+</section>
+
+<!-- 30 2.15 BASELINE -->
+<section class="slide">
+  <div class="kicker">2.15 · 技术基线（Tech §3）</div>
+  <h1>明确的技术选型</h1>
+  <div class="body">
+    <ul>
+      <li>Python 3.12+、FastAPI、SQLAlchemy async</li>
+      <li>PostgreSQL 唯一事实源，Alembic 单一迁移链</li>
+      <li>Outbox、Worker Lease、Durable Timer</li>
+      <li>Pydantic 结构化协议</li>
+      <li>不可变 Artifact + 内容哈希</li>
+      <li>Docker 或独立 Build Provider 隔离构建</li>
+      <li>Ruff、mypy strict、Pytest、迁移检查 = 合并门禁</li>
+    </ul>
+    <div class="callout blue"><b>重要克制：</b>“P2 前期继续采用模块化单体。除非测量证明 Outbox 已成为瓶颈，否则<b>不引入外部事件总线或微服务拆分</b>。”——架构上明确反对过度工程。</div>
+  </div>
+  <div class="foot"><span>第二章 · 架构</span><span>30 / 50</span></div>
+</section>
+
+<!-- 31 CH2 SUMMARY -->
+<section class="slide hero">
+  <div class="kicker" style="color:#60A5FA">第二章小结</div>
+  <h1>架构，也是真的完整。</h1>
+  <p class="sub">五层总览、六要素引擎、权威对象树、三套状态机 + 转换契约、Permit、ExternalOperation、Agent Mesh、Outbox 事件链、生成策略、明确的技术基线……<br/>这套架构放在任何一家 AI 公司的 Agent 平台评审会上，都算得上成熟。<br/><br/><b style="color:#F87171">但“画得出来”不等于“跑得起来”。</b>进入第三章：框架是怎么一步步演变、一步步堆复杂度的。</p>
+  <div class="big">02</div>
+  <div class="foot"><span>第二章 · 架构</span><span>31 / 50</span></div>
+</section>
+
+<!-- 32 CH3 TRANSITION -->
+<section class="slide hero">
+  <div class="kicker" style="color:#60A5FA">第三章</div>
+  <h1>框架演变</h1>
+  <p class="sub">定义和架构是“设计态”，框架是“实现态”。这一章看实现计划怎么从 S0 切片，一路长到 MA / GQ / CD 几十个批次——<br/>复杂度曲线，就是在这里悄悄爬上去的。</p>
+  <div class="big">03</div>
+  <div class="foot"><span>第三章 · 框架演变</span><span>32 / 50</span></div>
+</section>
+
+<!-- 33 3.1 SLICES -->
+<section class="slide">
+  <div class="kicker">3.1 · 开发切片（Plan §10）</div>
+  <h1>P0 整体交付，但拆成 S0–S8 纵向切片</h1>
+  <div class="body"><ol>
+    <li><b>S0</b> 工程骨架：Core、空 Apps、数据库、迁移、CI、一键启动</li>
+    <li><b>S1</b> 可靠内核：三套状态机、Outbox、Lease、Timer、Artifact、Evidence、Audit，过 CSV_SUMMARY_BASELINE</li>
+    <li><b>S2</b> 单 Agent 闭环：Interpreter / Planner / Executor / Evaluator + 预算停止</li>
+    <li><b>S3</b> 治理与人工：Permit、Policy、Secret Broker、HumanTask + 各自恢复</li>
+    <li><b>S4</b> 能力与组织：Requirement、Provider、Certification、Organization、Assignment、DecisionRecord</li>
+    <li><b>S5</b> 能力构建：沙箱、ToolSpec、构建、扫描、测试、认证，过 EVT_PARSER_GAP</li>
+    <li><b>S6</b> 独立 App：Workspace、Build、Test、Artifact 通用端口</li>
+    <li><b>S7</b> 反馈重规划：预览部署、Observation、ExperienceRecord、重规划</li>
+    <li><b>S8</b> 产品验证：A/B/C 首轮冻结实验 + 产品 DecisionRecord；启动两个独立产品</li>
+  </ol>
+  <div class="callout red"><b>S4 当时的硬规定：</b>“默认路径必须是单 Agent。创建额外 Agent 前，Organization Designer 必须记录预期收益、协调成本、风险、可逆性和停止条件。没有正向预期净收益证据时不得增员。”——这条在项目里被系统性绕过。</div>
+  <div class="callout"><b>已修订（定义 3.0，2026-08-10）：</b>Plan §10 现规定 Organization Designer 仍<b>记录</b>角色、消耗、现实权限与探索理由，但<b>不得</b>把“证明真实缺口、预期净收益或通过审批”设为创建角色和沙箱尝试的前置条件。当年的失败在于“既不记录也不验证”，不在于“允许增员”。</div></div>
+  <div class="foot"><span>第三章 · 框架演变</span><span>33 / 50</span></div>
+</section>
+
+<!-- 34 3.2 MA -->
+<section class="slide">
+  <div class="kicker">3.2 · 多 Agent 计划（Plan §12，MA-0~MA-6）</div>
+  <h1>多 Agent 补足：7 个批次 + 实现状态</h1>
+  <div class="body"><table>
+    <tr><th>批次</th><th>交付物</th><th>状态（2026-07-31）</th></tr>
+    <tr><td>MA-0 合同冻结</td><td>指标/MAST/成员契约 Schema</td><td>✅ 已完成</td></tr>
+    <tr><td>MA-1 可观测与归因</td><td>协调 Token、三指标、MAST 分类</td><td>✅ 已完成（OTel 后续对齐）</td></tr>
+    <tr><td>MA-2 固定模板加固</td><td>成员三要素、认证摘要、回归</td><td>✅ 已完成并强制接线</td></tr>
+    <tr><td>MA-3 长任务耐久化</td><td>ExecutionPlanItem、大结果卸载</td><td>✅ 已完成并接入主链</td></tr>
+    <tr><td>MA-4 路由与过程评估</td><td>TaskFeatures、DispatchDecision</td><td>✅ 固定 Hive 主链完成</td></tr>
+    <tr><td>MA-5 P2-4 冻结实验</td><td>强单 Agent vs 固定 Hive A/B/C</td><td>🟡 半落地（骨架）</td></tr>
+    <tr><td>MA-6 条件激活</td><td>P2-5 自适应组织候选</td><td>🟡 Gate 钩子（未激活）</td></tr>
+  </table>
+  <div class="callout red"><b>§12.5 明确不做（现行口径，2026-08-10 定义 3.0 修订后）：</b>不引入 CrewAI/LangGraph 替换自研 Kernel；不用 Agent 数/消息量/上下文长度当成功指标；<b>不在 P2-4 DecisionRecord 前扩大自适应自由拓扑的现实生产权限</b>（真实数据、真人、共享状态、公开传播、资金或法律影响）；不以 Prompt 替代状态机/角色契约/验证/恢复。</div>
+  <div class="callout">沙箱内的候选拓扑提出、组织试验与并行假设按 Plan §0.1/§1.1 <b>默认开放</b>；原文"不在 P2-4 前开放自适应自由拓扑"已被判定为不合规表述并收窄为现实权限限定。</div></div>
+  <div class="foot"><span>第三章 · 框架演变</span><span>34 / 50</span></div>
+</section>
+
+<!-- 35 3.3 GQ -->
+<section class="slide">
+  <div class="kicker">3.3 · 单 Agent 质量基线（Plan §13，GQ-0~GQ-5）</div>
+  <h1>把“单 Agent 闭环”单列成一条修复线</h1>
+  <div class="body"><table>
+    <tr><th>批次</th><th>交付物</th><th>状态</th></tr>
+    <tr><td>GQ-0 合同冻结</td><td>生成器协议、canary 合同、门槛</td><td>✅ 已完成</td></tr>
+    <tr><td>GQ-1 选择一致性</td><td>按 strategy 分派；标签≠实际 fail-closed</td><td>✅ 已完成</td></tr>
+    <tr><td>GQ-2 会话内反馈+Verification</td><td>真实失败回灌；pytest</td><td>🟡 半落地</td></tr>
+    <tr><td>GQ-3 影子/Canary</td><td>artifact-backed vs agentic 对照</td><td>✅ 控制流实现</td></tr>
+    <tr><td>GQ-4 默认切换决策</td><td>达标后 agentic 设默认</td><td>✅ 控制流实现（默认未翻）</td></tr>
+    <tr><td>GQ-5/MA-5 固定 Hive 重评</td><td>基于强单 Agent 基线重评</td><td>⏳ 未开</td></tr>
+  </table>
+  <div class="callout blue"><b>§13.1 原则：</b>优先修复单 Agent 生成闭环，而非继续增加组织层复杂度；真实构建/测试/smoke 失败必须回灌生成会话；agentic 默认切换由成功率/成本/延迟门槛门控，<b>不得凭直觉</b>。</div></div>
+  <div class="foot"><span>第三章 · 框架演变</span><span>35 / 50</span></div>
+</section>
+
+<!-- 36 3.4 CD -->
+<section class="slide">
+  <div class="kicker">3.4 · 对话式交付（Plan §14，CD-0~CD-12）</div>
+  <h1>又一条线：把“对话完整交付”补成 13 个批次</h1>
+  <div class="body"><table>
+    <tr><th>批次</th><th>名称</th><th>状态</th></tr>
+    <tr><td>CD-0</td><td>止血：沙箱/transcript 审计/AC1 门禁</td><td>✅ 已完成（名义隔离）</td></tr>
+    <tr><td>CD-1</td><td>交付状态机接线 + 早交人</td><td>✅ 已完成</td></tr>
+    <tr><td>CD-2</td><td>合规 GQ-3 窗 + 统一 Verification 闸门</td><td>🟡 控制流就绪；阻塞 CD-6/7</td></tr>
+    <tr><td>CD-3</td><td>WorkBuddy 体验：审阅/交人/成本/轨迹</td><td>✅ 已完成</td></tr>
+    <tr><td>CD-4</td><td>对话层 agent loop（PRD §4.4）</td><td>✅ 已完成</td></tr>
+    <tr><td>CD-5</td><td>恢复度量 / SSE / 结构瘦身</td><td>✅ 最小完成</td></tr>
+    <tr><td>CD-6~12</td><td>沙箱真执行 / GQ-3 窗 / GQ-4 / 适配器 …</td><td>🟡 多数 PENDING</td></tr>
+  </table>
+  <div class="callout red"><b>门禁铁律：</b>CD-6 未全绿（含 N-3c/N-3d，且不得仅用 <code>echo ok</code> 验收）禁止生产 canary；CD-7 未绿禁止开 GQ-3 窗；不删 Permit/Outbox/Evidence/Audit/Reconciler。</div></div>
+  <div class="foot"><span>第三章 · 框架演变</span><span>36 / 50</span></div>
+</section>
+
+<!-- 37 3.5 IMPL STATUS -->
+<section class="slide">
+  <div class="kicker">3.5 · 实现状态大表（Tech §25）</div>
+  <h1>“已完成”的精确含义：结构落地 ≠ 可验证交付</h1>
+  <div class="body">
+    <div class="card cyan"><b>状态标签约定（Tech §25 F-9）：</b>
+      <span class="pill">已完成</span>生产路径可用且默认启用　
+      <span class="pill c">已实现但默认不可启用</span>控制流就绪须门禁　
+      <span class="pill r">M6 CLAMPED_PENDING_QUALIFICATION</span>canary off；watch HALTED；next Offline Qual　
+      <span class="pill g">PENDING</span>DecisionNote 未 ACCEPTED</div>
+    <ul>
+      <li>P0 全链路、P1 R1–R8：<b>已完成</b>（结构/链路落地）</li>
+      <li>Durable Hive（代码默认 on，可 force_single_agent 退出）、多 Agent 补足 MA-0~6：结构落地；自适应拓扑的<b>生产权限继承</b>仍受限</li>
+      <li>GQ-0~GQ-4：控制流已实现；代码默认已是 agentic，<b>GQ-4 DecisionRecord 仍 PENDING</b></li>
+      <li>M6 曾开 5% 后已 <b>CLAMPED_PENDING_QUALIFICATION</b>（watch HALTED；须先 Offline Qual），<b>不等于 GQ-4</b></li>
+      <li>MAST 9 码已定义，<b>尚未接入生产分类路径（零生产引用）</b></li>
+      <li>ExternalOperation 跨 provider 真实网络对账、Eval Harness 完整 95% CI：<b>仍待交付</b></li>
+    </ul>
+    <div class="callout">关键澄清：<b>“已完成”指结构/链路已落地；可验证交付以治理管道行为 pytest + 非桩 Eval 为准</b>，不以模块存在或结构级断言为准。</div>
+  </div>
+  <div class="foot"><span>第三章 · 框架演变</span><span>37 / 50</span></div>
+</section>
+
+<!-- 38 3.6 COMPLEXITY -->
+<section class="slide">
+  <div class="kicker warn">3.6 · 演变的代价</div>
+  <h1>复杂度一路上涨，可交付力却没跟上</h1>
+  <div class="body">
+    <div class="metrics">
+      <div class="metric red"><div class="v">32</div><div class="l">天无用户侧进展</div></div>
+      <div class="metric blue"><div class="v">21</div><div class="l">个 PENDING GenerationRun</div></div>
+      <div class="metric cyan"><div class="v">8</div><div class="l">个卡在 FAILED_TERMINAL</div></div>
+      <div class="metric"><div class="v">0</div><div class="l">个 MAST 码生产引用</div></div>
+    </div>
+    <div class="callout red"><b>矛盾点：</b>框架批次从 S0 长到 CD-12，能力清单越来越长（MA-0~6、GQ-0~5、CD-0~12 共 26 个批次），但“端到端跑通一个真实 Goal”这件事，始终没有发生。复杂度↑，交付力↓——这就是“敲边鼓”的量化证据。</div>
+    <div class="legend">下一章进入失败原因：为什么架子搭得这么全，核心闭环还是没跑通？</div>
+  </div>
+  <div class="foot"><span>第三章 · 框架演变</span><span>38 / 50</span></div>
+</section>
+
+<!-- 39 CH4 TRANSITION -->
+<section class="slide hero">
+  <div class="kicker" style="color:#F87171">第四章</div>
+  <h1>失败原因</h1>
+  <p class="sub">前面三章把“好的东西”讲足了。这一章说实话：<br/>核心单 Agent 闭环从未端到端跑通，全程在周边做工程，最终用复杂度掩盖了交付真空。</p>
+  <div class="big">04</div>
+  <div class="foot"><span>第四章 · 失败原因</span><span>39 / 50</span></div>
+</section>
+
+<!-- 40 4.1 EVIDENCE WALL -->
+<section class="slide">
+  <div class="kicker warn">4.1 · 证据墙</div>
+  <h1>来自真实报告的硬数字</h1>
+  <div class="body">
+    <div class="metrics">
+      <div class="metric red"><div class="v">32</div><div class="l">天无用户进度<br/>(delivery-pipeline-unblock-plan)</div></div>
+      <div class="metric blue"><div class="v">21</div><div class="l">PENDING GenerationRun<br/>卡在冻结计划外路径</div></div>
+      <div class="metric cyan"><div class="v">8</div><div class="l">FAILED 卡在<br/>cannot mark FAILED_TERMINAL</div></div>
+      <div class="metric"><div class="v">≥8</div><div class="l">路径落在 frozen-plan 之外</div></div>
+    </div>
+    <div class="card red">根因分类（code-regression-check / doc-impl-readme-conformance）：
+      <b>F-1</b> 未纳入版本管理的 goal_runtime_plan.py 引发 ImportError；
+      <b>F-2</b> failure_lessons schema 不兼容，静默丢弃 delivery-gap 经验；
+      <b>F-3/F-4</b> fork 门禁、execution_orchestrator 单文件 4400+ 行 / 22 次改动；
+      <b>§3-A</b> PRD 把已实现项列为未实现；<b>§3-C</b> MAST 9 码零生产引用；<b>§3-D/E</b> 用魔法字符串、源码字符串断言违反自身规范。</div>
+  </div>
+  <div class="foot"><span>第四章 · 失败原因</span><span>40 / 50</span></div>
+</section>
+
+<!-- 41 4.2 FIVE ROOT CAUSES -->
+<section class="slide">
+  <div class="kicker warn">4.2 · 五大根因</div>
+  <h1>为什么“架子全、交付空”？</h1>
+  <div class="body"><ol>
+    <li><b>A · 主闭环未闭合。</b>单 Agent “解释→计划→执行→验证→重规划”从没端到端跑通；S2 的目标被 S4/S5/MA/GQ/CD 持续稀释。</li>
+    <li><b>B · 把控制流当能力。</b>canary 闸门、状态机接线、DeliveryState 等“控制流已实现”被当作“能力已交付”，但默认不翻、窗不开、经验不沉淀。</li>
+    <li><b>C · 工程卫生缺失。</b>未纳管文件 ImportError、schema 不兼容静默丢经验、单文件 4400 行、文档与实现互相指假。</li>
+    <li><b>D · 优先级倒置。</b>先做多 Agent / 对话体验 / canary 等“亮眼”层，拖着单 Agent 闭环这个地基不补。</li>
+    <li><b>E · 元工作替代真工作。</b>大量批次在“计划怎么计划”“评测怎么评测”，真实 Goal 从头到尾没被端到端交付过。</li>
+  </ol>
+  <div class="callout red">五条的共同主语：<b>“控制流/计划/架构”被当成了“结果”</b>。这正是用户说的“一直在敲边鼓”。</div></div>
+  <div class="foot"><span>第四章 · 失败原因</span><span>41 / 50</span></div>
+</section>
+
+<!-- 42 4.3 BASICS -->
+<section class="slide">
+  <div class="kicker warn">4.3 · 根因 → 漏掉的基本功</div>
+  <h1>每个根因，都对应一项被跳过的基本功</h1>
+  <div class="body"><table>
+    <tr><th>根因</th><th>被跳过的基本功</th></tr>
+    <tr><td>A 主闭环未闭合</td><td>先把一件事端到端跑通（S2），再谈组织与评测</td></tr>
+    <tr><td>B 控制流当能力</td><td>验收只看真实行为：默认翻没翻、窗开没开、经验沉淀没</td></tr>
+    <tr><td>C 工程卫生缺失</td><td>文件纳管、schema 兼容迁移、单文件拆分、文档=实现</td></tr>
+    <tr><td>D 优先级倒置</td><td>地基（单 Agent 闭环）不通不过，不上层特性</td></tr>
+    <tr><td>E 元工作替代真工作</td><td>用“交付真实 Goal”作唯一进度标尺，而非批次数</td></tr>
+  </table>
+  <div class="callout blue"><b>一句话带走：</b>Agent 的“根”是能在约束下稳定交付、失败有明确出路的<b>单 Agent 闭环</b>；graph / 多 Agent / 评测都是它长好之后的事。</div></div>
+  <div class="foot"><span>第四章 · 失败原因</span><span>42 / 50</span></div>
+</section>
+
+<!-- 43 4.4 FATAL DETAILS -->
+<section class="slide">
+  <div class="kicker warn">4.4 · 三个致命细节</div>
+  <h1>“定义齐全、落地为零”最刺眼的三处</h1>
+  <div class="body"><div class="card red"><b>① MAST 失败码（§18.4 / PRD §12）：</b>9 个码已定义、classify 函数已写，但全库零生产引用——只测试引用。定义“就绪”，集成“待 P2-4”。这恰好是“敲边鼓”的缩影。</div>
+  <div class="card red"><b>② 沙箱未真执行（CD-6 / §13.8）：</b>N-3 族（entrypoint 吞命令、uid 写盘失败、路径静默挂空、DinD）使 docker 模式“尚未真执行”。<b>CD-6 全绿前开 canary 只会得到无效或假绿数据。</b></div>
+  <div class="card red"><b>③ M6 canary ≠ GQ-4（§13.7.3）：</b>M6 曾开 5% agentic canary，现已 <b>CLAMPED_PENDING_QUALIFICATION</b>（canary off；watch HALTED；须先 Offline Qual）；代码默认已是 agentic（artifact-backed 为 fallback），但 GQ-4 DecisionRecord 仍 PENDING。用历史开窗营造“已晋级”的错觉，是优先级倒置的集中体现。</div>
+  <div class="callout">三处共同证明：<b>“控制流已就绪”和“能力已交付”是两件事</b>；把前者当后者汇报，就是失败被掩盖的机制。</div></div>
+  <div class="foot"><span>第四章 · 失败原因</span><span>43 / 50</span></div>
+</section>
+
+<!-- 44 CH4 SUMMARY -->
+<section class="slide hero">
+  <div class="kicker" style="color:#F87171">第四章小结</div>
+  <h1>不是不会设计，是没把设计跑成结果。</h1>
+  <p class="sub">五大根因没有一条是“不懂 Agent”。它们全是工程纪律问题：<br/>主闭环没闭合、控制流当能力、卫生缺失、优先级倒置、元工作替代真工作。<br/><br/>下一章给结论：<b style="color:#FCA5A5">Agent 到底该怎么搭，多 Agent 到底该怎么搭。</b></p>
+  <div class="big">04</div>
+  <div class="foot"><span>第四章 · 失败原因</span><span>44 / 50</span></div>
+</section>
+
+<!-- 45 CH5 TRANSITION -->
+<section class="slide hero">
+  <div class="kicker" style="color:#60A5FA">第五章</div>
+  <h1>结论</h1>
+  <p class="sub">从“失败案例”回到“该怎么做”。两件事：单 Agent 怎么搭（地基），多 Agent 怎么搭（上层）。<br/>顺序很重要——先地基，后上层。</p>
+  <div class="big">05</div>
+  <div class="foot"><span>第五章 · 结论</span><span>45 / 50</span></div>
+</section>
+
+<!-- 46 5.1 HOW AGENT -->
+<section class="slide">
+  <div class="kicker">5.1 · Agent 怎么搭（7 步法）</div>
+  <h1>先让一件事端到端跑通</h1>
+  <div class="body"><ol>
+    <li><b>定义不可变闭环</b>：GoalSpec → Work → Run → Evidence → 验收 → 重规划，状态机先画清（参照 §2.5–2.7）。</li>
+    <li><b>副作用受控</b>：所有外部效应走 Permit + ExternalOperation 原子派发 + operation_key 幂等（§2.9–2.10）。</li>
+    <li><b>证据分级</b>：只认外部 Observation / build-verification 满足 Gate；内部 smoke 永远不够（§2.12）。</li>
+    <li><b>失败有出路</b>：UNKNOWN 必须走对账；BLOCKED 可恢复；EXHAUSTED 需证据；禁止“未达标”死胡同（§2.5–2.7）。</li>
+    <li><b>可恢复 & 幂等</b>：Worker 崩溃后从持久状态续跑；重放不产生第二份输出（CSV/EVT 基线）。</li>
+    <li><b>数据契约带迁移</b>：schema 变更必须迁移 + 兼容；禁止静默丢经验（F-2 教训）。</li>
+    <li><b>验收只看真行为</b>：默认策略翻没翻、窗开没开、经验沉淀没——用行为判定，不靠控制流已就绪。</li>
+  </ol>
+  <div class="callout blue"><b>顺序即纪律：</b>前 5 步是单 Agent 闭环地基；地基不稳时，不把投入重心压到多 Agent <b>生产扩权</b> / 对话体验 / canary——沙箱试验仍可做。</div></div>
+  <div class="foot"><span>第五章 · 结论</span><span>46 / 50</span></div>
+</section>
+
+<!-- 47 5.2 HOW MULTIAGENT -->
+<section class="slide">
+  <div class="kicker">5.2 · 多 Agent 怎么搭</div>
+  <h1>沙箱默认可试；扩大现实生产权限才需证据</h1>
+  <div class="body"><div class="cols"><div class="col">
+    <h3>原则（定义 3.0 / PRD §10 / Plan §12.5）</h3>
+    <ul>
+      <li>沙箱内候选拓扑、角色创造与组织试验<b>默认开放</b>（ATTRIBUTE_2/4/6/7）</li>
+      <li>认证 Hive（<code>aar1_certified_hive</code>）<b>代码默认 on</b>；可按 Goal <code>force_single_agent</code> / env 退出</li>
+      <li>把某拓扑<b>晋级为生产默认并扩大不可逆现实权限</b>前，须同任务/模型/工具/权限/总预算对照与净收益证据</li>
+      <li>强顺序局部任务可由单责任 Agent 连续完成；团队保留统筹与验收</li>
+      <li>机器验证优先于 LLM-as-a-Judge；不靠 Prompt 替代状态机/验证</li>
+    </ul>
+  </div><div class="col">
+    <h3>扩大生产权限前</h3>
+    <ul>
+      <li>局部执行闭环与对照基线可观测（GQ-0~5 控制流 ≠ 能力已交付）</li>
+      <li>跑 P2-4 冻结实验（MA-5），出 DecisionRecord</li>
+      <li>报告 coordination_token_share / error_amplification / dispatch_entropy</li>
+      <li>正净收益 → 才扩大固定模板 / 自适应组织的<b>生产默认与现实权限</b></li>
+      <li>每次派工可回放：派给谁、为什么、依据什么证据</li>
+    </ul>
+  </div></div>
+  <div class="callout red"><b>反面教材：</b>本项目把 MA-0~6、GQ-0~5、CD-0~12 的“控制流”当成“多 Agent 已具备”，却把投入重心压到生产扩权 / canary，而主闭环与 MAST 生产接线仍缺——顺序反了。</div></div>
+  <div class="foot"><span>第五章 · 结论</span><span>47 / 50</span></div>
+</section>
+
+<!-- 48 5.3 CAUSAL CHAIN -->
+<section class="slide">
+  <div class="kicker">5.3 · 因果链总图</div>
+  <h1>从“定义好”到“塌了”的一条线</h1>
+  <div class="body">
+    <pre><span class="g">定义/需求优秀</span>  (§0 公式、10 原则、G1–G12、冻结评测协议)
+      │  但……
+      ▼
+<span class="c">全程在周边敲边鼓</span>  (S0→CD-12 共 26+ 批次；MA/GQ/CD 三线并行)
+      │  结果……
+      ▼
+<span class="red">核心单 Agent 闭环从未端到端跑通</span>  (S2 目标被持续稀释；32 天无进展)
+      │  暴露为……
+      ▼
+<span class="red">五大根因</span>  (A 未闭合 / B 控制流当能力 / C 卫生缺失 / D 倒置 / E 元工作)
+      │  每条对应……
+      ▼
+<span class="k">一项被跳过的基本功</span>  (先跑通→真行为验收→卫生→地基优先→真实 Goal 作标尺)
+      │  收束到……
+      ▼
+<span class="g">结论：先让一件事跑通，再去谈架构</span></pre>
+  </div>
+  <div class="foot"><span>第五章 · 结论</span><span>48 / 50</span></div>
+</section>
+
+<!-- 49 5.4 ACTION LIST -->
+<section class="slide">
+  <div class="kicker">5.4 · 团队行动清单</div>
+  <h1>拿到这份复盘，明天能做什么</h1>
+  <div class="body"><ol>
+    <li><b>选一个真实 Goal</b>，用现有 S2 闭环从头跑到可验证交付；不允许中途切去开新批次。</li>
+    <li><b>给“已交付”立行为标尺</b>：默认策略翻没翻、窗开没开、经验沉淀没——写进周报，不写“控制流已实现”。</li>
+    <li><b>修工程卫生</b>：未纳管文件入库、failure_lessons schema 迁移、拆 execution_orchestrator 单文件、文档与实现对齐。</li>
+    <li><b>冻结优先级</b>：主闭环未稳时，不把投入重心压到多 Agent 生产扩权 / canary；沙箱试验仍可做。</li>
+    <li><b>把 MAST 9 码接进生产分类路径</b>，让“定义”第一次产生“行为”。</li>
+    <li><b>任何“已晋级/已启用”的表述</b>，必须能指向 DecisionRecord + 真实流量证据，否则一律视为“控制流就绪”。</li>
+  </ol>
+  <div class="callout blue">把这些当成 Regent 的“复兴清单”，而不是又一份计划文档。</div></div>
+  <div class="foot"><span>第五章 · 结论</span><span>49 / 50</span></div>
+</section>
+
+<!-- 50 ENDING -->
+<section class="slide hero">
+  <div class="kicker" style="color:#60A5FA">结束</div>
+  <h1>graph 工程重要，<br/>但不能漏掉基本知识。</h1>
+  <p class="sub">Regent 不是败在“不懂 Agent 架构”，而是败在：把架构、控制流、计划当成了结果，<br/>唯独没把“一个真实 Goal 端到端跑通”当成结果。<br/><br/>希望这份复盘让大家记住——<b style="color:#FCA5A5">先把一件事跑通，再去谈架构。</b></p>
+  <div class="big">★</div>
+  <div class="foot"><span>Regent 失败案例复盘 · 2 小时课堂</span><span>50 / 50</span></div>
+</section>
+
+</div>
+
+<script>
+const slides=[...document.querySelectorAll('.slide')];
+let i=0;
+function show(n){i=(n+slides.length)%slides.length;slides.forEach((s,k)=>s.classList.toggle('active',k===i));const p=document.getElementById('progress');p.style.width=((i+1)/slides.length*100)+'%';}
+function key(e){if(['ArrowRight','ArrowDown','PageDown',' '].includes(e.key)){e.preventDefault();show(i+1);}else if(['ArrowLeft','ArrowUp','PageUp'].includes(e.key)){e.preventDefault();show(i-1);}else if(e.key==='Home'){show(0);}else if(e.key==='End'){show(slides.length-1);}else if(e.key==='f'||e.key==='F'){if(!document.fullscreenElement){document.documentElement.requestFullscreen();}}}
+document.addEventListener('keydown',key);
+document.getElementById('stage').addEventListener('click',e=>{if(e.clientX<window.innerWidth/2)show(i-1);else show(i+1);});
+function fit(){const s=Math.min(window.innerWidth/1280,window.innerHeight/720);document.documentElement.style.setProperty('--s',s);}
+window.addEventListener('resize',fit);fit();show(0);
+</script>
+</body>
+</html>

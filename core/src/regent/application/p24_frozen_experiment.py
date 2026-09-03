@@ -8,7 +8,6 @@ unless an explicit GO DecisionRecord exists (checked by p25_adaptive_gate).
 
 from __future__ import annotations
 
-import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -23,6 +22,7 @@ from regent.application.multiagent_metrics import (
     TokenBucket,
     compute_all_metrics,
 )
+from regent.application.statistics import wilson_interval as _wilson_interval
 from regent.application.p1_contracts import canonical_hash
 
 P24_EXPERIMENT_VERSION = "p24-frozen-abc/v1"
@@ -51,16 +51,6 @@ class FrozenExperimentConfig:
     repeats: int = 3
     confidence_level: float = 0.95
     variants: tuple[str, ...] = ("A_single_agent", "B_certified_hive", "C_control")
-
-
-def _wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
-    if n <= 0:
-        return None
-    p = successes / n
-    denom = 1 + z * z / n
-    centre = p + z * z / (2 * n)
-    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
-    return ((centre - margin) / denom, (centre + margin) / denom)
 
 
 def summarize_variant(results: Sequence[VariantRunResult]) -> dict[str, Any]:

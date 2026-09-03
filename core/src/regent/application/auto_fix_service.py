@@ -12,7 +12,6 @@ from typing import Any
 
 from regent.application.delivery_review_service import (
     DeliveryReviewCheck,
-    DeliveryReviewResult,
     review_html_for_delivery,
 )
 

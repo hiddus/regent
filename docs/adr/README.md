@@ -10,7 +10,7 @@
 
 > **ADR-0003 读法提醒**：其中枚举的 7 类能力是**边界范畴**，不是交付清单。当前引导期实际只落地 3 个能力，以 `capabilities/bootstrap/` 下的 `capability.json` 为准（偏差 F-11）。
 >
-> 除 ADR 外，较新的决策以 `docs/decision-note-*.md` 形式记录（如 [`decision-note-auto-start-journey-2026-07-31.md`](../decision-note-auto-start-journey-2026-07-31.md)）。两者效力等同，均需在与基线文档冲突时被援引。
+> 旧 Regent 路线的 `decision-note-*` 已移入[历史归档](../archive/legacy-regent-2026/README.md)，不再与当前 Novel Engine 基线具有同等效力。新的产品级决策应直接更新三件套，并在确需记录取舍时新增 ADR。
 
 ## 目录内容
 

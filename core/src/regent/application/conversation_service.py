@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +29,98 @@ class AppendConversationMessage:
     content: str
     actor: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+async def append_project_message(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    role: str,
+    message_type: str,
+    content: str,
+    metadata: Mapping[str, object],
+) -> None:
+    """Append a message to a project's conversation within the caller's transaction."""
+    conversation = await session.scalar(
+        select(ConversationModel).where(ConversationModel.app_project_id == project_id)
+    )
+    if conversation is None:
+        return
+    last = await session.scalar(
+        select(ConversationMessageModel.ordinal)
+        .where(ConversationMessageModel.conversation_id == conversation.id)
+        .order_by(ConversationMessageModel.ordinal.desc())
+        .limit(1)
+    )
+    session.add(
+        ConversationMessageModel(
+            id=uuid.uuid4(),
+            conversation_id=conversation.id,
+            ordinal=(last or 0) + 1,
+            role=role,
+            message_type=message_type,
+            content=content,
+            metadata_json=dict(metadata),
+            created_by="regent-core",
+        )
+    )
+
+
+async def append_project_event(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    message_type: str,
+    content: str,
+    metadata: dict[str, str],
+) -> None:
+    await append_project_message(
+        session,
+        project_id,
+        role="EVENT",
+        message_type=message_type,
+        content=content,
+        metadata=metadata,
+    )
+
+
+async def append_project_timeline_event(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    message_type: str,
+    content: str,
+    metadata: dict[str, object],
+) -> None:
+    """Append an event and reflect it in the goal's live-action projection."""
+    await append_project_message(
+        session,
+        project_id,
+        role="EVENT",
+        message_type=message_type,
+        content=content,
+        metadata=metadata,
+    )
+    goal_raw = metadata.get("goal_id")
+    if not goal_raw:
+        return
+    try:
+        goal_id = uuid.UUID(str(goal_raw))
+    except ValueError:
+        return
+    goal = await session.get(GoalModel, goal_id)
+    if goal is None:
+        return
+    from regent.application.live_action import apply_live_action_on_goal, summary_for_event
+
+    stage = None
+    if isinstance(goal.metadata_json, dict):
+        stage = goal.metadata_json.get("execution_stage")
+    apply_live_action_on_goal(
+        goal,
+        summary_for_event(message_type, content),
+        stage=str(stage) if stage else None,
+        detail=content[:240] if content else None,
+        event_type=message_type,
+    )
 
 
 class ConversationService:

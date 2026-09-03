@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import socket
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +12,7 @@ from regent.agent.skills import route_skills_for_gaps
 from regent.agent.tools import WorkspaceToolkit
 from regent.agent.types import VerificationGap, VerificationVerdict
 from regent.application.delivery_review_service import review_files_for_delivery
+from regent.infrastructure.preview_process import pick_free_port as _pick_free_port
 
 
 class VerificationAgent:
@@ -63,7 +63,6 @@ class VerificationAgent:
         }
 
         from regent.config import get_settings
-        from regent.application.delivery_success_policy import is_blocking_delivery_gap_code
 
         gates_mode = str(
             getattr(get_settings(), "delivery_product_gates_mode", "soft") or "soft"
@@ -531,7 +530,3 @@ def _resolve_test_command(
     return None
 
 
-def _pick_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])

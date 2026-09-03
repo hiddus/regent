@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.report_generators import (
-    HTMLReportGenerator,
-    MarkdownReportGenerator,
     MultiFormatArtifactPublisher,
     ReportPayload,
     ReportSection,
@@ -107,7 +104,6 @@ async def create_spreadsheet(
     else:
         artifact = gen.generate_csv(data)
     # Store artifact
-    from pathlib import Path
     import uuid as _uuid
     scope = _uuid.uuid5(_uuid.NAMESPACE_URL, f"regent:api-spreadsheet:{payload.title}")
     store.put(scope, f"spreadsheets/{artifact.filename}", artifact.content)
@@ -122,29 +118,23 @@ async def create_spreadsheet(
 @router.get("/{filename}")
 async def download_report(filename: str, request: Request) -> Response:
     """Download a previously generated report by filename."""
+    if "/" in filename or "\\" in filename or filename in {".", ".."}:
+        raise HTTPException(status_code=404, detail="Report not found")
     store = _get_artifact_store(request)
-    from regent.config import get_settings
-    from pathlib import Path
-    settings = get_settings()
-    # Search in reports and spreadsheets directories
     for prefix in ("reports", "spreadsheets"):
-        artifact_dir = Path(settings.artifact_root)
-        # Walk to find the file
-        if artifact_dir.exists():
-            for fpath in artifact_dir.rglob(f"{prefix}/{filename}"):
-                if fpath.is_file():
-                    content = fpath.read_bytes()
-                    media_type = "application/octet-stream"
-                    if filename.endswith(".md"):
-                        media_type = "text/markdown"
-                    elif filename.endswith(".html"):
-                        media_type = "text/html"
-                    elif filename.endswith(".csv"):
-                        media_type = "text/csv"
-                    return Response(
-                        content=content,
-                        media_type=media_type,
-                        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-                    )
-    from fastapi import HTTPException
+        content = store.find(f"{prefix}/{filename}")
+        if content is None:
+            continue
+        media_type = "application/octet-stream"
+        if filename.endswith(".md"):
+            media_type = "text/markdown"
+        elif filename.endswith(".html"):
+            media_type = "text/html"
+        elif filename.endswith(".csv"):
+            media_type = "text/csv"
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     raise HTTPException(status_code=404, detail="Report not found")

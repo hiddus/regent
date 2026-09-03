@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Regent 失败案例复盘 · 课堂易懂版</title>
+<style>
+  :root{
+    --blue:#3B82F6; --cyan:#06B6D4; --red:#EF4444; --dark:#0F172A;
+    --ink:#1E293B; --gray:#64748B; --bg:#FFFFFF; --line:#E2E8F0; --soft:#F1F5F9;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;background:#0b1220;overflow:hidden;
+    font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;color:var(--ink);}
+  #stage{position:absolute;top:50%;left:50%;width:1280px;height:720px;
+    transform:translate(-50%,-50%) scale(1);transform-origin:center center;
+    background:var(--bg);overflow:hidden;box-shadow:0 20px 80px rgba(0,0,0,.5);}
+  .slide{position:absolute;inset:0;display:none;flex-direction:column;padding:54px 64px;}
+  .slide.active{display:flex;}
+  /* 章节眉 */
+  .crumb{font-size:13px;letter-spacing:.12em;color:var(--gray);text-transform:uppercase;margin-bottom:14px;}
+  .crumb b{color:var(--blue);}
+  h1{font-size:42px;font-weight:800;line-height:1.18;letter-spacing:-.01em;}
+  h2{font-size:30px;font-weight:800;line-height:1.25;margin-bottom:6px;}
+  h3{font-size:20px;font-weight:700;margin-bottom:10px;color:var(--ink);}
+  p{font-size:17px;line-height:1.7;color:#334155;}
+  .lead{font-size:19px;color:#475569;line-height:1.75;}
+  .muted{color:var(--gray);}
+  .note{font-size:12.5px;color:var(--gray);line-height:1.5;border-left:3px solid var(--line);
+    padding:6px 0 6px 12px;margin-top:14px;background:var(--soft);border-radius:0 6px 6px 0;}
+  .note b{color:var(--gray);}
+  /* 封面 */
+  .cover{background:linear-gradient(135deg,#0F172A 0%,#1E293B 60%,#0b1220 100%);color:#fff;justify-content:center;}
+  .cover .kicker{color:var(--cyan);font-size:16px;letter-spacing:.3em;margin-bottom:18px;font-weight:600;}
+  .cover h1{color:#fff;font-size:60px;line-height:1.1;}
+  .cover .sub{color:#94A3B8;font-size:21px;margin-top:22px;max-width:920px;line-height:1.6;}
+  .cover .tag{display:inline-block;margin-top:34px;padding:8px 18px;border:1px solid rgba(255,255,255,.25);
+    border-radius:999px;color:#CBD5E1;font-size:14px;letter-spacing:.05em;}
+  /* 过渡页 */
+  .sec{background:linear-gradient(135deg,#0F172A,#1E293B);color:#fff;justify-content:center;position:relative;overflow:hidden;}
+  .sec .big{position:absolute;right:40px;bottom:-30px;font-size:240px;font-weight:800;color:rgba(59,130,246,.16);line-height:1;}
+  .sec .num{color:var(--cyan);font-size:20px;letter-spacing:.4em;font-weight:600;}
+  .sec h1{color:#fff;font-size:52px;margin-top:14px;max-width:900px;line-height:1.15;}
+  .sec .desc{color:#94A3B8;font-size:19px;margin-top:20px;max-width:820px;line-height:1.65;}
+  /* 卡片 */
+  .grid{display:grid;gap:18px;margin-top:22px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  .g3{grid-template-columns:1fr 1fr 1fr;}
+  .g4{grid-template-columns:1fr 1fr 1fr 1fr;}
+  .card{background:var(--soft);border:1px solid var(--line);border-radius:14px;padding:18px 20px;}
+  .card.blue{border-left:4px solid var(--blue);}
+  .card.cyan{border-left:4px solid var(--cyan);}
+  .card.red{border-left:4px solid var(--red);}
+  .card .t{font-size:17px;font-weight:800;margin-bottom:8px;}
+  .card .d{font-size:14.5px;line-height:1.6;color:#475569;}
+  .card .ic{font-size:22px;margin-bottom:8px;display:block;}
+  /* 对照 */
+  .vs{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:20px;border-radius:14px;overflow:hidden;border:1px solid var(--line);}
+  .vs .col{padding:20px 22px;}
+  .vs .bad{background:#FEF2F2;}
+  .vs .good{background:#ECFDF5;}
+  .vs .h{font-size:16px;font-weight:800;margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+  .vs .bad .h{color:#B91C1C;}
+  .vs .good .h{color:#047857;}
+  .vs ul{list-style:none;}
+  .vs li{font-size:15px;line-height:1.65;margin-bottom:10px;padding-left:20px;position:relative;color:#334155;}
+  .vs .bad li:before{content:"✗";position:absolute;left:0;color:#EF4444;font-weight:800;}
+  .vs .good li:before{content:"✓";position:absolute;left:0;color:#10B981;font-weight:800;}
+  /* 公式白话框 */
+  .plain{background:#EFF6FF;border:1px solid #BFDBFE;border-radius:14px;padding:22px 26px;margin-top:20px;}
+  .plain .q{font-size:15px;color:var(--blue);font-weight:700;margin-bottom:8px;}
+  .plain .a{font-size:21px;font-weight:800;color:#1E3A8A;line-height:1.5;}
+  /* 列表 */
+  .lst{margin-top:18px;}
+  .lst .it{display:flex;gap:14px;padding:13px 0;border-bottom:1px dashed var(--line);}
+  .lst .it:last-child{border-bottom:none;}
+  .lst .n{flex:0 0 34px;height:34px;border-radius:9px;background:var(--blue);color:#fff;font-weight:800;
+    display:flex;align-items:center;justify-content:center;font-size:15px;}
+  .lst .n.c{background:var(--cyan);}
+  .lst .n.r{background:var(--red);}
+  .lst .b{font-size:16.5px;line-height:1.6;color:#334155;}
+  .lst .b b{color:var(--ink);}
+  /* 证据墙 */
+  .wall{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:24px;}
+  .wall .w{background:var(--dark);color:#fff;border-radius:16px;padding:22px;text-align:center;}
+  .wall .w .v{font-size:46px;font-weight:800;color:var(--cyan);line-height:1;}
+  .wall .w .l{font-size:14px;color:#94A3B8;margin-top:10px;line-height:1.45;}
+  .wall .w .x{font-size:12.5px;color:#FCA5A5;margin-top:8px;line-height:1.4;}
+  /* 步骤 */
+  .steps{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-top:26px;}
+  .steps .s{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:14px 10px;text-align:center;}
+  .steps .s .no{width:30px;height:30px;border-radius:50%;background:var(--blue);color:#fff;font-weight:800;
+    display:flex;align-items:center;justify-content:center;margin:0 auto 10px;font-size:14px;}
+  .steps .s .t{font-size:13.5px;font-weight:700;line-height:1.4;color:var(--ink);}
+  /* 因果链 */
+  .chain{display:flex;align-items:stretch;gap:0;margin-top:28px;flex-wrap:wrap;}
+  .chain .node{flex:1;min-width:150px;background:var(--soft);border-radius:12px;padding:16px 14px;border-top:4px solid var(--blue);}
+  .chain .node.r{border-top-color:var(--red);}
+  .chain .node .t{font-size:14px;font-weight:800;margin-bottom:6px;}
+  .chain .node .d{font-size:12.5px;color:#475569;line-height:1.5;}
+  .chain .arrow{display:flex;align-items:center;color:var(--gray);font-size:22px;padding:0 4px;}
+  /* 底部 */
+  .foot{position:absolute;left:0;right:0;bottom:0;height:42px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 64px;font-size:12px;color:var(--gray);background:linear-gradient(180deg,transparent,#F8FAFC);}
+  .bar{position:absolute;left:0;top:0;height:4px;background:linear-gradient(90deg,var(--blue),var(--cyan));transition:width .3s;}
+  .pg{position:absolute;right:64px;bottom:12px;font-size:12px;color:var(--gray);}
+  .skip{position:absolute;left:64px;bottom:12px;font-size:11.5px;color:#94A3B8;}
+  svg{display:block;}
+  .hl{color:var(--blue);font-weight:700;}
+  .hr{color:var(--red);font-weight:700;}
+</style>
+</head>
+<body>
+<div id="stage">
+
+<!-- 1 封面 -->
+<section class="slide cover active">
+  <div class="kicker">两小时课堂 · 内部复盘</div>
+  <h1>一个「定义满分」<br>却没跑通的项目</h1>
+  <div class="sub">Regent 失败案例复盘 —— 我们到底该怎样搭 Agent？<br>不堆术语，不甩代号，只讲人话和真教训。</div>
+  <div class="tag">给一起写代码的小伙伴 · 2026.08</div>
+</section>
+
+<!-- 2 开场 -->
+<section class="slide">
+  <div class="crumb"><b>开场</b> · WHY THIS TALK</div>
+  <h2>为什么拿它当教材？</h2>
+  <div class="grid g2" style="margin-top:26px">
+    <div class="card blue">
+      <span class="ic">📘</span>
+      <div class="t">它的「说明书」写得极好</div>
+      <div class="d">目标、原则、验收标准、架构图，样样齐全，挑不出逻辑毛病。很多人第一次看都会觉得：这项目稳了。</div>
+    </div>
+    <div class="card red">
+      <span class="ic">💥</span>
+      <div class="t">但它从头到尾没真正跑起来</div>
+      <div class="d">文档里想得明明白白的能力，落到代码里，核心那一条「自己把事办成」的闭环，始终没打通。</div>
+    </div>
+  </div>
+  <div class="plain">
+    <div class="q">一句话总结这次教训</div>
+    <div class="a">定义和架构不是重点——<span class="hl">让一件事端到端跑通、并且能验证真跑通了</span>，才是 Agent 的命根子。</div>
+  </div>
+  <div class="note">讲师注：本课不教你怎么「造」一个 Regent，而是借它的失败，弄清搭 Agent / 多 Agent 的基本功。文档代号（G1-G12、MA-0~6 等）留在本课最后「可跳过」区，备课时对照用。</div>
+</section>
+
+<!-- 3 本课带走什么 -->
+<section class="slide">
+  <div class="crumb"><b>开场</b> · AGENDA</div>
+  <h2>这两小时，你能带走什么</h2>
+  <div class="lst">
+    <div class="it"><div class="n">1</div><div class="b"><b>它到底想干什么</b>——一句话、一个比喻，就懂 Regent 是什么，不再被名词吓住。</div></div>
+    <div class="it"><div class="n c">2</div><div class="b"><b>它设计成什么样</b>——用「一个任务的一生」讲清楚架构，不贴代码。</div></div>
+    <div class="it"><div class="n">3</div><div class="b"><b>它怎么一步步长歪</b>——越设计越复杂，真活儿反而停了。</div></div>
+    <div class="it"><div class="n r">4</div><div class="b"><b>为什么算失败</b>——五大根因，每条配「当时怎么做 ❌ / 本来该怎样 ✅」。</div></div>
+    <div class="it"><div class="n c">5</div><div class="b"><b>结论：Agent 到底怎么搭</b>——单 Agent 七步法 + 多 Agent 原则，拿回去就能用。</div></div>
+  </div>
+  <div class="note">节奏：前 4 章是「解剖失败」，第 5 章是「开药方」。中间每章有过渡页，方便你按小节休息或讨论。</div>
+</section>
+
+<!-- 4 第一章过渡 -->
+<section class="slide sec">
+  <div class="num">CHAPTER 01</div>
+  <h1>它到底想干什么？</h1>
+  <div class="desc">先把目标讲成人话。看懂「它想成为什么」，才明白后来为什么摔得这么惨。</div>
+  <div class="big">01</div>
+</section>
+
+<!-- 5 一句话定义 -->
+<section class="slide">
+  <div class="crumb"><b>第一章</b> · 定义</div>
+  <h2>一句话说清 Regent</h2>
+  <div class="plain">
+    <div class="q">文档里写了一长串公式，翻译成人话就是：</div>
+    <div class="a">你给它一个目标 + 一堆不许碰的红线，它自己想办法把事办成，<span class="hl">并且交活儿之前，先自己验证「确实办成了」</span>。</div>
+  </div>
+  <div class="grid g3" style="margin-top:26px">
+    <div class="card"><div class="t">输入是什么</div><div class="d">一个目标（如「把这本书读完好，答出 10 道题」）+ 约束（如「不能乱花钱、不能瞎发消息」）。</div></div>
+    <div class="card"><div class="t">它做什么</div><div class="d">自己拆任务、自己派活、自己执行、卡住了自己救、做完自己查。</div></div>
+    <div class="card"><div class="t">输出是什么</div><div class="d">一个「带证据的交付」——不是嘴上说做完，而是拿得出验证过的成果。</div></div>
+  </div>
+  <div class="note">讲师注：文档原公式 <span class="muted">Regent(G,C,V,R_t,S_t)=…</span> 表达的就是上面这句话。听课小伙伴不必记符号，记住「目标 + 红线 → 自己办成 + 自己验证」即可。</div>
+</section>
+
+<!-- 6 它不像什么 -->
+<section class="slide">
+  <div class="crumb"><b>第一章</b> · 澄清误会</div>
+  <h2>它不像什么（先排三个误会）</h2>
+  <div class="vs">
+    <div class="col bad"><div class="h">❌ 以为它是…</div><ul>
+      <li><b>又一个聊天机器人</b>：只陪你聊，不真去办事。</li>
+      <li><b>一个写好的自动脚本</b>：流程写死，换个任务就废。</li>
+      <li><b>一个只会答问题的搜索引擎</b>：给答案，但不落地。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 它其实是…</div><ul>
+      <li><b>会动手的同事</b>：接了活，自己去把结果做出来。</li>
+      <li><b>能随机应变的执行者</b>：任务变了，它重新想办法。</li>
+      <li><b>交活前自查的人</b>：做完先验证，再交给你。</li>
+    </ul></div>
+  </div>
+  <div class="note">关键区分：聊天机器人「说」；Regent 要「做 + 验证做没做成」。后来失败，恰恰是因为它停在「说」这层，没走到「做 + 验证」。</div>
+</section>
+
+<!-- 7 它像什么 -->
+<section class="slide">
+  <div class="crumb"><b>第一章</b> · 心智模型</div>
+  <h2>它像什么？——一个不会累的项目经理</h2>
+  <div class="grid g2" style="margin-top:22px">
+    <div class="card cyan"><div class="t">🧠 接活就拆</div><div class="d">老板丢一句「把网站做出来」，它自己拆成：搭框架、写页面、联数据库、自测……</div></div>
+    <div class="card cyan"><div class="t">📋 派工有条</div><div class="d">每个子任务发一张「开工条」，限时、超时作废，避免有人干到天荒地老。</div></div>
+    <div class="card cyan"><div class="t">🔧 卡住自救</div><div class="d">某步报错或超时，它不躺平，换条路再试，或老实报告「这步我真救不回来」。</div></div>
+    <div class="card cyan"><div class="t">✅ 交差前自证</div><div class="d">说「做完了」之前，先跑一遍验证：真读完了？真答对了？拿得出证据才交付。</div></div>
+  </div>
+  <div class="lead" style="margin-top:22px">记住这个比喻就够了：<span class="hl">Regent = 一个不会累、会自己想办法、且交活前先自查的项目经理。</span>后面所有架构，都是为了让这个「项目经理」靠谱。</div>
+</section>
+
+<!-- 8 硬规矩 -->
+<section class="slide">
+  <div class="crumb"><b>第一章</b> · 不变的原则</div>
+  <h2>它给自己定的硬规矩（节选）</h2>
+  <p class="lead">文档里列了十条「不可违背的原则」。挑最要命的四条讲——这四条，后来全被自己破了。</p>
+  <div class="lst">
+    <div class="it"><div class="n r">A</div><div class="b"><b>能不找人就不找人。</b> 默认自己闭环，实在不行再打扰你。→ 后来却把「等你确认」当成了常态，主循环卡死。</div></div>
+    <div class="it"><div class="n r">B</div><div class="b"><b>交付前必须自己验证。</b> 不能嘴上说做完。→ 后来很多「完成」其实是没验过的。</div></div>
+    <div class="it"><div class="n r">C</div><div class="b"><b>当时的原则：多 Agent 不是默认选项</b>（成稿时原文：先证明单人能干，才考虑加人）。→ 后来架构先复杂了，单人闭环反而没跑通。<br><b>已被定义 3.0 修订（2026-08-10）</b>：现行不变原则第 6 条是「智能体团队是产品形态，成员与拓扑可以自由演化，不以事前净收益证明限制探索」；单人先稳只是<b>投入顺序建议</b>，不再是加人的准入条件。真正的门禁落在扩大现实生产权限上。</div></div>
+    <div class="it"><div class="n r">D</div><div class="b"><b>每一步都得有迹可循。</b> 做了什么、为什么，留证据。→ 后来「验证结果」常常没留痕，等于没发生。</div></div>
+  </div>
+  <div class="note">讲师注：原则原文编号为不变原则 1–10。此处只取与失败最相关的四条，避免信息过载。C 条是本课唯一被后续定义修订过的一条，讲的时候要把「当时口径」和「现行口径」分开说，否则学员会带走一条已经撤回的规则。</div>
+</section>
+
+<!-- 9 怎么算成功 -->
+<section class="slide">
+  <div class="crumb"><b>第一章</b> · 成功标准</div>
+  <h2>怎么才算「成功」？</h2>
+  <div class="plain">
+    <div class="q">文档定的「北极星指标」，说人话就是：</div>
+    <div class="a">每办成一件<span class="hl">真事</span>，花了多少<span class="hr">真成本</span>（钱、时间、外部动作）。越低越好。</div>
+  </div>
+  <div class="grid g2" style="margin-top:22px">
+    <div class="card"><div class="t">「真事」是什么意思</div><div class="d">不是「我跑了流程」，而是「目标确实达成、且验证过」。读没读完书，以答对题为准，不以「我打开了文件」为准。</div></div>
+    <div class="card"><div class="t">八条护栏是什么</div><div class="d">比如：不能乱花钱、不能重复发消息、不能卡死不报、不能假装完成…… 护栏就是「再聪明也不能越的线」。</div></div>
+  </div>
+  <div class="note">讲师注：北极星原文为 <span class="muted">CostPerVerifiedSuccess</span>（每验证成功一次的成本）。护栏原文 8 条，此处概括，细节见讲师速查。</div>
+</section>
+
+<!-- 10 12道毕业考题 -->
+<section class="slide">
+  <div class="crumb"><b>第一章</b> · 毕业标准</div>
+  <h2>它给自己定的 12 道「毕业考题」</h2>
+  <p class="lead">文档里叫 P1 毕业矩阵，共 12 关。说人话：<span class="hl">要算「成人」，得先过这 12 道真活儿考验。</span></p>
+  <div class="grid g3" style="margin-top:18px">
+    <div class="card"><div class="t">① 真读完一本书</div><div class="d">不是打开文件，是读透并答对题。</div></div>
+    <div class="card"><div class="t">② 真跑通一个网站</div><div class="d">从空目录到能访问，不止写代码。</div></div>
+    <div class="card"><div class="t">③ 真修好一个 Bug</div><div class="d">改完要自测通过，不是改完就交。</div></div>
+    <div class="card"><div class="t">④ 卡住能自救</div><div class="d">超时/报错后有明确出路，不悬空。</div></div>
+    <div class="card"><div class="t">⑤ 不乱花不乱发</div><div class="d">对外动作受控、可查、可回滚。</div></div>
+    <div class="card"><div class="t">⑥ 交差带证据</div><div class="d">每件事交付都附验证结果。</div></div>
+    <div class="card"><div class="t">⑦ 不重复造轮子</div><div class="d">能复用就复用，不瞎写。</div></div>
+    <div class="card"><div class="t">⑧ 真多任务不乱</div><div class="d">同时多个目标不互相踩。</div></div>
+    <div class="card"><div class="t">⑨ 失败了能复盘</div><div class="d">出错留下教训，下次不犯。</div></div>
+    <div class="card"><div class="t">⑩ 人能随时接手</div><div class="d">关键时刻人介入，它让位。</div></div>
+    <div class="card"><div class="t">⑪ 边界内行事</div><div class="d">不越护栏，不偷偷扩权。</div></div>
+    <div class="card"><div class="t">⑫ 说人话汇报</div><div class="d">进展用大白话讲，不是吐日志。</div></div>
+  </div>
+  <div class="note">讲师注：即原文档 G1–G12。列在此让你感受「标准定得多实在」——可惜后来一关都没真验证通过。下一章看它怎么设计的。</div>
+</section>
+
+<!-- 11 第二章过渡 -->
+<section class="slide sec">
+  <div class="num">CHAPTER 02</div>
+  <h1>它设计成什么样？</h1>
+  <div class="desc">不贴代码。用「一个任务的一生」把架构讲成人话，你就知道它在哪些环节断了。</div>
+  <div class="big">02</div>
+</section>
+
+<!-- 12 整体分层图 -->
+<section class="slide">
+  <div class="crumb"><b>第二章</b> · 架构总览</div>
+  <h2>整体长什么样？六层一栋楼</h2>
+  <svg viewBox="0 0 1152 440" width="1152" height="440" style="margin-top:14px">
+    <defs>
+      <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#64748B"/>
+      </marker>
+    </defs>
+    <!-- 层 -->
+    <g>
+      <rect x="40" y="20" width="1072" height="58" rx="10" fill="#EFF6FF" stroke="#BFDBFE"/>
+      <text x="64" y="46" font-size="17" font-weight="800" fill="#1E3A8A">① 入口层</text>
+      <text x="200" y="46" font-size="15" fill="#475569">老板/系统发一句话（目标 + 红线）</text>
+      <text x="900" y="46" font-size="13" fill="#94A3B8">= 接活台</text>
+    </g>
+    <g>
+      <rect x="40" y="92" width="1072" height="58" rx="10" fill="#ECFEFF" stroke="#A5F3FC"/>
+      <text x="64" y="118" font-size="17" font-weight="800" fill="#0E7490">② 大脑层</text>
+      <text x="200" y="118" font-size="15" fill="#475569">拆目标、定计划、决定下一步干啥</text>
+      <text x="900" y="118" font-size="13" fill="#94A3B8">= 项目经理</text>
+    </g>
+    <g>
+      <rect x="40" y="164" width="1072" height="58" rx="10" fill="#F1F5F9" stroke="#CBD5E1"/>
+      <text x="64" y="190" font-size="17" font-weight="800" fill="#334155">③ 派工层</text>
+      <text x="200" y="190" font-size="15" fill="#475569">发「开工条」（限时、超时作废），把活派出去</text>
+      <text x="900" y="190" font-size="13" fill="#94A3B8">= 派工台</text>
+    </g>
+    <g>
+      <rect x="40" y="236" width="1072" height="58" rx="10" fill="#F1F5F9" stroke="#CBD5E1"/>
+      <text x="64" y="262" font-size="17" font-weight="800" fill="#334155">④ 干活层</text>
+      <text x="200" y="262" font-size="15" fill="#475569">真正去执行（写代码、读文件、调接口…）</text>
+      <text x="900" y="262" font-size="13" fill="#94A3B8">= 施工队</text>
+    </g>
+    <g>
+      <rect x="40" y="308" width="520" height="58" rx="10" fill="#FEF9C3" stroke="#FDE68A"/>
+      <text x="64" y="334" font-size="17" font-weight="800" fill="#854D0E">⑤ 账本层</text>
+      <text x="180" y="334" font-size="14" fill="#475569">每一笔对外动作先记账后执行</text>
+      <text x="510" y="334" font-size="12" fill="#94A3B8">= 出纳</text>
+    </g>
+    <g>
+      <rect x="592" y="308" width="520" height="58" rx="10" fill="#DCFCE7" stroke="#BBF7D0"/>
+      <text x="616" y="334" font-size="17" font-weight="800" fill="#166534">⑥ 查证层</text>
+      <text x="740" y="334" font-size="14" fill="#475569">交付前先验证「真做成了」</text>
+      <text x="1090" y="334" font-size="12" fill="#94A3B8">= 质检</text>
+    </g>
+    <!-- 箭头 -->
+    <line x1="576" y1="49" x2="576" y2="92" stroke="#64748B" marker-end="url(#ar)"/>
+    <line x1="576" y1="121" x2="576" y2="164" stroke="#64748B" marker-end="url(#ar)"/>
+    <line x1="576" y1="193" x2="576" y2="236" stroke="#64748B" marker-end="url(#ar)"/>
+    <line x1="300" y1="265" x2="300" y2="308" stroke="#64748B" marker-end="url(#ar)"/>
+    <line x1="852" y1="265" x2="852" y2="308" stroke="#64748B" marker-end="url(#ar)"/>
+  </svg>
+  <div class="note">讲师注：对应原技术规格「架构五层 + 六要素引擎」。此处只标人话角色，组件名（如 ExecutionPermit、Outbox）见讲师速查。失败点主要在 ③④⑥：活没真干、查证没真跑。</div>
+</section>
+
+<!-- 13 任务的一生 -->
+<section class="slide">
+  <div class="crumb"><b>第二章</b> · 状态机（人话版）</div>
+  <h2>一个任务的一生</h2>
+  <p class="lead">文档里画了三套状态机（目标 / 工作 / 运行）。浓缩成「一个任务从生到死」的故事：</p>
+  <svg viewBox="0 0 1152 330" width="1152" height="330" style="margin-top:10px">
+    <defs><marker id="a2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#64748B"/></marker></defs>
+    <!-- nodes -->
+    <g font-size="14" font-weight="700" text-anchor="middle">
+      <rect x="20" y="130" width="140" height="64" rx="12" fill="#EFF6FF" stroke="#BFDBFE"/><text x="90" y="158" fill="#1E3A8A">出生</text><text x="90" y="178" font-size="11" fill="#64748B">接到目标</text>
+      <rect x="200" y="130" width="140" height="64" rx="12" fill="#EFF6FF" stroke="#BFDBFE"/><text x="270" y="158" fill="#1E3A8A">拆解</text><text x="270" y="178" font-size="11" fill="#64748B">拆成小活</text>
+      <rect x="380" y="130" width="140" height="64" rx="12" fill="#ECFEFF" stroke="#A5F3FC"/><text x="450" y="158" fill="#0E7490">派活</text><text x="450" y="178" font-size="11" fill="#64748B">发开工条</text>
+      <rect x="560" y="130" width="140" height="64" rx="12" fill="#F1F5F9" stroke="#CBD5E1"/><text x="630" y="158" fill="#334155">干活</text><text x="630" y="178" font-size="11" fill="#64748B">真去执行</text>
+      <rect x="740" y="130" width="140" height="64" rx="12" fill="#DCFCE7" stroke="#BBF7D0"/><text x="810" y="158" fill="#166534">交差</text><text x="810" y="178" font-size="11" fill="#64748B">带证据交付</text>
+      <rect x="920" y="130" width="140" height="64" rx="12" fill="#FEF2F2" stroke="#FECACA"/><text x="990" y="158" fill="#B91C1C">挂掉</text><text x="990" y="178" font-size="11" fill="#64748B">有出路地结束</text>
+    </g>
+    <!-- straight arrows -->
+    <line x1="160" y1="162" x2="198" y2="162" stroke="#64748B" marker-end="url(#a2)"/>
+    <line x1="340" y1="162" x2="378" y2="162" stroke="#64748B" marker-end="url(#a2)"/>
+    <line x1="520" y1="162" x2="558" y2="162" stroke="#64748B" marker-end="url(#a2)"/>
+    <line x1="700" y1="162" x2="738" y2="162" stroke="#64748B" marker-end="url(#a2)"/>
+    <line x1="880" y1="162" x2="918" y2="162" stroke="#64748B" marker-end="url(#a2)"/>
+    <!-- 卡住回路 -->
+    <path d="M630,194 C630,250 450,250 450,196" fill="none" stroke="#EF4444" stroke-width="2" marker-end="url(#a2)"/>
+    <text x="520" y="270" font-size="12.5" fill="#B91C1C" text-anchor="middle" font-weight="700">卡住 / 超时 → 自救或上报</text>
+    <!-- 悬停警示 -->
+    <rect x="560" y="40" width="140" height="40" rx="8" fill="#FEF2F2" stroke="#FECACA"/>
+    <text x="630" y="65" font-size="12.5" fill="#B91C1C" text-anchor="middle" font-weight="700">⚠ 后来卡这儿</text>
+    <line x1="630" y1="80" x2="630" y2="128" stroke="#EF4444" stroke-width="2" stroke-dasharray="4 3"/>
+  </svg>
+  <div class="note">讲师注：原状态机含 GoalState / WorkState / RunState 几十个枚举值。本课只留「主线 + 卡住回路 + 悬停警示」三样——因为失败就发生在「干活→交差」之间卡住、又没出路。枚举细节见速查。</div>
+</section>
+
+<!-- 14 派工许可证 -->
+<section class="slide">
+  <div class="crumb"><b>第二章</b> · 关键机制</div>
+  <h2>什么是「派工许可证」？</h2>
+  <div class="grid g2" style="margin-top:20px">
+    <div class="card blue"><div class="t">🎫 一张限时开工条</div><div class="d">每派一个活，发一张条子：写明「干啥、限时多久、干完找谁销账」。像工地派工单。</div></div>
+    <div class="card"><div class="t">⏰ 超时自动作废</div><div class="d">条子到点没销账，就作废，活儿回到待派状态——防止有人干到天荒地老没人管。</div></div>
+    <div class="card"><div class="t">🔁 可恢复，不悬空</div><div class="d">作废不是「丢了」，而是有去处：重派、或老实报告「这步救不回」。</div></div>
+    <div class="card red"><div class="t">💡 后来怎么破的</div><div class="d">条子发出去，活儿卡住，却没人销账、也没作废——任务就「悬在半空」，系统以为还在干，实际早死了。</div></div>
+  </div>
+  <div class="lead" style="margin-top:20px">一句话：<span class="hl">许可证是「防卡死」的保险丝。</span>保险丝没接好，后面全崩。</div>
+  <div class="note">讲师注：即原 ExecutionPermit 生命周期（issued→active→expired/revoked→settled）。字段细节见速查。</div>
+</section>
+
+<!-- 15 对外打交道 -->
+<section class="slide">
+  <div class="crumb"><b>第二章</b> · 关键机制</div>
+  <h2>它怎么跟「外部世界」打交道？</h2>
+  <div class="plain">
+    <div class="q">原则：凡是会花钱、会发消息、会改外部数据的动作——</div>
+    <div class="a">先<span class="hl">记账</span>，再<span class="hl">执行</span>；记完才算数，出事能查、能撤。</div>
+  </div>
+  <div class="vs" style="margin-top:18px">
+    <div class="col bad"><div class="h">❌ 危险做法</div><ul>
+      <li>想到就直接发消息、直接扣钱。</li>
+      <li>出错了不知道发过没，重复发。</li>
+      <li>外部系统回没回，全靠猜。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 该有的做法</div><ul>
+      <li>动作先写进「账本」，标「待执行」。</li>
+      <li>执行完回写「已执行 / 失败」。</li>
+      <li>失败可重试、可回滚，全程留痕。</li>
+    </ul></div>
+  </div>
+  <div class="note">讲师注：即原 ExternalOperation + Outbox 事件链。这是「不乱花不乱发」护栏的落地机制。后来这条链常常断了——动作发了，账本没记，等于裸奔。</div>
+</section>
+
+<!-- 16 怎么不撒谎 -->
+<section class="slide">
+  <div class="crumb"><b>第二章</b> · 关键机制</div>
+  <h2>怎么保证它「不撒谎」？</h2>
+  <div class="grid g2" style="margin-top:20px">
+    <div class="card cyan"><div class="t">📌 事实只有一个源头</div><div class="d">「任务做到哪了」只有一份权威记录，谁改都留痕，不各说各话。</div></div>
+    <div class="card cyan"><div class="t">🏆 交付要有「奖杯」</div><div class="d">说「做完了」，得附上验证产物（如测试通过截图、答对题的记录），否则不算数。</div></div>
+    <div class="card red"><div class="t">💡 后来怎么破的</div><div class="d">「完成」常常只是代码跑完了流程，奖杯（验证产物）没留——系统信了，其实没真成。</div></div>
+    <div class="card"><div class="t">🔍 查证官独立</div><div class="d">验证的人和干活的分开，不让「自己说自己行」。</div></div>
+  </div>
+  <div class="lead" style="margin-top:20px">这层（查证层）是 Regent 的灵魂：<span class="hr">没有它，「完成」只是自我感觉良好。</span></div>
+  <div class="note">讲师注：即原 Artifact / 事实源（Source of Truth）边界。后来「奖杯」缺失，是「交付前必须自己验证」原则被破的直接证据。</div>
+</section>
+
+<!-- 17 第三章过渡 -->
+<section class="slide sec">
+  <div class="num">CHAPTER 03</div>
+  <h1>框架是怎么长歪的？</h1>
+  <div class="desc">设计一套套地出，复杂度往上爬，可真能交付的活儿，反而停了。看这条反着的曲线。</div>
+  <div class="big">03</div>
+</section>
+
+<!-- 18 多Agent方案 -->
+<section class="slide">
+  <div class="crumb"><b>第三章</b> · 演变 · 多 Agent</div>
+  <h2>它想的多 Agent 方案（人话）</h2>
+  <p class="lead">文档里规划了一支「分工团队」：有人专拆目标，有人专写代码，有人专测试…… 听起来很专业。</p>
+  <div class="grid g3" style="margin-top:20px">
+    <div class="card"><div class="t">🧭 规划员</div><div class="d">只管把大目标拆小、排顺序。</div></div>
+    <div class="card"><div class="t">🔧 执行员</div><div class="d">只管真去干活（写码/读文件）。</div></div>
+    <div class="card"><div class="t">🧪 测试员</div><div class="d">只管验证「真做成了没」。</div></div>
+  </div>
+  <div class="vs" style="margin-top:18px">
+    <div class="col bad"><div class="h">❌ 栽在哪儿</div><ul>
+      <li>团队还没组好，先定了「要多 Agent」。</li>
+      <li>单人（单 Agent）那条最基础的闭环，没先跑通。</li>
+      <li>结果：分工图很美，没人真把活干完。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 正确顺序</div><ul>
+      <li>先让<b>一个人</b>能把一件事端到端办成。</li>
+      <li>证明单人靠谱了，再把活拆给多人。</li>
+      <li>多 Agent 是「加速」，不是「遮丑」。</li>
+    </ul></div>
+  </div>
+  <div class="note">讲师注：即原 MA-0~6 多 Agent 计划。原则原文也写了「多 Agent 非默认」，但落地时顺序反了——这正是根因 C/D 的缩影。</div>
+</section>
+
+<!-- 19 质量闸门 -->
+<section class="slide">
+  <div class="crumb"><b>第三章</b> · 演变 · 质量闸门</div>
+  <h2>它想的质量闸门（人话）</h2>
+  <div class="grid g2" style="margin-top:20px">
+    <div class="card blue"><div class="t">🚪 毕业前先过小考</div><div class="d">每个能力在「宣布能用」前，得先过一组真实验收：真读、真写、真修、真验。</div></div>
+    <div class="card"><div class="t">📊 验收只看行为</div><div class="d">不看出勤（跑没跑流程），看结果（目标达成没、验证过没）。</div></div>
+    <div class="card red"><div class="t">💡 后来怎么破的</div><div class="d">闸门画了，但「小考」常常没真考——用「流程跑完」冒充「验收通过」。</div></div>
+    <div class="card cyan"><div class="t">🔁 带回归保护</div><div class="d">每改一次，自动重跑小考，防止「越改越退」。</div></div>
+  </div>
+  <div class="lead" style="margin-top:20px">闸门的意义：<span class="hl">让「我以为行」变成「证明确实行」。</span>后来闸门失守，退化成摆设。</div>
+  <div class="note">讲师注：即原 GQ-0~5 单 Agent 质量基线。与第 10 页「12 道毕业考题」同源——都是「先验证再宣布」的思想，可惜都没真落地。</div>
+</section>
+
+<!-- 20 对话式交付 -->
+<section class="slide">
+  <div class="crumb"><b>第三章</b> · 演变 · 对话交付</div>
+  <h2>它想的「对话式交付」（人话）</h2>
+  <div class="plain">
+    <div class="q">理想：你像跟一个新同事交代活儿一样——</div>
+    <div class="a">说目标、给红线、看进展、卡住时它来问你，而不是吐一堆日志让你自己猜。</div>
+  </div>
+  <div class="grid g2" style="margin-top:20px">
+    <div class="card"><div class="t">想要的样子</div><div class="d">「我在做 X，卡在 Y，需要你确认 Z」——人话、带上下文、能决策。</div></div>
+    <div class="card red"><div class="t">实际的样子</div><div class="d">要么沉默不动（等你确认却没提醒），要么甩原始素材（一堆文件，没说要你干嘛）。</div></div>
+  </div>
+  <div class="note">讲师注：即原 CD-0~12 对话式交付规范。失败点：交互「没超时、没上下文、没决策建议」——和根因 A（主循环未闭合）直接相关。</div>
+</section>
+
+<!-- 21 反着的曲线 -->
+<section class="slide">
+  <div class="crumb"><b>第三章</b> · 证据</div>
+  <h2>越设计越复杂，真活儿反而停了</h2>
+  <svg viewBox="0 0 1152 360" width="1152" height="360" style="margin-top:8px">
+    <!-- 坐标 -->
+    <line x1="80" y1="40" x2="80" y2="300" stroke="#CBD5E1" stroke-width="2"/>
+    <line x1="80" y1="300" x2="1080" y2="300" stroke="#CBD5E1" stroke-width="2"/>
+    <text x="20" y="170" font-size="13" fill="#64748B" transform="rotate(-90 20 170)" text-anchor="middle">程度</text>
+    <text x="580" y="340" font-size="13" fill="#64748B" text-anchor="middle">时间（开发阶段推进）</text>
+    <!-- 复杂度曲线 上升 -->
+    <path d="M120,270 C300,250 500,180 1060,70" fill="none" stroke="#3B82F6" stroke-width="3.5"/>
+    <text x="1010" y="62" font-size="13" fill="#3B82F6" font-weight="700">设计复杂度 ↑</text>
+    <!-- 交付力曲线 下降 -->
+    <path d="M120,90 C320,110 560,170 1060,265" fill="none" stroke="#EF4444" stroke-width="3.5"/>
+    <text x="1000" y="282" font-size="13" fill="#EF4444" font-weight="700">真能交付的活 ↓</text>
+    <!-- 交叉警示 -->
+    <circle cx="590" cy="178" r="6" fill="#0F172A"/>
+    <text x="600" y="170" font-size="12.5" fill="#0F172A" font-weight="700">两条线越离越远</text>
+    <!-- x 标注 -->
+    <text x="120" y="320" font-size="12" fill="#94A3B8">早期</text>
+    <text x="1040" y="320" font-size="12" fill="#94A3B8">后期</text>
+  </svg>
+  <div class="lead" style="margin-top:6px">这就是「<span class="hr">敲边鼓</span>」的画像：人在周边把设计越做越花，核心那件「真交付」却一路往下掉。</div>
+  <div class="note">讲师注：曲线为定性示意，非精确数据。下一页用真实证据墙填数字。</div>
+</section>
+
+<!-- 22 第四章过渡 -->
+<section class="slide sec">
+  <div class="num">CHAPTER 04</div>
+  <h1>为什么最后算失败？</h1>
+  <div class="desc">不绕了。上证据，上根因，每条配「当时 ❌ / 该怎样 ✅」。这是全课最该记的一章。</div>
+  <div class="big">04</div>
+</section>
+
+<!-- 23 证据墙 -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 证据</div>
+  <h2>证据墙：数字是不会骗人的</h2>
+  <div class="wall">
+    <div class="w"><div class="v">32</div><div class="l">天</div><div class="x">核心闭环无任何用户可见进展</div></div>
+    <div class="w"><div class="v">21</div><div class="l">个任务</div><div class="x">卡在「待生成」，永远不往前</div></div>
+    <div class="w"><div class="v">8</div><div class="l">个任务</div><div class="x">报错想标记「失败」，却标记不了，僵死</div></div>
+    <div class="w"><div class="v">0</div><div class="l">次引用</div><div class="x">定好的 9 种失败码，生产里一次都没用上</div></div>
+  </div>
+  <div class="grid g2" style="margin-top:24px">
+    <div class="card red"><div class="t">这几组数字说明什么</div><div class="d">系统「看着在忙」，实则主循环早停了；出错也「死不成、活不了」，悬在中间。</div></div>
+    <div class="card"><div class="t">最扎眼的是「0」</div><div class="d">设计了 9 种失败处理，结果一个都没触发——不是没失败，是失败都没被接住。</div></div>
+  </div>
+  <div class="note">讲师注：数据来自 delivery-pipeline-unblock-plan 与 doc_impl_conformance 报告。这些是「定义满分、执行停摆」的硬证据。</div>
+</section>
+
+<!-- 24 五大根因总览 -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 根因总览</div>
+  <h2>五大根因（一张图记住）</h2>
+  <div class="chain">
+    <div class="node r"><div class="t">A 主循环没闭合</div><div class="d">核心「办成+验证」从未端到端跑通</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">B 把流程当能力</div><div class="d">流程跑完 ≠ 事真做成</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">C 工程卫生缺失</div><div class="d">改了不敢验、错了查不出</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">D 优先级倒置</div><div class="d">先搞复杂架构，基础没落地</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">E 元工作替代真工作</div><div class="d">写文档/画图，代替真把活干完</div></div>
+  </div>
+  <p class="lead" style="margin-top:24px">五条不是并列，而是<span class="hr">一条压一条</span>：因为主循环没闭合（A），才用流程假装能力（B），才没精力搞卫生（C），才先炫架构（D），才用元工作自我安慰（E）。</p>
+  <div class="note">下一页起，每条配 ❌当时 / ✅该怎样。也可按需逐条讨论。</div>
+</section>
+
+<!-- 25 根因A -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 根因 A</div>
+  <h2>A · 主循环没闭合</h2>
+  <div class="vs">
+    <div class="col bad"><div class="h">❌ 当时怎么做</div><ul>
+      <li>「拆目标→派活→执行→验证→交付」这条主链，每一段都写了，却从没串起来真跑过一次。</li>
+      <li>永远在补某一环，没让整条链端到端流动。</li>
+      <li>结果：每段都「差不多」，合起来「都没成」。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 本来该怎样</div><ul>
+      <li><b>先拿最小一件事</b>（如「真读完一篇短文档并答 1 题」）跑通整条链。</li>
+      <li>链通了，再往里加能力；链不通，不加任何新东西。</li>
+      <li>把「整链跑通」当成唯一进度指标。</li>
+    </ul></div>
+  </div>
+  <div class="lead" style="margin-top:18px"><span class="hl">一句话：先让一件事从头跑到尾，再去谈架构。</span>这是 Regent 摔得最狠的一跤。</div>
+</section>
+
+<!-- 26 根因B -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 根因 B</div>
+  <h2>B · 把「流程」当成了「能力」</h2>
+  <div class="vs">
+    <div class="col bad"><div class="h">❌ 当时怎么做</div><ul>
+      <li>代码走到了「生成完成」那一步，就记作「任务完成」。</li>
+      <li>至于生成的东西对不对、能不能用，没人验。</li>
+      <li>「跑完」被当成了「做成」。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 本来该怎样</div><ul>
+      <li>完成 = <b>目标达成 + 验证通过</b>，二者缺一不可。</li>
+      <li>验证要真跑：读没读完，以答对题为准。</li>
+      <li>验不过，就不算完成，回到干活环节。</li>
+    </ul></div>
+  </div>
+  <div class="lead" style="margin-top:18px"><span class="hr">流程是骨架，能力是血肉。</span>只有骨架、没有血肉，站不起来。</div>
+</section>
+
+<!-- 27 根因C -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 根因 C</div>
+  <h2>C · 工程卫生缺失</h2>
+  <div class="vs">
+    <div class="col bad"><div class="h">❌ 当时怎么做</div><ul>
+      <li>改了代码，没有自动小考回归，不知退没退步。</li>
+      <li>失败码定义了 9 种，生产里一次没接住。</li>
+      <li>一个没 tracked 的文件导致整个导入报错，藏了很久。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 本来该怎样</div><ul>
+      <li>每次改动自动重跑验收小考，红就拦下。</li>
+      <li>定义的每个失败处理，都要有真实触发路径。</li>
+      <li>依赖、数据格式变更带迁移脚本，CI 里冒烟。</li>
+    </ul></div>
+  </div>
+  <div class="lead" style="margin-top:18px"><span class="hl">卫生不是琐事，是「改了不怕坏」的底气。</span>没它，越改越心虚。</div>
+</section>
+
+<!-- 28 根因D -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 根因 D</div>
+  <h2>D · 优先级倒置</h2>
+  <div class="vs">
+    <div class="col bad"><div class="h">❌ 当时怎么做</div><ul>
+      <li>单人闭环还没跑通，就先设计多 Agent 分工、评测协议。</li>
+      <li>把「架构看起来高级」排在「先把一件事办成」前面。</li>
+      <li>复杂度涨得比能力快。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 本来该怎样</div><ul>
+      <li><b>投入顺序</b>：单人跑通 → 状态机无悬停 → 验收只看行为 → 卫生/评测 → 再把重心移到多 Agent。</li>
+      <li>任一层没稳，不要把投入重心押到下一层（这是重心建议，不是许可门禁）。</li>
+      <li>多 Agent 是「加速」，不是「打地基」；沙箱里的多角色试验默认开放，门禁只落在生产默认与现实权限。</li>
+    </ul></div>
+  </div>
+  <div class="lead" style="margin-top:18px"><span class="hl">地基没打，楼越高越危险。</span></div>
+</section>
+
+<!-- 29 根因E -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 根因 E</div>
+  <h2>E · 元工作替代了真工作</h2>
+  <div class="vs">
+    <div class="col bad"><div class="h">❌ 当时怎么做</div><ul>
+      <li>写文档、画架构图、定规范，占了大量精力。</li>
+      <li>这些「关于做事的事」，代替了「真去把事做出来」。</li>
+      <li>文档越完美，执行越苍白。</li>
+    </ul></div>
+    <div class="col good"><div class="h">✅ 本来该怎样</div><ul>
+      <li>文档是「给别人看的地图」，不是「自我感动的勋章」。</li>
+      <li>每份文档配一个可验证的落地动作，否则不写。</li>
+      <li>用「真跑通」证明文档没错，而非用文档假装进展。</li>
+    </ul></div>
+  </div>
+  <div class="lead" style="margin-top:18px"><span class="hr">敲边鼓的本质：用「准备」逃避「交付」。</span></div>
+</section>
+
+<!-- 30 根因↔基本功 -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 对照表</div>
+  <h2>每个根因，对应漏掉的一项基本功</h2>
+  <div class="vs" style="grid-template-columns:1fr 1fr;margin-top:16px">
+    <div class="col bad"><div class="h">根因（当时踩的坑）</div><ul>
+      <li>A 主循环没闭合</li>
+      <li>B 把流程当能力</li>
+      <li>C 工程卫生缺失</li>
+      <li>D 优先级倒置</li>
+      <li>E 元工作替真工作</li>
+    </ul></div>
+    <div class="col good"><div class="h">本该有的基本功（下次补上）</div><ul>
+      <li>先跑通最小闭环，再谈别的</li>
+      <li>完成 = 达成 + 验证，缺一不可</li>
+      <li>改动有回归、失败有接住</li>
+      <li>先把单人做硬，再把重心移到多 Agent</li>
+      <li>文档配落地动作，不自我感动</li>
+    </ul></div>
+  </div>
+  <div class="lead" style="margin-top:18px">记住这张表：<span class="hl">根因是表象，基本功是答案。</span>下一章给的就是「基本功清单」。</div>
+</section>
+
+<!-- 31 三个细节 -->
+<section class="slide">
+  <div class="crumb"><b>第四章</b> · 扎心细节</div>
+  <h2>三个最扎心的细节</h2>
+  <div class="lst">
+    <div class="it"><div class="n r">1</div><div class="b"><b>9 种失败码，生产里 0 次引用。</b> 不是系统没失败，是失败全从缝里漏走了，没人接住——等于安全网是画的。</div></div>
+    <div class="it"><div class="n r">2</div><div class="b"><b>「在沙箱里跑过」≠「真执行过」。</b> 验证常常只在隔离环境比划一下，没碰真实外部系统，所以「通过」是假的。</div></div>
+    <div class="it"><div class="n r">3</div><div class="b"><b>「灰度实验」和「毕业验收」被当成一回事。</b> 本该先小范围试（灰度），再正式过关（毕业）；结果混为一谈，以为试过就是过了。</div></div>
+  </div>
+  <div class="note">讲师注：对应原 MAST 零生产引用、sandbox 未真执行、M6 canary ≠ GQ-4。这三个细节，是根因 B/C 的「铁证」。</div>
+</section>
+
+<!-- 32 第五章过渡 -->
+<section class="slide sec">
+  <div class="num">CHAPTER 05</div>
+  <h1>所以，Agent 到底怎么搭？</h1>
+  <div class="desc">失败讲完了，开药方。单 Agent 七步法 + 多 Agent 原则，拿回去就能用。</div>
+  <div class="big">05</div>
+</section>
+
+<!-- 33 七步法总览 -->
+<section class="slide">
+  <div class="crumb"><b>第五章</b> · 单 Agent 七步法</div>
+  <h2>搭一个 Agent，七步走</h2>
+  <div class="steps">
+    <div class="s"><div class="no">1</div><div class="t">定最小目标</div></div>
+    <div class="s"><div class="no">2</div><div class="t">画主循环</div></div>
+    <div class="s"><div class="no">3</div><div class="t">跑通一次</div></div>
+    <div class="s"><div class="no">4</div><div class="t">加状态机</div></div>
+    <div class="s"><div class="no">5</div><div class="t">立验证关</div></div>
+    <div class="s"><div class="no">6</div><div class="t">搞卫生</div></div>
+    <div class="s"><div class="no">7</div><div class="t">才谈多Agent</div></div>
+  </div>
+  <div class="plain" style="margin-top:26px">
+    <div class="q">七步的核心纪律</div>
+    <div class="a">多 Agent 是「加速」，不是「遮丑」。前 5 步没稳就靠分工去补，只会把混乱翻倍——这是<span class="hl">投入顺序建议</span>，不是准入条件：沙箱里的多角色试验随时可做，需要门禁的是把它变成生产默认、扩大现实权限。</div>
+  </div>
+  <div class="note">下面两页把这七步拆开讲，配「❌别这样 / ✅要这样」。讲师注：不要说成「不许试多 Agent」——按定义 3.0 ATTRIBUTE_2/7，沙箱试验默认开放，七步法约束的是投入重心和生产晋级。</div>
+</section>
+
+<!-- 34 七步法详解 上 -->
+<section class="slide">
+  <div class="crumb"><b>第五章</b> · 七步法详解（1/2）</div>
+  <h2>第 1–4 步：先把一件事跑通</h2>
+  <div class="lst">
+    <div class="it"><div class="n">1</div><div class="b"><b>定最小目标</b>：别一上来就「做整个平台」。选一件小得能验证的事，如「读这篇文档，答 1 题」。</div></div>
+    <div class="it"><div class="n c">2</div><div class="b"><b>画主循环</b>：目标 → 拆解 → 执行 → 验证 → 交付。先画清楚这条链，别先画分支。</div></div>
+    <div class="it"><div class="n">3</div><div class="b"><b>跑通一次</b>：❌ 只写不跑。✅ 真端到端跑一遍，看到「交付 + 证据」才算数。</div></div>
+    <div class="it"><div class="n c">4</div><div class="b"><b>加状态机</b>：❌ 状态能卡死、无出路。✅ 每个状态有去处，超时/出错都能恢复或漂亮地挂掉。</div></div>
+  </div>
+  <div class="lead" style="margin-top:16px"><span class="hl">前四步的终点：一件真事，从头跑到尾，且你信它真成了。</span></div>
+</section>
+
+<!-- 35 七步法详解 下 -->
+<section class="slide">
+  <div class="crumb"><b>第五章</b> · 七步法详解（2/2）</div>
+  <h2>第 5–7 步：稳了再加速</h2>
+  <div class="lst">
+    <div class="it"><div class="n">5</div><div class="b"><b>立验证关</b>：❌ 流程跑完=完成。✅ 达成 + 验证通过才算；验证要真跑，不比划。</div></div>
+    <div class="it"><div class="n c">6</div><div class="b"><b>搞卫生</b>：❌ 改了不验、错了查不出。✅ 每次改动自动回归小考；失败处理都要有真触发路径；依赖变更带迁移。</div></div>
+    <div class="it"><div class="n">7</div><div class="b"><b>才把重心移到多 Agent</b>：❌ 单人没稳就指望分工来补。✅ 单人闭环跑通且稳，再把活拆给多个角色「加速」；沙箱里的多角色对照试验不必等这一步。</div></div>
+  </div>
+  <div class="lead" style="margin-top:16px"><span class="hl">七步是一口气走完的「地基」，不是七份文档。</span>每一步都用「真跑通」证明，不是用 PPT 证明。第 7 步排在最后是<b>投入顺序</b>，不是许可顺序。</div>
+</section>
+
+<!-- 36 多Agent原则 -->
+<section class="slide">
+  <div class="crumb"><b>第五章</b> · 多 Agent 原则</div>
+  <h2>多 Agent 怎么搭？（原则）</h2>
+  <div class="grid g2" style="margin-top:20px">
+    <div class="card blue"><div class="t">① 单人先稳（投入顺序，非准入）</div><div class="d">多 Agent 是加速，不是打地基。地基没稳，分工只会让混乱翻倍——但这是投入重心的建议；沙箱里的多角色试验默认可做。</div></div>
+    <div class="card"><div class="t">② 按能力分，不按层分</div><div class="d">谁擅长拆、谁擅长写、谁擅长验，让专长说话，别硬切层级。</div></div>
+    <div class="card"><div class="t">③ 交接带证据</div><div class="d">一个 Agent 交给另一个，附上「做到哪、证据是啥」，不靠口头「搞定了」。</div></div>
+    <div class="card"><div class="t">④ 有总指挥</div><div class="d">谁来判断「整体成了没」？得有一个角色兜底，不能各自为战。</div></div>
+    <div class="card cyan"><div class="t">⑤ 失败能收口</div><div class="d">任一 Agent 卡死，系统能重派或上报，不悬空。</div></div>
+    <div class="card"><div class="t">⑥ 评测冻结</div><div class="d">「算成功」的标准先定死、先跑通单人版，再上多人，不临时改规则。</div></div>
+  </div>
+  <div class="note">讲师注：对应原多 Agent 评测协议 + MA 计划的精神。此处只留原则，避免代号轰炸。</div>
+</section>
+
+<!-- 37 因果链总图 -->
+<section class="slide">
+  <div class="crumb"><b>第五章</b> · 一张图收尾</div>
+  <h2>整堂课，一张因果链</h2>
+  <div class="chain">
+    <div class="node"><div class="t">定义/架构极好</div><div class="d">目标、原则、图都挑不出毛病</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">全程敲边鼓</div><div class="d">在周边忙，核心没碰</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">主循环没闭合</div><div class="d">「办成+验证」从未端到端</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">五大根因 A–E</div><div class="d">一环压一环</div></div>
+    <div class="arrow">→</div>
+    <div class="node r"><div class="t">漏了基本功</div><div class="d">先跑通 / 真验证 / 搞卫生…</div></div>
+  </div>
+  <p class="lead" style="margin-top:26px">带走这一句：<span class="hl">Agent 的「根」，是能在约束下稳定交付、且失败有明确出路的单 Agent 闭环。</span>架构、多 Agent、评测，都是长在这根上的枝。</p>
+</section>
+
+<!-- 38 行动清单 -->
+<section class="slide">
+  <div class="crumb"><b>第五章</b> · 团队下一步</div>
+  <h2>回去就能做的三件事</h2>
+  <div class="lst">
+    <div class="it"><div class="n">1</div><div class="b"><b>挑一件最小真事</b>，按七步法跑通闭环，截图留证。不为 KPI，只为证明「链是通的」。</div></div>
+    <div class="it"><div class="n c">2</div><div class="b"><b>给现有项目做一次「根因体检」</b>：主循环通没通？完成是真验过还是假跑过？失败能不能收口？</div></div>
+    <div class="it"><div class="n">3</div><div class="b"><b>立一条铁律</b>：任何新能力，先有「真验证」再宣布完成。铁律管的是「宣布完成」和「上生产」，不是「能不能试」——多 Agent 可以随时在沙箱里试，只是别在单人闭环没稳时把投入重心压过去。</div></div>
+  </div>
+  <div class="lead" style="margin-top:18px">别再让「文档很美、执行很空」重演。<span class="hl">跑通一件事，胜过画十张架构图。</span></div>
+</section>
+
+<!-- 39 结束 -->
+<section class="slide cover">
+  <div class="kicker">THE END · 但交付才开始</div>
+  <h1>跑通一件事，<br>胜过画十张架构图。</h1>
+  <div class="sub">Regent 用一次失败告诉我们：Agent 的根，是能稳定交付、失败有出路的单 Agent 闭环。<br>剩下的，都是长在这根上的枝。</div>
+  <div class="tag">讨论时间 · 你手上的项目，主循环通了吗？</div>
+</section>
+
+<!-- 40 讲师速查说明 -->
+<section class="slide">
+  <div class="crumb"><b>讲师速查</b> · 可跳过 · 仅供备课对照原文档</div>
+  <h2>代号对照（1/3）：目标与原则</h2>
+  <div class="grid g2" style="margin-top:18px">
+    <div class="card"><div class="t">公式化定义</div><div class="d">Regent(G, C, V, R_t, S_t) = … 目标/约束/验证/运行时资源/状态 → 白话见第 5 页</div></div>
+    <div class="card"><div class="t">恒定属性 9 条（现行 PRD §0.2 / 定义 3.0）</div><div class="d">目标定方向不定路径 / 探索默认开放 / 在实践中进化 / 团队是生命组织 / 证据用于学习 / 资源自治 / 边界落在现实影响上 / 自由但不脱离现实 / 长期连续开放演化<br><b>旧版对照</b>：讲义早期版本抄的是已被取代的 1.0 七条（自主、目标驱动、约束遵守、可验证、可恢复、可追溯、可接管），备课时不要再引用。</div></div>
+    <div class="card"><div class="t">不变原则 10 条（现行 PRD §0.3）</div><div class="d">交付前必验证 / 每步留痕 / 智能体团队是产品形态，成员与拓扑可自由演化，不以事前净收益证明限制探索 … 第 8 页取最相关 4 条<br><b>已修订</b>：旧版第 7 条「多 Agent 非默认」已被定义 3.0 收窄为只约束生产默认与现实权限。</div></div>
+    <div class="card"><div class="t">北极星 + 护栏</div><div class="d">CostPerVerifiedSuccess + 8 护栏 → 白话见第 9 页</div></div>
+    <div class="card"><div class="t">P0 能力 10 条</div><div class="d">可靠内核：目标接入/拆解/执行/验证/恢复/对外受控…</div></div>
+    <div class="card"><div class="t">非目标清单</div><div class="d">不替代人决策、不做无约束自主、不假装通用 AGI</div></div>
+  </div>
+  <div class="note">本区所有页放映时可一键跳过（按 End 直接到结尾讨论）。仅用于讲师把「人话」回扣到原文档代号。</div>
+</section>
+
+<!-- 41 速查 2 -->
+<section class="slide">
+  <div class="crumb"><b>讲师速查</b> · 可跳过 · 架构代号</div>
+  <h2>代号对照（2/3）：架构与机制</h2>
+  <div class="grid g2" style="margin-top:18px">
+    <div class="card"><div class="t">架构五层 / 六要素引擎</div><div class="d">入口/大脑/派工/干活/账本/查证 → 人话见第 12 页</div></div>
+    <div class="card"><div class="t">三套状态机</div><div class="d">GoalState / WorkState / RunState → 人话见第 13 页「任务的一生」</div></div>
+    <div class="card"><div class="t">ExecutionPermit 生命周期</div><div class="d">issued→active→expired/revoked→settled → 人话见第 14 页</div></div>
+    <div class="card"><div class="t">ExternalOperation + Outbox</div><div class="d">先记账后执行、事件链 → 人话见第 15 页</div></div>
+    <div class="card"><div class="t">Artifact / Source of Truth</div><div class="d">交付证据、事实单源 → 人话见第 16 页</div></div>
+    <div class="card"><div class="t">生成策略</div><div class="d">artifact-backed（先产物后写）vs agentic（自主探索）</div></div>
+  </div>
+</section>
+
+<!-- 42 速查 3 -->
+<section class="slide">
+  <div class="crumb"><b>讲师速查</b> · 可跳过 · 计划代号</div>
+  <h2>代号对照（3/3）：计划与演变</h2>
+  <div class="grid g2" style="margin-top:18px">
+    <div class="card"><div class="t">开发切片 S0–S8</div><div class="d">从脚手架到对话式交付的 9 个实现切片</div></div>
+    <div class="card"><div class="t">多 Agent 计划 MA-0~6</div><div class="d">分工团队规划 → 人话见第 18 页</div></div>
+    <div class="card"><div class="t">质量基线 GQ-0~5</div><div class="d">单 Agent 毕业小考 → 人话见第 19 页</div></div>
+    <div class="card"><div class="t">对话交付 CD-0~12</div><div class="d">交互规范 → 人话见第 20 页</div></div>
+    <div class="card"><div class="t">毕业矩阵 G1–G12</div><div class="d">12 道真活考验 → 人话见第 10 页</div></div>
+    <div class="card red"><div class="t">失败铁证</div><div class="d">MAST 9 码 0 引用 / sandbox 未真执行 / M6 canary≠GQ-4 → 第 31 页</div></div>
+  </div>
+  <div class="note">到此速查结束。回到第 39 页「结束/讨论」即可。原文档：Regent-PRD.md / Regent-Plan.md / Regent-Technical-Spec.md（2026-08-01 CURRENT）。</div>
+</section>
+
+<!-- 进度条 / 页码 -->
+<div class="bar" id="bar"></div>
+<div class="pg" id="pg"></div>
+<div class="skip">讲师速查区（40–42 页）放映可跳过</div>
+<div class="foot">
+  <span>Regent 失败案例复盘 · 课堂易懂版</span>
+  <span>← → 翻页 · 空格 · F 全屏 · Home/End 跳首尾</span>
+</div>
+
+</div>
+
+<script>
+const slides=[...document.querySelectorAll('.slide')];
+let i=0;
+function show(n){
+  i=Math.max(0,Math.min(slides.length-1,n));
+  slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+  document.getElementById('bar').style.width=((i+1)/slides.length*100)+'%';
+  document.getElementById('pg').textContent=(i+1)+' / '+slides.length;
+  document.getElementById('stage').scrollTop=0;
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();show(i+1);}
+  else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();show(i-1);}
+  else if(e.key==='Home'){show(0);}
+  else if(e.key==='End'){show(slides.length-1);}
+  else if(e.key==='f'||e.key==='F'){
+    if(!document.fullscreenElement){document.documentElement.requestFullscreen();}
+    else{document.exitFullscreen();}
+  }
+});
+// 点击舞台左右半区翻页
+document.getElementById('stage').addEventListener('click',e=>{
+  const r=document.getElementById('stage').getBoundingClientRect();
+  if(e.clientX < r.left + r.width/2) show(i-1); else show(i+1);
+});
+function fit(){
+  const s=Math.min(window.innerWidth/1280, window.innerHeight/720);
+  document.getElementById('stage').style.transform='translate(-50%,-50%) scale('+s+')';
+}
+window.addEventListener('resize',fit);
+fit(); show(0);
+</script>
+</body>
+</html>

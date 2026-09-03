@@ -24,6 +24,7 @@ from regent.application.capability_resolution_service import (
     CapabilityResolutionService,
     ResolutionMethod,
 )
+from regent.application.conversation_service import append_project_message
 from regent.application.evidence_policy import (
     collect_authorized_urls,
     goal_requires_external_evidence,
@@ -41,8 +42,6 @@ from regent.infrastructure.evidence_capability import (
 )
 from regent.infrastructure.models import (
     CapabilityModel,
-    ConversationMessageModel,
-    ConversationModel,
     DiscoveryRoundModel,
     GoalModel,
     GoalSpecModel,
@@ -64,6 +63,7 @@ class ResearchMoreRecoveryResult:
 
 
 class ResearchMoreRecoveryService:
+    _append = staticmethod(append_project_message)
     """Core detects the gap; capability pool supplies the connector — not chat paste."""
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -457,36 +457,3 @@ class ResearchMoreRecoveryService:
         capability_feeds = list(package_feeds) if needs_external else []
         return list(dict.fromkeys([*existing, *goal_urls, *capability_feeds]))
 
-    @staticmethod
-    async def _append(
-        session: AsyncSession,
-        project_id: uuid.UUID,
-        *,
-        role: str,
-        message_type: str,
-        content: str,
-        metadata: dict[str, object],
-    ) -> None:
-        conversation = await session.scalar(
-            select(ConversationModel).where(ConversationModel.app_project_id == project_id)
-        )
-        if conversation is None:
-            return
-        last = await session.scalar(
-            select(ConversationMessageModel.ordinal)
-            .where(ConversationMessageModel.conversation_id == conversation.id)
-            .order_by(ConversationMessageModel.ordinal.desc())
-            .limit(1)
-        )
-        session.add(
-            ConversationMessageModel(
-                id=uuid.uuid4(),
-                conversation_id=conversation.id,
-                ordinal=(last or 0) + 1,
-                role=role,
-                message_type=message_type,
-                content=content,
-                metadata_json=metadata,
-                created_by="regent-core",
-            )
-        )

@@ -161,18 +161,6 @@ def _missing_field_groups(
 
 
 
-def _looks_like_list_product(html: str) -> bool:
-    text = html or ""
-    lower = text.lower()
-    # Utility pages: do not require list→detail navigation.
-    if _UTILITY_SURFACE_HINTS.search(text) and lower.count("<article") < 2:
-        return False
-    if _LIST_PRODUCT_HINTS.search(text):
-        return True
-    # Multiple article/card blocks imply a list surface.
-    return lower.count("<article") >= 2 or lower.count('class="card') >= 2
-
-
 @dataclass(frozen=True, slots=True)
 class LivePreviewCheck:
     name: str

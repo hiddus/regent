@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Regent 智能目标执行系统 · 省市领导汇报</title>
+<style>
+  :root{
+    --navy:#16335B;
+    --blue:#2E6DB4;
+    --blue-soft:#E8F0FA;
+    --red:#D7263D;
+    --red-soft:#FCE9EC;
+    --ink:#1F2A37;
+    --muted:#5A6B7B;
+    --bg:#F5F8FC;
+    --card:#FFFFFF;
+    --line:#DCE5F0;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;background:#0E1B2E;font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Source Han Sans SC",sans-serif;color:var(--ink);overflow:hidden;}
+  #viewport{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 30%,#1A3354,#0B1626);}
+  #stage{position:absolute;left:50%;top:50%;width:1280px;height:720px;transform:translate(-50%,-50%);background:var(--bg);overflow:hidden;border-radius:6px;box-shadow:0 30px 90px rgba(0,0,0,.5);}
+  .slide{position:absolute;inset:0;padding:64px 80px;display:none;flex-direction:column;}
+  .slide.active{display:flex;animation:fade .45s ease;}
+  @keyframes fade{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+
+  .kicker{display:inline-flex;align-items:center;gap:8px;font-size:14px;letter-spacing:3px;color:var(--blue);font-weight:700;text-transform:uppercase;margin-bottom:14px;}
+  .kicker::before{content:"";width:26px;height:3px;background:var(--red);border-radius:2px;}
+  h1{font-size:42px;line-height:1.25;color:var(--navy);font-weight:800;letter-spacing:.5px;}
+  h2{font-size:30px;color:var(--navy);font-weight:800;margin-bottom:6px;letter-spacing:.5px;}
+  .sub{font-size:16px;color:var(--muted);margin-top:10px;line-height:1.7;}
+  .lead{font-size:19px;color:var(--ink);line-height:1.85;}
+  .rule{height:4px;width:64px;background:linear-gradient(90deg,var(--red),var(--blue));border-radius:3px;margin:18px 0 26px;}
+
+  /* cover */
+  .cover{background:linear-gradient(135deg,#16335B 0%,#1E4A86 55%,#2E6DB4 100%);color:#fff;justify-content:center;align-items:flex-start;}
+  .cover .kicker{color:#9FC2EC;}
+  .cover .kicker::before{background:#F4B400;}
+  .cover h1{color:#fff;font-size:58px;line-height:1.15;text-shadow:0 2px 18px rgba(0,0,0,.25);}
+  .cover .tag{font-size:20px;color:#C9DEF6;margin-top:22px;font-weight:500;letter-spacing:1px;}
+  .cover .pill{display:inline-block;margin-top:30px;padding:12px 22px;border:1px solid rgba(255,255,255,.35);border-radius:40px;font-size:15px;color:#EAF3FF;letter-spacing:2px;background:rgba(255,255,255,.06);}
+  .cover .foot{position:absolute;bottom:46px;left:80px;right:80px;display:flex;justify-content:space-between;font-size:14px;color:#9FC2EC;border-top:1px solid rgba(255,255,255,.18);padding-top:18px;}
+
+  /* cards */
+  .grid{display:grid;gap:20px;margin-top:6px;}
+  .grid.c2{grid-template-columns:1fr 1fr;}
+  .grid.c3{grid-template-columns:repeat(3,1fr);}
+  .grid.c4{grid-template-columns:repeat(4,1fr);}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 22px;box-shadow:0 6px 20px rgba(22,51,91,.06);}
+  .card .ico{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;margin-bottom:12px;}
+  .card h3{font-size:18px;color:var(--navy);margin-bottom:8px;font-weight:700;}
+  .card p{font-size:14.5px;color:var(--muted);line-height:1.7;}
+  .ico.b{background:var(--blue-soft);color:var(--blue);}
+  .ico.r{background:var(--red-soft);color:var(--red);}
+
+  /* attribute list */
+  .attr{display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-bottom:1px dashed var(--line);}
+  .attr:last-child{border-bottom:none;}
+  .attr .n{flex:0 0 30px;height:30px;border-radius:8px;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;}
+  .attr .t{font-size:15.5px;color:var(--ink);line-height:1.55;}
+  .attr .t b{color:var(--navy);}
+
+  .two{display:grid;grid-template-columns:1.05fr .95fr;gap:40px;align-items:center;}
+
+  /* flow */
+  .flow{display:flex;align-items:stretch;justify-content:space-between;margin-top:26px;gap:0;}
+  .node{flex:1;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 10px;text-align:center;position:relative;box-shadow:0 4px 14px rgba(22,51,91,.06);}
+  .node .step{font-size:12px;color:var(--blue);font-weight:700;letter-spacing:1px;}
+  .node .nm{font-size:16px;color:var(--navy);font-weight:700;margin-top:6px;}
+  .node .ds{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.4;}
+  .arrow{flex:0 0 30px;display:flex;align-items:center;justify-content:center;color:var(--blue);font-size:20px;font-weight:700;}
+  .decision{margin-top:22px;display:flex;gap:16px;justify-content:center;align-items:center;}
+  .dec{background:var(--navy);color:#fff;border-radius:30px;padding:10px 26px;font-size:15px;font-weight:700;}
+  .dec.rev{background:var(--red);}
+  .dec.cont{background:var(--blue);}
+  .loopnote{text-align:center;color:var(--muted);font-size:14px;margin-top:14px;}
+
+  .quote{font-size:23px;line-height:1.95;color:var(--navy);font-weight:600;border-left:5px solid var(--red);padding:6px 0 6px 26px;background:linear-gradient(90deg,var(--blue-soft),transparent);border-radius:0 10px 10px 0;}
+
+  .badge-row{display:flex;gap:14px;margin-top:18px;flex-wrap:wrap;}
+  .badge{background:#fff;border:1px solid var(--line);border-radius:30px;padding:10px 20px;font-size:14.5px;color:var(--navy);font-weight:600;box-shadow:0 4px 12px rgba(22,51,91,.05);}
+
+  .phase{display:flex;gap:18px;margin-top:10px;}
+  .pcol{flex:1;background:#fff;border-radius:14px;padding:22px;border-top:5px solid var(--blue);box-shadow:0 6px 20px rgba(22,51,91,.07);}
+  .pcol.now{border-top-color:var(--red);}
+  .pcol.future{border-top-color:#8A9BB0;}
+  .pcol .pt{font-size:13px;color:var(--muted);font-weight:700;letter-spacing:1px;}
+  .pcol .ph{font-size:20px;color:var(--navy);font-weight:800;margin:6px 0 10px;}
+  .pcol p{font-size:14px;color:var(--muted);line-height:1.7;}
+
+  .bottomline{margin-top:auto;background:var(--navy);color:#fff;border-radius:14px;padding:18px 26px;font-size:16px;line-height:1.6;display:flex;gap:18px;align-items:center;}
+  .bottomline b{color:#F4B400;}
+
+  .navbtn{position:absolute;bottom:22px;right:30px;display:flex;gap:10px;z-index:30;}
+  .navbtn button{width:42px;height:42px;border-radius:50%;border:none;background:var(--navy);color:#fff;font-size:18px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.2);transition:.2s;}
+  .navbtn button:hover{background:var(--blue);}
+  .navbtn button:disabled{opacity:.3;cursor:default;}
+  .dots{position:absolute;bottom:30px;left:80px;display:flex;gap:8px;z-index:30;}
+  .dots span{width:9px;height:9px;border-radius:50%;background:#C2D2E6;cursor:pointer;transition:.2s;}
+  .dots span.on{background:var(--red);width:26px;border-radius:5px;}
+  .pageno{position:absolute;bottom:30px;right:96px;font-size:13px;color:var(--muted);z-index:30;}
+  .slidehint{position:absolute;top:24px;right:30px;font-size:12px;color:#9DB2CC;z-index:30;}
+  .footer{position:absolute;bottom:24px;right:30px;font-size:11px;color:#9DB2CC;z-index:5;}
+</style>
+</head>
+<body>
+<div id="viewport">
+  <div id="stage">
+
+    <!-- 1 COVER -->
+    <section class="slide cover active">
+      <div class="kicker">REGENT · 智能目标执行系统</div>
+      <h1>让 AI 真正干事<br>且始终在掌控之中</h1>
+      <div class="tag">自主可控 · 安全合规 · 可信赖的 AI 应用生产引擎</div>
+      <div class="pill">向省市领导汇报 ｜ 项目目标 · 系统定义 · 落地场景</div>
+      <div class="foot"><span>Regent 项目团队</span><span>2026</span></div>
+    </section>
+
+    <!-- 2 BACKGROUND -->
+    <section class="slide">
+      <span class="kicker">BACKGROUND</span>
+      <h2>为什么需要 Regent</h2>
+      <div class="rule"></div>
+      <p class="lead">AI 要真正服务发展，落地仍是最大难题。当前普遍面临四道坎：</p>
+      <div class="grid c2" style="margin-top:22px;">
+        <div class="card"><div class="ico r">⏳</div><h3>从想法到可用，太慢太贵</h3><p>"做个应用"仍靠堆人、堆时间，周期长、门槛高，基层与中小企业用不起。</p></div>
+        <div class="card"><div class="ico r">❓</div><h3>会聊不会干，难验证</h3><p>多数 AI 只停留在对话，生成的东西不可信、不可审计，关键场景不敢用。</p></div>
+        <div class="card"><div class="ico r">🔓</div><h3>怕失控、怕担责</h3><p>安全边界不清、责任难追溯、数据易泄露——政务与关键领域最忌讳"黑箱"。</p></div>
+        <div class="card"><div class="ico r">🔁</div><h3>重复造轮子</h3><p>各部门、各企业各自摸索，能力无法沉淀复用，资源大量浪费。</p></div>
+      </div>
+      <div class="bottomline"><span>核心问题</span><span>缺一套<span style="color:#F4B400">「让 AI 真正干事、且始终在掌控之中」</span>的系统。这正是 Regent 要解决的。</span></div>
+    </section>
+
+    <!-- 3 GOALS -->
+    <section class="slide">
+      <span class="kicker">PROJECT GOALS</span>
+      <h2>项目目标 · 我们要做成什么</h2>
+      <div class="rule"></div>
+      <div class="grid c3" style="margin-top:8px;">
+        <div class="card"><div class="ico b">①</div><h3>升级 AI 的能力</h3><p>把 AI 从"会聊天的工具"升级为"能干事的目标执行系统"——输入一句话目标，输出可运行、可验证的真实应用。</p></div>
+        <div class="card"><div class="ico b">②</div><h3>建一套生产体系</h3><p>建立自主可控、安全合规的 AI 应用生产体系：边界内自治、全程留痕、可审计、可接管。</p></div>
+        <div class="card"><div class="ico b">③</div><h3>让能力可沉淀</h3><p>缺什么补什么，不重复造轮子；用得越多越聪明，能力跨场景复用。</p></div>
+      </div>
+      <div class="two" style="margin-top:34px;">
+        <div>
+          <div class="quote" style="font-size:21px;">战略定位：Regent 不是又一个聊天机器人，而是管理 AI 团队在约束下自治干活的<span style="color:var(--red)">「目标操作系统」</span>。</div>
+        </div>
+        <div style="background:var(--blue-soft);border-radius:14px;padding:24px;">
+          <h3 style="color:var(--navy);font-size:18px;margin-bottom:10px;">一句话价值</h3>
+          <p style="font-size:15px;color:var(--muted);line-height:1.8;">把"造 AI 应用"这件事，从少数专家的专利，变成任何部门、任何企业都能用得起的公共能力。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 ONE-LINE DEF -->
+    <section class="slide">
+      <span class="kicker">IN ONE SENTENCE</span>
+      <h2>一句话看懂 Regent</h2>
+      <div class="rule"></div>
+      <div class="quote">您用一句话说清想要什么，Regent 在您设定的安全、预算与合规边界内，自动拆解目标、补齐能力、组建 AI 团队，交付一个能独立运行、并用真实数据证明成效的应用——做不成或不好用，就自动改进或停止，每一步都留痕、可审计、可接管。</div>
+      <div class="badge-row">
+        <span class="badge">🎯 一句话提需求</span>
+        <span class="badge">🛡 设好边界就放手</span>
+        <span class="badge">🤖 自动组队干活</span>
+        <span class="badge">📊 真实数据验收</span>
+        <span class="badge">🔁 不好用就改/停</span>
+        <span class="badge">🧾 全程可追溯</span>
+      </div>
+    </section>
+
+    <!-- 5 DEFINITION + 7 ATTR -->
+    <section class="slide">
+      <span class="kicker">DEFINITION</span>
+      <h2>系统定义 · Regent 到底是什么</h2>
+      <div class="rule"></div>
+      <div class="two">
+        <div>
+          <p class="lead" style="font-size:17px;">Regent 接收人的自然语言目标，在明确的<b style="color:var(--navy)">约束、资源、授权和治理边界</b>内，自主解释目标、发现并补齐能力，形成最合适的人机组织，创建并运营可独立运行的应用，并依据<b style="color:var(--navy)">可验证的外部结果</b>持续调整，直至目标达成或被叫停。</p>
+          <div style="margin-top:22px;background:var(--navy);color:#fff;border-radius:12px;padding:18px 22px;font-size:15px;line-height:1.75;">
+            <b style="color:#F4B400;">产品身份：</b>不是"更强的单一 AI"，而是<b>管理 AI 组织在约束与治理下自治运行的目标操作系统</b>。
+          </div>
+        </div>
+        <div>
+          <h3 style="color:var(--navy);font-size:17px;margin-bottom:4px;">九个恒定属性</h3>
+          <div class="attr"><div class="n">1</div><div class="t"><b>目标定方向，不定路径：</b>一句话给方向，怎么走由团队自己找</div></div>
+          <div class="attr"><div class="n">2</div><div class="t"><b>探索默认开放：</b>研究、原型、试验不必先证明一定有效</div></div>
+          <div class="attr"><div class="n">3</div><div class="t"><b>在实践中进化：</b>缩短"提出—尝试—观察—学习"的循环，多路并行</div></div>
+          <div class="attr"><div class="n">4</div><div class="t"><b>团队是生命组织：</b>成员和分工自行演化，不预设固定编制</div></div>
+          <div class="attr"><div class="n">5</div><div class="t"><b>证据用于学习：</b>用真实结果修正认知，而非当探索的许可证</div></div>
+          <div class="attr"><div class="n">6</div><div class="t"><b>资源自治：</b>给总预算和优先级，不逐任务审批</div></div>
+          <div class="attr"><div class="n">7</div><div class="t"><b>边界落在现实影响上：</b>管住不可逆的对外动作，不管思考和沙箱</div></div>
+          <div class="attr"><div class="n">8</div><div class="t"><b>自由但不脱离现实：</b>成本、结果、组织变化全程可追溯，您随时接管</div></div>
+          <div class="attr"><div class="n">9</div><div class="t"><b>长期连续、开放演化：</b>阶段结束不清零，经验跨项目复用</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6 CLOSED LOOP -->
+    <section class="slide">
+      <span class="kicker">HOW IT WORKS</span>
+      <h2>核心机制 · 一条可追溯、可验证的闭环</h2>
+      <div class="rule"></div>
+      <div class="flow">
+        <div class="node"><div class="step">GOAL</div><div class="nm">目标</div><div class="ds">一句话需求</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="step">PLAN</div><div class="nm">计划</div><div class="ds">拆解可执行步骤</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="step">ABILITY</div><div class="nm">能力</div><div class="ds">补齐所需能力</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="step">BUILD</div><div class="nm">构建</div><div class="ds">生成真实应用</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="step">PREVIEW</div><div class="nm">预览</div><div class="ds">可运行可试用</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="step">OBSERVE</div><div class="nm">观测</div><div class="ds">采集真实使用</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="step">DECIDE</div><div class="nm">决策</div><div class="ds">看证据下结论</div></div>
+      </div>
+      <div class="decision">
+        <div class="dec cont">✓ 继续 CONTINUE</div>
+        <div class="dec rev">↻ 改进 REVISE</div>
+        <div class="dec">■ 停止 STOP</div>
+      </div>
+      <div class="loopnote">每一环都产出证据；真实使用数据驱动"继续 / 改进 / 停止"决策，并回流到计划与构建，形成闭环。</div>
+    </section>
+
+    <!-- 7 SAFETY / GOVERNANCE -->
+    <section class="slide">
+      <span class="kicker">SAFETY & GOVERNANCE</span>
+      <h2>领导最关心的 · 安全、可信、合规</h2>
+      <div class="rule"></div>
+      <div class="grid c3" style="margin-top:8px;">
+        <div class="card"><div class="ico b">🔐</div><h3>边界可控</h3><p>高风险动作（发布、外部影响）必须人工审批，不能"自己说了算"。</p></div>
+        <div class="card"><div class="ico b">🗝</div><h3>凭据不落地</h3><p>系统不接触明文密钥，权限按需、按时下发，杜绝泄漏。</p></div>
+        <div class="card"><div class="ico b">🧾</div><h3>全程可审计</h3><p>每一步可追溯、可回放，谁在何时做了什么，责任清晰。</p></div>
+        <div class="card"><div class="ico b">🛡</div><h3>数据不泄露</h3><p>外部内容默认不可信，敏感信息最小化采集与保留。</p></div>
+        <div class="card"><div class="ico b">🛑</div><h3>失败即止损</h3><p>重复副作用 / 未对账 / 安全违规，系统立即停，不将错就错。</p></div>
+        <div class="card"><div class="ico b">✅</div><h3>独立验证</h3><p>用真实结果验收，不用"内部自测"糊弄过关。</p></div>
+      </div>
+      <div class="bottomline"><span>设计哲学</span><span>把<b>「可控、可信」</b>刻进系统骨子里，而不是事后补救。</span></div>
+    </section>
+
+    <!-- 8 SCENARIO GOV -->
+    <section class="slide">
+      <span class="kicker">SCENARIO 01 · 智慧政务</span>
+      <h2>落地场景一 · 智慧政务</h2>
+      <div class="rule"></div>
+      <div class="grid c2" style="margin-top:8px;">
+        <div class="card"><div class="ico b">💬</div><h3>政策与办事智能问答</h3><p>法规条文问答、文书模板填表、合规自查——群众"问得清、办得顺"。</p></div>
+        <div class="card"><div class="ico b">📡</div><h3>民生诉求与舆情分析</h3><p>自动聚类群众反馈、标红风险信号，让治理从"被动响应"变"主动发现"。</p></div>
+        <div class="card"><div class="ico b">📊</div><h3>政务数据看板</h3><p>用自然语言生成图表与解读，领导决策有数据、有依据。</p></div>
+        <div class="card"><div class="ico b">📝</div><h3>公文与会议辅助</h3><p>会议纪要自动提炼、公文要点生成，为公务人员减负提效。</p></div>
+      </div>
+      <div class="bottomline"><span>价值</span><span>把公务人员从重复劳动中解放出来，让群众办事更省心、治理更精准。</span></div>
+    </section>
+
+    <!-- 9 SCENARIO INDUSTRY -->
+    <section class="slide">
+      <span class="kicker">SCENARIO 02 · 产业赋能</span>
+      <h2>落地场景二 · 产业赋能</h2>
+      <div class="rule"></div>
+      <div class="grid c2" style="margin-top:8px;">
+        <div class="card"><div class="ico r">🏭</div><h3>中小企业数字化转型助手</h3><p>把可靠的 AI 工具包低成本交到企业手里，转型不再"高不可攀"。</p></div>
+        <div class="card"><div class="ico r">📈</div><h3>招商与产业情报</h3><p>自动采集公开信息，生成竞品、供应链风险周报，辅助精准招商。</p></div>
+        <div class="card"><div class="ico r">🛒</div><h3>本地特色产品营销</h3><p>批量生成商品文案、短视频脚本，为农特产品、本地品牌拓宽销路。</p></div>
+        <div class="card"><div class="ico r">🌐</div><h3>营商环境分析</h3><p>多维度扫描企业诉求与风险，支撑"一企一策"精准施策。</p></div>
+      </div>
+      <div class="bottomline"><span>价值</span><span>降低 AI 使用门槛，让中小企业也能用上"靠谱的 AI"，培育本地智能产业生态。</span></div>
+    </section>
+
+    <!-- 10 SCENARIO PEOPLE -->
+    <section class="slide">
+      <span class="kicker">SCENARIO 03 · 民生服务</span>
+      <h2>落地场景三 · 民生服务</h2>
+      <div class="rule"></div>
+      <div class="grid c2" style="margin-top:8px;">
+        <div class="card"><div class="ico b">🤝</div><h3>便民服务助手</h3><p>多语言社区通知、办事指南，让公共服务覆盖每一个角落、不留死角。</p></div>
+        <div class="card"><div class="ico b">🏞</div><h3>文旅智能导览</h3><p>个性化行程与讲解，用 AI 讲好本地故事，提升文旅体验。</p></div>
+        <div class="card"><div class="ico b">🎓</div><h3>教育培训</h3><p>政策科普、个性化学习辅导，让优质知识资源触手可及。</p></div>
+        <div class="card"><div class="ico b">❤️</div><h3>健康与权益指引</h3><p>用大白话解读报告、指引维权路径，让公共服务更暖心。</p></div>
+      </div>
+      <div class="bottomline"><span>价值</span><span>让公共服务更高效、更可及、更温暖，实实在在提升群众获得感。</span></div>
+    </section>
+
+    <!-- 11 ROADMAP -->
+    <section class="slide">
+      <span class="kicker">ROADMAP</span>
+      <h2>落地路径 · 稳扎稳打，底线不松</h2>
+      <div class="rule"></div>
+      <div class="phase">
+        <div class="pcol"><div class="pt">现已具备</div><div class="ph">可靠内核</div><p>一个可信、可治理的"AI 执行引擎"，已通过严格自动化验收——目标、约束、证据、审计全程闭环。</p></div>
+        <div class="pcol now"><div class="pt">当前推进</div><div class="ph">自主生成应用</div><p>让 AI 自己把想法做成可运行的产品，并依据真实使用数据持续改进或停止。</p></div>
+        <div class="pcol future"><div class="pt">未来扩展</div><div class="ph">运营平台</div><p>多目标、多场景、持续学习的 AI 应用工厂，能力跨场景沉淀复用。</p></div>
+      </div>
+      <div class="bottomline"><span>底线</span><span>不做<b>无审批全自动发布</b> · 不用<b>"伪成功"</b>糊弄 · 不把<b>"更多 AI 数量"</b>当目标。每一步都必须有真实证据。</span></div>
+    </section>
+
+    <!-- 12 VALUE / CTA -->
+    <section class="slide">
+      <span class="kicker">VALUE & OUTLOOK</span>
+      <h2>价值与展望 · 与省市共建标杆</h2>
+      <div class="rule"></div>
+      <div class="grid c3" style="margin-top:8px;">
+        <div class="card"><div class="ico b">🏛</div><h3>对政府</h3><p>提供自主可控、安全合规的 AI 应用生产基础设施，夯实数字政府底座。</p></div>
+        <div class="card"><div class="ico b">🏢</div><h3>对产业</h3><p>降低 AI 门槛，培育本地 AI 应用生态，激活中小企业创新。</p></div>
+        <div class="card"><div class="ico b">👨‍👩‍👧</div><h3>对民生</h3><p>让公共服务更高效、更温暖，增强群众获得感与幸福感。</p></div>
+      </div>
+      <div class="quote" style="margin-top:28px;font-size:21px;">期待与省市共建试点场景，联合打造可复制、可推广的标杆应用，让 AI 真正服务于高质量发展大局。</div>
+      <div class="foot" style="position:static;margin-top:24px;color:var(--muted);font-size:14px;">谢谢聆听 · 欢迎指导</div>
+    </section>
+
+    <div class="slidehint">← → 翻页 · 空格继续</div>
+    <div class="dots" id="dots"></div>
+    <div class="pageno" id="pageno"></div>
+    <div class="navbtn">
+      <button id="prev" onclick="go(-1)">‹</button>
+      <button id="next" onclick="go(1)">›</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  let i=0;
+  const dots=document.getElementById('dots');
+  const pageno=document.getElementById('pageno');
+  slides.forEach((_,k)=>{const s=document.createElement('span');s.onclick=()=>show(k);dots.appendChild(s);});
+  function show(k){
+    i=Math.max(0,Math.min(slides.length-1,k));
+    slides.forEach((s,j)=>s.classList.toggle('active',j===i));
+    [...dots.children].forEach((d,j)=>d.classList.toggle('on',j===i));
+    pageno.textContent=(i+1)+' / '+slides.length;
+    document.getElementById('prev').disabled=(i===0);
+    document.getElementById('next').disabled=(i===slides.length-1);
+  }
+  function go(d){show(i+d);}
+  document.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '){e.preventDefault();go(1);}
+    if(e.key==='ArrowLeft'){e.preventDefault();go(-1);}
+  });
+  function fit(){
+    const s=document.getElementById('stage');
+    const sc=Math.min(window.innerWidth/1280,window.innerHeight/720);
+    s.style.transform='translate(-50%,-50%) scale('+sc+')';
+  }
+  window.addEventListener('resize',fit);fit();show(0);
+</script>
+</body>
+</html>

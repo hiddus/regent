@@ -1,0 +1,238 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Regent 架构演进与 Agent 系统搭建｜博士生参访培训</title>
+<style>
+:root{--navy:#071525;--navy2:#102a43;--blue:#2563eb;--cyan:#06b6d4;--green:#10b981;--amber:#f59e0b;--red:#ef4444;--ink:#172033;--muted:#64748b;--paper:#fbfdff;--line:#dbe4ee;--soft:#eef5fb;--white:#fff}
+*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#020617;font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",Arial,sans-serif;color:var(--ink)}
+#deck{position:absolute;left:50%;top:50%;width:1280px;height:720px;transform-origin:center;background:var(--paper);overflow:hidden;box-shadow:0 24px 90px #000b}
+.slide{display:none;position:absolute;inset:0;padding:50px 66px 54px;background:var(--paper)}.slide.active{display:flex;flex-direction:column}.dark{background:radial-gradient(circle at 82% 18%,#174e75 0,#102a43 25%,#071525 63%);color:#fff}.section{justify-content:center}.section .ghost{position:absolute;right:42px;bottom:-68px;font-size:270px;font-weight:900;color:#ffffff0a;line-height:1}
+.eyebrow{font-size:14px;letter-spacing:.18em;text-transform:uppercase;color:var(--cyan);font-weight:800;margin-bottom:13px}.dark h1,.dark h2{color:#fff}h1{font-size:58px;line-height:1.08;margin:0;letter-spacing:-.03em}h2{font-size:37px;line-height:1.2;margin:0 0 9px;letter-spacing:-.02em}h3{font-size:22px;line-height:1.3;margin:0 0 8px}.sub{font-size:21px;line-height:1.6;color:#a9bdd0;max-width:920px;margin-top:22px}.takeaway{font-size:19px;line-height:1.55;color:#475569;margin:0 0 18px}.dark .takeaway{color:#b8cada}.accent{color:var(--cyan)}.red{color:var(--red)}.green{color:var(--green)}
+.grid{display:grid;gap:18px;flex:1;align-items:stretch}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}.wide-right{grid-template-columns:.72fr 1.28fr}.wide-left{grid-template-columns:1.3fr .7fr}.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px 22px;box-shadow:0 8px 26px #17324d0b}.card.flat{box-shadow:none}.card.blue{border-top:5px solid var(--blue)}.card.cyan{border-top:5px solid var(--cyan)}.card.green{border-top:5px solid var(--green)}.card.redtop{border-top:5px solid var(--red)}.card.amber{border-top:5px solid var(--amber)}.card p,.card li{font-size:16px;line-height:1.55;color:#475569}.big{font-size:58px;font-weight:900;line-height:1;color:var(--blue);margin-bottom:13px}.label{font-size:13px;letter-spacing:.12em;color:var(--muted);font-weight:800;text-transform:uppercase}.quote{font-size:31px;line-height:1.5;font-weight:800;max-width:1030px}.rule{height:4px;width:120px;background:linear-gradient(90deg,var(--blue),var(--cyan));border-radius:9px;margin:20px 0}
+ul{padding-left:20px;margin:8px 0}li{margin:7px 0}.clean{list-style:none;padding:0}.clean li{padding-left:23px;position:relative}.clean li:before{content:"→";position:absolute;left:0;color:var(--blue);font-weight:900}.small{font-size:14px!important;color:var(--muted)!important}.tiny{font-size:12px!important}.strong{font-weight:800;color:var(--ink)}
+.flow{display:flex;align-items:stretch;gap:7px;margin:15px 0}.node{flex:1;border:1px solid var(--line);background:#fff;border-radius:13px;padding:14px 12px;text-align:center;display:flex;flex-direction:column;justify-content:center;min-height:82px}.node b{font-size:16px}.node span{font-size:12.5px;color:var(--muted);margin-top:5px}.arrow{align-self:center;font-size:24px;color:#94a3b8}.layers{display:flex;flex-direction:column;gap:12px;margin-top:12px}.layer{border-radius:14px;padding:16px 20px;display:grid;grid-template-columns:220px 1fr;gap:18px;align-items:center}.layer b{font-size:20px}.layer span{font-size:15px;line-height:1.5}.l1{background:#dbeafe}.l2{background:#cffafe}.l3{background:#d1fae5}.l4{background:#fef3c7}.l5{background:#fee2e2}
+.timeline{display:grid;grid-template-columns:repeat(5,1fr);gap:0;margin-top:38px;position:relative}.timeline:before{content:"";position:absolute;left:6%;right:6%;top:22px;height:4px;background:linear-gradient(90deg,var(--blue),var(--cyan),var(--green),var(--amber),var(--red))}.phase{position:relative;padding:54px 13px 0}.dot{position:absolute;top:10px;left:18px;width:26px;height:26px;border-radius:50%;background:#fff;border:7px solid var(--blue);z-index:1}.phase:nth-child(2) .dot{border-color:var(--cyan)}.phase:nth-child(3) .dot{border-color:var(--green)}.phase:nth-child(4) .dot{border-color:var(--amber)}.phase:nth-child(5) .dot{border-color:var(--red)}.phase h3{font-size:18px}.phase p{font-size:14px;line-height:1.45;color:var(--muted)}
+.compare{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:16px;overflow:hidden;flex:1}.compare>div{padding:22px 26px}.bad{background:#fff1f2}.good{background:#ecfdf5}.compare h3{font-size:23px}.bad h3{color:#be123c}.good h3{color:#047857}.compare li{font-size:16px;line-height:1.55}.formula{background:var(--navy);color:#fff;padding:22px 28px;border-radius:15px;font-size:25px;font-weight:800;text-align:center;margin:14px 0}.formula span{color:var(--cyan)}
+.matrix{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden;border:1px solid var(--line)}.matrix th{background:var(--navy2);color:#fff;text-align:left;font-size:14px;padding:13px}.matrix td{font-size:14px;line-height:1.35;padding:12px 13px;border-bottom:1px solid var(--line);vertical-align:top}.matrix tr:last-child td{border-bottom:0}.matrix .yes{color:#047857;font-weight:800}.matrix .no{color:#be123c;font-weight:800}
+.metric-row{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:22px}.metric{background:var(--navy);border-radius:16px;padding:21px 18px;text-align:center;color:#fff}.metric b{display:block;font-size:44px;color:var(--cyan);line-height:1}.metric span{display:block;font-size:13px;color:#a9bdd0;line-height:1.35;margin-top:10px}
+.arch{display:grid;grid-template-columns:1fr 48px 1fr 48px 1fr;align-items:center;gap:8px;flex:1}.archbox{height:335px;border-radius:18px;padding:22px;border:1px solid var(--line);background:#fff}.archbox h3{font-size:23px}.archbox p{font-size:15px;line-height:1.55;color:#475569}.archarrow{text-align:center;font-size:32px;color:var(--blue)}
+.foot{position:absolute;left:66px;right:66px;bottom:17px;display:flex;justify-content:space-between;color:#94a3b8;font-size:11.5px}.dark .foot{color:#6f8aa3}.progress{position:absolute;left:0;bottom:0;height:4px;background:linear-gradient(90deg,var(--blue),var(--cyan));transition:.25s}.chip{display:inline-block;border:1px solid #ffffff33;border-radius:99px;padding:8px 16px;margin-top:30px;color:#cbd5e1;font-size:14px}.callout{border-left:5px solid var(--blue);background:#eff6ff;padding:16px 20px;border-radius:0 12px 12px 0;font-size:18px;line-height:1.55}.warn{border-left-color:var(--red);background:#fff1f2}.exercise{border:2px dashed var(--cyan);background:#ecfeff;padding:18px 22px;border-radius:15px}.exercise h3{color:#0e7490}.speaker{display:none;position:fixed;z-index:5;right:18px;top:18px;width:380px;max-height:82vh;overflow:auto;background:#071525f2;color:#e2e8f0;border:1px solid #ffffff22;border-radius:14px;padding:20px;box-shadow:0 16px 60px #0008}.speaker.show{display:block}.speaker h3{color:#67e8f9;font-size:18px}.speaker p{color:#d4e1ed;font-size:14px;line-height:1.6;white-space:pre-line}.speaker .time{color:#fbbf24;font-weight:800}.help{display:none}.timer{position:fixed;right:18px;top:13px;color:#94a3b8;font:600 13px monospace;z-index:3}.source{font-size:13px;color:#64748b;line-height:1.5;margin:4px 0}.check{font-size:23px;line-height:1.65}.check b{color:var(--blue)}
+@media print{html,body{overflow:visible;background:#fff}#deck{position:static;transform:none!important;width:1280px;height:auto;box-shadow:none}.slide{display:flex!important;position:relative;width:1280px;height:720px;break-after:page}.help,.timer,.speaker{display:none!important}}
+</style>
+</head>
+<body>
+<main id="deck">
+
+<section class="slide dark active" data-min="3" data-notes="开场不先讲产品功能。先抛出核心矛盾：Agent 系统最容易失败的地方，不是模型不聪明，而是系统没有把不确定推理装进一个可靠的外壳。说明今天分享的是架构经验与失败教训，不是产品宣传。">
+ <div class="eyebrow">Regent Mid-term Architecture Workshop</div><h1>把 Agent 做成系统<br><span class="accent">而不是一段聪明的循环</span></h1>
+ <p class="sub">Regent 架构演进、失败教训与 Multi-Agent 的正确搭建顺序<br>面向来访博士生的两小时技术培训</p><span class="chip">架构设计 × 工程闭环 × 组织实验</span>
+</section>
+
+<section class="slide" data-min="3" data-notes="快速建立共同语言。请大家先记住三个问题：一次推理怎么完成；长期目标怎么推进；多人/多智能体何时值得。全场会不断回到这三个层级。">
+ <div class="eyebrow">学习目标</div><h2>两小时后，你应该能回答三个问题</h2><p class="takeaway">不是“用哪个框架”，而是“哪些责任必须被放在正确的层级”。</p>
+ <div class="grid g3"><div class="card blue"><div class="big">01</div><h3>AgentLoop 怎么闭环？</h3><p>模型、工具、上下文、验证、修复与停止，如何组成一次可靠执行。</p></div><div class="card cyan"><div class="big">02</div><h3>Regent 管什么？</h3><p>目标、状态、权限、证据、恢复与资源，为什么不能塞进 Prompt。</p></div><div class="card green"><div class="big">03</div><h3>何时扩大多 Agent 生产权限？</h3><p>沙箱试验默认可做；对照净收益 Gate 只约束生产默认与现实权限扩张。</p></div></div>
+</section>
+
+<section class="slide" data-min="2" data-notes="给出课程地图。建议中间在第四章前休息 8 分钟。问答分散在各章节，不单独留到最后。">
+ <div class="eyebrow">课程地图 · 约 120 分钟</div><h2>从一个循环，走到一个可治理的组织</h2>
+ <div class="timeline"><div class="phase"><div class="dot"></div><h3>Ⅰ 基本概念</h3><p>Agent、Loop、系统的边界<br>15 min</p></div><div class="phase"><div class="dot"></div><h3>Ⅱ Regent 架构</h3><p>控制面与执行面<br>25 min</p></div><div class="phase"><div class="dot"></div><h3>Ⅲ 架构演变</h3><p>为什么复杂度上升<br>18 min</p></div><div class="phase"><div class="dot"></div><h3>Ⅳ 失败复盘</h3><p>复杂但不交付<br>25 min</p></div><div class="phase"><div class="dot"></div><h3>Ⅴ 正确搭建</h3><p>路线图、实验与练习<br>37 min</p></div></div>
+</section>
+
+<section class="slide dark section" data-min="1" data-notes="章节过渡。强调先拆概念，否则所有讨论都会把一次模型循环、长期任务系统和多智能体编排混为一谈。"><div class="eyebrow">Part Ⅰ</div><h1>先把三个层级拆开</h1><p class="sub">一次执行、长期运行、组织协作，是三个不同问题。</p><div class="ghost">Ⅰ</div></section>
+
+<section class="slide" data-min="4" data-notes="用研究者熟悉的控制系统类比：模型是策略，工具是执行器，环境返回观测，验证器提供误差信号。Loop 不等于 while true；它必须有预算、终态与失败分类。">
+ <div class="eyebrow">AgentLoop</div><h2>AgentLoop 是一次“受约束的认知—行动闭环”</h2><p class="takeaway">它回答：在一个任务、一个工作区和一份预算里，Agent 怎样把意图变成可验证产物？</p>
+ <div class="flow"><div class="node"><b>理解目标</b><span>Goal + acceptance</span></div><div class="arrow">→</div><div class="node"><b>形成下一步</b><span>plan / todo</span></div><div class="arrow">→</div><div class="node"><b>调用工具</b><span>read / edit / run</span></div><div class="arrow">→</div><div class="node"><b>观察结果</b><span>tool feedback</span></div><div class="arrow">→</div><div class="node"><b>显式提交</b><span>submit</span></div><div class="arrow">→</div><div class="node"><b>验证与修复</b><span>verify / repair / stop</span></div></div>
+ <div class="formula">可靠 Loop = <span>策略</span> + 工具边界 + 上下文管理 + 验证器 + 预算 + 明确终态</div>
+</section>
+
+<section class="slide" data-min="4" data-notes="重点讲清：Regent 不是又一个 AgentLoop。AgentLoop 执行局部任务；Regent 跨多次运行保存事实、决定何时执行、给谁权限、是否恢复，以及结果是否满足外部目标。">
+ <div class="eyebrow">Regent</div><h2>Regent 是 Loop 外面的“耐久控制面”</h2><p class="takeaway">模型可以忘记，进程可以重启，但目标、授权、证据和责任不能丢。</p>
+ <div class="layers"><div class="layer l1"><b>交互与目标层</b><span>自然语言 Goal、约束、成功标准、人工决策；负责“到底要什么”。</span></div><div class="layer l2"><b>Regent 控制面</b><span>状态机、调度、预算、权限、证据、审计、恢复；负责“何时、由谁、在什么边界内做”。</span></div><div class="layer l3"><b>AgentLoop 执行面</b><span>模型调用工具完成一次有界工作；负责“下一步具体怎么做”。</span></div><div class="layer l4"><b>能力与运行环境</b><span>模型、工具、技能、沙箱、构建与部署 Provider；负责“有什么手段可用”。</span></div></div>
+</section>
+
+<section class="slide" data-min="4" data-notes="解释三者关系。Multi-Agent 不是第三层产品，而是执行层可选择的一种组织形态。Organization Engine 用收益证据决定生产主链默认走哪种组织；沙箱内多种组织形态可并行探索，不以单 Agent 胜出为前置条件。">
+ <div class="eyebrow">三者关系</div><h2>AgentLoop 是发动机，Multi-Agent 是变速箱，Regent 是整车控制系统</h2>
+ <div class="arch"><div class="archbox"><div class="label">Execution primitive</div><h3>AgentLoop</h3><p>一个 Agent 在一次 Run 内：思考、调用工具、观察、提交、验证、同轨迹修复。</p><p class="strong">优化目标：单次执行质量与成本。</p></div><div class="archarrow">⊂</div><div class="archbox"><div class="label">Organization option</div><h3>Multi-Agent</h3><p>多个 Loop 按角色和依赖协作；增加并行、独立验证，也增加协调和冲突。</p><p class="strong">优化目标：组织净收益。</p></div><div class="archarrow">⊂</div><div class="archbox"><div class="label">Durable control plane</div><h3>Regent</h3><p>从 Goal 到外部结果，选择组织、授予权限、记录状态、恢复运行、形成证据。</p><p class="strong">优化目标：目标达成的可治理性。</p></div></div>
+</section>
+
+<section class="slide" data-min="3" data-notes="让大家口头判断三个案例，不需要真投票。答案：查一个确定事实通常单 Loop；跨天建应用需要 Regent；三个独立数据源可并行采集，适合固定多 Agent，但最终合并和验证仍需要协议。">
+ <div class="eyebrow">快速判断</div><h2>不要问“能不能多 Agent”，先问“问题属于哪一层”</h2>
+ <div class="grid g3"><div class="card"><h3>查清一个 API 行为</h3><p>单次、低副作用、短上下文。</p><div class="callout">优先：单 AgentLoop</div></div><div class="card"><h3>跨两天交付一个应用</h3><p>要恢复、审批、预算、部署和外部验收。</p><div class="callout">需要：Regent 控制面</div></div><div class="card"><h3>并行研究三个独立市场</h3><p>分区清晰、合并规则明确、可独立验证。</p><div class="callout">候选：固定 Multi-Agent</div></div></div>
+</section>
+
+<section class="slide dark section" data-min="1" data-notes="章节过渡。接下来不讲代码目录，而讲架构责任如何切分。"><div class="eyebrow">Part Ⅱ</div><h1>Regent：让自治变得可治理</h1><p class="sub">它的核心不是“更聪明”，而是“在边界内持续交付”。</p><div class="ghost">Ⅱ</div></section>
+
+<section class="slide" data-min="4" data-notes="用白话解释冻结定义。逐句拆：输入是自然语言目标；组织是手段；应用能独立运行；结果必须来自外部证据；系统必须停止。">
+ <div class="eyebrow">产品定义</div><h2>Regent 把自然语言目标变成可独立运行、可外部验证的结果</h2>
+ <div class="quote">“在约束、资源、授权和治理边界内，形成当前最合适的<span class="accent">最小人机组织</span>，创建并运营可脱离 Core 的应用，并依据<span class="accent">外部结果</span>持续调整。”</div><div class="rule"></div>
+ <div class="grid g3"><div><h3>输入不是 PRD 表单</h3><p>GoalSpec 是系统解释的结果，不是用户先填完的作业。</p></div><div><h3>组织不是产品身份</h3><p>单 Agent、固定团队和人类参与都只是候选手段。</p></div><div><h3>循环不是无限运行</h3><p>成功、耗尽、不可恢复失败或取消，都必须形成有证据的终态。</p></div></div>
+</section>
+
+<section class="slide" data-min="4" data-notes="讲控制面/数据面分离。最重要的设计原则：Kernel 不能依赖模型记忆来保存事实；Agent 不能直接改状态；外部副作用必须经过 Permit。">
+ <div class="eyebrow">架构边界</div><h2>Kernel 不是 Agent：一个管“事实与权限”，一个管“局部求解”</h2>
+ <div class="compare"><div class="good"><h3>Regent Core / 控制面</h3><ul><li>Goal、Work、Run 的权威状态</li><li>调度、租约、Outbox 与耐久计时</li><li>Permit、人工任务、密钥与审计</li><li>Artifact、Evidence、Observation</li><li>组织与能力注册、评测和晋级</li></ul></div><div class="bad"><h3>Agent 不应拥有的权力</h3><ul><li>凭对话内容直接改权威状态</li><li>绕过授权执行外部副作用</li><li>把自评或内部 smoke 当成功</li><li>在生成时偷偷补造业务需求</li><li>用无限重试掩盖不可恢复失败</li></ul></div></div>
+</section>
+
+<section class="slide" data-min="4" data-notes="讲事实层次。一个常见反模式是把聊天记录当数据库。对话只是投影；模型输出是候选；Artifact 是不可变证据载体，但它本身不授权副作用。">
+ <div class="eyebrow">事实架构</div><h2>把“事实、证据、界面、模型建议”分开</h2>
+ <table class="matrix"><thead><tr><th>层次</th><th>它是什么</th><th>能否直接驱动状态/副作用</th><th>典型例子</th></tr></thead><tbody><tr><td><b>事实源</b></td><td>唯一可写权威，带版本和状态机</td><td class="yes">可以，但须满足不变式</td><td>Goal、Run、Permit、ExternalOperation、Outbox</td></tr><tr><td><b>Artifact / Evidence</b></td><td>不可变、内容寻址、可审计</td><td>提供依据，不单独授权</td><td>代码快照、测试报告、观察记录、SBOM</td></tr><tr><td><b>投影</b></td><td>为人显示，可从事实重建</td><td class="no">不可以</td><td>对话时间线、进度页面、Agent 活动视图</td></tr><tr><td><b>模型输出</b></td><td>概率性候选，必须校验</td><td class="no">不可以</td><td>计划、假设、代码变更草案、路由建议</td></tr></tbody></table>
+ <div class="callout">删除界面投影后，系统仍应能从事实源 + Artifact 重建完整叙事。</div>
+</section>
+
+<section class="slide" data-min="4" data-notes="沿着一条用户价值链讲。每一步都产生可审计对象，而不是一段长 Prompt。强调内部通过不等于外部成功，Observation 和 Gate 才接近业务结果。">
+ <div class="eyebrow">目标闭环</div><h2>正确的闭环不是“生成完了”，而是“外部结果改变了下一轮”</h2>
+ <div class="flow"><div class="node"><b>Goal</b><span>意图与约束</span></div><div class="arrow">→</div><div class="node"><b>Evidence</b><span>事实与未知</span></div><div class="arrow">→</div><div class="node"><b>Hypothesis</b><span>可比较假设</span></div><div class="arrow">→</div><div class="node"><b>Requirement</b><span>冻结成功标准</span></div><div class="arrow">→</div><div class="node"><b>Build</b><span>隔离生成验证</span></div></div>
+ <div class="flow"><div class="node"><b>Preview</b><span>可访问产物</span></div><div class="arrow">→</div><div class="node"><b>Observation</b><span>真实行为</span></div><div class="arrow">→</div><div class="node"><b>Gate</b><span>按标准判断</span></div><div class="arrow">→</div><div class="node"><b>Decision</b><span>继续/修订/停止</span></div><div class="arrow">↺</div><div class="node"><b>Next state</b><span>证据驱动</span></div></div>
+ <div class="callout">模型自评、代码存在、页面能打开，只能说明“内部动作发生过”。</div>
+</section>
+
+<section class="slide" data-min="3" data-notes="解释 capability pool。工具发现协议如 MCP 只解决发现和调用语义，不解决认证、最小权限、撤销、审计。能力获取顺序能避免系统一遇缺口就让模型现场造轮子。">
+ <div class="eyebrow">能力架构</div><h2>缺能力时，顺序应该是“复用优先，构建最后”</h2>
+ <div class="flow"><div class="node"><b>1 复用</b><span>已有认证能力</span></div><div class="arrow">→</div><div class="node"><b>2 配置</b><span>参数/权限适配</span></div><div class="arrow">→</div><div class="node"><b>3 组合</b><span>多能力编排</span></div><div class="arrow">→</div><div class="node"><b>4 构建</b><span>沙箱内新能力</span></div><div class="arrow">→</div><div class="node"><b>5 请求人类</b><span>授权/信息/决策</span></div></div>
+ <div class="grid g2"><div class="card blue"><h3>MCP 解决什么</h3><p>工具发现、参数契约与调用语义。它是接口层，不是治理层。</p></div><div class="card redtop"><h3>Regent 仍必须解决什么</h3><p>能力认证、Permit、预算、fencing、撤销、审计、失败恢复与证据归档。</p></div></div>
+</section>
+
+<section class="slide" data-min="3" data-notes="状态机卫生是核心。每个中间态要有超时出口；等待人类不占 worker；外部调用要幂等且可对账；同一个失败重复出现必须停止，而不是递归套娃。">
+ <div class="eyebrow">可靠性骨架</div><h2>长任务的基本功：不悬停、可重放、不重复副作用</h2>
+ <div class="grid g4"><div class="card blue"><h3>Durable State</h3><p>进程退出不等于任务消失；状态进入数据库并带版本。</p></div><div class="card cyan"><h3>Lease + Heartbeat</h3><p>谁在执行必须可判定；失联后允许安全接管。</p></div><div class="card green"><h3>Outbox + DLQ</h3><p>状态与事件同事务；毒事件有死信和修复路径。</p></div><div class="card amber"><h3>Idempotency</h3><p>外部调用有幂等键、fencing token 和对账机制。</p></div></div>
+ <div class="formula">任何非终态，都必须回答：<span>谁会在什么时候，把它推进到哪里？</span></div>
+</section>
+
+<section class="slide dark section" data-min="1" data-notes="章节过渡。说明架构不是一次设计出来的，复杂度由真实失败引入；但复杂度也可能反过来吞噬交付。"><div class="eyebrow">Part Ⅲ</div><h1>架构如何演变，又如何失控</h1><p class="sub">每一层复杂度都应该偿还一种已观察到的失败。</p><div class="ghost">Ⅲ</div></section>
+
+<section class="slide" data-min="4" data-notes="按演变顺序讲。P0 是可靠内核；P1 是外部结果闭环；之后才是能力与组织；最后才是自适应组织。指出项目曾在第二阶段还没真正稳时就重仓第三、四阶段。">
+ <div class="eyebrow">演进时间轴</div><h2>正确演进：先把“单条链路”做硬，再扩大组织自由度</h2>
+ <div class="timeline"><div class="phase"><div class="dot"></div><h3>脚本原型</h3><p>Goal → LLM → 文件<br>证明可行性</p></div><div class="phase"><div class="dot"></div><h3>P0 可靠内核</h3><p>状态、权限、证据、恢复、预算</p></div><div class="phase"><div class="dot"></div><h3>P1 单 Agent 闭环</h3><p>生成、验证、部署、观察、修复</p></div><div class="phase"><div class="dot"></div><h3>固定组织候选</h3><p>明确角色、依赖、合并与验证协议</p></div><div class="phase"><div class="dot"></div><h3>自适应组织</h3><p>沙箱内默认可试；统计 Gate 只决定何时扩大现实生产权限</p></div></div>
+ <div class="callout warn"><b>真实偏航：</b>单 Agent 交付闭环还不稳定时，项目已经投入大量精力建设组织引擎、治理闸门和评测框架。</div>
+</section>
+
+<section class="slide" data-min="4" data-notes="说明架构复杂度预算。每增加一个服务、队列、Agent 或 Gate，都应该绑定一个具体故障和可测收益。否则是“可能有用”的复杂度。">
+ <div class="eyebrow">复杂度预算</div><h2>新增组件前，先写清楚它要消灭哪一种失败</h2>
+ <table class="matrix"><thead><tr><th>拟新增机制</th><th>它应该偿还的故障</th><th>必须观察的信号</th><th>没有证据时</th></tr></thead><tbody><tr><td>消息队列 / 事件总线</td><td>数据库 Outbox 吞吐已成瓶颈</td><td>排队时间、消费延迟、重放成本</td><td>继续模块化单体</td></tr><tr><td>第二个 Agent</td><td>可分区工作或独立验证明显受益</td><td>成功率、延迟、成本、协调失败</td><td>优化强单 Agent</td></tr><tr><td>新审批 Gate</td><td>存在不可逆或高风险外部效应</td><td>风险降低、等待时间、误拦截</td><td>用策略自动化</td></tr><tr><td>新文档/新规范</td><td>已有权威源无法表达关键决策</td><td>冲突减少、执行可验证</td><td>更新唯一权威源</td></tr></tbody></table>
+</section>
+
+<section class="slide" data-min="3" data-notes="这是关键拐点。强调失败不是定义错，而是架构顺序错和验收语义错。一个高质量规范完全可能掩盖一个没有用户进展的系统。">
+ <div class="eyebrow">演进洞察</div><h2>复杂度增长得比交付能力快，架构就会从护栏变成阻力</h2>
+ <div class="grid wide-left"><div class="card redtop"><div class="big red">↑</div><h3>我们快速增加了</h3><ul><li>组织编排与角色合同</li><li>治理 Gate 和 DecisionRecord</li><li>评测 Harness 与大量指标</li><li>诊断、审计、修复计划</li></ul></div><div class="card green"><div class="big green">→</div><h3>但用户侧交付没有同步增长</h3><p>最小闭环、状态出口、事件消费、干净构建和真实验收仍然不稳。</p></div></div>
+ <div class="formula">架构成熟度 ≠ 组件数量；它等于<span>在故障下仍能交付可验证结果的能力</span></div>
+</section>
+
+<section class="slide dark section" data-min="1" data-notes="进入失败复盘。提醒数字来自 2026-08-02 仓库诊断快照，是当时的项目状态，用于教学而非描述永久现状。"><div class="eyebrow">Part Ⅳ</div><h1>失败复盘：定义满分，执行敲边鼓</h1><p class="sub">不是为了批判，而是为了识别 Agent 项目最危险的伪进展。</p><div class="ghost">Ⅳ</div></section>
+
+<section class="slide" data-min="3" data-notes="逐个数字讲，不要渲染成永久结论。关键在于这些信号同时出现：积压、悬停、路径失配、核心编排器膨胀、文档爆炸。这不是单点 bug，是系统性优先级错位。">
+ <div class="eyebrow">2026-08-02 诊断快照</div><h2>失败不是感受：用户进展、队列与终态同时发出红灯</h2>
+ <div class="metric-row"><div class="metric"><b>32 天</b><span>无用户侧有效进展</span></div><div class="metric"><b>21</b><span>GenerationRun 处于 PENDING</span></div><div class="metric"><b>8</b><span>FAILED 无法进入明确终态</span></div><div class="metric"><b>4,400+</b><span>核心执行编排器代码行数</span></div></div>
+ <div class="grid g2" style="margin-top:18px;flex:0"><div class="callout warn"><b>工程信号：</b>干净 checkout 曾因未入库模块直接 ImportError；失败经验数据因 schema 不兼容被静默过滤。</div><div class="callout"><b>组织信号：</b>多 Agent 与治理能力建设领先于强单 Agent 真实任务基线。</div></div>
+</section>
+
+<section class="slide" data-min="4" data-notes="把症状归因。A 是核心根因；B 解释为什么状态看起来绿；C 是 Agent 系统放大普通工程问题；D 是架构顺序；E 是组织心理层面的伪进展。">
+ <div class="eyebrow">五个根因</div><h2>看似是很多 Bug，本质是五种基本功缺口</h2>
+ <div class="grid g3"><div class="card redtop"><h3>A 单 Agent 闭环未闭合</h3><p>没有稳定的 Goal → 进展 → 结果 → 终态。</p></div><div class="card redtop"><h3>B 控制流冒充能力</h3><p>“代码路径存在”被当成“真实行为已通过”。</p></div><div class="card amber"><h3>C 工程卫生欠账</h3><p>提交、迁移、事件消费、背压和幂等不稳。</p></div><div class="card amber"><h3>D 优先级倒置</h3><p>先做高阶 graph，再补单 Agent 基本功。</p></div><div class="card blue"><h3>E 元工作替代真工作</h3><p>文档、审计与计划制造了严谨工作的幻觉。</p></div><div class="card green"><h3>共同结果</h3><p>治理越来越完整，用户可验证产出却没有增加。</p></div></div>
+</section>
+
+<section class="slide" data-min="3" data-notes="这是最重要的验收课。列举伪证据：类存在、路由接线、测试 mock 通过、页面返回 200。真实证据需要固定任务、真实模型/工具/预算、外部观察、可复算报告。">
+ <div class="eyebrow">验收语义</div><h2>“控制流已实现”是工程进度，不是能力证据</h2>
+ <div class="compare"><div class="bad"><h3>伪验收：证明东西“存在”</h3><ul><li>类名、函数名或字符串能搜到</li><li>开关和路由已经接线</li><li>Mock 单测覆盖了预期分支</li><li>页面能打开、接口返回 200</li><li>Agent 自己说“任务完成”</li></ul></div><div class="good"><h3>真验收：证明结果“发生”</h3><ul><li>冻结任务集端到端重复运行</li><li>真实模型、工具、权限与总预算</li><li>产物由独立验证器检查</li><li>外部 Observation 对齐成功标准</li><li>失败能进入明确、可解释终态</li></ul></div></div>
+</section>
+
+<section class="slide" data-min="3" data-notes="讲 Agent 系统为什么特别吃工程卫生：随机性让复现更难，长任务让中间态更多，工具副作用让重试有风险。因此传统工程纪律不是落后的包袱，而是 AI 系统的稳定器。">
+ <div class="eyebrow">工程纪律</div><h2>Agent 越不确定，底层工程就越要确定</h2>
+ <div class="grid g4"><div class="card blue"><h3>版本控制</h3><p>新模块、迁移与测试成套提交；干净环境必须能启动。</p></div><div class="card cyan"><h3>数据契约</h3><p>字段演进带迁移与兼容读取；禁止静默丢失学习数据。</p></div><div class="card green"><h3>可观测性</h3><p>区分排队、执行、等待、阻塞；记录主失败原因而非噪声。</p></div><div class="card amber"><h3>故障注入</h3><p>模拟超时、重复投递、worker 死亡、模型截断与权限拒绝。</p></div></div>
+ <div class="callout warn">“模型有随机性”不是降低测试标准的理由，而是增加不变式测试与统计实验的理由。</div>
+</section>
+
+<section class="slide" data-min="3" data-notes="讲反指标。更多 Agent、更多消息、更长上下文会自然增长，但可能代表协调浪费。更好的北极星是单位预算下可验证结果、终态率、恢复成功率和人工介入质量。">
+ <div class="eyebrow">反指标</div><h2>这些数字上涨，可能意味着系统更差</h2>
+ <div class="grid g3"><div class="card redtop"><div class="big red">+Agent</div><h3>Agent 数量</h3><p>不是能力指标；更多成员可能只增加同步成本。</p></div><div class="card redtop"><div class="big red">+Msg</div><h3>消息与协作轮次</h3><p>可能是角色不清、合并失败或隐式冲突。</p></div><div class="card redtop"><div class="big red">+Ctx</div><h3>上下文与 Token</h3><p>可能是记忆边界不清、没有 Artifact 卸载。</p></div></div>
+ <div class="formula">更好的北极星：<span>单位预算的可验证目标结果</span> + 终态率 + 恢复成功率</div>
+</section>
+
+<section class="slide dark section" data-min="1" data-notes="章节过渡。接下来给一条可执行搭建路径。"><div class="eyebrow">Part Ⅴ</div><h1>正确搭建：先闭环，再组织</h1><p class="sub">把每一个架构选择变成可证伪的假设。</p><div class="ghost">Ⅴ</div></section>
+
+<section class="slide" data-min="4" data-notes="这是主路线图。每一级都要有出场条件。不要并行全做。第 1、2 级往往占 60% 时间；Multi-Agent 只是第 6 级的候选。">
+ <div class="eyebrow">七级搭建路线</div><h2>一个可靠 Agent 系统，应按这个顺序长出来</h2>
+ <div class="flow"><div class="node"><b>1 成功标准</b><span>固定任务 + 外部结果</span></div><div class="arrow">→</div><div class="node"><b>2 单 Loop</b><span>工具、提交、验证、停止</span></div><div class="arrow">→</div><div class="node"><b>3 耐久执行</b><span>状态、租约、恢复、幂等</span></div><div class="arrow">→</div><div class="node"><b>4 治理</b><span>权限、Permit、审计</span></div></div>
+ <div class="flow"><div class="node"><b>5 外部闭环</b><span>Observation 驱动下一轮</span></div><div class="arrow">→</div><div class="node"><b>6 组织实验</b><span>沙箱内并行候选拓扑对照</span></div><div class="arrow">→</div><div class="node"><b>7 条件晋级</b><span>扩大现实权限时的统计 Gate + 回滚</span></div></div>
+ <div class="callout"><b>出场规则：</b>前一级未通过真实固定用例时，不扩大该能力的<b>现实生产权限</b>；沙箱内的研究、原型与组织试验默认开放（定义 3.0 ATTRIBUTE_7）。</div>
+</section>
+
+<section class="slide" data-min="4" data-notes="给出最小 AgentLoop 的硬合同。显式 submit 很重要：没有 submit 不允许把自然语言停止当成功。验证失败应在同一轨迹做有界修复，重复同一 gap 时停止，避免递归 self-run。">
+ <div class="eyebrow">最小 AgentLoop 合同</div><h2>先做一个“失败也很清楚”的单 Agent</h2>
+ <div class="grid g2"><div class="card blue"><h3>必须具备</h3><ul><li>Goal anchor 与成功标准每轮可见</li><li>最小权限工具集与工作区边界</li><li>计划 / todo 可持久化</li><li>显式 submit，不把自然语言停机当完成</li><li>独立验证器返回结构化 gaps</li></ul></div><div class="card green"><h3>必须停止</h3><ul><li>最大轮数、Token、时间和成本预算</li><li>相同 gap 指纹重复出现</li><li>权限不足或外部依赖不可恢复</li><li>验证无改进且修复预算耗尽</li><li>用户取消或更高优先级治理规则触发</li></ul></div></div>
+ <div class="formula">Stop condition 是能力的一部分，不是失败后的补丁。</div>
+</section>
+
+<section class="slide" data-min="3" data-notes="从单 Loop 升级到耐久系统。强调聊天会话、Agent 身份、运行 Run 不是同一个东西。Project session 只绑定身份、工作区和 checkpoint，不另造第三个循环。">
+ <div class="eyebrow">耐久会话</div><h2>把“连续体验”与“连续进程”解耦</h2>
+ <div class="grid g3"><div class="card blue"><h3>Dialogue</h3><p>用户澄清、补充约束、查看进度。它是交互通道，不是执行状态机。</p></div><div class="card cyan"><h3>Project Session</h3><p>持久绑定 Agent 身份、工作区授权、checkpoint 和 epoch，支持跨 Run 恢复。</p></div><div class="card green"><h3>Agent Run</h3><p>一次有预算的执行轨迹。可成功、失败、耗尽或被替换。</p></div></div>
+ <div class="callout">不要为了“连续感”创造多个重叠 AgentLoop；执行仍应有唯一内核。</div>
+</section>
+
+<section class="slide" data-min="4" data-notes="讲多 Agent 决策矩阵。重点：任务强顺序依赖、单 Agent 已高成功率时不默认多 Agent。适合的是可分区、独立验证、并行收益大、合并协议清晰的任务。">
+ <div class="eyebrow">Multi-Agent 准入</div><h2>多 Agent 只有在“可分、可合、可证”时才值得</h2>
+ <table class="matrix"><thead><tr><th>任务特征</th><th>倾向单 Agent</th><th>倾向固定 Multi-Agent</th><th>判断问题</th></tr></thead><tbody><tr><td>依赖结构</td><td>强顺序、频繁共享隐状态</td><td>子任务弱耦合、可并行</td><td>能否画出清晰 DAG？</td></tr><tr><td>验证需求</td><td>同一执行者即可可靠验证</td><td>需要独立审查或对抗性验证</td><td>独立性带来多少风险下降？</td></tr><tr><td>单 Agent 基线</td><td>成功率高、成本可控</td><td>在特定任务族持续失败</td><td>失败是否真由组织造成？</td></tr><tr><td>合并成本</td><td>输出强耦合、冲突难解</td><td>接口冻结、合并规则明确</td><td>谁拥有最终决策权？</td></tr><tr><td>并行上限</td><td>关键路径不可缩短</td><td>墙钟时间可显著下降</td><td>收益能否覆盖协调 Token？</td></tr></tbody></table>
+</section>
+
+<section class="slide" data-min="4" data-notes="给出固定组织搭建法。先固定拓扑，而不是让模型自由招人。角色合同必须含输入、输出、权限、终止条件。协调器不要成为超级 Agent；验证者不能只看同一份思路的复述。">
+ <div class="eyebrow">固定组织模板</div><h2>第一次 Multi-Agent，不要自适应：先把接口冻结</h2>
+ <div class="arch"><div class="archbox"><div class="label">Coordinator</div><h3>任务拆分者</h3><p>冻结 DAG、分配预算、定义交付接口；不包办成员工作。</p><p class="strong">输出：任务合同 + 依赖 + 合并规则</p></div><div class="archarrow">→</div><div class="archbox"><div class="label">Workers</div><h3>并行执行者</h3><p>在隔离工作区按合同产出 Artifact；禁止越权修改共享事实。</p><p class="strong">输出：可独立验证的增量</p></div><div class="archarrow">→</div><div class="archbox"><div class="label">Independent verifier</div><h3>独立验证者</h3><p>按冻结成功标准验收，报告 gap；不得用多数投票代替事实。</p><p class="strong">输出：证据化 verdict</p></div></div>
+</section>
+
+<section class="slide" data-min="4" data-notes="解释公平实验。A/B 只改变组织形态；其他模型、工具、权限、提示、任务和总预算冻结。按任务重复运行，报告置信区间和护栏。不是只比平均分。">
+ <div class="eyebrow">组织实验</div><h2>Multi-Agent 的价值必须在同预算、盲评实验中被证明</h2>
+ <div class="grid wide-right"><div class="card blue"><h3>冻结变量</h3><ul><li>任务集与成功标准</li><li>模型与采样配置</li><li>工具、技能与权限</li><li>总 Token / 时间 / 金钱预算</li><li>外部依赖与运行环境</li></ul></div><div><table class="matrix"><thead><tr><th>核心指标</th><th>为什么必须看</th></tr></thead><tbody><tr><td>外部任务成功率 + 95% CI</td><td>判断提升是否超过随机波动</td></tr><tr><td>墙钟延迟与关键路径</td><td>验证并行是否真省时间</td></tr><tr><td>总成本与协调 Token 占比</td><td>识别“用更多资源买同样结果”</td></tr><tr><td>结构性失败率</td><td>重复、角色越界、冲突、漏验证</td></tr><tr><td>恢复率与人工介入</td><td>判断系统是否更可运营</td></tr></tbody></table></div></div>
+ <div class="callout">净收益与护栏结果决定<b>是否扩大现实生产权限</b>，不决定能否进入候选：候选拓扑（含自适应拓扑）在沙箱内默认可试，事前不需要先证明有效（定义 3.0 ATTRIBUTE_2/5/6）。</div>
+</section>
+
+<section class="slide" data-min="4" data-notes="给运营护栏。强调 kill switch、canary、稳定分桶、影子流量、决策记录和回滚。先在低副作用任务逐步放量。">
+ <div class="eyebrow">上线策略</div><h2>任何“更智能”的策略，都必须可观测、可回滚、可否决</h2>
+ <div class="grid g4"><div class="card blue"><h3>Shadow</h3><p>旁路运行，不产生外部副作用；先比较输出与成本。</p></div><div class="card cyan"><h3>Canary</h3><p>稳定分桶，小流量真实任务；同时观察质量和故障漏斗。</p></div><div class="card green"><h3>Decision Gate</h3><p>报告可复算，明确 GO / HOLD / STOP；默认不自动晋级。</p></div><div class="card redtop"><h3>Kill Switch</h3><p>运行时立即回到安全基线；覆盖任何默认策略。</p></div></div>
+ <div class="formula">创新速度来自<span>可逆性</span>，不是来自取消护栏。</div>
+</section>
+
+<section class="slide" data-min="5" data-notes="课堂练习，分 3-4 人讨论 3 分钟，2 分钟分享。期待答案：单 Agent + 独立规则/测试验证；暂不需要多 Agent。控制面负责权限、状态、审计、重试；Agent 负责局部读取、计算和生成。">
+ <div class="eyebrow">课堂练习 · 5 分钟</div><h2>给实验室搭一个“数据清洗与报告 Agent”，你会怎么切层？</h2>
+ <div class="exercise"><h3>场景</h3><p>输入 CSV 和自然语言要求；输出清洗后的数据、统计图和一页结论。数据含敏感字段，任务可能运行 40 分钟，失败后允许恢复。</p></div>
+ <div class="grid g3" style="margin-top:18px"><div class="card"><h3>问题 A</h3><p>哪些责任属于 AgentLoop，哪些属于控制面？</p></div><div class="card"><h3>问题 B</h3><p>最小成功标准与外部证据是什么？</p></div><div class="card"><h3>问题 C</h3><p>现在需要 Multi-Agent 吗？什么证据会改变你的决定？</p></div></div>
+</section>
+
+<section class="slide" data-min="4" data-notes="给参考答案。不要把唯一正确答案讲死，但强调架构责任。数据脱敏应由确定性策略和权限层兜底，而不是全靠 Prompt。">
+ <div class="eyebrow">练习参考</div><h2>一个克制的方案，通常比“全自动团队”更接近生产</h2>
+ <div class="grid g2"><div class="card blue"><h3>第一版</h3><ul><li>单 AgentLoop：读取、规划、生成转换脚本、运行、提交</li><li>确定性验证：schema、缺失值、行数守恒、敏感字段扫描</li><li>控制面：工作区隔离、预算、checkpoint、审计、恢复</li><li>成功：固定数据集上结果正确，报告可追溯到清洗步骤</li></ul></div><div class="card green"><h3>何时升级</h3><ul><li>数据分片可独立并行，墙钟成为真实瓶颈</li><li>需要独立统计审查，且能降低错误率</li><li>单 Agent 在冻结任务集上持续暴露同类组织性缺陷</li><li>接口、合并和冲突解决规则已经冻结</li></ul></div></div>
+</section>
+
+<section class="slide" data-min="4" data-notes="作为可执行 checklist 收束。提醒这份表适用于绝大多数 Agent 项目立项/架构评审。">
+ <div class="eyebrow">架构评审清单</div><h2>开工前，请让团队对这 12 个问题给出同一个答案</h2>
+ <div class="grid g2"><div class="check"><b>01</b> 外部成功标准是什么？<br><b>02</b> 哪些事实是唯一权威？<br><b>03</b> 模型输出在哪里被校验？<br><b>04</b> 每个非终态由谁推进？<br><b>05</b> 重试如何避免重复副作用？<br><b>06</b> 预算耗尽后留下什么？</div><div class="check"><b>07</b> 人工审批只用于哪些真风险？<br><b>08</b> 进程死亡后如何恢复？<br><b>09</b> 干净环境能否重建？<br><b>10</b> 单 Agent 基线有多强？<br><b>11</b> Multi-Agent 净收益如何实验？<br><b>12</b> 新策略如何一键回滚？</div></div>
+</section>
+
+<section class="slide dark" data-min="3" data-notes="结尾重复三句话。第一句是执行层，第二句是控制面，第三句是组织层。最后邀请提问时，可以让听众选择从架构、失败案例或多 Agent 实验任一角度展开。">
+ <div class="eyebrow">Takeaways</div><h1>三个结论，带回你的下一个 Agent 项目</h1><div class="rule"></div>
+ <p class="quote" style="font-size:28px">① 先做一个能稳定交付、失败有明确出口的 <span class="accent">AgentLoop</span>。<br>② 用 <span class="accent">Regent 式控制面</span>承载状态、权限、证据与恢复。<br>③ 把 <span class="accent">Multi-Agent</span> 当作待证明的组织策略，而不是默认答案。</p>
+ <span class="chip">问题不是“多少个 Agent”，而是“怎样用最小组织交付可验证结果”</span>
+</section>
+
+<section class="slide" data-min="0" data-notes="备用资料页，不计入主讲时间。回答追问时可展示。所有数字均来自仓库在 2026-08-02 的诊断快照；产品定义与架构原则来自冻结定义、PRD 与技术规范。">
+ <div class="eyebrow">资料与边界</div><h2>本培训依据 Regent 仓库当前规范与阶段性诊断</h2><p class="takeaway">这些材料用于提炼可迁移的方法，不将阶段性故障描述为永久现状。</p>
+ <div class="grid g2"><div class="card"><h3>产品与架构</h3><p class="source">docs/definitions/REGENT-DEFINITION-3.0.txt</p><p class="source">Regent-PRD.md</p><p class="source">Regent-Technical-Spec.md</p><p class="source">Regent-Plan.md</p><p class="source">Regent-Measurement-Decision-Framework.md</p></div><div class="card"><h3>失败复盘证据</h3><p class="source">Regent-Failure-Case-Analysis-2026-08-02.md</p><p class="source">delivery-pipeline-unblock-plan-2026-08-01.md</p><p class="source">code-regression-check-2026-08-02.md</p><p class="source">doc_impl_readme_conformance_check_2026-07-31.md</p><p class="source">core/src/regent/agent/agent_runner.py</p></div></div>
+</section>
+
+</main>
+<aside id="speaker" class="speaker"><h3>讲者备注</h3><div class="time"></div><p></p></aside>
+<div class="help">← → 翻页 · N 讲者备注 · F 全屏 · Home/End · P 打印/PDF</div><div id="timer" class="timer">00:00</div>
+<script>
+const slides=[...document.querySelectorAll('.slide')],deck=document.getElementById('deck'),panel=document.getElementById('speaker'),timer=document.getElementById('timer');let i=0,start=Date.now();
+slides.forEach((s,n)=>{let f=document.createElement('div');f.className='foot';f.innerHTML=`<span>Regent 架构演进与 Agent 系统搭建</span><span>${String(n+1).padStart(2,'0')} / ${slides.length}</span>`;s.appendChild(f);let p=document.createElement('div');p.className='progress';p.style.width=`${(n+1)/slides.length*100}%`;s.appendChild(p)});
+function fit(){let k=Math.min(innerWidth/1280,innerHeight/720);deck.style.transform=`translate(-50%,-50%) scale(${k})`}
+function show(n){i=Math.max(0,Math.min(slides.length-1,n));slides.forEach((s,j)=>s.classList.toggle('active',j===i));location.hash=`${i+1}`;let s=slides[i];panel.querySelector('.time').textContent=`建议用时：${s.dataset.min||0} 分钟`;panel.querySelector('p').textContent=s.dataset.notes||'本页无备注。';document.title=`${i+1}/${slides.length}｜Regent 架构演进与 Agent 系统搭建`}
+function fs(){if(!document.fullscreenElement)document.documentElement.requestFullscreen?.();else document.exitFullscreen?.()}
+addEventListener('resize',fit);addEventListener('keydown',e=>{if(['ArrowRight','PageDown',' ','Enter'].includes(e.key)){e.preventDefault();show(i+1)}else if(['ArrowLeft','PageUp','Backspace'].includes(e.key)){e.preventDefault();show(i-1)}else if(e.key==='Home')show(0);else if(e.key==='End')show(slides.length-1);else if(e.key.toLowerCase()==='n')panel.classList.toggle('show');else if(e.key.toLowerCase()==='f')fs();else if(e.key.toLowerCase()==='p')print()});
+setInterval(()=>{let s=Math.floor((Date.now()-start)/1000);timer.textContent=`${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`},1000);fit();let h=parseInt(location.hash.slice(1),10);show(Number.isFinite(h)?h-1:0);
+</script>
+</body>
+</html>
+
+

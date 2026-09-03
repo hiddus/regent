@@ -35,16 +35,26 @@ from regent.application.compliance_risk_service import (
     ComplianceChecker,
     ComplianceStatus,
 )
-from regent.application.delivery_gap_recovery import DeliveryGapRecoveryService
+from regent.application.conversation_service import (
+    append_project_message,
+    append_project_timeline_event,
+)
+from regent.application.delivery_gap_recovery import (
+    DeliveryGapRecoveryResult,
+    DeliveryGapRecoveryService,
+)
 from regent.application.delivery_rejection import DeliveryRejection, reasons_from_exception
 from regent.application.delivery_state import DeliveryState, decide_delivery_verdict
+from regent.application.delivery_state_service import (
+    record_delivery_state,
+    verdict_inputs_for_recovery,
+)
 from regent.application.discovery_worker import DiscoveryWorker
 from regent.application.evidence_policy import (
     collect_authorized_urls,
     goal_requires_external_evidence,
 )
 from regent.application.execution_events import (
-    APP_BUILD_PASSED,
     APP_BUILD_REQUESTED,
     CAPABILITY_RESOLUTION_REQUESTED,
     CAPABILITY_RESOLUTION_SATISFIED,
@@ -65,7 +75,6 @@ from regent.application.execution_events import (
     QUALITY_APPROVAL_REQUESTED,
     RELEASE_APPROVAL_COMPLETED,
     REQUIREMENT_REQUESTED,
-    REQUIREMENT_VALIDATED,
     WORKSPACE_SNAPSHOT_READY,
     EventEnvelope,
     make_idempotency_key,
@@ -104,6 +113,7 @@ from regent.application.product_discovery_service import (
     ProductDiscoveryService,
     RequirementRevisionService,
 )
+from regent.application.project_lifecycle import suggest_project_next_steps
 from regent.application.release_service import (
     CreateReleaseCandidate,
     ReleaseService,
@@ -126,8 +136,6 @@ from regent.infrastructure.models import (
     CapabilityModel,
     CapabilityResolutionItemModel,
     CapabilityResolutionPlanModel,
-    ConversationMessageModel,
-    ConversationModel,
     DeploymentModel,
     DiscoveryRoundModel,
     EvidenceModel,
@@ -156,6 +164,9 @@ _ZERO_HASH = "0" * 64
 
 
 class ExecutionOrchestrator:
+    _append_conversation_message = staticmethod(append_project_message)
+    _append_conversation_event = staticmethod(append_project_timeline_event)
+    _suggest_project_next_steps = staticmethod(suggest_project_next_steps)
     """P1 execution main chain orchestrator."""
 
     def __init__(
@@ -3636,7 +3647,7 @@ class ExecutionOrchestrator:
                             "verdict": task_verdict.as_dict(),
                         },
                     )
-            except Exception as task_exc:
+            except Exception:
                 task_overturn = True
                 logger.warning(
                     "goal task verification failed closed",
@@ -4859,7 +4870,7 @@ class ExecutionOrchestrator:
                 # --- Outer loop: milestone boundary revision check ---
                 from regent.application.goal_revision_service import GoalRevisionService
 
-                revision_result = await GoalRevisionService(self._sessions).assess_and_revise(
+                await GoalRevisionService(self._sessions).assess_and_revise(
                     goal_id=goal_id,
                     trigger="milestone_boundary",
                     actor=actor,
@@ -5676,28 +5687,7 @@ class ExecutionOrchestrator:
         ``DeliveryState``，写入 ``goal.metadata_json`` 并发 ``DeliveryStateChanged``
         Outbox 事件，使状态转移可被观测/统计（north_star handoff_rate 等）。
         """
-        if recovery.recovered:
-            verdict = decide_delivery_verdict(
-                success=False,
-                needs_human=False,
-                recoverable=True,
-                budget_left=True,
-            )
-        elif recovery.terminal_exhaust:
-            verdict = decide_delivery_verdict(
-                success=False,
-                needs_human=True,
-                recoverable=True,
-                budget_left=False,
-                review_prompt=recovery.message,
-            )
-        else:
-            verdict = decide_delivery_verdict(
-                success=False,
-                needs_human=False,
-                recoverable=False,
-                budget_left=False,
-            )
+        verdict = decide_delivery_verdict(**verdict_inputs_for_recovery(recovery))
         await self._record_delivery_state(
             goal_id,
             state=verdict.state,
@@ -5747,34 +5737,13 @@ class ExecutionOrchestrator:
         gap_kind: str,
         attempts: int,
     ) -> None:
-        """CD-1.2/CD-5: persist ``delivery_state`` + emit ``DeliveryStateChanged``."""
-        from sqlalchemy.orm.attributes import flag_modified
-
-        async with self._sessions() as session, session.begin():
-            goal = await session.get(GoalModel, goal_id, with_for_update=True)
-            if goal is None:
-                return
-            metadata = dict(goal.metadata_json or {})
-            metadata["delivery_state"] = state.value
-            goal.metadata_json = metadata
-            flag_modified(goal, "metadata_json")
-            session.add(
-                make_outbox_event(
-                    EventEnvelope(
-                        event_type=DELIVERY_STATE_CHANGED,
-                        aggregate_type="goal",
-                        aggregate_id=goal.id,
-                        aggregate_version=goal.version,
-                        payload={
-                            "goal_id": str(goal.id),
-                            "delivery_state": state.value,
-                            "gap_kind": gap_kind,
-                            "attempts": attempts,
-                        },
-                        correlation_id=goal.correlation_id,
-                    )
-                )
-            )
+        await record_delivery_state(
+            self._sessions,
+            goal_id,
+            state=state,
+            gap_kind=gap_kind,
+            attempts=attempts,
+        )
 
     # ---------------------------------------------------------------------------
     # Helper methods
@@ -6019,121 +5988,6 @@ class ExecutionOrchestrator:
                 extra={"goal_id": str(goal_id)},
                 exc_info=True,
             )
-
-    @staticmethod
-    async def _append_conversation_message(
-        session: AsyncSession,
-        project_id: uuid.UUID,
-        *,
-        role: str,
-        message_type: str,
-        content: str,
-        metadata: dict[str, object],
-    ) -> None:
-        conversation = await session.scalar(
-            select(ConversationModel).where(ConversationModel.app_project_id == project_id)
-        )
-        if conversation is None:
-            return
-        last = await session.scalar(
-            select(ConversationMessageModel.ordinal)
-            .where(ConversationMessageModel.conversation_id == conversation.id)
-            .order_by(ConversationMessageModel.ordinal.desc())
-            .limit(1)
-        )
-        session.add(
-            ConversationMessageModel(
-                id=uuid.uuid4(),
-                conversation_id=conversation.id,
-                ordinal=(last or 0) + 1,
-                role=role,
-                message_type=message_type,
-                content=content,
-                metadata_json=metadata,
-                created_by="regent-core",
-            )
-        )
-
-    async def _suggest_project_next_steps(
-        self,
-        session: AsyncSession,
-        project_id: uuid.UUID,
-        goal_id: uuid.UUID,
-    ) -> None:
-        """Project lifecycle: after goal ACHIEVE, suggest next steps.
-
-        Checks goal metadata for auto_maintain flag. If enabled,
-        emits a PROJECT_LIFECYCLE_SUGGESTION event prompting the user
-        to decide the next phase (maintenance, new feature, or archive).
-        """
-        goal = await session.get(GoalModel, goal_id)
-        if goal is None:
-            return
-        goal_meta = dict(goal.metadata_json or {})
-        # Only suggest if goal/project has auto_maintain enabled.
-        if not goal_meta.get("auto_maintain"):
-            return
-        await self._append_conversation_event(
-            session,
-            project_id,
-            "PROJECT_LIFECYCLE_SUGGESTION",
-            (
-                "当前阶段目标已完成。项目已启用自动维护模式。"
-                "请选择下一步方向：\n"
-                "1. 创建维护目标（持续监控和优化）\n"
-                "2. 启动新功能阶段\n"
-                "3. 归档项目"
-            ),
-            {
-                "goal_id": str(goal_id),
-                "project_id": str(project_id),
-                "suggested_actions": [
-                    "create_maintenance_goal",
-                    "start_new_phase",
-                    "archive_project",
-                ],
-            },
-        )
-
-    @staticmethod
-    async def _append_conversation_event(
-        session: AsyncSession,
-        project_id: uuid.UUID,
-        message_type: str,
-        content: str,
-        metadata: dict[str, object],
-    ) -> None:
-        """Append event message to conversation timeline and refresh live_action."""
-        await ExecutionOrchestrator._append_conversation_message(
-            session,
-            project_id,
-            role="EVENT",
-            message_type=message_type,
-            content=content,
-            metadata=dict(metadata),
-        )
-        goal_raw = metadata.get("goal_id")
-        if not goal_raw:
-            return
-        try:
-            goal_id = uuid.UUID(str(goal_raw))
-        except ValueError:
-            return
-        goal = await session.get(GoalModel, goal_id)
-        if goal is None:
-            return
-        from regent.application.live_action import apply_live_action_on_goal, summary_for_event
-
-        stage = None
-        if isinstance(goal.metadata_json, dict):
-            stage = goal.metadata_json.get("execution_stage")
-        apply_live_action_on_goal(
-            goal,
-            summary_for_event(message_type, content),
-            stage=str(stage) if stage else None,
-            detail=content[:240] if content else None,
-            event_type=message_type,
-        )
 
 
 # ---------------------------------------------------------------------------

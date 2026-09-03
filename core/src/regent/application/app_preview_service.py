@@ -6,13 +6,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from regent.application.conversation_service import append_project_event
 from regent.application.p1_contracts import canonical_hash
 from regent.domain.errors import DomainError, ErrorCode
 from regent.infrastructure.models import (
     AppPreviewReleaseModel,
     AppProjectModel,
-    ConversationMessageModel,
-    ConversationModel,
     GateEvaluationModel,
     GoalModel,
     GoalSpecModel,
@@ -42,6 +41,8 @@ class PreviewReceipt:
 
 
 class AppPreviewService:
+    _append_event = staticmethod(append_project_event)
+
     def __init__(
         self,
         sessions: async_sessionmaker[AsyncSession],
@@ -278,38 +279,6 @@ class AppPreviewService:
             if release is None:
                 raise DomainError(ErrorCode.NOT_FOUND, "preview release not found")
             return self._receipt(release)
-
-    async def _append_event(
-        self,
-        session: AsyncSession,
-        project_id: uuid.UUID,
-        message_type: str,
-        content: str,
-        metadata: dict[str, str],
-    ) -> None:
-        conversation = await session.scalar(
-            select(ConversationModel).where(ConversationModel.app_project_id == project_id)
-        )
-        if conversation is None:
-            return
-        last = await session.scalar(
-            select(ConversationMessageModel.ordinal)
-            .where(ConversationMessageModel.conversation_id == conversation.id)
-            .order_by(ConversationMessageModel.ordinal.desc())
-            .limit(1)
-        )
-        session.add(
-            ConversationMessageModel(
-                id=uuid.uuid4(),
-                conversation_id=conversation.id,
-                ordinal=(last or 0) + 1,
-                role="EVENT",
-                message_type=message_type,
-                content=content,
-                metadata_json=metadata,
-                created_by="regent-core",
-            )
-        )
 
     @staticmethod
     def _receipt(model: AppPreviewReleaseModel) -> PreviewReceipt:

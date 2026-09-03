@@ -18,6 +18,7 @@ from regent.application.p1_ports import (
     SandboxBuildRequest,
     SandboxBuildResult,
 )
+from regent.infrastructure.artifact_store import local_artifact_path
 
 CommandRunner = Callable[[list[str]], Awaitable[int]]
 PermitValidator = Callable[[str, str], Awaitable[None]]
@@ -72,8 +73,8 @@ class DockerSandboxDriver:
         output_dir.mkdir()
         output_dir.chmod(0o777)
 
-        source = self._local_artifact(request.workspace_snapshot_uri)
-        bundle = self._local_artifact(request.dependency_bundle_uri)
+        source = local_artifact_path(request.workspace_snapshot_uri)
+        bundle = local_artifact_path(request.dependency_bundle_uri)
         bundle_hash = hashlib.sha256(bundle.read_bytes()).hexdigest()
         if bundle_hash != request.dependency_bundle_hash:
             raise ValueError("dependency bundle hash mismatch")
@@ -278,17 +279,6 @@ class DockerSandboxDriver:
         return f"exit={process.returncode}\n{preview}"
 
     @staticmethod
-    def _local_artifact(uri: str) -> Path:
-        parsed = urlparse(uri)
-        if parsed.scheme != "file":
-            raise ValueError("sandbox accepts local immutable artifacts only")
-        raw = parsed.path[1:] if len(parsed.path) > 2 and parsed.path[2] == ":" else parsed.path
-        path = Path(raw).resolve()
-        if not path.is_file() or path.is_symlink():
-            raise ValueError("sandbox input artifact is invalid")
-        return path
-
-    @staticmethod
     def _unknown(operation_id: str, operation: Path, exit_code: int | None) -> SandboxBuildResult:
         evidence = operation / "output" / "unknown.json"
         evidence.write_text(
@@ -331,8 +321,8 @@ class LocalSandboxDriver:
         output_dir = operation / "output"
         output_dir.mkdir(parents=True)
 
-        source_path = self._local_artifact(request.workspace_snapshot_uri)
-        bundle_path = self._local_artifact(request.dependency_bundle_uri)
+        source_path = local_artifact_path(request.workspace_snapshot_uri)
+        bundle_path = local_artifact_path(request.dependency_bundle_uri)
         bundle_hash = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
         if bundle_hash != request.dependency_bundle_hash:
             raise ValueError("dependency bundle hash mismatch")
@@ -463,17 +453,6 @@ class LocalSandboxDriver:
         if external_request_id not in self._results:
             raise LookupError("unknown sandbox operation")
         return self._results[external_request_id]
-
-    @staticmethod
-    def _local_artifact(uri: str) -> Path:
-        parsed = urlparse(uri)
-        if parsed.scheme != "file":
-            raise ValueError("sandbox accepts local immutable artifacts only")
-        raw = parsed.path[1:] if len(parsed.path) > 2 and parsed.path[2] == ":" else parsed.path
-        path = Path(raw).resolve()
-        if not path.is_file() or path.is_symlink():
-            raise ValueError("sandbox input artifact is invalid")
-        return path
 
     async def exec_in_workspace(
         self,

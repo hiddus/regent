@@ -189,7 +189,7 @@ class EvalHarnessService:
         self, eval_run_id: uuid.UUID, *, actor: str = "regent-core",
     ) -> EvalRunModel:
         """Blind wrapper around delivery-verification scoring (agent identity hidden)."""
-        model = await self.run_and_score(eval_run_id, actor=actor)
+        await self.run_and_score(eval_run_id, actor=actor)
         async with self._sessions() as session, session.begin():
             locked = await session.get(EvalRunModel, eval_run_id, with_for_update=True)
             if locked is None:

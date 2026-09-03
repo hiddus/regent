@@ -1,0 +1,62 @@
+{
+  "diagnosed_at": "2026-08-09",
+  "root_cause_chain": [
+    {
+      "layer": "trigger",
+      "detail": "Crosswalk Goal CONTINUE/CORRECT babysit + Regent soft-pause loops kept redeploying runtime Preview"
+    },
+    {
+      "layer": "resource_leak",
+      "detail": "Each deploy left a .preview-venv (~hundreds of MB) and often a live Flask process; ~72 venvs accumulated"
+    },
+    {
+      "layer": "host",
+      "detail": "1.6Gi RAM ECS; disk hit ~93% (3G free on 40G); kswapd thrash + IO wait"
+    },
+    {
+      "layer": "symptom",
+      "detail": "sshd listened but SSH banner handshake timed out; API external timeouts/502 while containers Up"
+    },
+    {
+      "layer": "product_gap",
+      "detail": "Regent only had DB/outbox health — no host disk/mem/load measure, no in-process venv GC, no refuse-deploy under pressure"
+    }
+  ],
+  "ssh_root_cause": [
+    "Host had only 1.6Gi RAM; kswapd thrashing caused SSH banner timeouts",
+    "Disk 93% full (40G, 3G free) — preview .preview-venv ×72 inflated IO wait",
+    "sshd still listening but handshake stalled under load; TCP:22 open with OpenSSH banner when recovered"
+  ],
+  "api_symptom": "External /health timed out or 502 while container Up; /health route returns 404 (use /v1/health or /health/ready)",
+  "recovery": [
+    "SSH recovered after load eased / ECS reboot",
+    "Deleted old preview venvs (kept newest 8) + docker image prune → disk 93%→49%",
+    "Restarted regent-api/workers",
+    "Recreated runtime preview for 5ea5f717 and Flask process"
+  ],
+  "regent_self_heal_capability": {
+    "detect": [
+      "Worker + API period tick: disk/mem/load + preview venv counts",
+      "/health/ready and /v1/health expose host snapshot",
+      "/v1/doctor includes host_resources check"
+    ],
+    "repair": [
+      "Prune excess .preview-venv (keep newest N) on venv excess OR disk≥80% OR mem≥85%",
+      "Reap stale preview processes via .regent-preview.pid and /proc cwd match",
+      "Soft-pause ACTIVE goals with gap_kind=HOST_RESOURCE",
+      "Refuse generation and runtime preview deploy while unhealthy",
+      "POST /v1/ops/environment/heal for on-demand heal"
+    ],
+    "deployed": true
+  },
+  "crosswalk": {
+    "goal_id": "525e5628-d4f9-4444-9a71-e8f18c6447af",
+    "project_id": "62da7059-4512-4e97-8981-d243a5f3bf04",
+    "preview": "http://118.31.171.159:8000/preview/runtime/5ea5f717-d512-47ac-a60f-a891daaf062b/",
+    "content": {"US_points": 12, "SG_points": 12, "US_SG_steps": 12, "SG_US_steps": 12},
+    "rich_fields": true,
+    "pages_render_ok": true,
+    "note": "Content reached demo depth; overnight babysit CONTINUE burned the host without finishing QA stamp"
+  },
+  "code_fix": "runtime_preview readiness_timeout 25s→90s; host_resources + host_guard + API heal loop"
+}

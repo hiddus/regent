@@ -1,118 +1,76 @@
-# Regent
+# Regent Novel Engine
 
-> **围绕经营目标持续工作的智能体团队。**
+> 面向中国大陆非头部兼职网文作者的导演式长篇小说创作系统；经验证后扩展为创作与阅读双环。
 
-Regent 是一支能够自由探索、持续实践、自我组织并从真实经营结果中进化的智能体经营团队。它连接业务数据，主动发现增长机会、执行获授权的行动，并根据真实结果持续调整——而不是一个聊天助手、一次性工作流或多智能体开发框架。
+用户说出故事目标、调整关键路径，并在少数重大剧情节点作出选择；持续 Agent loop 负责规划、角色表演、成文、检查、局部修复、断点恢复和续写。
 
-当前商业切入点是**互联网产品增长经营**：围绕一个明确增长指标，在付费试点内完成经营体检、机会发现、低风险实验、结果验证与周期复盘。应用生成是团队可调用的能力，而非 Regent 本身。
+本仓库由两部分组成：
 
-- 永久定义（唯一规范源）：[`docs/definitions/REGENT-DEFINITION-3.0.txt`](./docs/definitions/REGENT-DEFINITION-3.0.txt)
-- 产品定义：[`Regent-PRD.md`](./Regent-PRD.md) · 技术架构：[`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md) · 编码执行清单：[`Regent-Plan.md`](./Regent-Plan.md)
+- **Novel Engine 产品层**：当前唯一对外产品方向；目标能力包括 C 端 Web/PWA、小说领域模型、剧本展开、角色演绎、阅读与后续内容分发，尚不表示这些能力已经实现。
+- **Regent Core 内核层**：内部基础设施，提供多 Agent 编排、持久化任务、预算、权限、审计、恢复和运行时监测；不再作为独立经营产品对外定义。
 
----
+私有项目 [`hiddus/novelMaker`](https://github.com/hiddus/novelMaker) 是小说推演链路的正式迁移基线：保留其持续 Agent loop、人机互动修正和状态推进能力，再逐项接入 Regent Core 与 Novel Engine 领域模型；它不构成第三套产品定义。
 
-## 核心能力
+## 权威文档
 
-- **目标治理闭环**：目标发布 → 边界确认 → 可行性分析 → 目标锁定 → 正式执行，每阶段可审计、可恢复。
-- **受治理的执行**：LLM 只提出结构化 Command，状态转换由确定性应用服务执行；不可逆/外部效应须前置授权（ExecutionPermit）。
-- **证据与观测**：执行过程产生 Evidence / Observation，用于接触现实、比较路径、更新认知，并支撑周期复盘。
-- **应用生成与发布**：Core 依据目标、证据与约束生成应用，支持预览发布与可审计的交付评审。
-- **预算与护栏**：每个目标设置正数预算上限；成本、权限、数据、不可逆影响均在护栏内运行。
-
-## 架构边界
-
-| 层 | 职责 |
+| 文档 | 权威范围 |
 |---|---|
-| **Core Kernel** | 状态机、治理、证据、审计、恢复、预算与安全边界。 |
-| **Certified Capability Pool** | 可声明、可验证、可替换的通用能力。 |
-| **Generated Apps** | 由 Core 根据目标、证据与约束生成，不由 Core 预置业务页面。 |
+| [Novel-Engine-PRD.md](./Novel-Engine-PRD.md) | 唯一产品需求源、用户、商业模式与验收标准 |
+| [Novel-Engine-Tech-Spec.md](./Novel-Engine-Tech-Spec.md) | 产品技术架构、领域模型与内核复用边界 |
+| [Novel-Engine-Plan.md](./Novel-Engine-Plan.md) | 唯一开发顺序、里程碑和出口检查 |
+| [Novel-Engine-Implementation-Requirements-v3.11.md](./Novel-Engine-Implementation-Requirements-v3.11.md) | v3.12 落地审查历史快照；已由 v4.0/v5.0 主文档吸收，不再作为独立权威源 |
+| [Regent-PRD.md](./Regent-PRD.md) | Regent Core 内核职责与产品边界兼容入口 |
+| [Regent-Technical-Spec.md](./Regent-Technical-Spec.md) | 现有内核实现说明与迁移约束 |
+| [Regent-Plan.md](./Regent-Plan.md) | 内核保留、复用和退役清单 |
 
-核心不变式：**LLM 只能提出结构化 Command，状态转换由确定性 Application Service 执行。** 详见 [`core/README.md`](./core/README.md)。
+冲突处理顺序：产品语义以 Novel Engine PRD 为准，技术实现以 Novel Engine Tech Spec 为准，执行顺序以 Novel Engine Plan 为准。旧 Regent 产品材料仅供历史追溯，不得作为当前需求依据。
 
-> 近期代码演进（2026-08-13 之后）：组织修复脚手架已落地并接入执行主链——hub-and-spoke 执行纪律（`config.max_subagent_depth=1`）、规则式目标分类、组织模式选择、运行时行为监测（含 SPA JS 深度分析）、行为修复环自动再调度与 worker 周期监测 tick（护栏：ACTIVE / 无存活 run / `max_iterations` 上限 / 预算）。详见 [`STATUS.md`](./STATUS.md) 与 [`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md) §25。
+## 当前产品契约
 
----
+用户主路径只有三类动作：
 
-## 快速开始
+1. 用自然语言设定故事目标。
+2. 调整 10–20 个主线关键节点。
+3. 在死亡、背叛、揭露、开战等重大节点拍板。
 
-### 方式 A：本地 Compose（推荐，一键起全套）
+要求用户维护结构化设定、逐章审核剧本、维护关系图或逐章改文，均视为产品退化。
 
-需要 Docker 与 Docker Compose。该方式启动 `postgres` + `api` + `worker` 三个服务（开发便利端口，**非生产安全基线**）。
+当前产品阶段：
 
-```bash
-# 1. 配置环境变量（模型 API Key 等必填项；端口、沙箱模式可选）
-#    具体变量与取值见 docs/deployment.md
-cp .env.example .env        # 若仓库未提供示例，请按 deployment.md 手动创建
-
-# 2. 构建并启动
-docker compose up --build
-
-# 3. 健康检查
-curl http://localhost:8000/health/ready
-```
-
-API 默认监听 `:8000`，PostgreSQL 默认发布到宿主 `:5432`（仅开发用）。
-
-### 方式 B：本地开发（源码安装）
-
-```bash
-# 仓库根（pyproject.toml 在仓库根，包 regent-core 构建自 core/src/regent）
-pip install -e ".[dev]"     # 安装运行 + 开发依赖（要求 Python >=3.12,<3.14）
-
-regent-api                  # 启动 FastAPI 服务（REST API + 静态资源）
-regent-worker               # 启动 Worker（消费执行队列并持久化）
-
-pytest                      # 运行测试
-ruff check core/src         # 代码风格 / 静态检查
-mypy                        # 严格类型检查
-```
-
-> 更完整的运行入口、子包结构、已关闭偏差与本地开发细节见 [`core/README.md`](./core/README.md)。
-> 生产 / 服务器手工编排（Path A）与上述 Compose（Path B）服务名、网络、端口策略**不相同**，请勿混读——见 [`docs/deployment.md`](./docs/deployment.md)。
-
----
+- 阶段一服务中国大陆非头部兼职网文作者，以 Web/PWA 验证原创导演式创作。
+- MVP 只做私有作品与定向试读；锚点仿写、公共池、广告分成和原生 App 后移。
+- 终局仍是原创创作与阅读双环，但必须先通过导演式交互、带 AI 标识持续阅读和单位经济三道闸门。
+- 当前代码是可复用的 Regent Core 与内部控制台；小说领域 API 和 C 端页面尚未实现。
 
 ## 仓库结构
 
 | 路径 | 说明 |
 |---|---|
-| `core/` | Regent 后端核心（FastAPI + Worker，Python） |
-| `capabilities/` | 认证能力池 |
-| `apps/regent-console/` | Web 控制台 |
-| `apps/regent-desktop/` | 桌面端（探索性，非目标） |
-| `tests/` | architecture / integration / unit 测试 |
-| `fixtures/` | 评测固定数据 |
-| `scripts/` | 仓库级辅助脚本 |
-| `ops/` | 运维脚本与门禁 |
-| `deploy/` | 部署相关 |
-| `docs/` | 规范、计划、审计、决策记录 |
-| `compose.yaml` | 本地 Compose（与服务器 Path A 手工编排不同） |
-| `capabilities/` | 认证能力池（声明 + resolver/sandbox 运行器） |
-| `archive/` | 历史产物 / 报告归档（非核心） |
-| `canvases/` | 设计画布产物（`.canvas.tsx`，非核心） |
-| `deliverables/` | 生成的对外交付物（非核心） |
-| `regent-pptx/` | PPT 构建工程（非核心） |
+| `core/` | Regent Core 后端内核（FastAPI、Worker、状态机与基础设施） |
+| `apps/regent-console/` | 现有控制台；后续按 Novel Engine Plan 演进为 C 端产品界面 |
+| `apps/regent-desktop/` | 历史探索性桌面壳，不是阶段一验收入口 |
+| `capabilities/` | 可复用能力声明与运行器 |
+| `tests/` | 架构、集成与单元测试 |
+| `docs/` | 当前开发/部署说明、契约、ADR 与历史归档索引 |
+| `docs/archive/legacy-regent-2026/` | 旧经营产品路线的计划、审计、实验与运行快照 |
 
-各子目录均有自己的 `README.md`，可逐级深入。
+## 本地开发
 
-## 文档索引
+当前代码仍沿用 Regent Core 的启动方式：
 
-| 文档 | 用途 |
-|---|---|
-| [`Regent-PRD.md`](./Regent-PRD.md) | 产品定义与需求（权威执行基线） |
-| [`Regent-Technical-Spec.md`](./Regent-Technical-Spec.md) | 技术架构与实施规范（含 §21 双列 API 对照） |
-| [`Regent-Measurement-Decision-Framework.md`](./Regent-Measurement-Decision-Framework.md) | 测量与决策框架 |
-| [`Regent-Plan.md`](./Regent-Plan.md) | 唯一编码执行清单与开发切片 |
-| [`docs/README.md`](./docs/README.md) | 文档总索引（含决策记录、状态机、附录） |
-| [`docs/deployment.md`](./docs/deployment.md) | 两套部署路径与沙箱支持矩阵 |
-| [`docs/definitions/REGENT-DEFINITION-3.0.txt`](./docs/definitions/REGENT-DEFINITION-3.0.txt) | 唯一规范定义源（冻结，不可修改） |
+```bash
+pip install -e ".[dev]"
+regent-api
+regent-worker
+pytest
+```
 
-编码冲突时：产品语义以 PRD 为准，技术实现以 Technical-Spec 为准，阶段顺序以 Plan 为准；任何冲突必须通过 ADR 或 DecisionRecord 解决。
+部署与环境说明见 [docs/deployment.md](./docs/deployment.md)，开发说明见 [docs/development.md](./docs/development.md)。小说产品包尚未完成迁入时，不得将旧控制台的可运行性等同于 Novel Engine 产品验收通过。
 
-## 状态与变更
+## 文档状态
 
-内部开发状态、已知阻断与决策记录快照统一维护在 **[`STATUS.md`](./STATUS.md)**（按日期更新），不在本 README 展开，以保持项目门面整洁。
+旧方向文档已经归档。归档内容可以用于理解历史实现和决策来源，但其中的产品定位、市场、里程碑和验收口径均已失效。
 
 ## License
 
-见仓库根目录 [`LICENSE`](./LICENSE)。
+见 [LICENSE](./LICENSE)。

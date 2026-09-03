@@ -13,10 +13,9 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus
 
 import httpx
 

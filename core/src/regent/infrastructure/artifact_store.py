@@ -3,6 +3,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +15,18 @@ class StoredArtifact:
 
 class ArtifactConflictError(RuntimeError):
     pass
+
+
+def local_artifact_path(uri: str) -> Path:
+    """Resolve and validate an immutable local file artifact URI."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        raise ValueError("sandbox accepts local immutable artifacts only")
+    raw = parsed.path[1:] if len(parsed.path) > 2 and parsed.path[2] == ":" else parsed.path
+    path = Path(raw).resolve()
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("sandbox input artifact is invalid")
+    return path
 
 
 class FileArtifactStore:
@@ -51,6 +64,21 @@ class FileArtifactStore:
 
     def read(self, goal_id: uuid.UUID, relative_path: str) -> bytes:
         return self._destination(goal_id, relative_path).read_bytes()
+
+    def find(self, relative_path: str) -> bytes | None:
+        """Read the first matching artifact across scopes without exposing storage layout."""
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts or not relative.name:
+            raise ValueError("artifact path must be a safe relative file path")
+        for scope_root in self.root.iterdir():
+            if not scope_root.is_dir() or scope_root.is_symlink():
+                continue
+            candidate = (scope_root / relative).resolve()
+            if scope_root.resolve() not in candidate.parents:
+                continue
+            if candidate.is_file() and not candidate.is_symlink():
+                return candidate.read_bytes()
+        return None
 
     def _destination(self, goal_id: uuid.UUID, relative_path: str) -> Path:
         goal_root = (self.root / str(goal_id)).resolve()

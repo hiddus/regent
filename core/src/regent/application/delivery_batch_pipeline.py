@@ -27,13 +27,13 @@ from regent.application.delivery_batch_service import (
     BATCH_PLANNED,
     BATCH_REJECTED,
     BATCH_VERIFYING,
-    DeliveryBatchSpec,
     persist_batch_plan,
     propose_delivery_batches,
     transition_batch,
 )
 from regent.application.p1_contracts import FileChange, FileChangeSet, FileMode, FileOperation
 from regent.infrastructure.artifact_store import FileArtifactStore
+from regent.infrastructure.media_types import media_type_for_path as _media_type
 from regent.infrastructure.models import DeliveryBatchModel
 from regent.infrastructure.sandbox import build_agent_sandbox
 from regent.infrastructure.workspace_writer import WorkspaceCommit, WorkspaceWriter
@@ -638,21 +638,6 @@ def _diff_to_changeset(
         generator_ref=generator_ref,
         prompt_version=prompt_version,
     )
-
-
-def _media_type(relative: str) -> str:
-    lower = relative.lower()
-    if lower.endswith(".html"):
-        return "text/html"
-    if lower.endswith(".css"):
-        return "text/css"
-    if lower.endswith(".js"):
-        return "application/javascript"
-    if lower.endswith(".json"):
-        return "application/json"
-    if lower.endswith(".py"):
-        return "text/x-python"
-    return "text/plain"
 
 
 def _gaps_from_acceptance(acceptance: dict[str, Any]) -> list[VerificationGap]:

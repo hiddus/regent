@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -629,6 +629,17 @@ async def report_fact(
 # ---------------------------------------------------------------------------
 # 分享（FR-17）
 # ---------------------------------------------------------------------------
+
+
+@router.get("/public/shares/{token}")
+async def read_public_share(token: str, session: DbSession) -> Response:
+    if len(token) < 20 or len(token) > 64:
+        raise ValidationFailed("invalid share token")
+    body = await works_app.get_public_share(session, token=token)
+    return JSONResponse(
+        content=json.loads(json.dumps(body, ensure_ascii=False, default=str)),
+        headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "private, no-store"},
+    )
 
 
 @router.post("/works/{work_id}/shares", response_model=ShareOut, status_code=201)

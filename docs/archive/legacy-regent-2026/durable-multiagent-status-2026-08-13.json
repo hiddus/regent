@@ -1,0 +1,40 @@
+{
+  "started_at": "2026-08-13T01:03:45Z",
+  "philosophy": "run-and-fix; no preset verification thresholds; unstick only when soft-paused/ask-human/infra unhealthy",
+  "product_goal": "互联网产品增长经营体检台（Flask Preview）",
+  "project_id": "b44dd5d4-40c4-451c-9efe-0f58cef48a52",
+  "goal_id": "989eb297-e784-4689-8b31-175a2384a457",
+  "conversation_id": "18b59c5a-9327-4104-8b4f-0ab867b9d8b2",
+  "organization": {
+    "engine": "pm-dev-independent-qa-v1",
+    "aar1_phase": "contract",
+    "certified_hive_opt_in": true
+  },
+  "ops": {
+    "start_script": "ops/start_durable_multiagent_2026_08_13.py",
+    "babysit_script": "ops/babysit_durable_multiagent_2026_08_13.py",
+    "babysit_log": "docs/durable-multiagent-babysit-log-2026-08-13.jsonl"
+  },
+  "observed": {
+    "goal_status": "ACTIVE",
+    "stage": "PREVIEW_SUCCEEDED",
+    "live": "{\"turn\": null, \"stage\": \"PREVIEW_SUCCEEDED\", \"detail\": \"产品面就绪（QA 通过，仍待产品验收）：http://118.31.171.159:8000/preview/runtime/5619d133-9f5c-4e3f-98be-5b6869d8b9fc/\", \"summary\": \"产品面就绪（QA 通过，仍待产品验收）：http://118.31.171.159:8000/pr",
+    "preview_ready": "true",
+    "preview_url": "http://118.31.171.159:8000/preview/runtime/5619d133-9f5c-4e3f-98be-5b6869d8b9fc/",
+    "preview_http": 200,
+    "session": {
+      "status": "PAUSED",
+      "epoch": 92,
+      "version": 165,
+      "updated_at": "2026-08-13 01:03:45.651141+00:00"
+    },
+    "host_unhealthy": false,
+    "exit_kind": "ASK_HUMAN",
+    "gap": "product_surface",
+    "roi_next": "continue_fix",
+    "roi_streak": "0",
+    "roi_verdict": "progressed",
+    "action": "self_repair_default"
+  },
+  "last_poll_at": "2026-08-13T08:38:33Z"
+}

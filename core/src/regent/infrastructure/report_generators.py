@@ -13,7 +13,6 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from regent.infrastructure.artifact_store import FileArtifactStore

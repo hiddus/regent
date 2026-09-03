@@ -1,0 +1,25 @@
+{
+  "goal_id": "2899cdaa-17e3-4edd-ae9e-3ee3a3018ead",
+  "project_id": "67785d8e-5c1f-4e63-a81f-e2a36e356d26",
+  "console": "http://118.31.171.159:8000/console/",
+  "idea_brief": "AI 前沿情报站 + 高活跃持续运营 + 自进化",
+  "preview_url": "http://118.31.171.159:8000/preview/runtime/c4d7b84d-7bac-4c03-a65b-9bb5044d1d22/",
+  "stage": "PREVIEW_SUCCEEDED",
+  "flags": {
+    "self_evolution_requested": true,
+    "ops_mode": "continuous_high_activity",
+    "decision_preference": "AGGRESSIVE"
+  },
+  "probe": {
+    "home": {"status": 200, "title": "AI 前沿情报站"},
+    "api_items": {"status": 200, "has_今日必读": true},
+    "api_refresh": {"status": 405, "note": "已发续跑指令要求修复 POST /api/refresh"}
+  },
+  "self_improvement": {
+    "run_id": "60e65545-b014-428e-aed6-c8b49234dbf7",
+    "status": "CANDIDATE_READY",
+    "independent_review_passed": false,
+    "note": "自进化提案已产生；独立审查拒掉了不完整候选（治理生效）。生产侧 soft-pass/proxy 修复已在跑。"
+  },
+  "verdict": "RUN_OK_CONTINUING"
+}

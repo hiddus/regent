@@ -23,6 +23,7 @@ from regent.application.quality_metrics import (
     UserQualityMetrics,
     aggregate_user_quality,
 )
+from regent.application.statistics import wilson_interval as _wilson_interval
 
 GQ_EXPERIMENT_VERSION = "gq-generation-strategy/v1"
 # Distinct from P2-4 org variants — do not reuse those labels.
@@ -157,16 +158,6 @@ def default_frozen_task_set() -> FrozenTaskSet:
         tune_task_ids=tuple(t.task_id for t in tasks if t.split == "tune"),
         final_task_ids=tuple(t.task_id for t in tasks if t.split == "final"),
     )
-
-
-def _wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
-    if n <= 0:
-        return None
-    p = successes / n
-    denom = 1 + z * z / n
-    centre = p + z * z / (2 * n)
-    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
-    return ((centre - margin) / denom, (centre + margin) / denom)
 
 
 def summarize_strategy_arm(results: Sequence[StrategyRunResult]) -> dict[str, Any]:

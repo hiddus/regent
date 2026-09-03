@@ -1,0 +1,97 @@
+{
+  "http": 201,
+  "body": {
+    "project": {
+      "id": "b44dd5d4-40c4-451c-9efe-0f58cef48a52",
+      "name": "增长体检台",
+      "product_intent": "为互联网产品增长/产品负责人提供一个可交互的Web体检台，输入产品名、主指标（激活/留存/转化）、基线与观察窗口，输出经营现状摘要、机会假设、低风险实验建议和周报骨架，支持迭代加深。",
+      "status": "DRAFT",
+      "created_by": "regent-ops:durable-multiagent-2026-08-13",
+      "created_at": "2026-08-13T01:03:45.586856Z",
+      "updated_at": "2026-08-13T01:03:45.586856Z"
+    },
+    "conversation_id": "18b59c5a-9327-4104-8b4f-0ab867b9d8b2",
+    "goal_id": "989eb297-e784-4689-8b31-175a2384a457",
+    "goal_status": "ACTIVE",
+    "goal_spec_id": "709d3cdc-d690-44c7-8aa5-26032ad099fe",
+    "goal_spec_version": 1,
+    "goal_spec_status": "DRAFT",
+    "goal_spec_hash": "8dad682a278c141aa4cfe5730961374ffce240e19ed60487846bd0ec743df266",
+    "understanding": {
+      "app_name": "增长体检台",
+      "product_intent": "为互联网产品增长/产品负责人提供一个可交互的Web体检台，输入产品名、主指标（激活/留存/转化）、基线与观察窗口，输出经营现状摘要、机会假设、低风险实验建议和周报骨架，支持迭代加深。",
+      "target_users": "互联网产品的增长负责人、产品负责人、数据分析师",
+      "problem": "增长负责人需要快速诊断产品经营现状、形成可执行的实验假设并生成周报，但缺乏一个轻量、可交互、可迭代的工具来整合这些步骤。",
+      "first_deliverable": "一个Flask Web应用，包含一个表单页面（产品名、主指标选择、基线值、观察窗口）和一个结果页面，展示基于输入生成的经营现状摘要、机会假设、低风险实验建议和周报骨架。",
+      "success_criteria": {
+        "form_submits_and_result_displays": true,
+        "result_contains_all_four_sections": true,
+        "app_runs_in_preview_without_errors": true
+      },
+      "explicit_constraints": {
+        "no_payment": true,
+        "no_large_scale_pii": true,
+        "no_production_write_access": true,
+        "public_reversible_preview": true
+      },
+      "non_goals": [
+        "支付功能",
+        "大规模PII处理",
+        "生产环境写权限",
+        "固定多Agent拓扑",
+        "不可逆外部动作"
+      ],
+      "unknowns": [
+        "具体的主指标定义和计算方式（激活/留存/转化的具体口径）",
+        "基线值和观察窗口的合理范围",
+        "机会假设和实验建议的生成逻辑（基于规则还是模型）",
+        "周报骨架的具体格式和内容要求"
+      ],
+      "proposed_steps": [
+        "搭建Flask应用骨架，创建表单页面和结果页面路由",
+        "实现表单提交和结果生成逻辑（基于简单规则或模板）",
+        "在Preview中运行并验证基本功能",
+        "根据自检结果迭代加深，例如增加更多指标选项或优化建议生成"
+      ],
+      "deduction_clear": true,
+      "fork_options": []
+    },
+    "model": "deepseek-v4-pro",
+    "plan": {
+      "app_name": "增长体检台",
+      "product_intent": "为互联网产品增长/产品负责人提供一个可交互的Web体检台，输入产品名、主指标（激活/留存/转化）、基线与观察窗口，输出经营现状摘要、机会假设、低风险实验建议和周报骨架，支持迭代加深。",
+      "target_users": "互联网产品的增长负责人、产品负责人、数据分析师",
+      "problem": "增长负责人需要快速诊断产品经营现状、形成可执行的实验假设并生成周报，但缺乏一个轻量、可交互、可迭代的工具来整合这些步骤。",
+      "first_deliverable": "一个Flask Web应用，包含一个表单页面（产品名、主指标选择、基线值、观察窗口）和一个结果页面，展示基于输入生成的经营现状摘要、机会假设、低风险实验建议和周报骨架。",
+      "success_criteria": {
+        "form_submits_and_result_displays": true,
+        "result_contains_all_four_sections": true,
+        "app_runs_in_preview_without_errors": true
+      },
+      "non_goals": [
+        "支付功能",
+        "大规模PII处理",
+        "生产环境写权限",
+        "固定多Agent拓扑",
+        "不可逆外部动作"
+      ],
+      "proposed_steps": [
+        "搭建Flask应用骨架，创建表单页面和结果页面路由",
+        "实现表单提交和结果生成逻辑（基于简单规则或模板）",
+        "在Preview中运行并验证基本功能",
+        "根据自检结果迭代加深，例如增加更多指标选项或优化建议生成"
+      ],
+      "unknowns": [
+        "具体的主指标定义和计算方式（激活/留存/转化的具体口径）",
+        "基线值和观察窗口的合理范围",
+        "机会假设和实验建议的生成逻辑（基于规则还是模型）",
+        "周报骨架的具体格式和内容要求"
+      ],
+      "fork_options": [],
+      "needs_user_fork": false,
+      "deduction_clear": true
+    },
+    "needs_user_fork": false,
+    "auto_started": true
+  }
+}

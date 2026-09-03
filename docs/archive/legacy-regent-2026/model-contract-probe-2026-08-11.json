@@ -1,0 +1,131 @@
+{
+  "base": "https://ai.showmac.com/v1",
+  "key_len": 51,
+  "models": {
+    "tencent/glm-5.2": {
+      "thinking_disabled": {
+        "status": 200,
+        "finish_reason": "stop",
+        "content_chars": 40,
+        "reasoning_chars": 0,
+        "reasoning_tokens": 0,
+        "completion_tokens": 22,
+        "n_tool_calls": 0,
+        "tool_names": [],
+        "tool_args_is_str": [],
+        "content_head": "幂等操作是指**无论执行一次还是多次，对系统状态产生的影响都完全相同的操作**。"
+      },
+      "thinking_omitted": {
+        "status": 200,
+        "finish_reason": "stop",
+        "content_chars": 37,
+        "reasoning_chars": 835,
+        "reasoning_tokens": 448,
+        "completion_tokens": 470,
+        "n_tool_calls": 0,
+        "tool_names": [],
+        "tool_args_is_str": [],
+        "content_head": "幂等操作是指无论执行一次还是多次，所产生的结果和系统影响都完全相同的操作。"
+      },
+      "tools_disabled_thinking": {
+        "status": 200,
+        "finish_reason": "tool_calls",
+        "content_chars": 0,
+        "reasoning_chars": 0,
+        "reasoning_tokens": 0,
+        "completion_tokens": 17,
+        "n_tool_calls": 1,
+        "tool_names": [
+          "write_file"
+        ],
+        "tool_args_is_str": [
+          true
+        ],
+        "content_head": ""
+      },
+      "tool_roundtrip": {
+        "status": 200,
+        "finish_reason": "stop",
+        "content_chars": 4,
+        "reasoning_chars": 0,
+        "reasoning_tokens": 0,
+        "completion_tokens": 3,
+        "n_tool_calls": 0,
+        "tool_names": [],
+        "tool_args_is_str": [],
+        "content_head": "已写入。"
+      }
+    },
+    "tencent/deepseek-v4-pro": {
+      "thinking_disabled": {
+        "status": 200,
+        "finish_reason": "stop",
+        "content_chars": 51,
+        "reasoning_chars": 0,
+        "reasoning_tokens": 0,
+        "completion_tokens": 26,
+        "n_tool_calls": 0,
+        "tool_names": [],
+        "tool_args_is_str": [],
+        "content_head": "幂等操作是指同一个操作执行一次或多次，对系统状态产生的影响完全相同，不会因为重复执行而导致额外副作用。"
+      },
+      "thinking_omitted": {
+        "status": 200,
+        "finish_reason": "stop",
+        "content_chars": 34,
+        "reasoning_chars": 323,
+        "reasoning_tokens": 171,
+        "completion_tokens": 191,
+        "n_tool_calls": 0,
+        "tool_names": [],
+        "tool_args_is_str": [],
+        "content_head": "幂等操作是指无论执行多少次，其产生的效果都与执行一次完全相同的操作。"
+      },
+      "tools_disabled_thinking": {
+        "status": 200,
+        "finish_reason": "tool_calls",
+        "content_chars": 0,
+        "reasoning_chars": 0,
+        "reasoning_tokens": 0,
+        "completion_tokens": 60,
+        "n_tool_calls": 1,
+        "tool_names": [
+          "write_file"
+        ],
+        "tool_args_is_str": [
+          true
+        ],
+        "content_head": ""
+      },
+      "tool_roundtrip": {
+        "status": 200,
+        "finish_reason": "stop",
+        "content_chars": 3,
+        "reasoning_chars": 0,
+        "reasoning_tokens": 0,
+        "completion_tokens": 2,
+        "n_tool_calls": 0,
+        "tool_names": [],
+        "tool_args_is_str": [],
+        "content_head": "完成。"
+      }
+    },
+    "tencent/deepseek-v4-flash": {
+      "thinking_disabled": {
+        "status": 402,
+        "error": "The free trial quota for the service has been exhausted and postpaid billing is not enabled, so the service cannot be accessed. Please go to Console > Online Inference Service to enable postpaid billi"
+      },
+      "thinking_omitted": {
+        "status": 402,
+        "error": "The free trial quota for the service has been exhausted and postpaid billing is not enabled, so the service cannot be accessed. Please go to Console > Online Inference Service to enable postpaid billi"
+      },
+      "tools_disabled_thinking": {
+        "status": 402,
+        "error": "The free trial quota for the service has been exhausted and postpaid billing is not enabled, so the service cannot be accessed. Please go to Console > Online Inference Service to enable postpaid billi"
+      },
+      "tool_roundtrip": {
+        "skipped": "no tool_calls in step 3"
+      }
+    }
+  }
+}

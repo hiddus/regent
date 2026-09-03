@@ -1,0 +1,17 @@
+{
+  "goal_id": "1e1a7b82-0247-41b8-a2ef-726c2cdc8412",
+  "project_id": "bef96c2c-c8dd-46ff-92e4-01336c01452c",
+  "preview_url": "http://118.31.171.159:8000/preview/runtime/6663da1c-24e1-4c69-8f64-137b0352dfe8/",
+  "stage": "PREVIEW_SUCCEEDED",
+  "probe": {
+    "ok": true,
+    "status": 200,
+    "has_time_hint": true,
+    "snippet": "<!DOCTYPE html><html lang=\"zh-CN\">...<title>北京时间</title>...<p class=\"time\">2026-08-04 20:09:04</p>..."
+  },
+  "verdict": "GOLDEN_OK",
+  "notes": [
+    "S1–S6 already landed; S7 closed by soft-pass build artifact, default flask profile + lean deps, WERKZEUG_RUN_MAIN fix, flask layout normalize, soft-pass insufficient gate, and /preview/runtime reverse proxy.",
+    "Console URL: http://118.31.171.159:8000/console/"
+  ]
+}

@@ -5,8 +5,6 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from regent.application.agent_control import (
-    META_EXECUTION_MODE,
-    META_SESSION_ALWAYS_TOOLS,
     get_execution_mode,
     session_always_tools,
 )

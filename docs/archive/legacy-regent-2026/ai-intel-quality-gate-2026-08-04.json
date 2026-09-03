@@ -1,0 +1,27 @@
+{
+  "title": "Regent product quality gates (PM+Tech+UX)",
+  "deployed_at": "2026-08-04T17:03:38Z",
+  "root_cause": "ship-first soft-pass treated process-up + weak Live QA as product-ready",
+  "gates": {
+    "live_preview_qa": "CSS substance + nav pass-rate >=80% + list requires links",
+    "orchestrator": "all PREVIEW_SUCCEEDED paths enforce Live QA; smoke hard-stop",
+    "console": "预览可用（待产品验收） vs 产品面就绪",
+    "workspace_writer": "CREATE-on-existing upgrades to REPLACE (fixes MODIFY regen)"
+  },
+  "unit_tests": "test_live_preview_qa.py 6 passed",
+  "regen_attempts": [
+    {
+      "goal_id": "127780de-8623-4f6a-a21b-708e28307879",
+      "result": "CANCELLED",
+      "reason": "WorkspaceConflictError CREATE target exists on shared agent workspace"
+    },
+    {
+      "goal_id": "16f4082f-33e8-4873-b298-10ef6cfe2e0d",
+      "project_id": "6c8b0eaa-18af-44b3-a1fa-69efbb7474c2",
+      "result": "LAUNCHED",
+      "idea": "raised PM+UX hard gates in idea text"
+    }
+  ],
+  "console": "http://118.31.171.159:8000/console/",
+  "verdict": "GATES_DEPLOYED_FRESH_DRAFT_STARTED"
+}

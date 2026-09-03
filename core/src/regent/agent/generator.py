@@ -33,6 +33,7 @@ from regent.application.delivery_rejection import DeliveryRejection
 from regent.application.p1_contracts import FileChange, FileChangeSet, FileMode, FileOperation
 from regent.application.p1_ports import GeneratedFileChangeSet
 from regent.domain.errors import ErrorCode
+from regent.infrastructure.media_types import media_type_for_path as _media_type
 from regent.infrastructure.artifact_store import FileArtifactStore
 from regent.infrastructure.sandbox import build_agent_sandbox
 from regent.model import ModelProvider, ModelTruncatedError, ToolCallInvalidError
@@ -1028,21 +1029,6 @@ def _allowed_extra(relative: str) -> bool:
     from regent.application.planned_path_policy import is_allowed_extra_path
 
     return is_allowed_extra_path(relative)
-
-
-def _media_type(relative: str) -> str:
-    lower = relative.lower()
-    if lower.endswith(".html"):
-        return "text/html"
-    if lower.endswith(".css"):
-        return "text/css"
-    if lower.endswith(".js"):
-        return "application/javascript"
-    if lower.endswith(".json"):
-        return "application/json"
-    if lower.endswith(".py"):
-        return "text/x-python"
-    return "text/plain"
 
 
 def _gaps_from_plan(plan: dict[str, Any]) -> list[VerificationGap]:

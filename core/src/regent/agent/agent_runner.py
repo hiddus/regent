@@ -1192,7 +1192,6 @@ class AgentRunner:
             blocked = current_blocked_item_key(self._toolkit.todos)
             if blocked:
                 plan_meta = dict(plan.get("goal_metadata") or {})
-                wrote = bool(getattr(self._toolkit, "recent_writes", None))
                 # recent_writes accumulates across turns — track per-turn delta.
                 writes_before = int(plan_meta.get("_progress_writes_mark") or 0)
                 writes_now = len(list(self._toolkit.recent_writes or []))

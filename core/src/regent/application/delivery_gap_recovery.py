@@ -28,6 +28,7 @@ from regent.application.capability_acquire_service import (
     CapabilityAcquireService,
 )
 from regent.application.capability_build_service import build_attainment_capability
+from regent.application.conversation_service import append_project_message
 from regent.application.capability_ladder import (
     ATTAINMENT_LADDER_CYCLES,
     MAX_ATTAINMENT_ESCALATION_ATTEMPTS,
@@ -74,8 +75,6 @@ from regent.infrastructure.evidence_capability import (
 from regent.infrastructure.models import (
     CapabilityModel,
     CapabilityResolutionPlanModel,
-    ConversationMessageModel,
-    ConversationModel,
     DiscoveryRoundModel,
     GenerationPlanModel,
     GoalModel,
@@ -326,6 +325,7 @@ def build_failure_lesson(
 
 
 class DeliveryGapRecoveryService:
+    _append = staticmethod(append_project_message)
     """Escalate capabilities + reorganize agents when delivery does not attain Goal."""
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -2619,36 +2619,3 @@ class DeliveryGapRecoveryService:
             return PRODUCT_SURFACE_NAME, "delivery.goal_intent", surface_id
         return PRODUCT_SURFACE_NAME, "delivery.goal_attainment", surface_id
 
-    @staticmethod
-    async def _append(
-        session: AsyncSession,
-        project_id: uuid.UUID,
-        *,
-        role: str,
-        message_type: str,
-        content: str,
-        metadata: dict[str, object],
-    ) -> None:
-        conversation = await session.scalar(
-            select(ConversationModel).where(ConversationModel.app_project_id == project_id)
-        )
-        if conversation is None:
-            return
-        last = await session.scalar(
-            select(ConversationMessageModel.ordinal)
-            .where(ConversationMessageModel.conversation_id == conversation.id)
-            .order_by(ConversationMessageModel.ordinal.desc())
-            .limit(1)
-        )
-        session.add(
-            ConversationMessageModel(
-                id=uuid.uuid4(),
-                conversation_id=conversation.id,
-                ordinal=(last or 0) + 1,
-                role=role,
-                message_type=message_type,
-                content=content,
-                metadata_json=metadata,
-                created_by="regent-core",
-            )
-        )

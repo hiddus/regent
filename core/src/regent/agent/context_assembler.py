@@ -325,7 +325,6 @@ class ContextAssembler:
 
     def segment_fingerprints(self) -> dict[str, str]:
         """Return per-segment content fingerprints for dedup diagnostics."""
-        sizes = self.segment_char_sizes()
         # Rebuild segments to get text for fingerprinting.
         segments = {
             "goal": self._goal_anchor_segment(),
