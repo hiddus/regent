@@ -6,6 +6,8 @@ type Onboarding = {status:string;questions:{question_id:string;prompt:string;opt
 type Work = {work_id:string;title:string;genre:string;state:string;latest_chapter_no:number;projection?:{stage_label:string}}
 type Progress = {chapter_no:number;state:string;current_step?:string;steps:Record<string,string>}
 type Chapter = {title:string;content:string;word_count:number;ai_disclosure:string}
+type CostData = {currency:string;consumed_minor:number;released_minor:number;by_chapter:{chapter_no:number;amount_minor:number}[];by_step:{step:string;amount_minor:number}[]}
+type Share = {share_id:string;work_id:string;share_url:string;scope:string;noindex:boolean;revoked_at:string|null;expires_at:string|null}
 
 const STEP_LABELS: Record<string,string> = {
   ASSEMBLE:'整理世界与目标', PERFORM:'角色各自行动', DIRECT:'导演编排场景',
@@ -27,6 +29,15 @@ export default function App() {
   const [streaming, setStreaming] = useState(false)
   const sseActive = useRef(false)
   const sseWorkRef = useRef('')
+  const [cost, setCost] = useState<CostData | null>(null)
+  const [shares, setShares] = useState<Share[]>([])
+  const [panel, setPanel] = useState<'cost'|'share'|'export'|'fact'|null>(null)
+  const [shareLabel, setShareLabel] = useState('')
+  const [shareUrl, setShareUrl] = useState('')
+  const [factStatement, setFactStatement] = useState('')
+  const [factResult, setFactResult] = useState('')
+  const [exportNotice, setExportNotice] = useState<{notice_version:string;title:string;body:string;satisfied_at:string|null}|null>(null)
+  const [exportResult, setExportResult] = useState<{download_url:string;format:string}|null>(null)
 
   // --- Init: load token ---
   useEffect(() => { void api('/me').catch(() => {}) }, [])
@@ -62,6 +73,7 @@ export default function App() {
   }
   function goHome() {
     setWorkId(''); setOnboarding(null); setProgress(null); setChapter(null); setError('')
+    setPanel(null); setCost(null); setShares([]); setShareUrl(''); setExportNotice(null); setExportResult(null); setFactResult('')
     window.history.pushState(null, '', '/')
   }
 
@@ -118,6 +130,67 @@ export default function App() {
         setChapter(ch)
       }
     } catch { /* no run yet */ }
+  }
+
+  // --- Cost / Share / Export / Fact ---
+  async function loadCost() {
+    if (!workId) return
+    try { setCost(await api<CostData>(`/works/${workId}/costs`)) }
+    catch(e) { setError((e as Error).message) }
+  }
+  async function createShare() {
+    if (!workId) return
+    setBusy(true); setError('')
+    try {
+      const s = await api<Share>(`/works/${workId}/shares`, {
+        method:'POST', body: JSON.stringify({invitee_label: shareLabel || '朋友', scope:'FULL'}),
+      })
+      setShareUrl(s.share_url); setShares(prev => [...prev, s])
+    } catch(e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+  async function revokeShare(sid: string) {
+    try {
+      await api(`/works/${workId}/shares/${sid}`, {method:'DELETE'})
+      setShares(prev => prev.map(s => s.share_id===sid ? {...s, revoked_at: new Date().toISOString()} : s))
+    } catch(e) { setError((e as Error).message) }
+  }
+  async function checkExportNotice() {
+    if (!workId) return
+    try {
+      const n = await api<{notice_version:string;title:string;body:string;satisfied_at:string|null}>(`/works/${workId}/export-notice`)
+      setExportNotice(n)
+    } catch(e) { setError((e as Error).message) }
+  }
+  async function acknowledgeAndExport() {
+    if (!workId || !exportNotice) return
+    setBusy(true); setError('')
+    try {
+      if (!exportNotice.satisfied_at) {
+        await api(`/works/${workId}/export-notice/acknowledge`, {
+          method:'POST', body: JSON.stringify({notice_version: exportNotice.notice_version}),
+        })
+      }
+      const exp = await api<{export_id:string;download_url:string;format:string}>(`/works/${workId}/exports`, {
+        method:'POST', body: JSON.stringify({format:'txt'}),
+      })
+      setExportResult({download_url: exp.download_url, format: exp.format})
+    } catch(e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+  async function reportFact() {
+    if (!workId || !factStatement.trim()) return
+    setBusy(true); setError('')
+    try {
+      const r = await api<{accepted:boolean;message:string;ticket_id:string}>(`/works/${workId}/facts/report`, {
+        method:'POST', body: JSON.stringify({statement: factStatement, chapter_no: progress?.chapter_no, client_nonce: crypto.randomUUID()}),
+      })
+      setFactResult(r.accepted ? `已记录 (#${r.ticket_id.slice(0,8)})：${r.message}` : `未受理：${r.message}`)
+      setFactStatement('')
+    } catch(e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+  function openPanel(p: 'cost'|'share'|'export'|'fact') {
+    setPanel(p)
+    if (p === 'cost') void loadCost()
+    if (p === 'export') void checkExportNotice()
   }
 
   // --- Actions ---
@@ -276,9 +349,62 @@ export default function App() {
             </div>
             <button onClick={()=>navigator.clipboard.writeText(chapter.content)} aria-label="复制正文">复制正文</button>
           </div>
+          <div className="toolbar">
+            <button onClick={()=>openPanel('cost')}>成本明细</button>
+            <button onClick={()=>openPanel('share')}>定向分享</button>
+            <button onClick={()=>openPanel('export')}>导出作品</button>
+            <button onClick={()=>openPanel('fact')}>事实报错</button>
+          </div>
           <div className="prose">{chapter.content.split('\n').map((p,i) => <p key={i}>{p}</p>)}</div>
           <footer>{chapter.ai_disclosure}</footer>
         </article>}
+
+        {/* --- Cost panel (FR-19) --- */}
+        {panel === 'cost' && workId && <div className="panel sub">
+          <div className="panelTop"><h2>成本明细</h2><button className="x" onClick={()=>setPanel(null)}>×</button></div>
+          {cost ? <div>
+            <p className="big">{((cost.consumed_minor) / 100).toFixed(2)} <small>{cost.currency}</small></p>
+            {cost.by_chapter.length > 0 && <div><p className="eyebrow">按章节</p>
+              {cost.by_chapter.map(c => <div className="costRow" key={c.chapter_no}><span>第 {c.chapter_no} 章</span><span>{(c.amount_minor/100).toFixed(2)}</span></div>)}
+            </div>}
+            {cost.by_step.length > 0 && <div><p className="eyebrow">按步骤</p>
+              {cost.by_step.map(s => <div className="costRow" key={s.step}><span>{STEP_LABELS[s.step]||s.step}</span><span>{(s.amount_minor/100).toFixed(2)}</span></div>)}
+            </div>}
+          </div> : <p className="muted">加载中…</p>}
+        </div>}
+
+        {/* --- Share panel (FR-17) --- */}
+        {panel === 'share' && workId && <div className="panel sub">
+          <div className="panelTop"><h2>定向分享</h2><button className="x" onClick={()=>setPanel(null)}>×</button></div>
+          <p className="muted">生成一个链接发给朋友，仅被邀请者可读，不会被搜索引擎收录。</p>
+          <div className="shareForm">
+            <input placeholder="对方称呼（可选）" value={shareLabel} onChange={e=>setShareLabel(e.target.value)} aria-label="邀请对象"/>
+            <button disabled={busy} onClick={createShare}>{busy?'生成中…':'生成链接'}</button>
+          </div>
+          {shareUrl && <div className="shareResult"><p>分享链接已生成：</p><code onClick={()=>navigator.clipboard.writeText(shareUrl)} title="点击复制">{shareUrl}</code></div>}
+          {shares.filter(s=>!s.revoked_at).length > 0 && <div><p className="eyebrow">有效分享</p>
+            {shares.filter(s=>!s.revoked_at).map(s => <div className="shareRow" key={s.share_id}><code className="sm">{s.share_url.slice(0,50)}…</code><button onClick={()=>revokeShare(s.share_id)}>撤回</button></div>)}
+          </div>}
+        </div>}
+
+        {/* --- Export panel (FR-16/23) --- */}
+        {panel === 'export' && workId && <div className="panel sub">
+          <div className="panelTop"><h2>导出作品</h2><button className="x" onClick={()=>setPanel(null)}>×</button></div>
+          {exportNotice && !exportNotice.satisfied_at && <div className="exportNotice"><p><b>{exportNotice.title}</b></p><p className="muted">{exportNotice.body}</p>
+            <button className="primary" disabled={busy} onClick={acknowledgeAndExport}>{busy?'处理中…':'知悉并导出'}</button></div>}
+          {exportNotice?.satisfied_at && !exportResult && <div><p className="muted">已确认导出告知。</p><button className="primary" disabled={busy} onClick={acknowledgeAndExport}>{busy?'导出中…':'导出 TXT'}</button></div>}
+          {exportResult && <div className="shareResult"><p>导出成功：</p><a href={exportResult.download_url} download className="primary dl">下载 {exportResult.format.toUpperCase()}</a></div>}
+          {!exportNotice && <p className="muted">加载中…</p>}
+        </div>}
+
+        {/* --- Fact report panel (FR-11) --- */}
+        {panel === 'fact' && workId && <div className="panel sub">
+          <div className="panelTop"><h2>事实报错</h2><button className="x" onClick={()=>setPanel(null)}>×</button></div>
+          <p className="muted">发现前后矛盾或与设定不符的事实？请描述问题，系统会在后续章节修正。</p>
+          <textarea className="factInput" value={factStatement} onChange={e=>setFactStatement(e.target.value)} placeholder="例如：第1章说修表匠的店铺在城东，但第3章变成了城西…" aria-label="事实错误描述"/>
+          <button className="primary" disabled={busy||!factStatement.trim()} onClick={reportFact}>{busy?'提交中…':'提交报错'}</button>
+          {factResult && <p className="factResult">{factResult}</p>}
+        </div>}
       </section>
     </main>
   </div>
