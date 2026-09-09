@@ -7,11 +7,16 @@ import json
 from pathlib import Path
 
 import pytest
-
 from regent.application.experiment_service import ExperimentRunInput, ExperimentService
 
-ARTIFACTS = Path(__file__).resolve().parents[3] / "docs" / "experiments" / "p0-v1-artifacts"
-TASK_SET = Path(__file__).resolve().parents[3] / "docs" / "experiments" / "p0-task-set-v1.json"
+# b3d5818 把 legacy 文档归档进 docs/archive/legacy-regent-2026/，本测试的
+# artifacts 与任务集跟着搬了家——路径必须指向归档后的位置。
+_EXPERIMENTS = (
+    Path(__file__).resolve().parents[3]
+    / "docs" / "archive" / "legacy-regent-2026" / "experiments"
+)
+ARTIFACTS = _EXPERIMENTS / "p0-v1-artifacts"
+TASK_SET = _EXPERIMENTS / "p0-task-set-v1.json"
 
 EXPECTED_SHA = {
     "raw-run-manifest.json": (
@@ -99,9 +104,8 @@ async def test_experiment_service_real_scoring_path_to_decision(db_sessions) -> 
     decision_id = await svc.finalize(mid)
     assert decision_id is not None
     async with db_sessions() as session:
-        from sqlalchemy import select
-
         from regent.infrastructure.models import ProductDecisionRecordModel
+        from sqlalchemy import select
 
         decision = await session.scalar(
             select(ProductDecisionRecordModel).where(

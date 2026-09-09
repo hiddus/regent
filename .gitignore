@@ -158,3 +158,14 @@ docs/_cw_ws_snapshot/
 ops/_*.txt
 ops/_*.json
 ops/_*.out
+
+# Novel 生成的样章输出
+deploy/novel/novel_output/
+
+# 一次性校验/探测输出（运行产物，不入库）
+deploy/novel/_pgverify.tar.gz
+deploy/novel/_frozen.txt
+deploy/novel/r[0-9]*.txt
+deploy/novel/rfinal.txt
+deploy/novel/regression-*.txt
+/_full_unit.txt

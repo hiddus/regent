@@ -58,6 +58,7 @@ _CHAPTER_RUN_STATES = (
     "QUEUED",
     "RUNNING",
     "PENDING_DECISION",
+    "AWAITING_INPUT",
     "RETRYABLE_FAILED",
     "TERMINAL_FAILED",
     "CANONIZED",
@@ -68,6 +69,20 @@ _STEP_STATES = ("PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED")
 _DECISION_STATES = ("PENDING", "RESOLVED", "EXPIRED", "SUPERSEDED")
 _MODERATION_DECISIONS = ("PENDING", "APPROVED", "REJECTED", "APPEALED", "RESOLVED")
 _FUNDING_SOURCES = ("platform_grant", "user_paid", "onboarding")
+# 与 domain.memory 的 MEMORY_KINDS / MEMORY_STATES 保持一致：这里只用于 CHECK 约束
+# 六个视图（技术方案 §3.2）：世界事实=rule；人物状态=character_arc+relation；
+# 人物认知=belief；读者认知=reader_knowledge；承诺与伏笔=promise；导演记忆=director_note。
+_MEMORY_KINDS = (
+    "rule",
+    "character_arc",
+    "promise",
+    "relation",
+    "belief",
+    "reader_knowledge",
+    "director_note",
+)
+_MEMORY_STATES = ("OPEN", "RESOLVED", "ABANDONED")
+_MEMORY_EDGE_KINDS = ("depends", "independent")
 
 
 def _states_sql(name: str, values: tuple[str, ...]) -> str:
@@ -136,6 +151,11 @@ class StoryWorkModel(Timestamped, NovelBase):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     latest_chapter_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_volume_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 用户认可的终局（B-05）：末节点完成后按它决定结束还是扩卷，不再「先扩卷、
+    # 扩不出来才结束」。0 / 空串表示用户没说，只能由导演补位。
+    ending_target_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ending_statement: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     # 产品软删除；财务与创作证据不级联物理删除
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -195,6 +215,53 @@ class CriticalNodeModel(NovelBase):
     consequences: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     requires_human: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 30 万字架构：节点归属卷/弧段标注
+    volume_no: Mapped[int] = mapped_column(Integer, nullable=True)
+    arc_no: Mapped[int] = mapped_column(Integer, nullable=True)
+
+
+class VolumeModel(Timestamped, NovelBase):
+    """卷：小说最高层结构单元（30 万字架构）。"""
+
+    __tablename__ = "novel_volumes"
+    __table_args__ = (
+        UniqueConstraint("work_id", "volume_no", name="uq_novel_volumes_work_vol"),
+        Index("ix_novel_volumes_work", "work_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("novel_works.id", ondelete="CASCADE"), nullable=False
+    )
+    volume_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    summary: Mapped[list[dict[str, object]]] = mapped_column(JSONB, default=list, nullable=False)
+    cultivation_realm: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    start_chapter_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    end_chapter_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+
+
+class ArcNodeModel(NovelBase):
+    """弧段：卷内叙事单元，每个弧段覆盖 3-8 章（30 万字架构）。"""
+
+    __tablename__ = "novel_arc_nodes"
+    __table_args__ = (
+        UniqueConstraint("volume_id", "arc_no", name="uq_novel_arcs_vol_arc"),
+        Index("ix_novel_arcs_volume", "volume_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    volume_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("novel_volumes.id", ondelete="CASCADE"), nullable=False
+    )
+    arc_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    arc_type: Mapped[str] = mapped_column(String(32), nullable=False, default="STANDARD")
+    chapter_range_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    chapter_range_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    core_conflict: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    resolution_type: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 
 
 class OnboardingSessionModel(Timestamped, NovelBase):
@@ -263,10 +330,21 @@ class ChapterRunModel(Timestamped, NovelBase):
         JSONB, default=list, nullable=False
     )
     review: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    # 人在回路：用户反馈与自动模式
+    user_guidance: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    auto_advance: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     # 幂等键：work:branch:chapter:step:input_version（Tech-Spec §5）
     input_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     canonized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 运行租约：调用在事务外进行（§4.4），持有租约期间其他 worker 不得并行推进
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class ChapterStepModel(Timestamped, NovelBase):
@@ -531,8 +609,13 @@ class ModelCallModel(NovelBase):
 
     __tablename__ = "novel_model_calls"
     __table_args__ = (
-        UniqueConstraint("logical_call_id", name="uq_novel_model_calls_logical"),
+        # logical call 与 attempt 分离：重试是新的 attempt，不复用前一次的费用记录
+        UniqueConstraint(
+            "logical_call_id", "attempt", name="uq_novel_model_calls_logical_attempt"
+        ),
         Index("ix_novel_model_calls_work", "work_id", "chapter_no"),
+        Index("ix_novel_model_calls_logical", "logical_call_id"),
+        Index("ix_novel_model_calls_status", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -559,6 +642,30 @@ class ModelCallModel(NovelBase):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # --- 生产调用协议（Tech-Spec §4.4 / §5 / §6）---
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # 调用前预留、调用后按实际结算；两段式，多退少补
+    reserved_amount_minor: Mapped[int | None] = mapped_column(BigInteger)
+    actual_amount_minor: Mapped[int | None] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(String(3), default="CNY", nullable=False)
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    # usage 来源：provider 报告 / estimated（对账失败后的估算）
+    usage_source: Mapped[str] = mapped_column(String(32), default="provider", nullable=False)
+    # 供应商请求 id：外部结果不确定时用于查询/对账
+    provider_request_id: Mapped[str | None] = mapped_column(String(128))
+    # 对账次数，与模型 attempt 分开计数：attempt 不会因对账而递增，
+    # 用它当重试上限会让 UNKNOWN 永远挂起（Plan v6.4 §10 P0-1）。
+    reconcile_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 调用租约：RESERVED 且租约过期 → UNKNOWN，禁止盲重试
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_ttl_seconds: Mapped[int | None] = mapped_column(Integer)
+    # 已成功输出快照：恢复时复用，不重新调用也不重复计费（G-09）
+    output_json: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class CostEntryModel(NovelBase):
@@ -569,7 +676,10 @@ class CostEntryModel(NovelBase):
         CheckConstraint(
             _states_sql("funding_source", _FUNDING_SOURCES), name="ck_novel_cost_funding"
         ),
-        UniqueConstraint("logical_call_id", "funding_pool", name="uq_novel_cost_settlement"),
+        # 幂等键 logical_call_id:funding_pool:entry_kind；两段式需要区分预留结算与释放
+        UniqueConstraint(
+            "logical_call_id", "funding_pool", "entry_kind", name="uq_novel_cost_settlement"
+        ),
         CheckConstraint("amount_minor >= 0", name="ck_novel_cost_non_negative"),
         Index("ix_novel_cost_work", "work_id", "chapter_no"),
     )
@@ -634,7 +744,12 @@ class NovelEventModel(NovelBase):
         Index("ix_novel_events_work_seq", "work_id", "sequence"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # SQLite 里只有 INTEGER PRIMARY KEY 才是 rowid 别名、才会自增；BIGINT 不会，
+    # 插入直接 NOT NULL 失败。Postgres 上 BigInteger+autoincrement 是 BIGSERIAL，
+    # 两边语义一致，用 variant 让模型在测试库里也能真写事件。
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     work_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("novel_works.id", ondelete="CASCADE"), nullable=False
@@ -680,5 +795,123 @@ class IdempotencyRecordModel(NovelBase):
     )
     status_code: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# 长期创作记忆（Plan §4 R3）
+# ---------------------------------------------------------------------------
+
+
+class MemoryItemModel(NovelBase):
+    """长期记忆条目：稳定规则 / 人物弧线 / 承诺与伏笔 / 关系变化。
+
+    事实链（Canon）保持 append-only，本表只是**可召回的索引**：改意时只把条目
+    置 ``invalidated_at``，不删不改，旧版上下文因此不会污染新版。
+    """
+
+    __tablename__ = "novel_memory_items"
+    __table_args__ = (
+        CheckConstraint(
+            _states_sql("kind", _MEMORY_KINDS), name="ck_novel_memory_kind"
+        ),
+        CheckConstraint(
+            _states_sql("state", _MEMORY_STATES), name="ck_novel_memory_state"
+        ),
+        UniqueConstraint(
+            "work_id", "branch_id", "item_key", name="uq_novel_memory_key"
+        ),
+        Index("ix_novel_memory_work_state", "work_id", "state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("novel_works.id", ondelete="CASCADE"), nullable=False
+    )
+    branch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    item_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    subject: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    entities: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="high")
+    source_chapter_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    # 兑现章号：0 表示尚未兑现。「已兑现」与「从没被记住」不能在存储里长得一样，
+    # 否则跨章保留未兑现承诺这条硬规矩无法验证（B-01）。
+    resolved_chapter_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 分类依据（explicit_kind / co_occurrence / promise_signal ...）：「凭什么把这条
+    # 记成规则」必须能查，否则分类错误无法与故意归类区分（B-01）。
+    basis: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    memory_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalidated_reason: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+
+
+class MemoryEdgeModel(NovelBase):
+    """记忆依赖边 ``(upstream -> downstream)``：最小子图重演的依据。"""
+
+    __tablename__ = "novel_memory_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "work_id", "branch_id", "upstream_key", "downstream_key",
+            name="uq_novel_memory_edge",
+        ),
+        Index("ix_novel_memory_edge_up", "work_id", "upstream_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("novel_works.id", ondelete="CASCADE"), nullable=False
+    )
+    branch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    upstream_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    downstream_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    # depends    = 已确认的下游依赖（共享实体/主体推导得出）
+    # independent = 已显式确认这一条没有上游依赖
+    # 只有 depends 边时，孤立节点既可能是真独立也可能是漏记：必须靠 independent
+    # 标记才能把两者分开，否则「有边」会被当成「图完整」（B-02）。
+    edge_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="depends")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class EvalRunModel(NovelBase):
+    """一次盲评评估（Plan §4 R4）。
+
+    配置指纹与报告指纹同时落库：采样后改配置会让两者不一致，
+    此时无论分数多好都不得宣布晋级。
+    """
+
+    __tablename__ = "novel_eval_runs"
+    __table_args__ = (UniqueConstraint("eval_id", name="uq_novel_eval_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    eval_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    config: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    samples: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    scores: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    report: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    report_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False, default="HOLD")
+    verdict_reasons: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

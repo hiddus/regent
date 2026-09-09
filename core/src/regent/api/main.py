@@ -88,6 +88,10 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(settings)
         app.state.sessions = create_session_factory(engine)
+        # 小说生产调用：预留与结算走独立事务，模型调用在事务外进行（Tech-Spec §4.4）
+        from regent.novel.application.production import configure_session_factory
+
+        configure_session_factory(app.state.sessions)
         app.state.transient_progress = TransientProgressRegistry()
         # Migration may not have applied yet; fail open at boot, fail-closed at use.
         with suppress(Exception):

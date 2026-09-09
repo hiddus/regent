@@ -61,10 +61,33 @@ def extract_cached_tokens(usage: dict[str, Any]) -> int | None:
     return None
 
 
+_REQUEST_ID_HEADERS = ("x-request-id", "x-fc-request-id", "cf-ray", "apim-request-id")
+
+
+def extract_request_id(response: Any) -> str:
+    """Best-effort supplier request id for reconciliation (Tech-Spec §4.4).
+
+    Empty string means unknown: the caller must then treat an interrupted call
+    as UNKNOWN and reconcile instead of blind-retrying.
+    """
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return ""
+    for key in _REQUEST_ID_HEADERS:
+        value = headers.get(key)
+        if value:
+            return str(value)[:128]
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class ModelUsage:
     input_tokens: int
     output_tokens: int
+    # 供应商缓存命中的输入 token，单独计价；无报告时为 0。
+    cached_input_tokens: int = 0
+    # 供应商请求标识：外部结果不确定时用于查询/对账（Tech-Spec §4.4）。
+    request_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +104,7 @@ class ModelProvider(Protocol):
         system_prompt: str,
         user_prompt: str,
         response_model: type[ResponseT],
+        temperature: float = 0,
     ) -> StructuredModelResponse[ResponseT]: ...
 
     async def chat(
@@ -123,6 +147,7 @@ class OpenAICompatibleProvider:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
+        self.model_name = model  # 公开读取：调用前按模型预留额度
         self._timeout = timeout_seconds
         self._max_structured_attempts = max_structured_attempts
         self._max_output_tokens = max_output_tokens
@@ -146,6 +171,7 @@ class OpenAICompatibleProvider:
         system_prompt: str,
         user_prompt: str,
         response_model: type[ResponseT],
+        temperature: float = 0,
     ) -> StructuredModelResponse[ResponseT]:
         schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
         schema_prompt = (
@@ -161,6 +187,8 @@ class OpenAICompatibleProvider:
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
         total_input = 0
         total_output = 0
+        total_cached = 0
+        request_id = ""
         last_error: ModelOutputError | None = None
         model_name = self._model
         self.last_http_attempts = []
@@ -170,8 +198,10 @@ class OpenAICompatibleProvider:
                     "model": self._model,
                     "messages": messages,
                     "response_format": {"type": "json_object"},
-                    "temperature": 0,
+                    "temperature": temperature,
                 }
+                if self._max_output_tokens is not None:
+                    payload["max_tokens"] = int(self._max_output_tokens)
                 self._apply_thinking_mode(payload)
                 # Same M1-2 HTTP retry as chat(): production artifact-backed
                 # generation uses this path; previously 504 raised immediately.
@@ -182,9 +212,11 @@ class OpenAICompatibleProvider:
                     model_name = str(body.get("model", self._model))
                 except (KeyError, IndexError, TypeError, ValueError) as exc:
                     raise ModelOutputError("model response envelope is invalid") from exc
-                usage = body.get("usage", {})
+                usage = body.get("usage", {}) or {}
                 total_input += int(usage.get("prompt_tokens", 0))
                 total_output += int(usage.get("completion_tokens", 0))
+                total_cached += extract_cached_tokens(usage) or 0
+                request_id = extract_request_id(response) or request_id
                 normalized = self._normalize_content(content)
                 try:
                     output = response_model.model_validate_json(normalized)
@@ -210,6 +242,8 @@ class OpenAICompatibleProvider:
                         usage=ModelUsage(
                             input_tokens=total_input,
                             output_tokens=total_output,
+                            cached_input_tokens=total_cached,
+                            request_id=request_id,
                         ),
                         model=model_name,
                     )

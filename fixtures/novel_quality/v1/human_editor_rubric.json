@@ -1,0 +1,18 @@
+{
+  "version": "1.0",
+  "protocol": {
+    "sample": "连续3章，隐藏模型与版本，随机顺序双盲评审",
+    "reviewers": 3,
+    "scale": "每项1-5分；3=可读但普通，4=达到商业连载，5=有鲜明作者性",
+    "decision": "各项中位数>=4，且无评审给沉浸感、因果或人物可信度1分"
+  },
+  "dimensions": [
+    {"id": "immersion", "name": "沉浸与可读性", "weight": 20, "anchor_1": "频繁出戏或难以读完", "anchor_5": "无需意志维持阅读"},
+    {"id": "causality", "name": "因果与净推进", "weight": 20, "anchor_1": "事件重复或靠巧合推进", "anchor_5": "每章改变局势且代价清晰"},
+    {"id": "character", "name": "人物可信与声纹", "weight": 20, "anchor_1": "角色可互换、只服务情节", "anchor_5": "遮住姓名仍能辨认角色"},
+    {"id": "prose", "name": "语言与意象", "weight": 15, "anchor_1": "模板句堆叠", "anchor_5": "准确、克制且有辨识度"},
+    {"id": "continuity", "name": "连续性", "weight": 15, "anchor_1": "状态或知识明显冲突", "anchor_5": "细节稳定并产生后续后果"},
+    {"id": "desire", "name": "追读欲", "weight": 10, "anchor_1": "不愿继续", "anchor_5": "结尾悬念来自选择后果而非截断"}
+  ],
+  "required_notes": ["最有效的一处", "最出戏的一处", "一项最小修改建议", "是否愿意自费继续阅读"]
+}

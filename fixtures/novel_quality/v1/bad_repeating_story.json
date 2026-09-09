@@ -1,0 +1,18 @@
+{
+  "chapters": [
+    {
+      "chapter_no": 21,
+      "text": "韩墨瞳孔骤缩，不再犹豫。剑尖锁定后心，他咬破舌尖，暗金光芒暴涨。赵无极冷笑：你逃不掉。枯手从暗河伸出，将他拖向深处。",
+      "state_before": {"location": "石桥", "clue": "unknown", "injury": "light"},
+      "state_after": {"location": "暗河", "clue": "unknown", "injury": "light"},
+      "dialogue_by_character": {"韩墨": ["今日谁也不能让我死在这里，我一定会杀出去，然后拿回属于我的东西。"], "赵无极": ["今日谁也不能让我死在这里，我一定会杀出去，然后拿回属于我的东西。"]}
+    },
+    {
+      "chapter_no": 22,
+      "text": "韩墨瞳孔骤缩，不再犹豫。剑尖锁定后心，他咬破舌尖，暗金光芒暴涨。赵无极冷笑：你逃不掉。枯手从暗河伸出，将他拖向深处。",
+      "state_before": {"location": "石桥", "clue": "unknown", "injury": "light"},
+      "state_after": {"location": "暗河", "clue": "unknown", "injury": "light"},
+      "dialogue_by_character": {"韩墨": ["今日谁也不能让我死在这里，我一定会杀出去，然后拿回属于我的东西。"], "赵无极": ["今日谁也不能让我死在这里，我一定会杀出去，然后拿回属于我的东西。"]}
+    }
+  ]
+}

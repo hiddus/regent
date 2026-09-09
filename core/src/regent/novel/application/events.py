@@ -13,11 +13,13 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from regent.novel.domain.models import EVENT_SCHEMA_VERSION, EventPage, NovelEvent
-from regent.novel.infrastructure.models import NovelEventModel
+from regent.novel.infrastructure.models import NovelEventModel, NovelWorkSequenceModel
 
 # 保留窗：早于此起点的补帧请求一律 resync（避免无界回溯 + 明确告知客户端）
 DEFAULT_RETENTION_SEQUENCE_WINDOW = 5000
@@ -43,15 +45,21 @@ async def append_event(
 
     序列分配使用 ``UPDATE ... RETURNING``（行锁），保证并发下单调递增且无空洞。
     """
+    # 用 Core insert 而不是裸 SQL：work_id 是 UUID，裸 SQL 会把 Python 的
+    # ``uuid.UUID`` 直接交给驱动，SQLite 无法绑定（Postgres 可以），于是
+    # 换一个方言就 500。交给列类型做绑定转换，语义不变仍是行级原子自增。
+    # ON CONFLICT 只有方言版 insert 才有，因此按方言挑一个。
+    seq = NovelWorkSequenceModel.__table__.c
+    dialect_name = str(session.get_bind().dialect.name or "")
+    dialect_insert = sqlite_insert if dialect_name == "sqlite" else pg_insert
     row = await session.execute(
-        text(
-            "INSERT INTO novel_work_sequences (work_id, last_sequence) "
-            "VALUES (:work_id, 0) "
-            "ON CONFLICT (work_id) DO UPDATE "
-            "SET last_sequence = novel_work_sequences.last_sequence + 1 "
-            "RETURNING last_sequence"
-        ),
-        {"work_id": work_id},
+        dialect_insert(NovelWorkSequenceModel)
+        .values(work_id=work_id, last_sequence=0)
+        .on_conflict_do_update(
+            index_elements=[seq.work_id],
+            set_={"last_sequence": seq.last_sequence + 1},
+        )
+        .returning(seq.last_sequence)
     )
     sequence = int(row.scalar_one())
 

@@ -78,6 +78,10 @@ class Worker:
         self.dispatcher = dispatcher
         self.leases = leases
         self.sessions = sessions
+        if sessions is not None:
+            from regent.novel.application.production import configure_session_factory
+
+            configure_session_factory(sessions)
         self.timers = timers
         self.permits = permits
         self.human_tasks = human_tasks
@@ -100,6 +104,8 @@ class Worker:
         self._behavior_monitor_interval = 600.0
         self._next_behavior_monitor = 0.0
         self._behavior_monitor_enabled = True
+        self._novel_recovery_interval = 30.0
+        self._next_novel_recovery = 0.0
         if sessions is not None:
             from regent.application.reconciliation_worker import ReconciliationWorker
             from regent.config import get_settings
@@ -127,6 +133,9 @@ class Worker:
         logger.info("worker lease acquired", extra={"worker_id": self.worker_id})
         if self.event_engine is not None:
             await self.event_engine.start()
+        # 重启即恢复：先把崩溃进程留下的 RESERVED/UNKNOWN 调用收口，再开始推进
+        if self.sessions is not None:
+            await self._novel_recovery_tick(startup=True)
         try:
             while not self._stopping.is_set():
                 if self.permits is not None:
@@ -146,6 +155,9 @@ class Worker:
                             logger.info("advanced CREATED runs", extra={"count": n})
                     except Exception:
                         logger.exception("CREATED run reclaim failed")
+                if self.sessions is not None and monotonic() >= self._next_novel_recovery:
+                    await self._novel_recovery_tick()
+                    self._next_novel_recovery = monotonic() + self._novel_recovery_interval
                 if self.sessions is not None and self.novel_provider is not None:
                     try:
                         from regent.novel.application.works import advance_background_run
@@ -282,6 +294,38 @@ class Worker:
             with suppress(Exception):
                 await self.leases.release(lease)
             logger.info("worker stopped", extra={"worker_id": self.worker_id})
+
+    async def _novel_recovery_tick(self, *, startup: bool = False) -> None:
+        """回收过期调用并对账 UNKNOWN 调用（Tech-Spec §4.4 / P0-1）。
+
+        崩溃留下的 ``RESERVED`` 记录先判定为 ``UNKNOWN``（保留预留额、不猜结果），
+        再逐条对账：供应商可查则据实结算，查不到按对账次数有界终止。
+        失败只记录日志，不得让整个 worker 循环停摆。
+        """
+        try:
+            from regent.novel.application.production import recover_novel_calls
+            from regent.novel.application.works import sweep_expired_decisions
+
+            async with self.sessions() as session:  # type: ignore[misc]
+                stats = await recover_novel_calls(
+                    session, provider=self.novel_provider
+                )
+                # 到期未选的裁决按默认项落定，与用户提交竞争（G-13）
+                expired = await sweep_expired_decisions(session)
+                await session.commit()
+        except Exception:
+            logger.exception("novel call recovery tick failed")
+            return
+        if expired:
+            logger.info(
+                "novel decisions auto-resolved by deadline",
+                extra={"count": len(expired), "decision_ids": expired},
+            )
+        if any(stats.values()):
+            logger.info(
+                "novel call recovery",
+                extra={"startup": startup, **stats},
+            )
 
     async def _scheduler_tick(self) -> None:
         assert self.scheduler is not None

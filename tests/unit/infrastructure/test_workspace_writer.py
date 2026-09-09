@@ -167,6 +167,10 @@ def test_symlink_in_base_is_rejected_when_supported(tmp_path: Path) -> None:
         os.symlink(outside, base / "link.txt")
     except OSError:
         pytest.skip("symlink creation is unavailable")
+    # 部分受控运行时会「伪成功」：os.symlink 不抛错但链接并未真正落地。
+    # 链接不存在就无法验证拒绝逻辑，跳过；真实环境（CI/Linux/特权 Windows）不受影响。
+    if not (base / "link.txt").exists() and not (base / "link.txt").is_symlink():
+        pytest.skip("symlink was silently dropped by the runtime")
     item, content = change("safe.txt", b"safe")
     writer = WorkspaceWriter(root, content.__getitem__)
     with pytest.raises(WorkspaceError):

@@ -31,11 +31,35 @@ class ChapterRunState(StrEnum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     PENDING_DECISION = "PENDING_DECISION"
+    AWAITING_INPUT = "AWAITING_INPUT"
     RETRYABLE_FAILED = "RETRYABLE_FAILED"
     TERMINAL_FAILED = "TERMINAL_FAILED"
     CANONIZED = "CANONIZED"
     SUPERSEDED = "SUPERSEDED"
     CANCELLED = "CANCELLED"
+
+
+class SceneRunState(StrEnum):
+    """场景运行状态机（Tech-Spec §3.4）。
+
+    DIRECTOR_VIEW 出现两次，用 artifact 区分：观看表演（PERFORMANCE）
+    与观看正文（PROSE）。RETAKE/REWRITE 产生新版本，不覆盖旧状态。
+    """
+
+    BRIEFED = "BRIEFED"
+    PERFORMING = "PERFORMING"
+    RESOLVING = "RESOLVING"
+    DIRECTOR_VIEW = "DIRECTOR_VIEW"
+    RENDERING = "RENDERING"
+    VALIDATING = "VALIDATING"
+    ACCEPTED = "ACCEPTED"
+
+
+class SceneArtifact(StrEnum):
+    """区分两次 DIRECTOR_VIEW 的产物类型。"""
+
+    PERFORMANCE = "PERFORMANCE"
+    PROSE = "PROSE"
 
 
 class ChapterStep(StrEnum):
@@ -44,9 +68,18 @@ class ChapterStep(StrEnum):
     ASSEMBLE = "ASSEMBLE"
     PERFORM = "PERFORM"
     DIRECT = "DIRECT"
+    PRODUCE = "PRODUCE"
     WEAVE = "WEAVE"
     REVIEW = "REVIEW"
     CANON = "CANON"
+
+
+class VolumeState(StrEnum):
+    """卷状态机（30 万字架构）。"""
+
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
 
 
 class StepState(StrEnum):
@@ -80,6 +113,16 @@ CHAPTER_STEP_ORDER: tuple[ChapterStep, ...] = (
     ChapterStep.REVIEW,
     ChapterStep.CANON,
 )
+
+
+def chapter_step_order(context: dict | None = None) -> tuple[ChapterStep, ...]:
+    """Pin the executor per run; unversioned in-flight chapters remain legacy."""
+    if (context or {}).get("architecture_version") == "director_v2":
+        return (
+            ChapterStep.ASSEMBLE, ChapterStep.DIRECT, ChapterStep.PRODUCE,
+            ChapterStep.REVIEW, ChapterStep.CANON,
+        )
+    return CHAPTER_STEP_ORDER
 
 # 允许的状态迁移。空集合表示终态。
 _STORY_WORK_TRANSITIONS: dict[StoryWorkState, frozenset[StoryWorkState]] = {
@@ -148,6 +191,7 @@ _CHAPTER_RUN_TRANSITIONS: dict[ChapterRunState, frozenset[ChapterRunState]] = {
     ChapterRunState.RUNNING: frozenset(
         {
             ChapterRunState.PENDING_DECISION,
+            ChapterRunState.AWAITING_INPUT,
             ChapterRunState.RETRYABLE_FAILED,
             ChapterRunState.TERMINAL_FAILED,
             ChapterRunState.CANONIZED,
@@ -175,6 +219,14 @@ _CHAPTER_RUN_TRANSITIONS: dict[ChapterRunState, frozenset[ChapterRunState]] = {
     ),
     ChapterRunState.TERMINAL_FAILED: frozenset(
         {ChapterRunState.QUEUED, ChapterRunState.CANCELLED, ChapterRunState.SUPERSEDED}
+    ),
+    ChapterRunState.AWAITING_INPUT: frozenset(
+        {
+            ChapterRunState.RUNNING,
+            ChapterRunState.RETRYABLE_FAILED,
+            ChapterRunState.CANCELLED,
+            ChapterRunState.SUPERSEDED,
+        }
     ),
     ChapterRunState.CANONIZED: frozenset({ChapterRunState.SUPERSEDED}),
     ChapterRunState.SUPERSEDED: frozenset(),
@@ -214,6 +266,63 @@ def assert_chapter_run_transition(current: str, target: str) -> None:
         return
     if tgt not in _CHAPTER_RUN_TRANSITIONS[cur]:
         raise InvalidTransition("chapter_run", current, target)
+
+
+_SCENE_RUN_TRANSITIONS: dict[tuple[SceneRunState, str], frozenset[tuple[SceneRunState, str]]] = {
+    (SceneRunState.BRIEFED, ""): frozenset({(SceneRunState.PERFORMING, "")}),
+    # 同一节拍内多个角色依次表演是同一状态的延续，不是新状态。
+    (SceneRunState.PERFORMING, ""): frozenset(
+        {(SceneRunState.PERFORMING, ""), (SceneRunState.RESOLVING, "")}
+    ),
+    (SceneRunState.RESOLVING, ""): frozenset(
+        {(SceneRunState.DIRECTOR_VIEW, SceneArtifact.PERFORMANCE)}
+    ),
+    (SceneRunState.DIRECTOR_VIEW, SceneArtifact.PERFORMANCE): frozenset(
+        {
+            # CONTINUE：进入下一节拍
+            (SceneRunState.PERFORMING, ""),
+            # RETAKE：fork 新 take，回到已下达 brief
+            (SceneRunState.BRIEFED, ""),
+            # RENDER：结束表演，进入小说呈现
+            (SceneRunState.RENDERING, ""),
+        }
+    ),
+    (SceneRunState.RENDERING, ""): frozenset(
+        {(SceneRunState.DIRECTOR_VIEW, SceneArtifact.PROSE)}
+    ),
+    (SceneRunState.DIRECTOR_VIEW, SceneArtifact.PROSE): frozenset(
+        {
+            (SceneRunState.RENDERING, ""),
+            (SceneRunState.BRIEFED, ""),
+            (SceneRunState.VALIDATING, ""),
+        }
+    ),
+    (SceneRunState.VALIDATING, ""): frozenset(
+        {
+            (SceneRunState.DIRECTOR_VIEW, SceneArtifact.PROSE),
+            (SceneRunState.ACCEPTED, ""),
+        }
+    ),
+    (SceneRunState.ACCEPTED, ""): frozenset(),
+}
+
+
+def assert_scene_run_transition(
+    current: str,
+    target: str,
+    current_artifact: str = "",
+    target_artifact: str = "",
+) -> None:
+    """校验场景阶段迁移。DIRECTOR_VIEW 必须带 artifact 才能区分两次观看。"""
+    try:
+        cur = (SceneRunState(current), current_artifact or "")
+        tgt = (SceneRunState(target), target_artifact or "")
+    except ValueError as exc:
+        raise InvalidTransition("scene_run", current, target) from exc
+    if cur == tgt:
+        return
+    if tgt not in _SCENE_RUN_TRANSITIONS[cur]:
+        raise InvalidTransition("scene_run", current, target)
 
 
 # 需要人工介入、且必须释放 worker 的状态（Tech-Spec §3.3）

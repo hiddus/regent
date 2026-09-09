@@ -51,6 +51,18 @@ def constant_time_eq(a: str, b: str) -> bool:
     return hmac.compare_digest(a, b)
 
 
+def as_utc(value: datetime | None) -> datetime | None:
+    """把数据库取回的时间统一成 tz-aware（naive 一律按 UTC 解释）。
+
+    ``DateTime(timezone=True)`` 在 SQLite 上取回来是 **naive**，直接与
+    ``datetime.now(UTC)`` 比较会抛 ``TypeError``——鉴权路径于是返回 500 而不是
+    401。有效期判断必须 fail-closed，不能因为驱动差异变成服务端错误。
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 async def require_principal(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -76,7 +88,10 @@ async def require_principal(
                 NovelSessionModel.token_hash == hash_token(raw)
             )
         )
-        if row is None or row.revoked_at is not None or row.expires_at < now:
+        expires_at = as_utc(row.expires_at) if row is not None else None
+        if row is None or row.revoked_at is not None or (
+            expires_at is not None and expires_at < now
+        ):
             raise Unauthenticated()
         principal = await session.get(NovelPrincipalModel, row.principal_id)
         if principal is None or principal.deleted_at is not None:

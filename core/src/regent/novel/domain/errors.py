@@ -166,3 +166,24 @@ class InfrastructureUnavailable(NovelError):
     status_code = 503
     code = "infrastructure_unavailable"
     retryable = True
+
+
+# --- 导演生产停止（内部循环，不是 API 错误 envelope）---
+
+
+class ProductionStopped(RuntimeError):
+    """导演循环停止，草稿保留。"""
+
+    failure_code = "DIRECTOR_PRODUCTION_STOPPED"
+
+
+class CommandRejected(ProductionStopped):
+    """命令未通过 Runtime 校验。模型输出不能直接变成状态迁移。"""
+
+    failure_code = "DIRECTOR_COMMAND_REJECTED"
+
+    def __init__(self, kind: str, reason: str, fingerprint: str = "") -> None:
+        self.kind = kind
+        self.reason = reason
+        self.fingerprint = fingerprint
+        super().__init__(f"命令被 Runtime 拒绝 [{kind}]: {reason}")

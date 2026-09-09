@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -98,6 +98,38 @@ class CriticalNode(BaseModel):
     consequences: list[str] = Field(default_factory=list)
     requires_human: bool = False
     locked: bool = False
+    # 30 万字架构：节点归属卷/弧段
+    volume_no: int | None = None
+    arc_no: int | None = None
+
+
+class ArcNodeOut(BaseModel):
+    """弧段输出（30 万字架构）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    arc_no: int
+    title: str
+    arc_type: str = "STANDARD"
+    chapter_range_start: int = 0
+    chapter_range_end: int = 0
+    core_conflict: str = ""
+    resolution_type: str = ""
+
+
+class VolumeOut(BaseModel):
+    """卷输出（30 万字架构）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    volume_no: int
+    title: str
+    cultivation_realm: str = ""
+    start_chapter_no: int = 0
+    end_chapter_no: int = 0
+    state: str = "PENDING"
+    summary: list[dict[str, Any]] = Field(default_factory=list)
+    arcs: list[ArcNodeOut] = Field(default_factory=list)
 
 
 class CriticalPathOut(BaseModel):
@@ -332,12 +364,67 @@ class RunProgressOut(BaseModel):
     current_step: ChapterStep | None = None
     steps: dict[str, StepState] = Field(default_factory=dict)
     reused_calls: int = 0
+    # 恢复复用的调用所避免的重复花费（最小货币单位）
+    avoided_cost_minor: int = 0
     version: int = 1
+    # 人在回路
+    auto_advance: bool = False
+    awaiting_input: bool = False
+    scene_no: int = 0
+    scene_count: int = 0
+    completed_scenes: int = 0
+
+
+# ---------------------------------------------------------------------------
+# 人在回路检查点
+# ---------------------------------------------------------------------------
+
+
+class GuidanceRequest(BaseModel):
+    """用户在检查点提交反馈。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feedback: str = Field(default="", max_length=5000)
+    approve: bool = False  # True = 无反馈直接继续
+
+
+class AutoAdvanceRequest(BaseModel):
+    """切换自动/手动模式。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
 
 
 # ---------------------------------------------------------------------------
 # 事实报错 / 审核 / 分享 / 导出
 # ---------------------------------------------------------------------------
+
+
+class EndingIntentRequest(BaseModel):
+    """用户认可的终局（B-05）。
+
+    两项都可空：都不填表示「我还没想好，交给导演判断」，此时完结只能由导演
+    判定，且判不出来就保持待定——不允许退化成「扩卷失败即完结」。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_volume_count: int | None = Field(default=None, ge=1, le=50)
+    ending_statement: str | None = Field(default=None, max_length=500)
+
+
+class ResumeCorrectionRequest(BaseModel):
+    """因纠错恢复创作（C-01）。
+
+    ``ticket_id`` 是 ``report_fact`` 返回的工单号，用于把「这次恢复」和「那次
+    报错」串起来——恢复是用户动作，必须能追到它对应哪一条纠错。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticket_id: str = Field(default="", max_length=64)
 
 
 class ReportFactRequest(BaseModel):
@@ -349,6 +436,9 @@ class ReportFactRequest(BaseModel):
     chapter_no: int | None = None
     kind: str = "FACT"  # FACT | TASTE
     client_nonce: str = ""
+    # 报错针对的记忆主题（人物名、节点标题）。不填时从 statement 里按在册人物推。
+    # 它决定重演范围：认不出主题就只能保守重做，不能假装精确。
+    subject: str = ""
 
 
 class ReportFactResponse(BaseModel):
@@ -359,6 +449,9 @@ class ReportFactResponse(BaseModel):
     kind: str
     message: str
     affected_chapters: list[int] = Field(default_factory=list)
+    # 重演范围是怎么定下来的：dependency_subgraph 还是 conservative_batch。
+    # 承诺「局部重演」却整批重做，是必须能让用户看见的事（B-02）。
+    replay_scope: str = ""
     # 审美意见不得只显示拒绝——必须给出回落动作（PRD §3.1）
     available_actions: list[str] = Field(default_factory=list)
 
@@ -369,10 +462,48 @@ class ModerationCaseOut(BaseModel):
     case_id: str
     work_id: str
     chapter_no: int | None = None
+    target_type: str = "CHAPTER"
     decision: ModerationDecision
     reason_code: str | None = None
+    detail: str = ""
     appealed_at: datetime | None = None
     resolved_at: datetime | None = None
+
+
+class ReportModerationRequest(BaseModel):
+    """FR-25：投诉/举报入口。任何投诉都必须落 ModerationCase（G-23）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_no: int | None = None
+    reason_code: str = "other"
+    detail: str = Field(default="", max_length=2000)
+    client_nonce: str = ""
+
+
+class ResolveModerationRequest(BaseModel):
+    """P1-4：审核结论。无结论不得视为通过（G-23）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: ModerationDecision
+    reason_code: str = ""
+    evidence: str = Field(default="", max_length=2000)
+    # author 不能给自己的案件下“通过”结论；平台审核用 moderator
+    actor: Literal["moderator", "author"] = "moderator"
+    client_nonce: str = ""
+
+
+class ResolveAppealRequest(BaseModel):
+    """P1-4：申诉结论。upheld=True 表示维持原判定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    upheld: bool = False
+    reason_code: str = ""
+    evidence: str = Field(default="", max_length=2000)
+    actor: Literal["moderator", "author"] = "moderator"
+    client_nonce: str = ""
 
 
 class CreateShareRequest(BaseModel):
@@ -473,6 +604,7 @@ __all__ = [
     "EVENT_SCHEMA_VERSION",
     "HUMAN_REQUIRED_NODE_TYPES",
     "AnswerClarifyRequest",
+    "AutoAdvanceRequest",
     "ChapterOut",
     "ClarifyQuestion",
     "ConfirmDirectionRequest",
@@ -490,6 +622,7 @@ __all__ = [
     "ExportOut",
     "ExportRequest",
     "FundingSource",
+    "GuidanceRequest",
     "ModerationCaseOut",
     "NovelEvent",
     "OnboardingOut",

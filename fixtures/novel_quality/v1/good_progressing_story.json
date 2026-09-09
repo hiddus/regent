@@ -1,0 +1,18 @@
+{
+  "chapters": [
+    {
+      "chapter_no": 1,
+      "text": "雨水淌过钟楼铜瓦。沈砚拆开父亲留下的怀表，夹层里不是齿轮，而是一张盐运暗码。他抄下第三行便烧掉原纸，决定去南仓找守夜人。",
+      "state_before": {"location": "钟楼", "clue": "unknown", "trust_luo": "neutral"},
+      "state_after": {"location": "南仓", "clue": "salt_code", "trust_luo": "neutral"},
+      "dialogue_by_character": {"沈砚": ["数字会撒谎，磨损不会。先看表轴。"], "罗七": ["少爷，南仓今夜可不认活人，您先留条退路。"]}
+    },
+    {
+      "chapter_no": 2,
+      "text": "南仓没有守夜人，只有一盏朝墙照的灯。罗七故意报错暗号，引出梁上的弩手；沈砚借箭痕认出官造机括。二人夺下账册，却因此暴露行踪。",
+      "state_before": {"location": "南仓", "clue": "salt_code", "trust_luo": "neutral"},
+      "state_after": {"location": "南仓地窖", "clue": "official_crossbow", "trust_luo": "positive"},
+      "dialogue_by_character": {"沈砚": ["箭尾漆是工部配方，这不是私盐贩子的手艺。"], "罗七": ["您管它谁的手艺，门外脚步可不等人，先钻地窖。"]}
+    }
+  ]
+}

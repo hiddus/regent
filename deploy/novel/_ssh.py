@@ -16,7 +16,7 @@ import stat
 import sys
 from dataclasses import dataclass, field
 
-def _load_dotenv() -> None:
+def load_dotenv() -> None:
     """Load repo-root .env without third-party deps (values needed for SSH)."""
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     path = os.path.join(root, ".env")
@@ -31,7 +31,7 @@ def _load_dotenv() -> None:
             os.environ.setdefault(key.strip(), value.strip())
 
 
-_load_dotenv()
+load_dotenv()
 
 HOST = os.environ.get("SERVER_IP", "118.31.171.159")
 USER = os.environ.get("LOGIN_USER", "root")

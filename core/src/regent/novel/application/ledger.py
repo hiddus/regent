@@ -14,7 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from regent.novel.domain.errors import GuardViolation, QuotaExceeded
@@ -24,6 +24,7 @@ from regent.novel.infrastructure.models import (
     CostEntryModel,
     ModelCallModel,
     QuotaReservationModel,
+    StoryWorkModel,
 )
 
 # generation scope 必须有 work/chapter/step；reading scope 禁止生成（G-14）
@@ -33,6 +34,14 @@ READING_SCOPE = "reading"
 
 class LedgerError(RuntimeError):
     """账本不一致——属于服务端缺陷，不是用户输入错误。"""
+
+
+def _affected(result: Any) -> int:
+    """受影响行数。部分方言对 RETURNING 报告 -1，用返回行兜底。"""
+    rowcount = result.rowcount
+    if rowcount is not None and rowcount >= 0:
+        return int(rowcount)
+    return 1 if result.first() is not None else 0
 
 
 # ---------------------------------------------------------------------------
@@ -132,14 +141,36 @@ async def reserve(
         return existing
 
     if funding_limit_minor is not None:
-        outstanding = await _outstanding_minor(session, work_id=work_id, currency=currency)
+        # 原子上限检查：已预留未结清的额度必须先算进去（P0-3）。
+        #
+        # P0-5：只读不算锁。两个事务同时读到 outstanding=0 会一起插入，上限被突破。
+        # 先锁住作品行使同一作品的预留串行化：预留是短事务（模型调用在事务外），
+        # 串行化的代价只落在记账这一小段上。作品行不存在时不加锁，退化为旧行为，
+        # 由唯一约束兜底。
+        await session.execute(
+            select(StoryWorkModel.id)
+            .where(StoryWorkModel.id == work_id)
+            .with_for_update()
+        )
+        # 拿到锁之后再看一次：等待期间可能已有同 key 的预留落库。
+        existing = await session.scalar(
+            select(QuotaReservationModel).where(
+                QuotaReservationModel.reservation_key == reservation_key
+            )
+        )
+        if existing is not None:
+            return existing
+        outstanding = await _outstanding_minor(
+            session, work_id=work_id, currency=currency, chapter_no=chapter_no
+        )
         if outstanding + amount_minor > funding_limit_minor:
             raise QuotaExceeded(
-                "work quota ceiling would be exceeded",
+                "quota ceiling would be exceeded",
                 retry_after=60,
             )
 
     row = QuotaReservationModel(
+        id=uuid.uuid4(),
         reservation_key=reservation_key,
         work_id=work_id,
         chapter_no=chapter_no,
@@ -183,6 +214,13 @@ async def consume(
         )
     )
     if existing is not None:
+        # 幂等只覆盖「同一笔」：同键不同额说明调用方拼错了键（A-01 就是这么来的），
+        # 静默返回旧流水会让差额凭空消失，必须失败。
+        if int(existing.amount_minor) != int(amount_minor):
+            raise GuardViolation(
+                f"consume idempotency conflict on {idem_key}: "
+                f"existing={existing.amount_minor} requested={amount_minor}"
+            )
         return existing
 
     res = await session.scalar(
@@ -207,10 +245,11 @@ async def consume(
         ),
         {"amount": amount_minor, "key": reservation_key},
     )
-    if result.rowcount != 1:
+    if _affected(result) != 1:
         raise LedgerError("conditional quota update affected unexpected row count")
 
     entry = CostEntryModel(
+        id=uuid.uuid4(),
         work_id=work_id,
         chapter_no=chapter_no,
         step=step,
@@ -251,18 +290,22 @@ async def release(
     if remaining <= 0:
         return None
 
+    # 状态必须区分「全额退回」与「部分已消费后退回余额」：
+    # 只写 RELEASED 会让有真实花费的预留看起来像没花过。
     result = await session.execute(
         text(
             "UPDATE novel_quota_reservations "
-            "SET settled_minor = amount_minor, status = 'RELEASED' "
+            "SET settled_minor = amount_minor, "
+            "    status = CASE WHEN settled_minor > 0 THEN 'SETTLED' ELSE 'RELEASED' END "
             "WHERE reservation_key = :key AND status = 'RESERVED'"
         ),
         {"key": reservation_key},
     )
-    if result.rowcount not in (0, 1):
+    if _affected(result) not in (0, 1):
         raise LedgerError("conditional quota release affected unexpected row count")
 
     entry = CostEntryModel(
+        id=uuid.uuid4(),
         work_id=work_id,
         chapter_no=chapter_no,
         step=step,
@@ -284,16 +327,32 @@ async def release(
 
 
 async def _outstanding_minor(
-    session: AsyncSession, *, work_id: uuid.UUID, currency: str
+    session: AsyncSession,
+    *,
+    work_id: uuid.UUID,
+    currency: str,
+    chapter_no: int | None = None,
 ) -> int:
-    rows = await session.execute(
-        text(
-            "SELECT COALESCE(SUM(amount_minor - settled_minor), 0) FROM novel_quota_reservations "
-            "WHERE work_id = :work_id AND currency = :currency AND status = 'RESERVED'"
-        ),
-        {"work_id": work_id, "currency": currency},
+    """未结清预留。按章核算：一章的上限不应被另一章的预留占满。
+
+    用 ORM 表达式而不是裸 SQL：UUID 参数的绑定形式随方言变化，
+    直接拼字符串会在 SQLite 上把 work_id 比成另一种格式。
+    """
+    stmt = select(
+        func.coalesce(
+            func.sum(
+                QuotaReservationModel.amount_minor - QuotaReservationModel.settled_minor
+            ),
+            0,
+        )
+    ).where(
+        QuotaReservationModel.work_id == work_id,
+        QuotaReservationModel.currency == currency,
+        QuotaReservationModel.status == "RESERVED",
     )
-    return int(rows.scalar_one())
+    if chapter_no is not None:
+        stmt = stmt.where(QuotaReservationModel.chapter_no == chapter_no)
+    return int(await session.scalar(stmt))
 
 
 async def work_cost(

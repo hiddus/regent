@@ -1,139 +1,211 @@
 # Novel Engine 技术规范
 
-> 版本：v4.2
+> 版本：v5.3
 >
-> 更新：2026-09-03
+> 更新：2026-09-07
 >
 > 状态：ACTIVE — 当前技术实现唯一权威源
 
-## 1. 架构原则
+## 1. 架构原则：导演负责创作
 
-### 1.1 执行拓扑
+本版为目标架构。场景导演闭环已完成首轮代码接入，完整长篇能力仍待验证与实施。它取代固定六步章节流水线和“硬导演/软导演”审核架构。现有作品、接口和 Core 能力按 §14 迁移，不把文档更新视作上线。
 
-持续 Agent loop 是唯一主流程：
+### 1.1 产品与创作控制权
 
-`intake → global plan → rolling chapter plan → context compile → character performance → direct → render → extract/verify/commit → evaluate`
+用户是作品方向的最终决策者：定义意图、调整关键路径、裁决重大变化。AI 导演是日常创作负责人：构思戏剧、调度人物、选择叙事方式、观看产物、决定继续或重演，对最终阅读体验负责。
 
-- Agent loop 是主核心流程，负责持续规划、执行、检查、提交、恢复和人机互动。
-- Hive 是 loop 内的局部执行器，不是候选架构、质量增强开关或研究变量。
-- 仅当一个步骤同时满足两个条件时启用 Hive：① 各工作线程必须持有彼此隔离的信息；② 工作线程之间没有前置依赖、可以并发执行。任一条件不满足，均由主 loop 顺序执行。
-- 典型 Hive 场景是同一场景内多个角色基于各自 `InformationSet` 独立表演。导演依赖角色表演结果，不得与其输入并行；普通候选评价若无信息隔离要求，也不因“可以并行”而启用 Hive。
-- 不存在“单 Agent 对多 Agent”的全局架构二选一，也不实现一次调用生成复杂长篇。
-- 人工 gate 仅用于目标变化、不可逆节点、证据冲突或自动修复超限。
+导演不是固定链条中的一次调用。导演拥有持久的创作意图和决策记录，通过受约束的命令驱动创作循环；底层运行时掌管权限、状态迁移、预算与提交。创作判断使用模型，执行合法性由代码判定。
 
-### 1.2 分层
+质量首先在创作中形成：人物选择的可信度、冲突的组织、情绪变化、信息揭示和承诺兑现。审校提供独立证据，不能代替导演创作，也不能以通过检查宣称文学质量。
 
-| 层 | 所有权 |
-|---|---|
-| Novel Domain | 作品、目标、关键路径、章、场景、角色、知识边界、Canon、裁决 |
-| Novel Application | loop、状态机、局部重演、发布、分享、导出、评测 |
-| Regent Core | TaskRuntime、ModelGateway、ArtifactStore、Permit、Observation、lease/timer/outbox |
-| Novel Web | C 端路由、用户态投影、SSE、PWA、阅读 |
-| Internal Ops | 现有 Regent Console，不进入 C 端 bundle |
+### 1.2 全局结构
 
-禁止把通用 `Goal`/`Work`/`ProjectAgentSession` 直接暴露为小说 API；它们只能通过适配器承载领域行为。
+```mermaid
+flowchart TD
+    U[用户：意图、路径、重大裁决] --> D[持续导演：全书方向、卷章安排、场景调度]
+    D --> S[场景任务与角色指令]
+    S --> P[角色演绎：动机、行动、反应]
+    P --> W[场景结算：行动结果与可观察事件]
+    W --> D
+    D --> N[叙事呈现：视角、内心、语言、节奏]
+    N --> V[导演观看：戏剧与阅读效果]
+    V -->|调整、重演、重写| D
+    V --> A[独立审校与证据核验]
+    A -->|定位问题| D
+    A --> C[章节接受与原子提交]
+    C --> M[事实、人物认知、读者认知、承诺记忆]
+    M --> D
+    R[Regent Core：任务、模型、预算、存储、恢复] -.承载.-> D
+```
 
-## 2. 仓库与构建边界
+保留模块化单体、API + Worker + PostgreSQL + 不可变产物存储，不为每个创作职责新建微服务。职责不等于常驻 Agent；同一模型可承载多个职责，但输入权限、产物和决策必须分开。
 
-建议新增：
+### 1.3 所有权与边界
+
+| 组件 | 负责 | 不得越权 |
+|---|---|---|
+| Director | 创作意图、人物弧线、章节/场景设计、叙事指令、选取 take、重演与组章 | 不直接写事实、不覆盖硬失败、不替用户修改锁定方向 |
+| Character Performer | 根据欲望、关系、认知和当下刺激提出行动、台词、反应 | 不知道导演秘密目标、未来结局或其他人物隐私；不自行宣布行动成功 |
+| Scene Resolver | 依据世界规则和当前状态结算行动，形成可观察事件 | 不为满足预设高潮篡改规则；不把未执行行动当事实 |
+| Narrative Writer | 将选定场景转成小说，执行视角、叙述距离、内心与语言指令 | 不擅自新增重大事件、知识获取、人物或能力 |
+| Continuity Supervisor | 验证时间、空间、资源、知识、事件及正文对应关系 | 不决定戏剧走向，不用计划字段代替正文证据 |
+| Editorial Reviewer | 提供表达、冗余、声纹和可读性意见 | 不擅自改变剧情；不以一个分数接管导演 |
+| Context/Memory Service | 按角色、叙述视角、时点和依赖编译上下文，持久化证据 | 不默认把缺失权限的秘密视作公开 |
+| Production Runtime | 命令校验、任务调度、预算、幂等、租约、提交、重放 | 不通过字数或重试次数降低质量门槛 |
+
+导演可见作品级事实与未来计划；事实、计划、假设必须分区标注。人物仅见角色投影，执笔者仅见当前叙事允许的信息。跨轮上下文重新编译，禁止复用带秘密的共享会话。
+
+### 1.4 并发契约
+
+持续导演 loop 是主流程。Hive 仍仅在信息隔离且任务无前置依赖时启用，例如同一时刻多个角色独立作出第一反应。依赖对手上一动作的反应按节拍顺序执行；导演等待表演和结算结果后才能决策。条件由调度器判断，不由模型选择。
+
+## 2. 工程分层与模块
 
 ```text
 core/src/regent/novel/
-  domain/
+  domain/          # 意图、场景、take、事件、认知、承诺、命令与状态规则
   application/
-  ports/
-  infrastructure/
-apps/novel-web/
-tests/novel/
-fixtures/novel_eval/
+    direction/    # 持续导演、层级规划、决策与重演范围
+    performance/  # 角色指令、节拍表演、场景结算
+    narrative/    # 小说化、组章、呈现修订
+    continuity/   # 正文事件核验、知识与世界规则
+    memory/       # 检索、投影、上下文 manifest
+    production/   # 任务推进、提交、恢复、预算适配
+  ports/          # ModelGateway、Runtime、Repository、ArtifactStore
+  infrastructure/ # PostgreSQL、Core 适配器、不可变产物
+  api/            # 用户态投影与现有作品接口
+apps/novel-web/    # 三动作、进度、阅读与试读
 ```
 
-- `apps/regent-console` 固定为 `/internal/ops` 或独立构建产物。
-- C 端不得 import `ArtifactPanel`、`ToolTrace`、源码浏览器、经营面板等内部组件。
-- `apps/regent-desktop` 不作为阶段一交付入口。
-- 私有 `novelMaker` 以冻结 commit 迁移；迁移清单逐模块标注直接迁移、适配、重写或不迁移。
+这是目标模块布局。逐项迁出 generation.py 与 works.py，禁止先复制成两套领域实现。Core 仅提供基础设施，不持有小说语义。内部运行记录与角色秘密不得进入用户进度事件；运维界面单独授权。
 
-## 3. 领域模型
+## 3. 创作对象、状态与记忆
 
-### 3.1 核心聚合
+### 3.1 层级创作对象
 
-| 对象 | 关键字段 |
+| 对象 | 核心内容 |
 |---|---|
-| `StoryWork` | id, owner_id, title, genre, state, public_state, branch_id, version |
-| `StoryGoal` | raw_intent, normalized_goal, assumptions, locked_at, version |
-| `CriticalPath` | nodes, dependency_edges, frozen_through_chapter, version |
-| `CriticalNode` | type, promise, preconditions, consequences, requires_human |
-| `ChapterRun` | work_id, branch_id, chapter_no, state, current_step, version |
-| `SceneCard` | goal, participants, location, must_reach, forbidden, pov |
-| `PersonaSpec` | identity, drives, voice, stable_traits, version |
-| `InformationSet` | persona_id, scene_id, grants, exclusions, context_hash |
-| `Performance` | intention, action, utterance, provenance, model_call_ids |
-| `CanonCommit` | parent_version, facts, source_hash, validation_id, created_at |
-| `DecisionRequest` | node_id, options, default, deadline, impact, version |
-| `PublicWork` | immutable published snapshot; later phase only |
-| `OnboardingSession` | user_id, work_id, clarify_round, question_count, assumptions, locked_at |
-| `ExportNotice` | user_id, work_id, notice_version, satisfied_at |
-| `ModerationCase` | work_id, chapter_no, target_type, decision, reason_code, appealed_at, resolved_at |
+| StoryIntent | 原始构思、目标读者、题材承诺、风格、用户锁定项 |
+| DirectionBible | 核心戏剧问题、人物弧线、世界约束、叙述原则、禁用捷径 |
+| ArcPlan / CriticalPath | 卷/故事弧目标、承诺、因果节点、依赖、可调整范围 |
+| ChapterIntent | 本章阅读体验、期待与兑现、情绪起落、候选场景、结束理由 |
+| SceneBrief | 场景存在理由、参与者、时空、冲突、情绪目标、信息揭示、退出条件 |
+| ActorBrief | 本人目标、障碍、可观察刺激、个人表演指令和知识投影 |
+| PerformanceTurn | 行动意图、台词、可见动作、私有动机、输入来源 |
+| SceneTake | 一次场景尝试、节拍序列、结算事件、工作状态差异、父版本 |
+| NarrativeSpec | POV、叙述距离、读者可知内容、内心权限、详略、语体、转场 |
+| SceneProse / ChapterEdition | 正文、所用 take、组章顺序、版本与内容 hash |
+| DirectorDecision | 观察、目标偏差、证据、所选命令、预期改善、重演范围 |
+| ValidationReport | 检查项、严重度、证据片段、事实来源、pass/fail/abstain |
 
-`ExportNotice` 承载 PRD FR-23 的“首次导出前告知”：**拦截判据为 `satisfied_at` 为空或 `notice_version` 不等于当前条款版本**——条款升级后必须重新告知，不能让老用户永久停留在旧版本。每次告知另写一条 append-only 告知日志用于举证，但**拦截只查 `ExportNotice`，不查日志**。
+一位导演在全书、卷、章、场景四种尺度工作；不强制建立四个互相讨论的导演 Agent。全书方向稳定，滚动细化近期场景，远期节点保持可调整。取消固定“每节点三章”和每章必须升级的硬编码；章数由因果完成度和阅读节奏决定。
 
-### 3.2 Canon 与知识边界
+### 3.2 记忆的六个视图
 
-- Canon 为 append-only 版本链，不原地修改。
-- 模型不能直接写 Canon，必须经过 `extract → verify → commit`。
-- `ContextCompiler` 是确定性纯函数：相同 snapshot、角色和场景产生相同 `ContextManifest`。
-- `KnowledgeGrant` 至少标注事实、角色、获得时间、来源、版本和可见范围。
-- 角色 Agent 只获得一次性、限定 work/scene/persona/context_hash/expiry 的 capability，不能查询完整 Canon。
-- 路径依赖边类型至少包括 causal、temporal、knowledge、foreshadow、object_state。
+1. **世界事实**：稳定规则与已经提交的客观事件，带来源和版本。
+2. **人物状态**：位置、资源、伤势、关系、欲望、承诺和弧线阶段。
+3. **人物认知**：事实、误信、怀疑分别记录；获得时间与来源明确。误信可以驱动行为，但不能写成客观事实。
+4. **读者认知**：正文已经揭示、暗示、误导和刻意保留的内容。人物知道不等于读者知道，反之亦然。
+5. **承诺与伏笔**：种下、强化、部分兑现、兑现、调整；带证据、预计窗口、关联事件。未知结局是计划，不进入事实。
+6. **导演记忆**：创作选择、失败原因、有效表现、尚待解决的问题、风格约束。
 
-### 3.3 状态机
+Canon 使用 append-only 事件版本链；当前状态是可重建投影。旧事实被新事件改变时保留历史与生效时间。摘要是检索辅助，不能覆盖原始事实或充当唯一来源；稳定规则和未兑现承诺不因超出最近 N 章被遗忘。
 
-`StoryWork`：
+ContextManifest 绑定 work/branch/chapter/scene/take/beat、父 Canon、计划、人物、叙事权限及来源 hash。同样的选定来源和版本产生同样投影。检索可以使用模型，但检索结果需先冻结为清单，再确定性裁剪。秘密信息不通过上一章完整结尾、导演指令或共享 scratchpad 旁路泄露。
 
-`ONBOARDING | READY | RUNNING | PENDING_DECISION | PAUSED_QUOTA | PAUSED_COST | RECOMPUTING | FAILED | DONE | CANCELLED | ARCHIVED`
+### 3.3 草稿世界与提交世界
 
-`ChapterRun`：
+- 场景结算写入分支内 `WorkingState`，用于同章后续场景；它尚非 Canon。
+- 每次重演 fork 新 take，只选中的 take 可以参与正文和工作状态。
+- 正文新增重大事件时退回导演/结算；微小描写也需确认未改变世界或认知。
+- 章节提交前对实际正文重新抽取并核验事件，确认正文与选中 take 一致。
+- 只有已接受 ChapterEdition 是阅读、后续章上下文和导出的权威版本；草稿预览必须单独标注与授权。
+- 修改已提交历史创建分支及替代版本，失效所有依赖旧事件、认知、承诺的后续产物，不原地覆写。
 
-`QUEUED | RUNNING | PENDING_DECISION | RETRYABLE_FAILED | TERMINAL_FAILED | CANONIZED | SUPERSEDED | CANCELLED`
+### 3.4 状态与命令
 
-`ChapterStep`：
+作品既有状态兼容；ChapterRun 新增 `architecture_version`，目标阶段为 `PLANNING → SCENE_PRODUCTION → ASSEMBLING → VALIDATING → COMMITTING → CANONIZED`，并允许人工等待、预算暂停、重演和终止失败。
 
-`ASSEMBLE | PERFORM | DIRECT | WEAVE | REVIEW | CANON`
+SceneRun：`BRIEFED → PERFORMING → RESOLVING → DIRECTOR_VIEW → RENDERING → DIRECTOR_VIEW → VALIDATING → ACCEPTED`。两个 DIRECTOR_VIEW 通过 artifact_kind 区分表演和正文；RETAKE/REWRITE 产生新版本，不覆盖旧状态。
 
-步骤状态：`PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED`。
+| 导演命令 | 合法前置与效果 |
+|---|---|
+| PLAN_SCENE | 有 ChapterIntent 和父状态，建立场景与角色任务 |
+| REQUEST_PERFORMANCE | 已通过上下文权限检查，启动下一节拍 |
+| CONTINUE_SCENE | 有结算结果和剩余预算，编译下一轮可见信息 |
+| RETAKE_SCENE | 给出失败证据、变更指令、依赖范围，fork take |
+| RENDER_SCENE | 选定合法 take 和 NarrativeSpec，调用执笔者 |
+| REWRITE_PROSE | 事件保持一致，改变呈现；修改剧情则回到场景 |
+| ACCEPT_SCENE | 导演给出效果证据且无硬失败，接受该场景版本 |
+| ASSEMBLE_CHAPTER | 场景接受且依赖合法，进行衔接与节奏编排 |
+| REQUEST_USER_DECISION | 超出用户锁定范围或重大不可逆选择，挂起 |
+| FINISH_CHAPTER | 效果与审校完成、事实证据齐全，申请原子提交 |
 
-人工等待和配额暂停必须释放 worker。状态转换采用 expected_version 条件更新，失败返回冲突，不允许静默覆盖。
+Runtime 校验命令白名单、输入版本、角色权限、预算、最大步数及依赖；模型不能直接更新状态。ACCEPT_SCENE 是章内草稿接受，不等于发布或提交 Canon。
 
-## 4. 章执行协议
+## 4. 导演创作与提交协议
 
-1. 锁定输入 snapshot 与路径版本。
-2. 生成确定性 ContextManifest 和角色 InformationSet。
-3. 为每个逻辑模型调用创建预算预留。
-4. 模型调用在数据库事务外执行，结果写不可变 `ModelCall`。
-5. 硬导演检查泄密、时间/空间、人物状态、必达节点和规则。
-6. 软导演检查节奏、声纹、趣味性；不得覆盖硬规则结果。
-7. 失败按依赖图重演最小子图；超过上限创建 DecisionRequest。
-8. 正文通过后抽取 FactCandidate。
-9. 短事务锁 ChapterRun：校验版本，写正文、CanonCommit、成本结算、状态和 outbox 事件。
-10. 失败不得出现“Canon 已提交但成本/正文不可达”或“记费但成功产物丢失”。
+### 4.1 一章的运行
 
-声纹质量不属于 Canon 状态机：声纹不达标阻断 `Performance/Prose` 接受并触发重演，不得表述为“阻断入 Canon”。
+1. 锁定用户方向、父 Canon 与架构版本。导演读取未兑现承诺、人物状态与前章效果，形成 ChapterIntent。
+2. 导演设计一个必要场景，说明戏剧目的、人物欲望冲突、读者体验、呈现策略及结束条件。
+3. 编译 ActorBrief；人物提出行动，Resolver 依据规则与前状态结算成事件。开放语义可由模型辅助，但强规则由代码约束，模糊结果需显式标记并解决。
+4. 导演观察行为与效果：成立则继续或结束；不成立则修改场景条件、表演指令或叙事安排。人物合理的意外选择允许改变未锁定计划；不能为了预设结局强迫人物无动机行动。
+5. Writer 按 NarrativeSpec 将选定 take 写成小说，包含内心、自由间接引语、叙述节奏等文学手段，不使用影视分镜替代小说表达。
+6. 导演观看正文是否产生预期效果；呈现问题重写正文，表演问题重演，场景设计问题重新调度。
+7. 独立审校核对正文、规则和知识；导演处理问题。已通过的规则只在受影响输入变化时重跑，最终章提交进行完整复核。
+8. 导演决定是否需要下一场景。按时间、因果与视角依赖组章，不能任意重排破坏信息获得顺序。
+9. 核验最终正文的事件、人物认知和读者认知，准备提交包。
+10. 短事务校验父版本与 lease fencing token，原子写入 ChapterEdition 指针、CanonCommit、认知/承诺投影及 outbox；并发冲突则重新规划或失效，不能强行提交。
+
+### 4.2 导演如何把控质量
+
+导演在创作前提出可观察意图，在创作后提供对应文本/行动证据。例如“读者知道同伴在隐瞒，主角仍然信任他”，应体现为泄露给读者的动作与主角交付信任的行动，不能只填“紧张感 8 分”。
+
+导演观察五项：人物为什么这么做；选择怎样改变局势；读者现在知道和期待什么；情绪如何发生变化；本场值得占用这些篇幅的理由。舒缓、关系建立、哀悼等场景可以通过，不强制每场冲突升级或每章两个状态字段变化。
+
+硬失败由 Continuity Supervisor 阻断，导演无权降级。审美判断采用题材与场景意图匹配的 rubric；声纹相似度、套句密度和字面重复属于辅助信号，不能机械替代上下文判断。机器无证据应 abstain，关键事实未解决不得提交。
+
+### 4.3 有界探索与最小重演
+
+每章冻结 `max_scene_count / max_turns_per_scene / max_retakes / max_prose_revisions / max_logical_calls / cost_cap / deadline`。首个 pilot 可用 2–4 场、每场最多 4 轮、最多 2 次重演、1 次呈现修订作为实验配置，正式值由盲评和成本校准后版本化。
+
+每次修订必须改变明确的输入或指令并引用失败证据；相同问题连续无改善时停止该策略。不同候选按命令中的 candidate_id 区分，不被幂等缓存误合并。达到上限时保存草稿，进入可恢复失败或预算暂停，不以字数、成本或尝试次数放行。用户只处理方向选择与是否继续，不承担日常场景审校。
+
+重演沿事件、时间、认知、伏笔、人物状态、呈现依赖传播。纯措辞修订保留表演；行动变化失效相关正文及后续场景。MVP 依赖图不完整时保守失效当前章后续全部场景，禁止宣称已经实现最小子图重演。
+
+### 4.4 调用与费用
+
+模型调用在事务外；调用前预留预算，结果持久化后按 logical_call 独立结算。废弃 take 也消耗真实费用，不因章节未接受而退款式抹除流水。章节提交验证相关调用结果与费用状态已记录；outbox/对账修复提交与通知之间的崩溃。
+
+提供方结果不确定时记录 UNKNOWN 并优先查询/对账，不能承诺跨外部服务绝对 exactly-once；没有提供方幂等能力时，盲重试可能产生重复费用，须计入恢复设计。
+
+**UNKNOWN 的终止必须按对账次数，不按模型 attempt**：attempt 只在新一次模型调用时递增，拿它当上限会让 UNKNOWN 永远挂起。每次对账递增 `ModelCall.reconcile_count`（迁移 `20260908_0052`），达到 `reconcile_attempts`（默认 3）后按“费用已发生”结算预留额并置 FAILED，允许后续 attempt 以新的 attempt 号重跑；重复费用留在账上，不抹除。供应商可查时据实结算并写回 `output_json`，之后同键恢复直接复用、不再调用。
+
+**超时类异常若携带供应商 `request_id` 必须落库**，否则对账没有可查对象，只能按估价结清。
+
+**恢复清扫（`production.recover_novel_calls()`）**是 worker 的启动动作与周期任务（默认 30 秒）：先把租约过期仍停在 `RESERVED` 的调用判定为 `UNKNOWN`（保留预留额，不猜成功也不猜失败），再对静默期（默认 60 秒）之前的 `UNKNOWN` 逐条对账。静默期用于避免把供应商尚未落账的调用提前按“钱已花掉”结清。
+
+**预算判据是已结算金额，不是累计预留**：`direction._call` 用 `committed_minor` + 本次估价与章级上限比较，超额在调用发出前停止；预留会被释放，把历史累计预留当成已花掉的钱会高估消耗并放过越界。`CallBroker.budget_limit_minor` 在 `ledger.reserve()` 内按章做原子上限检查，并发预留不得共同突破同一上限。实际费用超过预留时补记 `_top_up`，不得因超限丢账。
 
 ## 5. 幂等与恢复
 
 | 操作 | 逻辑幂等键 |
 |---|---|
 | 新建作品 | `user_id:client_nonce` |
-| 章节步骤 | `work_id:branch_id:chapter_no:step:input_version` |
-| 模型调用 | `provider:model:prompt_hash:context_hash:purpose` |
+| 章节步骤 | `work:branch:chapter:scene:take:beat:command:input_version` |
+| 模型调用 | `production_id:command_id:candidate_id:purpose`（同时校验模型、prompt 与 context hash） |
 | 裁决提交 | `decision_id:decision_version:client_nonce` |
 | Canon 提交 | `work_id:branch_id:chapter_no:source_output_hash` |
-| 配额结算 | `logical_call_id:funding_pool` |
+| 配额结算 | `logical_call_id:attempt:funding_pool`（消费/释放/补记均按 attempt 独立记账） |
 | 分享/撤回/导出/发布/结算 | 强制 `Idempotency-Key` |
 
-- logical call 与 attempt 分离；已成功 logical call 恢复时复用，不重新付费。
+- logical call 与 attempt 分离；已成功 logical call 恢复时复用，不重复内部结算；外部不确定结果按 §4.4 处理。
+- **同键判定必须包含调用配置**：`config_fingerprint(model, sampling)` 写入 `ModelCall.sampling.config_hash`，同键换模型或采样参数是 `CallConflict`，不是复用。
+- **运行租约复核（P0-4）**：写回结果前复核 owner、fencing token 与有效期，三者缺一即丢弃产出；模型调用在事务外进行，会话默认 `expire_on_commit=False`，因此必须**回查数据库列值**，不能读内存中的 run 对象。
+- **输入版本（P0-4）**：用户提交指导或关键路径变更时递增 `input_version`；调用窗口内版本变化即判定本次产出属于旧方向，作废并留痕，不得覆盖新方向。
 - 同键同参数返回首个结果；同键异参数返回 409。
-- checkpoint 至少为 `work + branch + chapter + step + input_version`。
+- checkpoint 至少为 `work + branch + chapter + scene + take + beat + command + input_version`。
 - 恢复响应包含 reused_calls、avoided_cost、last_sequence，允许用户验证未重跑。
 
 ## 6. 成本、额度与账本
@@ -262,7 +334,7 @@ URL 是状态；刷新后只凭 URL 和服务端 snapshot 恢复。登录和通�
 
 PRD 不固定厂商。路由类别：
 
-- 全局规划和软导演：高推理档；
+- 全局规划、持续导演决策和场景结算：高推理档；
 - 角色表演和正文：创作质量档，允许按题材选择；
 - 抽取、分类和检索重排：低成本结构化档；
 - 硬约束：代码/规则优先。
@@ -290,19 +362,17 @@ Evaluator 每项返回证据片段与 rubric；无证据 abstain。至少 10–2
 - 成本收益门：采用 Pareto gate，不把质量、成本和时延揉成可任意加权总分。
 - 最终阈值由 5–10 seed pilot 标定后冻结；候选值不得直接宣传为生产 SLA。
 
-### 12.4 局部质量机制实验
+### 12.4 创作机制与体验验证
 
-- E1 信息集裁剪 ON/OFF；
-- E2 硬导演 ON/OFF；
-- E3 全历史、层级摘要、摘要+实体召回；
-- E4 最小子图重演与整章重跑；
-- E5 未固化窗口 N=1/3/5；
-- E6 逐段聚合、摘要和双轨评价；
-- E7 20→50→100→150 章升级。
+比较冻结的现有六步流程与导演场景循环，使用相同题材、seed、模型配置与预算带，保留真实 token、成本、重演次数和延迟；预算不能匹配时报告质量/成本曲线，不把更多调用带来的收益归因于架构。
 
-每项预注册主/次指标、样本量、停止规则和失败后的删除/重设计动作。产品纠错保持开放，但能力评测使用 untouched cohort，不能为测量方便关闭真实功能。
+- 场景层：人物动机、潜台词、信息差、导演意图与实际效果对应。
+- 连续三章：期待建立、兑现、情绪张弛、桥段重复和继续阅读意愿。
+- 卷层：人物弧线、未兑现承诺、旧事实召回、高潮与结算。
+- 故障层：崩溃恢复、废弃 take 隔离、并发提交、改意失效、未知调用结果。
+- 局部消融：单轮/多轮表演、固定/动态场景、一次呈现/导演指导修订、记忆召回策略。角色知识边界和硬事实门禁始终保持，Hive 仅测试调度契约。
 
-Hive 不在实验清单中。角色信息隔离由产品的角色知识边界承诺决定；当隔离后的多个角色任务可并发时，调度器必须使用 Hive。相关测试只验证路由判定、信息不串线、结果收敛和故障隔离是否正确，不验证“该不该使用 Hive”。
+评审隐藏架构、模型和导演自评；目标读者看正文后评价，导演意图匹配由另组标注。自动分数作为诊断，生产晋级以预注册人评、硬错误与成本门槛共同决定。阈值 pilot 后冻结；当前未声明任何收益已被证明。
 
 ## 13. 架构守卫
 
@@ -311,7 +381,7 @@ Hive 不在实验清单中。角色信息隔离由产品的角色知识边界承
 | G-01 | 不存在一次调用生成整部作品的正常路径 |
 | G-02 | 角色上下文由确定性 ContextCompiler 装配 |
 | G-03 | 每个角色只获得自己的 InformationSet |
-| G-04 | 硬导演先于软评审，软评审不能覆盖硬失败 |
+| G-04 | 导演创作与独立审校分权，任何创作接受不能覆盖硬失败 |
 | G-05 | 重演有上限并限定最小依赖范围 |
 | G-06 | 模型不能直接写 Canon |
 | G-07 | Canon、账本和创作留痕 append-only |
@@ -326,7 +396,7 @@ Hive 不在实验清单中。角色信息隔离由产品的角色知识边界承
 | G-16 | C 端 bundle 不包含内部运维组件 |
 | G-17 | SSE 有持久 sequence、补帧、缺口和 resync 契约 |
 | G-18 | 私有正文默认不进入共享缓存 |
-| G-19 | 声纹失败阻断正文接受，不与 Canon 提交混为一个状态 |
+| G-19 | 声纹自动指标仅告警，确认的人物表现缺陷返回导演；不机械要求每章多人物对话 |
 | G-20 | 自动 Judge 无人工校准不得作为发布 gate |
 | G-21 | 单次 onboarding 澄清轮次 ≤1、每轮问题数 ≤3；信息不足时写入 `assumptions` 后继续，不得无限追问 |
 | G-22 | 导出前校验 `ExportNotice`：`satisfied_at` 为空或 `notice_version` 不等于当前版本时阻断导出并重新告知 |
@@ -335,23 +405,53 @@ Hive 不在实验清单中。角色信息隔离由产品的角色知识边界承
 
 守卫按其依赖对象所在里程碑落地，不要求 M0 在对象尚不存在时通过全部守卫。
 
-## 14. 当前代码复用矩阵
+## 14. 当前代码与迁移边界
 
-| 能力 | 当前状态 | 处置 |
-|---|---|---|
-| worker lease/heartbeat、outbox、durable timer | 已有 | 直接复用/适配 |
-| ProjectAgentSession checkpoint/steering | 已有通用实现 | 适配为 StoryRun 外壳 |
-| Budget reserve/settle/release | 已有但金额和原子性需修复 | 迁移后复用 |
-| ExecutionEvent 审计 | 已有 | 扩展领域 payload，不能替代状态事件 |
-| HumanTask/WAITING_HUMAN | 已有 | 适配 DecisionRequest |
-| SSE 连接 | 已有 | 重做持久事件和补帧语义 |
-| C 端认证/owner 隔离 | 未满足 | M0 前置 |
-| 小说领域模型/API | 未实现 | 新建 |
-| Novel Web/PWA | 未实现 | 新建 |
-| 小说数据集与评测 | 未实现 | 新建 |
-| 公共池/账本/分成 | 未实现 | Later |
+截至 2026-09-07 重新核验：以下区分现有代码与目标协议，完整验收及下一批次以 [开发计划 v6.4](Novel-Engine-Plan.md#10-下一开发批次按复核缺口排序) 为准。定向回归 111 项通过、前端构建通过；迁移图单一 head 为 `20260907_0051`，未执行真实数据库升级，不代表生产验收。
 
-## 15. 研究依据
+场景闭环已实现：`application/direction.py` 提供场景规划、逐角色行动、结果结算、导演继续/重演/呈现、正文观看/改写、独立场景核验、组章及有界整章修复。新章节固定为 director_v2；无版本的在途章节继续 legacy_v1。每个 PRODUCE tick 最多一次逻辑调用，通过 ChapterRun JSON 检查点持久化。已接入接受版历史过滤、废弃 take 隔离、正文证据支持的状态、父 Canon 版本检查、章节与 Canon 同事务接受。
+
+生产调用协议已接入（R0，2026-09-08）：`application/production.py` 包含版本化价格本、独立事务预留、事务外调用、统一终态结算（`_finalize` 覆盖正常成功、供应商查询成功与放弃对账三条路径）、按 attempt 独立的消费/释放/补记幂等、成功结果复用与 UNKNOWN 挂账；对账按 `reconcile_count` 有界终止；`recover_novel_calls()` 已接入 `Worker` 启动与周期 tick。章节预算按已结算金额校验，预留按章做原子上限检查。
+
+运行租约与输入版本隔离已接入（P0-4，2026-09-08）：`production.lease_is_valid()`/`require_run_lease()` 复核 owner、fencing token 与有效期；`advance_step` 在调用窗口后回查数据库列值判定失效并留 `chapter.result_discarded`；`works.bump_input_version()` 由用户指导与关键路径变更触发。调用配置指纹入幂等键。
+
+**P0-5 已闭合（2026-09-08）**：在服务器独立临时库 `novel_pgverify` 上完成真实 PostgreSQL 认证——迁移链 `upgrade head → 0054 → downgrade -1 ×2 → upgrade head` 全绿，并发与崩溃场景 11/11 通过。认证暴露并修掉三个只在真机出现的问题：① 预留上限检查无锁（改为先锁作品行再复检）；② 恢复清扫的「回收」与「对账」跨会话互不可见（改为同一账本会话内回收→提交→对账）；③ 账本会话工厂用同步 Engine 造 AsyncSession，运行时才报错（只接受 AsyncEngine，否则降级到同一会话）。迁移 0048 由「按当前 ORM metadata 全量建表」改为冻结的 0048-era schema + 冻结清单核对：否则全新库会在 0049 撞 `DuplicateTable`，即新环境无法安装。
+
+**仍未闭合，不能按目标协议推定已经生效**：供应商查询能力依赖 provider 实现 `lookup_call`，默认无查询能力时只能按估价结清；`downgrade` 属数据丢弃型回退（丢列），未验证跨 0048 的全链回退，不承诺无损；R4 的真实 pilot 采样与人评冻结仍为人工项，代码只提供判定与留痕。
+
+运行租约已有 owner、expiry 和 fencing_token 字段，但当前提交/释放路径尚未按 token 做数据库条件校验，不能阻止租约过期后的旧 worker 写入。用户指导更新 run.version 而未递增 input_version，尚不能保证调用身份随用户改意失效。价格本为静态配置，未与供应商账单校准；模型结算和业务检查点是两个事务，仍需后台对账、版本隔离及 PostgreSQL 并发/崩溃注入验证。
+
+导演命令与上下文已接入（R1，2026-09-08）：`domain/commands.py` 定义带版本与 fingerprint 的 DirectorCommand，`application/runtime.py` 校验阶段、输入版本、角色、预算、步数、**scene/take 绑定与产物绑定**。规划、行动、表演观看、正文观看、组章、完成与请求裁决全部走 Runtime 分发。`domain/context.py` 确定性编译角色/执笔者/导演上下文，运行记录保存完整 manifest（binding + sources + fingerprint）。
+
+**Hive 只做局部执行器**：`domain/hive.py::route_beat()` 逐条核对 `known_by` 判定隔离，仅在「≥2 角色、互不泄漏、上下文不同」时启用；执行用 `CallBroker.run_batch()`，**只并发模型调用**，预留与结算顺序进行——会话不支持并发，并发只覆盖 HTTP 往返。Hive 不改变账本语义。Runtime 不校验创作质量，不替代独立审校。
+
+成章与产品边界（R2/M2，2026-09-08）：Canon 事实在提交时打 `volume_no`/`chapter_no`，取用时按当前卷过滤（标签整体缺失退回全量），前 1-2 卷走摘要；末节点完成后置 `story_complete` 并结束整本，跨卷展开在末节点完成时也触发，不再只看 80% 完成度。导演可发起持久裁决，用户提交与到期默认竞争落定，结果递增 input_version 并写入生成上下文。审核与申诉结论（`resolve_moderation`/`resolve_appeal`）已落库留痕，作者不得给自己的案件下「通过」结论。**§5 浏览器/网络/视口矩阵、移动端、断网恢复与无障碍仍为人工验收项，未执行。**
+
+完整六类长期记忆、独立不可变产物与依赖子图重演、真实三章同预算盲评、shadow/灰度与回退仍待实施或提交验收产物。以下迁移表与新增守卫是目标要求，不是本次完成清单。
+
+| 当前实现 | 处置 |
+|---|---|
+| Regent Worker、模型网关、预算/账本、事件与存储能力 | 保留；验证适配后的幂等、金额与恢复语义 |
+| 小说 API、作品服务、novel-web | 已存在；保留产品入口，改造状态投影 |
+| generation.py 六步循环 | 保留为 legacy_v1，新增 director_v2 执行协议逐步替换 |
+| PERFORM 人物生成 | 迁移为场景节拍 ActorBrief/PerformanceTurn，补认知隔离 |
+| DIRECT 计划汇总 | 替换为持久导演决策服务，不做原函数改名包装 |
+| WEAVE 整章成文 | 拆为场景呈现和组章，加入正文观看与修订 |
+| REVIEW 混合评审及降级放行 | 拆为导演观察、连续性检查、编辑意见；去除硬失败降级 |
+| Canon 提取及近期截取 | 建立事件核验、工作状态、正式提交与分层记忆 |
+| quality.py 与质量 fixtures | 保留诊断和基线；旧机械阈值按 v2 语义重新校准 |
+
+新增表优先扩展：ProductionRun、DirectorDecision、SceneRun、SceneTake、PerformanceTurn、ResolvedEvent、NarrativeArtifact、ValidationReport、KnowledgeGrant、ReaderKnowledge、PromiseRecord、ArtifactDependency。既有 ChapterRun 增加架构版本与接受版本指针；JSON 内容仍需 schema_version 与结构校验。
+
+在章边界选择架构版本，运行中不得切换。旧章只导入来源明确的已接受正文与 Canon；历史无证据字段标为 legacy_unverified，不伪造新协议验收。先 shadow 运行独立分支，再新作品灰度；回退执行器必须保留 v2 产物且检查状态兼容，禁止把运行中 v2 take 交给 v1 继续。
+
+阅读 API 继续返回接受版；进度增加“构思本章、推演场景、打磨表达、完成章节”等投影，不向用户展示角色私密推理。内部事件新增 scene/take/command/version，事件 schema 版本化，客户端未知内部事件不得崩溃。
+
+新增守卫：导演必须在首次表演前创建 SceneBrief；每个接受场景可追溯导演决策；未选 take 不进入 Canon；Writer 不独立改变重大事件；人物与读者认知分离；场景循环有界；章节提交校验父版本；固定三章节点不再控制 v2。
+
+## 15. 历史参考
+
+以下链接保留自前版，本次未重新核验，不构成 v5.0 架构有效性证据；新架构以 §12 实测验收。
 
 - [LongStoryEval](https://aclanthology.org/2025.acl-long.799/)：采用跨章证据聚合与卷/全书摘要双轨评价。
 - [ConStory-Bench](https://aclanthology.org/2026.findings-acl.410/)：采用事实/时间等错误 taxonomy 和前中后位置分桶。
@@ -367,3 +467,27 @@ Hive 不在实验清单中。角色信息隔离由产品的角色知识边界承
 | 2026-09-02 | v4.0 | 基于最新代码和六角色复核重新生成；补齐小说领域、状态机、事务、成本、权限、事件、前端、PWA、评测和守卫，并明确真实复用边界。 |
 | 2026-09-02 | v4.1 | 补齐 PRD P0 需求的技术落点：`OnboardingSession`（澄清轮次）、`ExportNotice`（导出告知状态与条款版本重触发）、`ModerationCase`（审核与申诉）、§10.4 移动端等价；守卫增至 G-23。 |
 | 2026-09-03 | v4.2 | 将 Agent loop/Hive 关系提升为固定调度契约：Hive 仅由“信息隔离且可并发”双条件触发，删除独立/共享角色采样实验，并新增 G-24 确定性路由守卫。 |
+| 2026-09-07 | v5.0 | 将导演升级为持续创作控制中心；重定义场景循环、角色/结算/叙事/审校分权、六类记忆、提交边界和 v1→v2 迁移。 |
+| 2026-09-07 | v5.1 | 落实 R0 生产调用协议：版本化价格本、调用前预留、事务外调用、UNKNOWN 挂账与对账入口、恢复复用、章级货币预算上限、运行租约，并更新 §14 实现边界。 |
+| 2026-09-07 | v5.2 | 落实 R1 导演命令与上下文：versioned DirectorCommand、CommandRuntime 白名单与依赖校验、§3.4 SceneRun 状态机、确定性 ContextCompiler 与 ContextManifest。 |
+| 2026-09-07 | v5.3 | 按当前代码、定向回归与补充探测校正 §14：区分调用/账本/租约及命令协议的已接入部分与未闭合行为，开发顺序同步 Plan v6.4。 |
+| 2026-09-08 | v5.4 | §4.4 补 UNKNOWN 按对账次数终止、失败保留 `request_id`、恢复清扫与静默期、预算按已结算金额校验；§5 配额结算键加 attempt 维度；§14 同步 P0-1~P0-3 已落地与剩余 P0-4/P0-5 边界。 |
+| 2026-09-08 | v5.5 | §5 补调用配置指纹、租约复核须回查数据库、input_version 使旧方向产出作废；§14 同步 P0-4 已落地与剩余 P0-5 边界。 |
+| 2026-09-08 | v5.6 | §14 同步第二批 P1-1~P1-4：完整命令分发与绑定/产物校验、完整 manifest 留痕、Hive 只并发模型调用的局部执行器、按卷记忆与末节点终止、裁决闭环与审核/申诉结论留痕；标明旅程矩阵仍待人工验收。 |
+| 2026-09-08 | v5.7 | §4.4 补并发预留的原子上限（锁作品行后复检）与恢复清扫的同会话要求；§14 记 P0-5 真机认证结论与 0048 冻结；新增 §15 长期记忆（R3）与 §16 盲评与灰度（R4）的判定规则与存储。 |
+
+## 15. 长期创作记忆（R3）
+
+- 存储：`novel_memory_items`（迁移 0053）与 `novel_memory_edges`。事实链 `novel_canon_commits` 保持 append-only，本表只是**可召回索引**。
+- 抽取：由 `domain.memory.extract_items` 确定性完成，不经过模型。事实未带类别标记即不记——宁可漏记也不误记，误记会把噪声写进「稳定规则」并污染之后每一章。
+- 召回：按实体与类别打分，**未兑现的承诺永不因限额被裁掉**（伏笔回收失败不可逆）；结果带 `source_hash` 进入章上下文，可复现。
+- 失效：用户改关键路径只把 `promise` / `character_arc` 置 `invalidated_at`（世界规则与已发生关系保留）；失效是打标记，不删不改。
+- 重演：依赖边完整时给出最小子图；缺边即返回 `complete=False`，由调用方保守重做当前章之后的场景，不假装能算精确。
+
+## 16. 盲评与灰度（R4）
+
+- 冻结：样本构成（含舒缓场景与单人场景比例）、rubric、同预算带、停止条件、晋级阈值一起落 `novel_eval_runs`（迁移 0054）并生成指纹。采样后改配置会使配置指纹与报告指纹不一致，此时无论分数多好都只能 HOLD。
+- 盲评：A/B 顺序由 `(eval_id, sample_id)` 确定性洗牌；评者载荷只有 A/B 位置，没有 arm 标签，也没有导演自评。
+- 裁决：样本不足、配置漂移、超预算带、或阅读意愿未超过基线，一律不晋级；不允许用「趋势看起来不错」代替统计结论。
+- 灰度：按作品做确定性分桶，同一作品不会在灰度期间来回横跳；**运行中的任务不得切换执行器**。
+- 代码只做判定与留痕：样本选取、rubric 文案与阈值须由人冻结。

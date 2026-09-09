@@ -40,6 +40,35 @@ async def test_openai_compatible_provider_validates_structured_output() -> None:
     assert result.usage.output_tokens == 2
 
 
+async def test_generate_structured_forwards_sampling_and_output_limits() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"answer":"ok"}'}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://model.example/v1",
+            api_key="secret",
+            model="test-model",
+            max_output_tokens=4096,
+            client=client,
+        )
+        await provider.generate_structured(
+            system_prompt="Return JSON",
+            user_prompt="answer",
+            response_model=Answer,
+            temperature=0.85,
+        )
+
+    assert seen["temperature"] == 0.85
+    assert seen["max_tokens"] == 4096
+
+
 async def test_openai_compatible_provider_retries_schema_validation_errors() -> None:
     requests: list[dict[str, object]] = []
 

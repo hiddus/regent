@@ -6,7 +6,6 @@ from pathlib import Path
 
 from _ssh import Remote
 
-
 ROOT = Path(__file__).resolve().parents[2]
 REMOTE = "/opt/regent"
 
@@ -27,8 +26,14 @@ def main() -> None:
             f"{REMOTE}/core/src/regent/worker/main.py",
         )
         remote.put(
-            str(ROOT / "core" / "migrations" / "versions" / "20260903_0048_novel_domain.py"),
-            f"{REMOTE}/core/migrations/versions/20260903_0048_novel_domain.py",
+            str(ROOT / "core" / "src" / "regent" / "model" / "provider.py"),
+            f"{REMOTE}/core/src/regent/model/provider.py",
+        )
+        # 整个 versions 目录：迁移 0048～0055 一起上， alembic 在服务器端按链升级。
+        remote.put_tree(
+            str(ROOT / "core" / "migrations" / "versions"),
+            f"{REMOTE}/core/migrations/versions",
+            exclude=("__pycache__",),
         )
         remote.put_tree(
             str(ROOT / "apps" / "novel-web" / "dist"),
@@ -38,8 +43,8 @@ def main() -> None:
         env_file = f"{REMOTE}/.env"
         commands = [
             # 1. 用增量 Dockerfile 重建镜像（基于 regent-core:latest）
-            f"cd {REMOTE} && docker build -t regent-core:novel-mvp -f core/Dockerfile.novel-mvp .",
-            # 2. 执行 Novel Domain 迁移（0048）
+            f"cd {REMOTE} && docker build --no-cache -t regent-core:novel-mvp -f core/Dockerfile.novel-mvp .",
+            # 2. 执行迁移：生产库从当前版本一路升到 head（0055）
             (
                 f"docker run --rm --network regent-net --env-file {env_file} "
                 "regent-core:novel-mvp alembic upgrade head"
