@@ -2512,42 +2512,92 @@ async def advance_step(
 async def advance_background_run(
     session: AsyncSession, *, provider: ModelProvider
 ) -> RunProgressOut | None:
-    """由 durable worker 每次领取一个章节检查点；网页关闭后仍继续。"""
-    run = await session.scalar(
-        select(ChapterRunModel)
-        .join(StoryWorkModel, StoryWorkModel.id == ChapterRunModel.work_id)
-        .where(
-            StoryWorkModel.state == StoryWorkState.RUNNING.value,
-            StoryWorkModel.deleted_at.is_(None),
-            ChapterRunModel.state.in_(
-                (
-                    ChapterRunState.QUEUED.value,
-                    ChapterRunState.RUNNING.value,
-                    ChapterRunState.RETRYABLE_FAILED.value,
+    """由 durable worker 每次领取一个章节检查点；网页关闭后仍继续。
+
+    D-02 依赖屏障：``QUEUED``（新章起跑）不得越过同作品同分支更早章节的
+    在途运行（QUEUED / RUNNING / PENDING_DECISION / AWAITING_INPUT /
+    RETRYABLE_FAILED）——否则第二章可能在第一章尚未完成时被领取，剧情依赖
+    就断了。屏障只拦「起跑」：续跑中的 RUNNING / RETRYABLE_FAILED 不受影响。
+    屏障不阻塞其他作品：逐个候选检查，被挡住的跳过，而不是整体停摆。
+    """
+    candidates = list(
+        (
+            await session.scalars(
+                select(ChapterRunModel)
+                .join(StoryWorkModel, StoryWorkModel.id == ChapterRunModel.work_id)
+                .where(
+                    StoryWorkModel.state == StoryWorkState.RUNNING.value,
+                    StoryWorkModel.deleted_at.is_(None),
+                    ChapterRunModel.state.in_(
+                        (
+                            ChapterRunState.QUEUED.value,
+                            ChapterRunState.RUNNING.value,
+                            ChapterRunState.RETRYABLE_FAILED.value,
+                        )
+                    ),
+                    # 租约在期说明别的 worker 正在事务外调用模型，不得并行推进（§4.4）
+                    or_(
+                        ChapterRunModel.lease_expires_at.is_(None),
+                        ChapterRunModel.lease_expires_at <= datetime.now(UTC),
+                    ),
                 )
-            ),
-            # 租约在期说明别的 worker 正在事务外调用模型，不得并行推进（§4.4）
-            or_(
-                ChapterRunModel.lease_expires_at.is_(None),
-                ChapterRunModel.lease_expires_at <= datetime.now(UTC),
-            ),
+                .order_by(ChapterRunModel.updated_at, ChapterRunModel.chapter_no)
+                .limit(16)
+            )
+        ).all()
+    )
+    for candidate in candidates:
+        # 锁内复核：扫描与加锁之间状态可能已被其他 worker 改写
+        locked = await session.scalar(
+            select(ChapterRunModel.id)
+            .where(
+                ChapterRunModel.id == candidate.id,
+                ChapterRunModel.state.in_(
+                    (
+                        ChapterRunState.QUEUED.value,
+                        ChapterRunState.RUNNING.value,
+                        ChapterRunState.RETRYABLE_FAILED.value,
+                    )
+                ),
+                or_(
+                    ChapterRunModel.lease_expires_at.is_(None),
+                    ChapterRunModel.lease_expires_at <= datetime.now(UTC),
+                ),
+            )
+            .with_for_update(skip_locked=True)
         )
-        .order_by(ChapterRunModel.updated_at, ChapterRunModel.chapter_no)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
-    if run is None:
-        return None
-    work = await session.get(StoryWorkModel, run.work_id)
-    if work is None:
-        return None
-    return await advance_step(
-        session,
-        provider=provider,
-        owner_id=work.owner_id,
-        work_id=work.id,
-        chapter_no=run.chapter_no,
-    )
+        if locked is None:
+            continue
+        if candidate.state == ChapterRunState.QUEUED.value:
+            earlier_in_flight = await session.scalar(
+                select(func.count(ChapterRunModel.id)).where(
+                    ChapterRunModel.work_id == candidate.work_id,
+                    ChapterRunModel.branch_id == candidate.branch_id,
+                    ChapterRunModel.chapter_no < candidate.chapter_no,
+                    ChapterRunModel.state.in_(
+                        (
+                            ChapterRunState.QUEUED.value,
+                            ChapterRunState.RUNNING.value,
+                            ChapterRunState.PENDING_DECISION.value,
+                            ChapterRunState.AWAITING_INPUT.value,
+                            ChapterRunState.RETRYABLE_FAILED.value,
+                        )
+                    ),
+                )
+            )
+            if int(earlier_in_flight or 0) > 0:
+                continue
+        work = await session.get(StoryWorkModel, candidate.work_id)
+        if work is None:
+            continue
+        return await advance_step(
+            session,
+            provider=provider,
+            owner_id=work.owner_id,
+            work_id=work.id,
+            chapter_no=candidate.chapter_no,
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2818,7 +2868,51 @@ async def _queue_replay_run(
         )
     )
     if int(pending_replay or 0) > 0:
-        return False
+        # D-01：同一报错去重（重复点同一个错不再叠任务）；不同报错必须合并进
+        # 已排队的那次重演——不能因「已有排队任务」而静默丢弃新纠错。
+        pending = await session.scalar(
+            select(ChapterRunModel)
+            .where(
+                ChapterRunModel.work_id == work.id,
+                ChapterRunModel.branch_id == work.branch_id,
+                ChapterRunModel.chapter_no == chapter_no,
+                ChapterRunModel.attempt > 1,
+                ChapterRunModel.state == ChapterRunState.QUEUED.value,
+            )
+            .order_by(ChapterRunModel.attempt.desc())
+            .limit(1)
+        )
+        if pending is None or not correction:
+            return False
+        ctx = dict(pending.generation_context or {})
+        history = list(ctx.get("corrections") or [])
+        if not history and ctx.get("correction"):
+            history = [dict(ctx["correction"])]
+        statement = str(correction.get("statement", "")).strip()
+        if statement and any(
+            str(item.get("statement", "")).strip() == statement for item in history
+        ):
+            return False
+        history.append(dict(correction))
+        ctx["corrections"] = history
+        ctx["correction"] = dict(correction)
+        ctx["replay_reason"] = "fact_reported"
+        pending.generation_context = ctx
+        await session.flush()
+        await append_event(
+            session,
+            work_id=work.id,
+            event_type="run.correction_merged",
+            data={
+                "chapter_no": chapter_no,
+                "run_id": str(pending.id),
+                "ticket_id": str(correction.get("ticket_id", "")),
+                "corrections_total": len(history),
+            },
+            branch_id=work.branch_id,
+            chapter_no=chapter_no,
+        )
+        return True
     new_attempt = int(max_attempt) + 1
     context: dict = {"architecture_version": ARCHITECTURE}
     if correction:

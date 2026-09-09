@@ -556,7 +556,7 @@ async def generate_ending_verdict(
     调用走 CallBroker：与场景调用同样的预算、持久化和幂等恢复约束。终局判断是
     一次会改变作品终态的调用，不能因为「它不在六步里」就绕过计费与恢复。
     """
-    from regent.novel.application.direction import EndingVerdict
+    from regent.novel.application.direction import MAX_COST_MINOR, EndingVerdict, ProductionStopped
     from regent.novel.application.production import CallBroker
 
     sys_prompt = (
@@ -583,7 +583,16 @@ async def generate_ending_verdict(
         ][-40:],
         "open_promises": [str(p.get("content", "")) for p in open_promises][-20:],
     }, ensure_ascii=False)
-    broker = CallBroker(lease_owner=f"run:{run.id}")
+    # D-04：终局裁决同样受章级货币上限约束。它能改变作品终态，不能成为
+    # 绕过预算的旁路——预算按「本章已结算金额」扣减（与导演 _call_batch 同一
+    # 口径），耗尽时在调用 provider 前拒绝。拒绝语义是「没有判断」而不是
+    # 「判断为没讲完」：调用方把异常折算成 None，扩卷不会被预算故障触发。
+    production_state = dict((run.generation_context or {}).get("production", {}) or {})
+    committed = int(production_state.get("committed_minor", 0) or 0)
+    remaining = MAX_COST_MINOR - committed
+    if remaining <= 0:
+        raise ProductionStopped("终局判断预算已耗尽：不做终局判断")
+    broker = CallBroker(lease_owner=f"run:{run.id}", budget_limit_minor=remaining)
     result = await broker.run(
         session,
         provider=provider,
@@ -767,10 +776,19 @@ async def assemble(
             if vn.ordinal >= target_ord and count < 3:
                 vol_remaining.append({"title": vn.title, "promise": vn.promise})
                 count += 1
+    # D-01：纠错语义必须穿过 ASSEMBLE 重建。排队时保存的 correction /
+    # replay_reason / corrections 若在重建那一刻被清掉，重演拿到的就是一次
+    # 「不知道要改什么」的普通重跑——纠错内容只躺在事件里，永远到不了导演请求。
+    old_context = run.generation_context or {}
     run.generation_context = {
         # 执行器身份先落位：ASSEMBLE 每次重建上下文，重建丢了它就等于
         # 「这一章跑的哪个臂」不可举证。
-        **executor_app.carry_over(run.generation_context),
+        **executor_app.carry_over(old_context),
+        **{
+            key: old_context[key]
+            for key in ("correction", "replay_reason", "corrections")
+            if key in old_context
+        },
         "architecture_version": architecture_version,
         "story_complete": story_complete,
         "parent_canon_version": int(parent_canon.version) if parent_canon else 0,
@@ -836,28 +854,11 @@ def _memory_view(
     audience: str,
     persona: str = "",
 ) -> list[dict[str, Any]]:
-    """把长期记忆按**受众**投影成请求能带的那一份（C-03 / 技术方案 §3.2）。
+    """按受众投影长期记忆（C-03）——实现下沉到 domain（memory.project_payloads）。
 
-    六类视图各有可见边界：导演记忆不进正文，读者认知不给人物，人物误信只对
-    人物自己可见。不做这层投影，召回的全量记忆会被原样塞进每个请求——人物于是
-    「知道」了读者才知道的事，信息隔离就形同不存在。
-
-    ``persona`` 非空时只保留与该人物相关的条目（世界规则对所有人可见）。
+    旧流程与 director_v2 必须共用同一个裁剪实现，两边不得漂移（D-03）。
     """
-    allowed = memory_domain.VISIBLE_TO.get(audience, ("world_fact",))
-    out: list[dict[str, Any]] = []
-    for payload in payloads or ():
-        if not isinstance(payload, dict):
-            continue
-        kind = str(payload.get("kind") or "")
-        if memory_domain.VIEW_OF_KIND.get(kind, "world_fact") not in allowed:
-            continue
-        if persona and kind != "rule":
-            entities = {str(e) for e in (payload.get("entities") or ())}
-            if persona not in entities and persona != str(payload.get("subject") or ""):
-                continue
-        out.append(payload)
-    return out
+    return memory_domain.project_payloads(payloads, audience, persona)
 
 
 async def perform(

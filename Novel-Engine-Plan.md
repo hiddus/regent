@@ -1,10 +1,20 @@
 # Novel Engine 开发计划
 
-> 版本：v7.6
+> 版本：v7.8
 >
 > 更新：2026-09-09
 >
 > 状态：ACTIVE — 当前开发顺序唯一权威源
+
+> **v7.8 闭合**：v7.7 复核提出的 4 个闭环缺口（D-01～D-04）全部修复并通过反证。D-01：纠错语义（correction/replay_reason/corrections）穿过 ASSEMBLE 重建保留，排队重演对同一报错去重、对不同报错合并进队列（`run.correction_merged` 事件留痕），不再静默丢弃；D-02：后台领取加依赖屏障——同作品同分支更早章节在途（QUEUED/RUNNING/PENDING_DECISION/AWAITING_INPUT/RETRYABLE_FAILED）时 QUEUED 新章不起跑，屏障只拦起跑不拦续跑、不阻塞其他作品，锁内复核防双 Worker 竞争；D-03：六视角记忆投影下沉到 `domain.memory.project_payloads`（新旧流程共用同一裁剪实现），接入 director_v2 全链——plan（导演视图，raw memory 不再倾倒）、ACT（逐角色个人视图，保 Hive 隔离）、WATCH_TAKE/WATCH_PROSE（导演视图）、RENDER（叙述者视图），全部带 manifest 留痕；D-04：终局裁决 CallBroker 传 `budget_limit_minor = 章级上限 − 已结算`，预算耗尽在调用 provider 前拒绝（拒绝折算为「没有判断」，不会触发扩卷）。新增 `test_d_batch.py` 15 例（含 produce 级真实请求证明）；反证 `deploy/novel/mutate_check_d.py` 退回旧行为后 11 例次变红（8 个变异全部被咬住）。全量单测通过。详见 [本轮复核](docs/archive/novel-director-completeness-v7.8.md)。历史结论见 [v7.7 复核](docs/archive/novel-director-completeness-v7.7.md)。
+
+### v7.7 提出的入口验收（v7.8 已闭合）
+
+- [x] D-01 / C-01：纠错内容经过 ASSEMBLE 仍进入当前导演请求与核验；重复报错去重、不同报错合并进排队任务，不静默丢失。
+- [x] D-02 / C-01：依赖屏障保证前章在途时后章 QUEUED 不起跑；覆盖租约在期（双 Worker）、PENDING_DECISION、终态放行与「先领早章」。
+- [x] D-03 / C-03：记忆投影接入 director_v2 的实际 plan/ACT/WATCH/RENDER 请求，按具体角色与叙述权限验证（produce 级真实请求断言）。
+- [x] D-04 / C-05：终局模型调用前执行剩余预算硬门，耗尽时不发调用；幂等键 `ending:<卷>:<章>` 重试不重复结算（v7.6 已建）。
+- [ ] B-04/B-06、M2/R4/M4：真实灰度、运行时认证、浏览器旅程、人评与长篇验收继续开放。
 
 > 最新复核（v7.4）：导演式生成尚未完备。本轮 277 项定向回归、前端构建通过，迁移图单 head 0055；新增隔离探测复现纠错任务缺少纠错输入、DONE 作品任务无人领取、80% 扩卷绕过用户卷数限制、正式事实兑现后承诺仍 OPEN。详细证据及验收条件见 [完备性复核](docs/archive/novel-director-completeness-v7.4.md)。以下 v7.3 完成记录保留为历史开发记录，冲突处以本轮结论为准。
 >

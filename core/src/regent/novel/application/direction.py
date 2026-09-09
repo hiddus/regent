@@ -37,6 +37,7 @@ from regent.novel.domain.context import (
 )
 from regent.novel.domain.errors import ProductionStopped, QuotaExceeded
 from regent.novel.domain.hive import route_beat
+from regent.novel.domain.memory import project_payloads as _memory_view
 from regent.novel.domain.models import DecisionOption
 from regent.novel.domain.states import SceneArtifact, SceneRunState
 from regent.novel.infrastructure.models import ChapterRunModel, PersonaSpecModel, StoryWorkModel
@@ -623,9 +624,19 @@ async def plan_chapter(
         "只使用给定角色；角色指令不泄露本人未知秘密，不预写结果和台词。"
         "不擅自决定用户锁定的重大节点。正文总目标1800至2500字。",
         {
-            "context": {k: v for k, v in run.generation_context.items() if k != "production"},
+            # D-03：导演计划请求拿**导演视图**的长期记忆（含未兑现承诺与导演
+            # 笔记），不再把召回的全量 memory 原样塞进请求——那是 C-03 投影
+            # 纪律，六步旧流程早已如此，director_v2 不得成为例外。
+            "context": {
+                k: v
+                for k, v in run.generation_context.items()
+                if k not in ("production", "memory")
+            },
             "cast": cast,
             "user_guidance": run.user_guidance or {},
+            "director_memory": _memory_view(
+                run.generation_context.get("memory", []), "director"
+            ),
         },
         "plan",
         f"v{_input_version(run)}:plan",
@@ -713,6 +724,8 @@ async def produce_tick(
     brief = take["brief"]
     phase = production["phase"]
     prefix = f"scene{production['scene_index']}:take{take['take_no']}:{phase}"
+    # D-03：六视角记忆投影只在此处按受众裁剪一次，装配器只负责留痕。
+    memory_payloads = list(run.generation_context.get("memory", []) or [])
 
     async def call[T: BaseModel](schema: type[T], system: str, payload: dict[str, Any]) -> T:
         return await _call(
@@ -746,6 +759,10 @@ async def produce_tick(
                 canon=run.generation_context.get("canon", []),
                 observations=_all_events(production, take),
                 turn=take["turn"],
+                # D-03：角色只拿**他自己**的长期记忆投影（他知道的/误信的/
+                # 承诺过的）；读者认知与导演笔记不进人物上下文。逐人物裁剪
+                # 同时保住了 Hive 隔离：每个 compiled payload 仍只含本人视角。
+                memory=_memory_view(memory_payloads, "character", actor["persona"]),
             )
             for actor in remaining_actors
         }
@@ -867,6 +884,8 @@ async def produce_tick(
             remaining_turns=MAX_TURNS - take["turn"] - 1,
             user_guidance=run.user_guidance or {},
             user_decision=_pending_user_decision(run),
+            # D-03：导演观看表演时带导演视图记忆（未兑现承诺是排场的硬约束）。
+            memory=_memory_view(memory_payloads, "director"),
         )
         result = await call(TakeDirection, "你是导演，观看实际演绎，判断人物选择和场景效果。"
             "决定CONTINUE推进下一节拍、RETAKE改变调度重演、RENDER结束表演进入小说呈现。"
@@ -955,6 +974,9 @@ async def produce_tick(
             director_instruction=take.get("render_instruction", ""),
             previous_draft=take.get("content", ""),
             revision_instruction=take.get("revision_instruction", ""),
+            # D-03：正文只拿叙述者视图记忆——读者认知可以出现，导演笔记
+            # 永不进正文材料（与旧流程 weave 的 narrator_memory 同一纪律）。
+            memory=_memory_view(memory_payloads, "narrator"),
         )
         result = await call(
             SceneText,
@@ -991,6 +1013,8 @@ async def produce_tick(
                 "validation": take.get("validation"),
                 "remaining_revisions": MAX_REVISIONS - take["revisions"],
                 "user_decision": _pending_user_decision(run),
+                # D-03：导演审阅正文同样只拿导演视图记忆。
+                "director_memory": _memory_view(memory_payloads, "director"),
             },
         )
         _quote_check(result.evidence, take["content"])

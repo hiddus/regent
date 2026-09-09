@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -125,10 +126,16 @@ def compile_actor_context(
     canon: list[dict[str, Any]],
     observations: list[dict[str, Any]],
     turn: int,
+    memory: Sequence[dict[str, Any]] = (),
 ) -> CompiledContext:
-    """装配单个人物的上下文：只有他该知道的事实与可观察事件。"""
+    """装配单个人物的上下文：只有他该知道的事实与可观察事件。
+
+    ``memory`` 是**已按该人物投影过的**长期记忆（调用方负责用 character 视角
+    裁剪；装配器不做检索也不做裁剪判断，只留痕）。读者认知与导演笔记不得进入。
+    """
     known_facts = visible_facts(canon, persona)
     allowed_observations = visible_facts(observations, persona)
+    memory_items = list(memory)
     payload = {
         "persona": persona,
         **dict(cast.get(persona) or {}),
@@ -136,6 +143,7 @@ def compile_actor_context(
         "setting": setting,
         "known_facts": known_facts,
         "observations": allowed_observations,
+        "character_memory": memory_items,
         "turn": turn,
     }
     manifest = ContextManifest(
@@ -154,6 +162,11 @@ def compile_actor_context(
             SourceRef(kind="observations", ref=f"scene:{scene_index}", hash=digest(observations)),
             SourceRef(kind="persona", ref=persona, hash=digest(cast.get(persona) or {})),
             SourceRef(kind="brief", ref=f"scene:{scene_index}", hash=digest(direction)),
+            SourceRef(
+                kind="memory",
+                ref=f"character:{persona}",
+                hash=digest(memory_items),
+            ),
         ],
         projection_hash=digest(payload),
     )
@@ -175,12 +188,16 @@ def compile_writer_context(
     director_instruction: str,
     previous_draft: str = "",
     revision_instruction: str = "",
+    memory: Sequence[dict[str, Any]] = (),
 ) -> CompiledContext:
     """装配执笔者上下文：只有已发生且读者可见的事件。
 
     原始 Canon、人物内心、隐藏事件和未发生的后续场景一律不进入。
+    ``memory`` 是叙述者视角的长期记忆（调用方负责投影）：读者认知可以出现，
+    导演笔记不得进入正文材料。
     """
     visible = reader_visible_events(events)
+    memory_items = list(memory)
     payload = {
         "narrative": narrative,
         "events": visible,
@@ -190,6 +207,7 @@ def compile_writer_context(
         "director_instruction": director_instruction,
         "previous_draft": previous_draft,
         "revision_instruction": revision_instruction,
+        "narrator_memory": memory_items,
     }
     manifest = ContextManifest(
         audience="writer",
@@ -208,6 +226,7 @@ def compile_writer_context(
                 version=f"visible:{len(visible)}",
             ),
             SourceRef(kind="narrative", ref=f"scene:{scene_index}", hash=digest(narrative)),
+            SourceRef(kind="memory", ref="narrator", hash=digest(memory_items)),
         ],
         projection_hash=digest(payload),
     )
@@ -228,12 +247,15 @@ def compile_director_performance_context(
     remaining_turns: int,
     user_guidance: dict[str, Any] | None = None,
     user_decision: dict[str, Any] | None = None,
+    memory: Sequence[dict[str, Any]] = (),
 ) -> CompiledContext:
     """装配导演观看表演的上下文：看到已发生事件与可见行动，看不到内心。
 
     ``user_decision`` 是用户裁决的**完整创作语义**（不只是 option_id）：导演
     必须按所选后果继续，不得执行未选分支，也不得就同一件事再问一次（A-02）。
+    ``memory`` 是导演视角的长期记忆（含未兑现承诺与导演笔记）。
     """
+    memory_items = list(memory)
     payload = {
         "brief": brief,
         "events": events,
@@ -242,6 +264,7 @@ def compile_director_performance_context(
         "remaining_turns": remaining_turns,
         "user_guidance": user_guidance or {},
         "user_decision": user_decision or {},
+        "director_memory": memory_items,
     }
     manifest = ContextManifest(
         audience="director",
@@ -261,6 +284,7 @@ def compile_director_performance_context(
                 ref=str((user_decision or {}).get("decision_id", "")),
                 hash=digest(user_decision or {}),
             ),
+            SourceRef(kind="memory", ref="director", hash=digest(memory_items)),
         ],
         projection_hash=digest(payload),
     )

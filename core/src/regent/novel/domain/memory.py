@@ -519,6 +519,36 @@ def visible_views(audience: str) -> tuple[str, ...]:
     return VISIBLE_TO.get(audience, ("world_fact",))
 
 
+def project_payloads(
+    payloads: Iterable[dict[str, Any]], audience: str, persona: str = ""
+) -> list[dict[str, Any]]:
+    """把召回的 payload 按**受众**投影成请求能带的那一份（C-03 / 技术方案 §3.2）。
+
+    与 :func:`project_for`（MemoryItem 对象）同一条边界：导演记忆不进正文，
+    读者认知不给人物，人物误信只对人物自己可见。不做这层投影，召回的全量
+    记忆会被原样塞进每个请求——人物于是「知道」了读者才知道的事，信息隔离
+    就形同不存在。
+
+    ``persona`` 非空时只保留与该人物相关的条目（世界规则对所有人可见）。
+    纯函数、无检索：旧流程（generation._memory_view）与 director_v2
+    （direction）共用同一个裁剪实现，两边不得漂移。
+    """
+    allowed = visible_views(audience)
+    out: list[dict[str, Any]] = []
+    for payload in payloads or ():
+        if not isinstance(payload, dict):
+            continue
+        kind = str(payload.get("kind") or "")
+        if VIEW_OF_KIND.get(kind, "world_fact") not in allowed:
+            continue
+        if persona and kind != "rule":
+            entities = {str(e) for e in (payload.get("entities") or ())}
+            if persona not in entities and persona != str(payload.get("subject") or ""):
+                continue
+        out.append(payload)
+    return out
+
+
 def project_for(
     items: Iterable[MemoryItem], audience: str, *, view: str = ""
 ) -> tuple[MemoryItem, ...]:
