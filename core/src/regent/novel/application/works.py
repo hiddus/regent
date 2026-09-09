@@ -1824,6 +1824,7 @@ async def start_run(
         generation_context={
             "architecture_version": executor,
             "executor": executor,
+            "executor_version": executor_app.executor_version(executor),
         },
         auto_advance=True,
     )
@@ -2914,7 +2915,16 @@ async def _queue_replay_run(
         )
         return True
     new_attempt = int(max_attempt) + 1
-    context: dict = {"architecture_version": ARCHITECTURE}
+    # B-04：重演也是一次**新的运行**——执行器按作品分桶重新确定（桶对同一
+    # 作品是确定的，因此与首跑同臂；灰度旋钮回退后的重演落回 stable 属于
+    # 「切换推迟到下一次运行」的既定语义）。不再硬编码 director_v2，否则
+    # legacy 臂作品的纠错重演会静默换架构，盲评无法归因。
+    executor = executor_app.choose_executor(work.id)
+    context: dict = {
+        "architecture_version": executor,
+        "executor": executor,
+        "executor_version": executor_app.executor_version(executor),
+    }
     if correction:
         context["correction"] = dict(correction)
         context["replay_reason"] = "fact_reported"

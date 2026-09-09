@@ -18,9 +18,27 @@ import os
 from regent.novel.application.direction import ARCHITECTURE
 from regent.novel.domain import evaluation
 
+# 第二个**真实可执行**的策略：六步流水线 ASSEMBLE→PERFORM→DIRECT→WEAVE→
+# REVIEW→CANON（generation.perform/direct/weave/review/canon），由
+# ``chapter_step_order`` 按 ``architecture_version`` 分派。它不是占位名——
+# 灰度臂落到它时，整章走的是这条完整可运行的链路。
+LEGACY_EXECUTOR = "legacy_v1"
 STABLE_EXECUTOR = ARCHITECTURE
 # 只有已知的成文架构才能当灰度臂：未知名字会让整章走进无法重放的路径。
-KNOWN_EXECUTORS = frozenset({ARCHITECTURE})
+KNOWN_EXECUTORS = frozenset({ARCHITECTURE, LEGACY_EXECUTOR})
+
+# 固定版本号：策略身份与其实现一起冻结，盲评与复盘据此归因；采样可比性的
+# 前提是「同版本」。改动任一策略的行为必须显式升版本，否则旧采样的结论
+# 会被静默套到新实现头上（B-04 验收：两个真实可执行且**固定版本**的策略）。
+EXECUTOR_VERSIONS: dict[str, str] = {
+    ARCHITECTURE: "director_v2@1",
+    LEGACY_EXECUTOR: "legacy_v1@1",
+}
+
+
+def executor_version(name: str) -> str:
+    """策略的固定版本标识；未知名字按 ``@0`` 处理（不参与可比采样）。"""
+    return EXECUTOR_VERSIONS.get(name, f"{name}@0")
 
 _CANARY_NAME_KEY = "NOVEL_EXECUTOR_CANARY"
 _CANARY_PERCENT_KEY = "NOVEL_EXECUTOR_CANARY_PERCENT"
@@ -60,7 +78,8 @@ def choose_executor(work_id: object) -> str:
 DEFER_MARKER = "executor_switch_deferred"
 # 一次运行的执行器身份：任何重建 generation_context 的步骤都必须带上它们，
 # 否则 ASSEMBLE 一重建就把「这一章到底跑的哪个臂」抹掉了，盲评无法归因。
-PINNED_CONTEXT_KEYS: tuple[str, ...] = ("executor", DEFER_MARKER)
+# executor_version 同理：版本跟着臂走，重建不得丢。
+PINNED_CONTEXT_KEYS: tuple[str, ...] = ("executor", "executor_version", DEFER_MARKER)
 
 
 def carry_over(context: dict[str, object] | None) -> dict[str, object]:
