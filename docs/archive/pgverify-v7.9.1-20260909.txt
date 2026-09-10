@@ -1,0 +1,102 @@
+=== B-06 重跑（23/23）：场景 8 KeyError 根因闭合 ===
+
+结论：D-02 依赖屏障无缺陷。原 22/22 日志中
+  PASS 屏障挡住后章 :: ch4=QUEUED ticks=['claimed', "KeyError: 'ASSEMBLE'"]
+的 KeyError 是测试工装假象，非屏障漏洞：
+
+1. advance_background_run 的候选扫描覆盖所有 RUNNING 作品（跨作品）；
+2. 场景 1-7 遗留的 ORM 直插 run（无 ChapterStepModel 行，如场景 4 的
+   过期租约 RUNNING run）在 updated_at 排序中排到最前；
+3. 场景 8 的 worker 先撞上这些无步骤行的遗留 run，
+   advance_step 的 by_name["ASSEMBLE"] 抛 KeyError——从未轮到本场景 ch4；
+4. 本场景直插的 ch4 当时也无步骤行（第二个同类假象）。
+
+证据：deploy/novel/pgdebug_barrier.py 插桩诊断（独立临时库单作品竞争 x6）：
+  - 6/6 屏障全部正确：唯一 worker 领取重演，另一 worker 被 SKIP LOCKED/屏障
+    挡住返回 none，ch4 全程 QUEUED；drain tick 正确续跑 RETRYABLE_FAILED 重演；
+  - probe A（无污染单 tick）：领 ch1 重演、ch4 不动；
+  - 本地确定性测试 test_barrier_blocks_on_retryable_failed_of_earlier_chapter 通过。
+修复：场景 8 直插 ch4 补齐步骤行；场景开始时把此前场景遗留 run 中和为终态；
+新增检查「worker tick 无未处理异常」。
+
+=== 重跑原始日志（fingerprint: HEAD 7655058, diff sha 0bea12dc29c6a0ab）===
+
+=== 0. 指纹（源码 / 迁移 / 环境）===
+[fingerprint] git HEAD          : 7655058983a41d3462033fc4e05eb5ff9b3c28d3
+[fingerprint] dirty files       : 10
+[fingerprint] working diff sha  : 0bea12dc29c6a0ab
+[fingerprint] alembic heads     : 20260909_0055 (head)
+[fingerprint] local python      : 3.12.14
+[fingerprint] git HEAD          : 7655058983a41d3462033fc4e05eb5ff9b3c28d3
+[fingerprint] dirty files       : 10
+[fingerprint] working diff sha  : 0bea12dc29c6a0ab
+[fingerprint] alembic heads     : 20260909_0055 (head)
+[fingerprint] local python      : 3.12.14
+[fingerprint] remote pg version : PostgreSQL 16.14 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+[fingerprint] remote py version : Python 3.12.14
+[fingerprint] remote image      : sha256:c92a618e9b6553a30a6f5924beaa2672d0814d4836e05f2f2486d
+=== 1. 上传当前工作树 ===
+alembic.ini
+core
+=== 2. 建临时库 ===
+DROP DATABASE
+CREATE DATABASE
+=== 3. 复制到 api 容器 ===
+
+copied files: 391
+=== 4. alembic 升级/回退 ===
+--- upgrade head [exit 0] ---
+INFO  [alembic.runtime.migration] Running upgrade 20260810_0047 -> 20260903_0048, Novel Engine 领域 schema（M0 首个开发批次 · Plan §10 第 3/4/6 项）。
+INFO  [alembic.runtime.migration] Running upgrade 20260903_0048 -> 20260904_0049, Novel Engine 卷弧结构（30 万字架构 P1）。
+INFO  [alembic.runtime.migration] Running upgrade 20260904_0049 -> 20260905_0050, Novel Engine 章节检查点（人在回路）。
+INFO  [alembic.runtime.migration] Running upgrade 20260905_0050 -> 20260907_0051, Novel Engine 生产调用协议（R0：预算预留、租约、调用恢复）。
+INFO  [alembic.runtime.migration] Running upgrade 20260907_0051 -> 20260908_0052, 对账次数与模型 attempt 分离（Plan v6.4 §10 P0-1）。
+INFO  [alembic.runtime.migration] Running upgrade 20260908_0052 -> 20260908_0053, Novel Engine 长期创作记忆（Plan §4 R3）。
+INFO  [alembic.runtime.migration] Running upgrade 20260908_0053 -> 20260908_0054, No
+--- current [exit 0] ---
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+20260909_0055 (head)
+--- downgrade -1（head->前一个） [exit 0] ---
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 20260909_0055 -> 20260908_0054, 终局意图、记忆边类型与六类记忆视图（Plan §4 R2/R3）。
+--- downgrade -1（再退一个） [exit 0] ---
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 20260908_0054 -> 20260908_0053, Novel Engine 盲评评估（Plan §4 R4）。
+--- upgrade head [exit 0] ---
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20260908_0053 -> 20260908_0054, Novel Engine 盲评评估（Plan §4 R4）。
+INFO  [alembic.runtime.migration] Running upgrade 20260908_0054 -> 20260909_0055, 终局意图、记忆边类型与六类记忆视图（Plan §4 R2/R3）。
+--- current [exit 0] ---
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+20260909_0055 (head)
+=== 5. 并发与崩溃注入 ===
+PASS 租约抢占只有一个赢家 :: a=1 b=None
+PASS fencing token 单调递增 :: token=1 owner=worker:a
+PASS 租约归属唯一 :: owner=worker:a
+PASS 并发预留不破上限 :: outcomes=[True, 'QuotaExceeded', 'QuotaExceeded', 'QuotaExceeded']
+PASS 未结清总额 <= 上限 :: outstanding=6
+PASS 崩溃后回收并结清 :: {'reclaimed': 1, 'succeeded': 0, 'failed': 1, 'pending': 0, 'skipped': 0}
+PASS 恢复后调用不再挂起 :: status=FAILED
+PASS 恢复后无悬空预留 :: status=SETTLED
+PASS 旧 worker 租约失效 :: owner=worker:b token=2
+PASS 旧 worker 写回被拒
+PASS 同 key 并发预留只剩一行 :: rows=1 outcomes=[True, True, True, True]
+PASS 并发章提交都落库 :: commits=[1, 2] outcomes=[True, True]
+PASS 并发章提交版本不丢更新 :: version=3（基线 1 + 两次提交）
+PASS 裁决竞争后状态唯一 :: state=RESOLVED
+PASS 裁决竞争只有一个赢家 :: chosen=keep
+PASS 裁决结果可区分人/自动 :: resolved_by=timer outcomes=[['user:Conflict', 'default'], ['user:Conflict', 'default:none'], ['user:Conflict', 'default:none']]
+PASS 并发报错只建一个重演任务 :: outcomes=['73e6f0eb-c745-473f-9361-02a2a729935b', 'f03d6f24-815d-4d1c-9d8c-3d867ea2b961'] attempts=[1, 2]
+PASS 不同报错合并进排队重演 :: corrections={'甲其实从未持有钥匙', '甲当晚根本不在场'}
+PASS 屏障挡住后章：第四章未被并发领取 :: ch4=QUEUED ticks=['none', 'claimed']
+PASS 重演被领取推进（恰好一个 worker 赢家） :: replay=RETRYABLE_FAILED ticks=['none', 'claimed']
+PASS worker tick 无未处理异常（跨作品遗留已中和） :: ticks=['none', 'claimed']
+PASS 父版本竞争只有一个提交成功 :: commits=[1] outcomes=['committed', 'ProductionStopped']
+PASS 过期父版本被拒绝（ProductionStopped） :: outcomes=['committed', 'ProductionStopped']
+
+=== 23/23 passed ===

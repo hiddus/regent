@@ -6,6 +6,8 @@
 >
 > 状态：ACTIVE — 当前开发顺序唯一权威源
 
+> **v7.8 状态再验证**：本轮 308 项定向回归、前端构建通过；旧隔离探测确认纠错语义保留且前章优先推进。D-01～D-04 的具体修复得到支持，但并非只剩人工验证：B-04 实际双策略灰度、R4 评估运行入口、B-06 当前源码的生产运行时认证、M2 浏览器自动化、M4 长篇运行与指标采集仍未完成。详见 [剩余工程与人工任务划分](docs/archive/novel-remaining-work-v7.8.md)。本轮未执行远程认证或真实模型实验。
+
 > **v7.8 闭合**：v7.7 复核提出的 4 个闭环缺口（D-01～D-04）全部修复并通过反证。D-01：纠错语义（correction/replay_reason/corrections）穿过 ASSEMBLE 重建保留，排队重演对同一报错去重、对不同报错合并进队列（`run.correction_merged` 事件留痕），不再静默丢弃；D-02：后台领取加依赖屏障——同作品同分支更早章节在途（QUEUED/RUNNING/PENDING_DECISION/AWAITING_INPUT/RETRYABLE_FAILED）时 QUEUED 新章不起跑，屏障只拦起跑不拦续跑、不阻塞其他作品，锁内复核防双 Worker 竞争；D-03：六视角记忆投影下沉到 `domain.memory.project_payloads`（新旧流程共用同一裁剪实现），接入 director_v2 全链——plan（导演视图，raw memory 不再倾倒）、ACT（逐角色个人视图，保 Hive 隔离）、WATCH_TAKE/WATCH_PROSE（导演视图）、RENDER（叙述者视图），全部带 manifest 留痕；D-04：终局裁决 CallBroker 传 `budget_limit_minor = 章级上限 − 已结算`，预算耗尽在调用 provider 前拒绝（拒绝折算为「没有判断」，不会触发扩卷）。新增 `test_d_batch.py` 15 例（含 produce 级真实请求证明）；反证 `deploy/novel/mutate_check_d.py` 退回旧行为后 11 例次变红（8 个变异全部被咬住）。全量单测通过。详见 [本轮复核](docs/archive/novel-director-completeness-v7.8.md)。历史结论见 [v7.7 复核](docs/archive/novel-director-completeness-v7.7.md)。
 
 ### v7.7 提出的入口验收（v7.8 已闭合）

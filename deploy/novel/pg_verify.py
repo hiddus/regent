@@ -156,7 +156,7 @@ from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, "/tmp/pgverify/core/src")
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text as sa_text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from regent.novel.application import ledger
@@ -173,6 +173,7 @@ from regent.novel.application.production import (
 )
 from regent.novel.infrastructure.models import (
     ChapterRunModel,
+    ChapterStepModel,
     ModelCallModel,
     NovelPrincipalModel,
     QuotaReservationModel,
@@ -517,6 +518,196 @@ async def scenario_user_vs_default_decision_race():
           f"resolved_by={resolved_by} outcomes={outcomes}")
 
 
+# ---------------------------------------------------------------------------
+# 场景 8：真实纠错重演入口——并发 report_fact 合并去重 + 后台领取屏障（D-01/D-02）
+# ---------------------------------------------------------------------------
+async def scenario_replay_entry_concurrency():
+    from regent.novel.application import memory as memory_app
+    from regent.novel.application import works as works_app
+    from regent.novel.domain.models import ReportFactRequest
+
+    work_id, branch_id = await seed()
+
+    # 跨作品隔离：advance_background_run 的候选扫描覆盖所有 RUNNING 作品，
+    # 此前场景遗留的 ORM 直插 run（无 ChapterStepModel 行、租约已过期）会被
+    # updated_at 排序排到最前，让本场景的 worker 撞上 KeyError 而测不到屏障。
+    # 场景 1–7 的检查此时已经完成，统一中和为终态即可。
+    async with Sessions() as s:
+        await s.execute(
+            sa_text(
+                "UPDATE novel_chapter_runs SET state='CANONIZED', lease_owner=NULL, "
+                "lease_expires_at=NULL WHERE work_id != :wid "
+                "AND state IN ('QUEUED','RUNNING','RETRYABLE_FAILED')"
+            ),
+            {"wid": work_id},
+        )
+        await s.commit()
+
+    async def setup():
+        async with Sessions() as s:
+            work = await s.get(StoryWorkModel, work_id)
+            work.latest_chapter_no = 3
+            for chapter_no in range(1, 4):
+                s.add(ChapterRunModel(
+                    id=uuid.uuid4(), work_id=work_id, branch_id=branch_id,
+                    chapter_no=chapter_no, attempt=1, state="CANONIZED",
+                ))
+            await memory_app.record_chapter_memory(
+                s, work=work, chapter_no=1,
+                facts=[{"statement": "甲承诺明日归还钥匙", "quote": "甲承诺明日归还钥匙",
+                        "known_by": ["甲"]}],
+                cast=["甲"],
+            )
+            await s.commit()
+
+    await setup()
+
+    async def report(statement):
+        async with Sessions() as s:
+            try:
+                work = await s.get(StoryWorkModel, work_id)
+                resp = await works_app.report_fact(
+                    s, owner_id=work.owner_id, work_id=work_id,
+                    payload=ReportFactRequest(statement=statement, chapter_no=1, subject="甲"),
+                )
+                await s.commit()
+                return str(resp.ticket_id)
+            except Exception as exc:
+                await s.rollback()
+                return f"{type(exc).__name__}: {exc}"[:120]
+
+    outcomes = await asyncio.gather(
+        report("甲其实从未持有钥匙"), report("甲当晚根本不在场"),
+    )
+    async with Sessions() as s:
+        replays = list(
+            (await s.scalars(
+                select(ChapterRunModel).where(
+                    ChapterRunModel.work_id == work_id,
+                    ChapterRunModel.chapter_no == 1,
+                    ChapterRunModel.attempt > 1,
+                )
+            )).all()
+        )
+        all_runs = list((await s.scalars(
+            select(ChapterRunModel).where(ChapterRunModel.work_id == work_id)
+        )).all())
+        attempts = sorted(int(r.attempt) for r in all_runs if int(r.chapter_no) == 1)
+        ctx = dict(replays[0].generation_context or {}) if replays else {}
+    check("并发报错只建一个重演任务", len(replays) == 1 and attempts == [1, 2],
+          f"outcomes={outcomes} attempts={attempts}")
+    statements = {str(c.get("statement", "")) for c in (ctx.get("corrections") or [])}
+    check("不同报错合并进排队重演", statements == {"甲其实从未持有钥匙", "甲当晚根本不在场"},
+          f"corrections={statements}")
+
+    # 再排一章 QUEUED（第 4 章，避开 setup 已建的第 2/3 章）：屏障必须挡住它，
+    # 直到第一章重演离开在途。直插必须带齐步骤行——缺行的 run 被领取时
+    # advance_step 的 by_name[step] 会抛 KeyError，污染屏障判读。
+    async with Sessions() as s:
+        run = ChapterRunModel(
+            id=uuid.uuid4(), work_id=work_id, branch_id=branch_id,
+            chapter_no=4, attempt=1, state="QUEUED",
+            generation_context={"architecture_version": "director_v2"},
+        )
+        s.add(run)
+        await s.flush()
+        for step in ("ASSEMBLE", "DIRECT", "PRODUCE", "REVIEW", "CANON"):
+            s.add(ChapterStepModel(
+                id=uuid.uuid4(), run_id=run.id, step=step,
+                state="PENDING", input_version=1,
+            ))
+        await s.commit()
+
+    async def worker_tick():
+        async with Sessions() as s:
+            try:
+                progress = await works_app.advance_background_run(s, provider=_NoProvider())
+                await s.commit()
+                return "claimed" if progress is not None else "none"
+            except Exception as exc:
+                await s.rollback()
+                return f"{type(exc).__name__}: {exc}"[:120]
+
+    ticks = await asyncio.gather(worker_tick(), worker_tick())
+    async with Sessions() as s:
+        ch4 = await s.scalar(
+            select(ChapterRunModel).where(
+                ChapterRunModel.work_id == work_id, ChapterRunModel.chapter_no == 4)
+        )
+        replay_row = await s.scalar(
+            select(ChapterRunModel).where(
+                ChapterRunModel.work_id == work_id,
+                ChapterRunModel.chapter_no == 1, ChapterRunModel.attempt > 1)
+        )
+    check("屏障挡住后章：第四章未被并发领取", str(ch4.state) == "QUEUED",
+          f"ch4={ch4.state} ticks={ticks}")
+    check("重演被领取推进（恰好一个 worker 赢家）",
+          str(replay_row.state) != "QUEUED" or ticks.count("claimed") == 0,
+          f"replay={replay_row.state} ticks={ticks}")
+    check("worker tick 无未处理异常（跨作品遗留已中和）",
+          all(t in ("claimed", "none") for t in ticks),
+          f"ticks={ticks}")
+
+
+# ---------------------------------------------------------------------------
+# 场景 9：父版本竞争——过期的父事实版本不得提交 Canon（B-05/C-05 链路）
+# ---------------------------------------------------------------------------
+async def scenario_parent_version_race():
+    import hashlib
+    from regent.novel.application import generation as gen_app
+    from regent.novel.infrastructure.models import CanonCommitModel
+
+    work_id, branch_id = await seed()
+
+    async def make_run(attempt: int, text: str) -> uuid.UUID:
+        run_id = uuid.uuid4()
+        async with Sessions() as s:
+            s.add(ChapterRunModel(
+                id=run_id, work_id=work_id, branch_id=branch_id,
+                chapter_no=1, attempt=attempt, state="RUNNING",
+                title="第 1 章", content=text,
+                review={"passed": True},
+                generation_context={
+                    "architecture_version": "director_v2",
+                    "parent_canon_version": 0,  # 双方都带着过期父版本入场
+                    "verified_facts": [
+                        {"statement": "钥匙在桌上", "known_by": ["ALL"]},
+                    ],
+                    "validated_content_hash": hashlib.sha256(text.encode()).hexdigest(),
+                },
+            ))
+            await s.commit()
+        return run_id
+
+    # 两份不同正文：避免同 source_hash 触发幂等早退，确保竞争走父版本校验
+    run_a = await make_run(1, "他把钥匙放在桌上，雨水沿窗棂流下。")
+    run_b = await make_run(2, "他把钥匙放在桌上，雨水沿窗棂流下，门开了。")
+
+    async def submit(run_id: str):
+        async with Sessions() as s:
+            run = await s.get(ChapterRunModel, uuid.UUID(run_id))
+            work = await s.get(StoryWorkModel, work_id)
+            try:
+                await gen_app.canon(s, provider=_NoProvider(), work=work, run=run)
+                await s.commit()
+                return "committed"
+            except Exception as exc:
+                await s.rollback()
+                return f"{type(exc).__name__}"
+
+    outcomes = await asyncio.gather(submit(str(run_a)), submit(str(run_b)))
+    async with Sessions() as s:
+        commits = list((await s.scalars(
+            select(CanonCommitModel.version)
+            .where(CanonCommitModel.work_id == work_id)
+            .order_by(CanonCommitModel.version)
+        )).all())
+    check("父版本竞争只有一个提交成功", commits == [1], f"commits={commits} outcomes={outcomes}")
+    check("过期父版本被拒绝（ProductionStopped）",
+          outcomes.count("committed") == 1 and "ProductionStopped" in " ".join(outcomes),
+          f"outcomes={outcomes}")
+
+
 async def main():
     for fn in (
         scenario_lease_contention,
@@ -526,6 +717,8 @@ async def main():
         scenario_duplicate_reservation_key,
         scenario_concurrent_chapter_commit,
         scenario_user_vs_default_decision_race,
+        scenario_replay_entry_concurrency,
+        scenario_parent_version_race,
     ):
         try:
             await fn()

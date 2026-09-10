@@ -368,6 +368,35 @@ async def test_barrier_blocks_on_pending_decision_of_earlier_chapter(novel_db, m
     assert claimed == [], "等待用户裁决的第一章必须挡住第二章起跑"
 
 
+@pytest.mark.asyncio
+async def test_barrier_blocks_on_retryable_failed_of_earlier_chapter(novel_db, monkeypatch):
+    """第一章停在 RETRYABLE_FAILED（租约已释放）时，第二章不得起跑；worker 续跑第一章。
+
+    这是 pg_verify 场景 8 竞争里观察到的关键不变量：重演失败落 RETRYABLE_FAILED
+    后，后续 QUEUED 章必须继续被挡，直到重演离开在途。
+    """
+    claimed = _install_advance_step_spy(monkeypatch)
+
+    async with novel_db() as s:
+        work = await _work(s, latest_chapter_no=2)
+        ch1 = _run(work, chapter_no=1, state=ChapterRunState.RETRYABLE_FAILED.value)
+        ch1.lease_expires_at = None  # 失败路径已释放租约
+        ch2 = _run(
+            work, chapter_no=2, state=ChapterRunState.QUEUED.value,
+            context={"architecture_version": "director_v2"},
+        )
+        ch2.updated_at = _OLD
+        s.add_all([ch1, ch2])
+        await s.commit()
+
+        await works.advance_background_run(s, provider=object())
+        await s.commit()
+
+    assert claimed == [1], (
+        f"RETRYABLE_FAILED 的第一章属于在途，必须挡住第二章并续跑第一章，实际推进了 {claimed}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # D-03：记忆投影接入 director_v2 场景链
 # ---------------------------------------------------------------------------
