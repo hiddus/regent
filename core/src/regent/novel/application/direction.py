@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import uuid
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -50,6 +52,31 @@ MAX_TAKES = 3
 MAX_TURNS = 4
 MAX_REVISIONS = 2
 MAX_CHAPTER_REPAIRS = 1
+# 角色引用自修次数。之所以需要「带反馈的自修」而不是交给步骤级重试：规划用
+# temperature=0，入参不变的重试会以近乎确定的方式产出同一个坏名字，重试等于
+# 白烧钱。自修必须改入参——把违规原因和在册名单回传给导演。
+MAX_PLAN_REPAIRS = 2
+# 末尾括号注释，模型给角色名加注的习惯写法；只用于**确定性**归一，不做模糊匹配。
+_TRAILING_PAREN = re.compile(r"[（(][^（()）]*[)）]\s*$")
+# 每章可新增的人物数。角色表是**起点不是牢笼**：一本小说不可能只有开局那几个
+# 人，导演当然要能按叙事需要带新人进场。上限卡的不是「能不能造人」，而是
+# 「一次造多少」——角色表会被带进后续每一章的上下文和每个角色的信息集，
+# 无上限等于让一次随手声明永久抬高后续所有章节的成本。
+MAX_NEW_PERSONAS_PER_CHAPTER = 2
+# 引文核对：量**覆盖度**，不量同一性。
+# 真机样本：8 条 evidence 里 7 条逐字命中，第 8 条把原文的「他将开表器握在手中」
+# 写成「陈默将开表器握在手中」——把代词还原成人名——整章就判死了。要求字节级
+# 相同等于要求模型不能做任何正常的小改动，而这个检查的目的是「不许凭空捏造」，
+# 不是「不许改写」。凭空捏造的引文凑不出这么长的逐字重合，所以保证仍然成立。
+# 注意这与角色名归一**不是一回事**：角色名是身份键，猜错不可逆；引文只是
+# 审计用的出处，近义改写无害。风险不同，规则就该不同。
+QUOTE_MIN_RUN = 12
+QUOTE_MIN_RATIO = 0.6
+# 判断类调用（观看表演 / 审阅正文）的引文自修次数。
+# 为什么必须给修正机会而不是继续放宽判据：真机样本一版比一版接近
+# （重合 17/49 → 24/28），阈值再往下调就只剩形式。而模型看到「哪条引用、
+# 差多少、原文就在下面」通常能立刻改对——看不到就只能重犯。
+MAX_JUDGE_REPAIRS = 1
 # 货币预算上限（分），与调用次数上限互不替代：次数管行为，金额管钱。
 # pilot 值，R4 盲评后按成本曲线版本化冻结（Tech-Spec §4.3）。
 MAX_COST_MINOR = 20_000
@@ -91,7 +118,16 @@ _PROSE_COMMANDS = {
 
 
 class ActorDirection(BaseModel):
-    persona: str
+    # ``persona`` 是角色表的**键**，不是自由文本。原先它是个没有 description 的裸
+    # ``str``，模型于是把「陈渡（记忆观察者）」这种「名字 + 本场作用」写进来，下游
+    # 拿它当身份查人，一查就空，整章判死。与其在提示词里反复喊「不要加括号」，
+    # 不如给「本场作用」一个正当去处——模型想表达的东西要有地方写。
+    persona: str = Field(
+        min_length=1,
+        description="必须是给定角色表里的确切名字，一字不差；"
+        "不得添加括号、头衔、别称或本场说明，也不得新造人物",
+    )
+    role: str = Field(default="", description="该人物在本场的作用，如「旁观者」；不要写进 persona")
     objective: str = Field(min_length=1)
     instruction: str = Field(min_length=1, description="表演指导，不含本人未知的秘密或未来结果")
 
@@ -113,11 +149,31 @@ class SceneBrief(BaseModel):
     narrative: NarrativeSpec
 
 
+class NewPersonaSpec(BaseModel):
+    """导演申请进场的新人物。
+
+    角色图谱是**起点不是牢笼**：一本小说不可能只有开局那几个人。但新人必须
+    **声明**，不能偷偷把新名字写进 ``persona``——人物名下游是当身份用的
+    （信息隔离、声纹、正典），只躺在 JSON 里的名字会在更后面炸，而且是那种
+    查不出原因的炸。声纹必填：没有声纹的新角色等于没有角色，而声纹分离正是
+    多角色独立表演的全部价值所在。
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    voice: str = Field(min_length=1, description="说话方式：句式、用词、语气；这是该人物的声纹")
+    identity: str = Field(default="", description="一句话身份，如「码头搬工」")
+    drives: str = Field(default="", description="他此刻想要什么")
+    reason: str = Field(min_length=1, description="为什么现有角色撑不起这场戏")
+
+
 class ChapterDirection(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     reader_intent: str = Field(min_length=1)
     ending_reason: str = Field(min_length=1)
     scenes: list[SceneBrief] = Field(min_length=1, max_length=4)
+    # 声明数量**不在 schema 上设 max_length**：超了要能被自修反馈纠正，而不是
+    # 变成一次读不懂的校验失败。
+    new_personas: list[NewPersonaSpec] = Field(default_factory=list)
 
 
 class ActorTurn(BaseModel):
@@ -129,10 +185,15 @@ class ActorTurn(BaseModel):
 
 class SceneEvent(BaseModel):
     statement: str = Field(min_length=1)
-    known_by: list[str] = Field(default_factory=list)
+    known_by: list[str] = Field(
+        default_factory=list,
+        description="实际获知者的角色名，必须取自给定角色表且一字不差；缺席人物不能自动获知",
+    )
     reader_visible: bool
     state_changes: dict[str, str] = Field(default_factory=dict)
-    dialogue_by_character: dict[str, list[str]] = Field(default_factory=dict)
+    dialogue_by_character: dict[str, list[str]] = Field(
+        default_factory=dict, description="键为角色表中的确切名字，值为该人物实际说出的台词"
+    )
 
 
 class SceneResolution(BaseModel):
@@ -249,15 +310,268 @@ def _save(run: Any, production: dict[str, Any]) -> None:
     run.generation_context = {**run.generation_context, "production": deepcopy(production)}
 
 
+def _longest_common_run(quote: str, text: str) -> int:
+    """两段文字的最长**连续**公共子串长度（只数逐字相同，不做模糊匹配）。"""
+    if not quote or not text:
+        return 0
+    # 滚动数组 DP；两端都是千字量级，不必上后缀自动机。
+    prev = [0] * (len(text) + 1)
+    best = 0
+    for char in quote:
+        cur = [0] * (len(text) + 1)
+        for j, other in enumerate(text, start=1):
+            if char == other:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+EVIDENCE_REPAIR_RULE = (
+    "evidence 必须**原样抄录**下面一段原文里的一句话，一个字都不要改：\n"
+    "不要加说话人前缀、不要加字段名、不要改写、不要把多句话拼成一句。"
+)
+
+
+async def _grounded_judgment[T: BaseModel](
+    call: Any,
+    schema: type[T],
+    system: str,
+    payload: dict[str, Any],
+    stage_text: str,
+    label: str,
+) -> T:
+    """带反馈自修的导演判断：引文不合规时把**原因**回传，而不是判死整章。
+
+    自修必须换 command_id：沿用原 id 会被幂等键挡住，或复用上一次的坏结果。
+    自修次数用尽才判死——判据不放松，只是给模型一次看见错误的机会。
+    """
+    repair: list[str] = []
+    for repair_no in range(MAX_JUDGE_REPAIRS + 1):
+        result = await call(
+            schema,
+            system,
+            {**payload, "repair_instructions": repair} if repair else payload,
+            repair_no=repair_no,
+        )
+        try:
+            _quote_check(result.evidence, stage_text)
+        except ProductionStopped as exc:
+            repair = [f"上一版判断不能采用：{exc}", EVIDENCE_REPAIR_RULE, stage_text[:1500]]
+            continue
+        return result
+    raise ProductionStopped(f"{label}：引文自修次数已用尽")
+
+
+def _stage_text(take: dict[str, Any]) -> str:
+    """场上**可引用**的原文：事件陈述、表演（动作与台词）、规则冲突提示。
+
+    ``rule_issues`` 必须在内：提示词要求「有 rule_issues 必须重演」，而重演的
+    **理由**就是那条规则冲突本身。不把它算作可引用文本，等于要求导演拿一个
+    不许引用的东西当证据——它只能把规则提示复述进 evidence，再被判成捏造。
+    """
+    return "\n".join(
+        [str(e.get("statement", "")) for e in take.get("events") or []]
+        + [
+            line
+            for a in take.get("performances") or []
+            for line in list(a.get("actions") or []) + list(a.get("dialogue") or [])
+        ]
+        + [str(issue) for issue in take.get("rule_issues") or []]
+    )
+
+
+# 省略号：模型引长句时几乎必然跳读，跳读不等于捏造。
+_QUOTE_ELLIPSIS = re.compile(r"…|\.{2,}|．{2,}")
+
+
+def _covered(quote: str, text: str) -> bool:
+    """逐字覆盖度判据（不含省略号拆分）。见 ``_quote_check`` 的说明。"""
+    if not quote:
+        return False
+    if quote in text:
+        return True
+    run = _longest_common_run(quote, text)
+    need = min(len(quote), max(QUOTE_MIN_RUN, int(QUOTE_MIN_RATIO * len(quote))))
+    return run >= need
+
+
+def _is_grounded(quote: str, text: str) -> bool:
+    """引文是否确有出处。
+
+    允许用省略号跳读——但**每一段被留下的片段都要有出处**，判据与整条引用同一套
+    （覆盖度，不是字节级）。省略号只是把若干真实片段接起来，不是改写许可证。
+
+    真机样本：5 条「事实证据不在正文中」全部来自 ``A……B`` 这种跳读引用，模型给的是
+    ``passed=True``，是被字节级比对改判成硬失败；而硬失败又会连锁导致导演的 ACCEPT
+    被 Runtime 拒绝、整章判死。要求每段都**字节级**存在又过严——模型常把其中一段
+    轻微改写，那不是捏造。
+    """
+    stripped = quote.strip()
+    if not stripped:
+        return False
+    if stripped in text:
+        return True
+    segments = [seg for seg in _QUOTE_ELLIPSIS.split(stripped) if seg.strip()]
+    if len(segments) > 1:
+        return all(_covered(seg.strip(), text) for seg in segments)
+    return _covered(stripped, text)
+
+
 def _quote_check(quotes: list[str], text: str) -> None:
-    if not quotes or any(not quote.strip() or quote not in text for quote in quotes):
+    """核对导演的 evidence 确有出处。
+
+    判据是**最长逐字重合**够长，而不是全串字节相同。阈值取「至少 12 字」与
+    「引文本身的 60%」中较大者，再以引文长度为上限——短引文天然要求整串命中，
+    长引文允许改掉几个字。
+    """
+    if not quotes:
         raise ProductionStopped("导演判断缺少可核对的原文证据")
+    for quote in quotes:
+        stripped = quote.strip()
+        if not stripped:
+            raise ProductionStopped("导演判断缺少可核对的原文证据：存在空白引用")
+        if _is_grounded(stripped, text):
+            continue
+        run = _longest_common_run(stripped, text)
+        need = min(len(stripped), max(QUOTE_MIN_RUN, int(QUOTE_MIN_RATIO * len(stripped))))
+        raise ProductionStopped(
+            f"导演判断缺少可核对的原文证据：引用「{stripped[:40]}」"
+            f"与场上原文最长逐字重合 {run} 字，需要 {need} 字；"
+            "若用省略号跳读，每一段留下的片段都必须逐字存在"
+        )
+
+
+def _canonical_persona(name: str, cast: dict[str, Any]) -> str | None:
+    """把角色引用归一到 ``cast`` 的键；归一不了返回 None。
+
+    只在两种**确定性**情形下归一：① 原样就是键（角色表里本来就带括号的名字，
+    如「陈默父亲（陈远舟）」，必须原样保留）；② 去掉末尾整段括号后正好是键。
+    不做模糊匹配：猜错等于把一个人的戏记到另一个人头上，而这是不可逆的。
+    """
+    if name in cast:
+        return name
+    stripped = _TRAILING_PAREN.sub("", name).strip()
+    if stripped and stripped in cast:
+        return stripped
+    return None
+
+
+def _brief_issues(brief: SceneBrief, cast: dict[str, Any]) -> list[str]:
+    """返回本场角色引用的问题（人类可读），无问题返回空表。
+
+    副作用：把可归一的引用**就地**改写为 ``cast`` 的键。模型写「陈渡（记忆
+    观察者）」时意图明确，为此重做整章规划毫无意义；归一即可。
+    """
+    issues: list[str] = []
+    resolved_names: list[str] = []
+    for actor in brief.actors:
+        resolved = _canonical_persona(actor.persona, cast)
+        if resolved is None:
+            issues.append(f"「{actor.persona}」不是角色表中的名字")
+            continue
+        if resolved in resolved_names:
+            issues.append(f"「{actor.persona}」与本场其他角色指向同一个人")
+            continue
+        resolved_names.append(resolved)
+        actor.persona = resolved
+    return issues
+
+
+def _declared_cast(
+    direction: ChapterDirection, cast: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """把导演声明的新人物并入候选角色表，返回（候选表，声明本身的问题）。
+
+    声明过的新名字是合法的引用——这一点是刻意的：角色表不是封闭集合。但声明
+    本身要受约束（不得顶替既有角色、不得自我重复、不得超量），否则「新增人物」
+    会变成绕过角色图谱的暗门。
+    """
+    if len(direction.new_personas) > MAX_NEW_PERSONAS_PER_CHAPTER:
+        return cast, [
+            f"一章最多新增 {MAX_NEW_PERSONAS_PER_CHAPTER} 个人物，"
+            f"本次声明了 {len(direction.new_personas)} 个"
+        ]
+    issues: list[str] = []
+    merged = dict(cast)
+    seen: set[str] = set()
+    for spec in direction.new_personas:
+        if spec.name in cast:
+            issues.append(f"「{spec.name}」已是既有角色，不能重复声明")
+        elif spec.name in seen:
+            issues.append(f"「{spec.name}」被重复声明")
+        else:
+            seen.add(spec.name)
+            merged[spec.name] = {
+                "identity": {"role": spec.identity},
+                "drives": {"primary": spec.drives},
+                "voice": {"style": spec.voice},
+            }
+    return merged, issues
+
+
+async def _register_new_personas(
+    session: AsyncSession,
+    work: StoryWorkModel,
+    cast: dict[str, Any],
+    direction: ChapterDirection,
+) -> dict[str, Any]:
+    """登记导演声明且**实际出场**的新人物，返回并入后的角色表。
+
+    只登记出场的那几个：声明了没用上的不带入角色表——它会被带进后续每一章
+    的上下文和每个角色的信息集，一次随手声明不该永久抬高后续成本。
+    """
+    used = {actor.persona for scene in direction.scenes for actor in scene.actors}
+    merged = dict(cast)
+    added: list[PersonaSpecModel] = []
+    for spec in direction.new_personas:
+        if spec.name not in used or spec.name in merged:
+            continue
+        entry = {
+            "identity": {"role": spec.identity},
+            "drives": {"primary": spec.drives},
+            "voice": {"style": spec.voice},
+        }
+        merged[spec.name] = entry
+        added.append(
+            PersonaSpecModel(
+                id=uuid.uuid4(),
+                work_id=work.id,
+                name=spec.name,
+                stable_traits=[spec.drives, spec.voice],
+                **entry,
+            )
+        )
+    if added:
+        session.add_all(added)
+        await session.flush()
+    return merged
+
+
+def _extend_events(take: dict[str, Any], events: list[Any]) -> None:
+    """把本轮事件并入 take；**同一句陈述**已入场的不再重复入场。
+
+    结算请求会把已有事件一并给模型看（它必须基于既有事实判定结果），模型于是
+    把看过的事件原样回吐，``extend`` 就把它们重复累加：真机样本里一个 6 事件的
+    场景跑完 3 个节拍变成 22 条，其中三组完全相同。重复事件会喂出重复正文、
+    触发规则冲突、迫使导演重演，最后卡死整章——而根因只是一句 ``extend``。
+    """
+    seen = {str(e.get("statement", "")) for e in take["events"]}
+    for event in events:
+        dumped = event.model_dump(mode="json")
+        key = str(dumped.get("statement", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        take["events"].append(dumped)
 
 
 def _check_brief(brief: SceneBrief, cast: dict[str, Any]) -> None:
-    names = [actor.persona for actor in brief.actors]
-    if len(names) != len(set(names)) or any(name not in cast for name in names):
-        raise ProductionStopped("场景包含重复或未定义的角色")
+    """校验角色引用；违规即判死（调用方负责在判死前给过自修机会）。"""
+    issues = _brief_issues(brief, cast)
+    if issues:
+        raise ProductionStopped("场景包含重复或未定义的角色：" + "；".join(issues))
 
 
 def _runtime_state(production: dict[str, Any], run: Any, take: dict[str, Any]) -> RuntimeState:
@@ -281,6 +595,27 @@ def _runtime_state(production: dict[str, Any], run: Any, take: dict[str, Any]) -
         take_no=int(take.get("take_no", 1) or 1),
         has_prose=bool(take.get("content")),
     )
+
+
+def _coerce_illegal_action(phase: str, result: Any, take: dict[str, Any]) -> list[str]:
+    """把**注定被 Runtime 拒绝**的动作换成唯一还能执行的那个，并返回留痕说明。
+
+    真机死法：节拍用尽时导演仍选 CONTINUE。这是**可判定**的非法——不必再问模型
+    一次（temperature=0 的入参不变重试会以近乎确定的方式产出同一个非法动作），
+    而节拍用尽后 RENDER 是唯一还能执行的路径。换的是**路径**不是**内容**：留下的
+    instruction 仍然是导演自己给的，且换动作会留痕入库，不静默。
+
+    另一类——「存在硬失败时导演仍选 ACCEPT」——**故意不在这里收束**。
+    ``test_director_cannot_override_failed_independent_validation`` 编码了一条安全
+    属性：独立核验没过的东西，导演不能绕过去。把它悄悄改成 REWRITE 等于替产品
+    做了个决定，而这个决定该由人拍：是让章直接停，还是允许重写。见归档文档。
+    """
+    notes: list[str] = []
+    if phase == "WATCH_TAKE" and result.action == "CONTINUE":
+        if MAX_TURNS - int(take.get("turn", 0)) - 1 <= 0:
+            result.action = "RENDER"
+            notes.append("节拍已用尽，CONTINUE 不可执行，按 RENDER 收束本场")
+    return notes
 
 
 def _apply_state(runtime: CommandRuntime, take: dict[str, Any], state: RuntimeState,
@@ -611,19 +946,23 @@ async def plan_chapter(
         ),
         RuntimeState(scene_state=NO_SCENE, input_version=_input_version(run)),
     )
-    result = await _call(
-        session,
-        provider,
-        work,
-        run,
-        production,
-        ChapterDirection,
+    system_prompt = (
         "你是持续负责小说创作的导演。先设计本章阅读体验，再安排1至4个必要场景。"
         "每场明确人物欲望冲突、表演指导、视角、信息差和结束理由。允许舒缓和关系戏，"
         "不要机械升级冲突或套用三章结构。人物合理的选择可以改变未锁定计划。"
         "只使用给定角色；角色指令不泄露本人未知秘密，不预写结果和台词。"
-        "不擅自决定用户锁定的重大节点。正文总目标1800至2500字。",
-        {
+        "不擅自决定用户锁定的重大节点。正文总目标1800至2500字。"
+        "scenes[].actors[].persona必须是给定角色表里的确切名字，一字不差，"
+        "不得添加括号、头衔、别称或本场说明；"
+        "人物在本场的作用写在actors[].role。"
+        "现有角色撑不起这场戏时，可以在new_personas里声明新人物并写清声纹voice；"
+        f"一章最多新增{MAX_NEW_PERSONAS_PER_CHAPTER}个。"
+        "persona要么是既有角色的确切名字，要么是本次在new_personas里声明的名字。"
+    )
+    plan_command = f"v{_input_version(run)}:plan"
+    repair: list[str] = []
+    for repair_no in range(MAX_PLAN_REPAIRS + 1):
+        payload: dict[str, Any] = {
             # D-03：导演计划请求拿**导演视图**的长期记忆（含未兑现承诺与导演
             # 笔记），不再把召回的全量 memory 原样塞进请求——那是 C-03 投影
             # 纪律，六步旧流程早已如此，director_v2 不得成为例外。
@@ -637,12 +976,42 @@ async def plan_chapter(
             "director_memory": _memory_view(
                 run.generation_context.get("memory", []), "director"
             ),
-        },
-        "plan",
-        f"v{_input_version(run)}:plan",
-    )
-    for brief in result.scenes:
-        _check_brief(brief, cast)
+        }
+        if repair:
+            payload["repair_instructions"] = repair
+        result = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            ChapterDirection,
+            system_prompt,
+            payload,
+            "plan",
+            # 自修是**新的逻辑调用**：沿用原 command_id 会被幂等键挡住（或更糟，
+            # 复用上一次的坏结果），所以带序号另起一条。
+            plan_command if not repair_no else f"{plan_command}:r{repair_no}",
+        )
+        # 先并入导演声明的新人物再校验：声明过的新名字是合法引用。
+        candidate, declare_issues = _declared_cast(result, cast)
+        issues: list[str] = list(declare_issues)
+        for brief in result.scenes:
+            issues += _brief_issues(brief, candidate)
+        if not issues:
+            break
+        # 反馈必须具体：说清哪个名字不能用、能用的是哪些，而不是再说一遍规则。
+        repair = [
+            "上一版规划的角色引用无法使用：" + "；".join(issues) + "。",
+            "既有角色的确切名字是：" + "、".join(sorted(cast)) + "。"
+            "actors[].persona 必须一字不差地取用既有名字，或取本次在 new_personas "
+            "里声明过的名字；不得添括号、头衔或本场说明，本场作用写在 actors[].role。"
+            f"需要新人物就在 new_personas 里声明并写清声纹，一章最多新增"
+            f"{MAX_NEW_PERSONAS_PER_CHAPTER} 个。",
+        ]
+    else:
+        raise ProductionStopped("角色引用自修次数已用尽：" + "；".join(issues))
+    cast = await _register_new_personas(session, work, cast, result)
     production.update(
         {
             "schema_version": 1,
@@ -727,7 +1096,11 @@ async def produce_tick(
     # D-03：六视角记忆投影只在此处按受众裁剪一次，装配器只负责留痕。
     memory_payloads = list(run.generation_context.get("memory", []) or [])
 
-    async def call[T: BaseModel](schema: type[T], system: str, payload: dict[str, Any]) -> T:
+    async def call[T: BaseModel](schema: type[T], system: str, payload: dict[str, Any],
+                                 *, repair_no: int = 0) -> T:
+        command_id = _command_id(production, run, phase)
+        if repair_no:
+            command_id = f"{command_id}:r{repair_no}"
         return await _call(
             session,
             provider,
@@ -738,7 +1111,7 @@ async def produce_tick(
             system,
             payload,
             prefix,
-            _command_id(production, run, phase),
+            command_id,
         )
 
     if phase == "ACT":
@@ -861,7 +1234,7 @@ async def produce_tick(
             for name in event.dialogue_by_character
         ):
             raise ProductionStopped("台词归属含未知人物")
-        take["events"].extend(e.model_dump(mode="json") for e in result.events)
+        _extend_events(take, result.events)
         take["rule_issues"] = result.rule_issues
         _apply_state(
             _RUNTIME,
@@ -887,23 +1260,27 @@ async def produce_tick(
             # D-03：导演观看表演时带导演视图记忆（未兑现承诺是排场的硬约束）。
             memory=_memory_view(memory_payloads, "director"),
         )
-        result = await call(TakeDirection, "你是导演，观看实际演绎，判断人物选择和场景效果。"
+        result = await _grounded_judgment(
+            call,
+            TakeDirection,
+            "你是导演，观看实际演绎，判断人物选择和场景效果。"
             "决定CONTINUE推进下一节拍、RETAKE改变调度重演、RENDER结束表演进入小说呈现。"
             "evidence必须逐字引用事件或可见行动。重演必须给出不同的revised_brief。"
             "有rule_issues必须重演；不要把自己变成打分编辑。"
             "若 user_decision 非空，用户已就这件事作出裁决：必须按其 near_term_consequence "
-            "推进，不得执行其他选项的走向，也不得就同一件事再次请求裁决。", watch.payload)
-        _record_manifest(take, watch)
-        evidence_text = "\n".join(
-            [e["statement"] for e in take["events"]]
-            + [line for a in take["performances"] for line in a["actions"] + a["dialogue"]]
+            "推进，不得执行其他选项的走向，也不得就同一件事再次请求裁决。",
+            watch.payload,
+            _stage_text(take),
+            "观看表演",
         )
-        _quote_check(result.evidence, evidence_text)
+        _record_manifest(take, watch)
+        coerced = _coerce_illegal_action(phase, result, take)
         production["decisions"].append(
             {
                 "phase": phase,
                 "scene_index": production["scene_index"],
                 "take_no": take["take_no"],
+                **({"coerced": coerced} if coerced else {}),
                 **result.model_dump(mode="json"),
             }
         )
@@ -998,7 +1375,8 @@ async def produce_tick(
         )
         production["phase"] = "WATCH_PROSE"
     elif phase == "WATCH_PROSE":
-        result = await call(
+        result = await _grounded_judgment(
+            call,
             ProseDirection,
             "你是导演，观看小说呈现是否实现本场阅读体验、潜台词和人物情绪。"
             "给出具体观察和逐字正文evidence，决定ACCEPT、REWRITE表达或RETAKE表演。"
@@ -1016,13 +1394,16 @@ async def produce_tick(
                 # D-03：导演审阅正文同样只拿导演视图记忆。
                 "director_memory": _memory_view(memory_payloads, "director"),
             },
+            take["content"],
+            "审阅正文",
         )
-        _quote_check(result.evidence, take["content"])
+        coerced = _coerce_illegal_action(phase, result, take)
         production["decisions"].append(
             {
                 "phase": phase,
                 "scene_index": production["scene_index"],
                 "take_no": take["take_no"],
+                **({"coerced": coerced} if coerced else {}),
                 **result.model_dump(mode="json"),
             }
         )
@@ -1086,7 +1467,7 @@ async def produce_tick(
         )
         issues = list(result.issues)
         for fact in result.facts:
-            if fact.quote not in take["content"]:
+            if not _is_grounded(fact.quote, take["content"]):
                 issues.append("事实证据不在正文中")
             # "ALL" 是「所有人都知道」的既有记号（context/hive/canon 同此口径），
             # 不是人物名：把它当未定义人物会让公开事实永远过不了核验。
@@ -1103,7 +1484,10 @@ async def produce_tick(
             result.state_changes
         ):
             issues.append("正文实际状态与场景结算不一致")
-        if any(change.quote not in take["content"] for change in result.state_changes):
+        if any(
+            not _is_grounded(change.quote, take["content"])
+            for change in result.state_changes
+        ):
             issues.append("状态变化缺少正文证据")
         passed = result.passed and not issues and bool(result.facts)
         take["validation"] = {**result.model_dump(mode="json"), "passed": passed, "issues": issues}
