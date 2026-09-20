@@ -838,6 +838,7 @@ async def _produce_script_tick(
         )
         sp["working_state"] = confirmed
         sp["scene_state_trail"] = [deepcopy(confirmed)]
+        sp["scene_exit_states"] = []
         sp["working_summary"] = ""
         sp["scene_entry_summaries"] = [""]
         production["phase"] = "WRITE_SCENE"
@@ -991,6 +992,13 @@ async def _produce_script_tick(
         _prior_ending = (
             texts[idx - 1][-300:] if idx > 0 and idx - 1 < len(texts) else ""
         )
+        # 结构化前场出口：仅 scene_exit_states[idx-1]；不得用 trail 入口冒充新值
+        _prior_exit: dict[str, Any] | None = None
+        _exits = sp.get("scene_exit_states")
+        if isinstance(_exits, list) and idx > 0 and idx - 1 < len(_exits):
+            cand = _exits[idx - 1]
+            if isinstance(cand, dict) and cand:
+                _prior_exit = cand
         gate = evaluate_scene_audit(
             must_beat_ids=must_ids,
             verdicts=audit.beat_verdicts,
@@ -1003,6 +1011,7 @@ async def _produce_script_tick(
             else {},
             entry_summary=_audit_entry,
             prior_scene_ending=_prior_ending,
+            prior_exit_state=_prior_exit,
         )
         sp.setdefault("scene_audits", {})[card.scene_id] = audit.model_dump()
 
@@ -1046,6 +1055,15 @@ async def _produce_script_tick(
         next_state = deepcopy(sp.get("working_state") or {})
         next_state.update(audit.state_changes)
         sp["working_state"] = next_state
+        # 结构化场出口：供后场证明「已接受新值」而非「旧值未出现」
+        exits = list(sp.get("scene_exit_states") or [])
+        while len(exits) < idx:
+            exits.append({})
+        if len(exits) == idx:
+            exits.append(deepcopy(next_state))
+        else:
+            exits[idx] = deepcopy(next_state)
+        sp["scene_exit_states"] = exits
         # trail[0]=入场状态；接受第 i 场后写入 trail[i+1]
         trail = sp.setdefault("scene_state_trail", [])
         if not trail:
@@ -1432,6 +1450,7 @@ async def _produce_script_tick(
                     "scene_revision_instruction",
                     "pending_scene_beat_evidence",
                     "scene_state_trail",
+                    "scene_exit_states",
                     "scene_entry_summaries",
                     "pending_repair_ticket",
                     "located_issues",

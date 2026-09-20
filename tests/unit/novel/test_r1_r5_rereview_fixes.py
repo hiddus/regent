@@ -212,7 +212,7 @@ def test_r1_synonym_old_value_still_blocks():
 
 
 def test_r1_handover_text_without_structured_delta_blocks():
-    """D1：正文像真正交接，但无结构化属性变更源 → 仍不自动 soft。"""
+    """D1：正文像真正交接，但无结构化 prior_exit_state → 仍不自动 soft。"""
     issue = "入场状态称钥匙归甲；上场结尾写钥匙已交到乙手中，本场状态却仍按甲。"
     gate = evaluate_scene_audit(
         must_beat_ids=set(),
@@ -224,6 +224,48 @@ def test_r1_handover_text_without_structured_delta_blocks():
         working_state={"钥匙": "甲持有"},
         entry_summary="钥匙在甲处",
         prior_scene_ending="他把钥匙交到乙手中，乙收好后离开。",
+    )
+    assert gate.continuity_block is True
+
+
+def test_r1_structured_handover_new_value_can_soft():
+    """D1：结构化 prior_exit 给出新值且接地到前场正文 → 可证滞后 soft。"""
+    issue = "入场状态称钥匙归甲；上场结尾写钥匙已交到乙手中，摘要未更新。"
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="甲还以为钥匙在自己手里。",
+        working_state={"钥匙": "甲持有"},
+        entry_summary="钥匙在甲处",
+        prior_scene_ending="他把钥匙交到乙手中，乙收好后离开。",
+        prior_exit_state={"钥匙": "乙手中"},
+    )
+    assert gate.continuity_block is False
+    assert is_entry_vs_ending_state_lag(
+        issue,
+        working_state={"钥匙": "甲持有"},
+        prior_scene_ending="他把钥匙交到乙手中，乙收好后离开。",
+        prior_exit_state={"钥匙": "乙手中"},
+    ) is True
+
+
+def test_r1_structured_exit_not_in_ending_still_blocks():
+    """D1：结构化新值未出现在前场正文 → 不得 soft（未接地）。"""
+    issue = "入场状态称钥匙归甲；上场结尾与摘要不一致。"
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="正文。",
+        working_state={"钥匙": "甲持有"},
+        entry_summary="钥匙在甲处",
+        prior_scene_ending="钥匙泛着微光，屋外雨声渐密。",
+        prior_exit_state={"钥匙": "乙手中"},
     )
     assert gate.continuity_block is True
 

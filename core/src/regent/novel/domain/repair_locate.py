@@ -618,6 +618,10 @@ def apply_repair_target_to_script_state(
     elif trail and idx < len(trail):
         sp["working_state"] = deepcopy(trail[idx])
         sp["scene_state_trail"] = trail[: idx + 1]
+    exits = list(sp.get("scene_exit_states") or [])
+    if exits:
+        # 保留目标场之前的已接受出口；截断后场，避免未来状态泄漏
+        sp["scene_exit_states"] = exits[:idx]
     entries = list(sp.get("scene_entry_summaries") or [])
     if idx < len(entries) and str(entries[idx] or "").strip():
         sp["working_summary"] = str(entries[idx])

@@ -315,14 +315,32 @@ def _state_values_agree_with_ending(
 
 
 def _prior_ending_shows_new_value(
-    state: dict[str, Any], ending: str
+    state: dict[str, Any],
+    ending: str,
+    *,
+    prior_exit_state: dict[str, Any] | None = None,
 ) -> bool:
     """前场结尾是否对同一实体记载了可核对的新取值。
 
-    858a round3 D1：旧值未出现 ≠ 已写新值。尚无结构化属性变更来源时，
-    不授予自动滞后例外（保持阻断，交有界修复）。
+    858a round3 D1：旧值未出现 ≠ 已写新值。
+    仅当结构化 prior_exit_state 给出不同取值，且该新值出现在已接受前场正文中，
+    才视为可证滞后。
     """
-    del state, ending
+    if not state or not str(ending or "").strip():
+        return False
+    exit_state = prior_exit_state if isinstance(prior_exit_state, dict) else None
+    if not exit_state:
+        return False
+    for key, old_val in state.items():
+        if key not in exit_state:
+            continue
+        new_val = exit_state.get(key)
+        old_s = str(old_val or "").strip()
+        new_s = str(new_val or "").strip()
+        if not new_s or new_s == old_s:
+            continue
+        if _phrase_in(ending, new_s):
+            return True
     return False
 
 
@@ -332,13 +350,14 @@ def is_entry_vs_ending_state_lag(
     entry_summary: str = "",
     prior_scene_ending: str = "",
     working_state: dict[str, Any] | None = None,
+    prior_exit_state: dict[str, Any] | None = None,
 ) -> bool:
     """入场状态摘要与上场结尾打架时，是否可证明为摘要滞后。
 
     关闭条件（858a round2 C1 / round3 D1）：
     - 没有可核对来源时不授予滞后例外。
     - 不用全文字符串不等、也不用「旧值未出现」作为滞后证据。
-    - 按问题涉及的实体比对；无法证明属性已出现新值时保留阻断。
+    - 按问题涉及的实体比对；须有结构化新值且接地到前场正文才 soft。
     """
     del entry_summary  # 标签化摘要不作字符串不等证据
     text = str(issue or "").strip()
@@ -354,15 +373,23 @@ def is_entry_vs_ending_state_lag(
 
     scoped = _relevant_state_for_issue(text, state)
     if not scoped:
-        # 问题未点名任何已知实体 → 无法按属性证明滞后
         return False
 
     # 来源一致：问题相关取值仍出现在前场结尾 → 真实矛盾，不是滞后
     if _state_values_agree_with_ending(scoped, ending):
         return False
 
-    # 须有可核对的新值才算滞后；当前无结构化变更源 → 不自动 soft
-    if _prior_ending_shows_new_value(scoped, ending):
+    scoped_exit = None
+    if isinstance(prior_exit_state, dict) and prior_exit_state:
+        scoped_exit = {
+            k: prior_exit_state[k]
+            for k in scoped
+            if k in prior_exit_state
+        } or None
+
+    if _prior_ending_shows_new_value(
+        scoped, ending, prior_exit_state=scoped_exit
+    ):
         return True
 
     return False
@@ -375,6 +402,7 @@ def continuity_should_block(
     working_state: dict[str, Any] | None = None,
     entry_summary: str = "",
     prior_scene_ending: str = "",
+    prior_exit_state: dict[str, Any] | None = None,
 ) -> bool:
     """连续性是否硬阻断。
 
@@ -395,6 +423,7 @@ def continuity_should_block(
             entry_summary=entry_summary,
             prior_scene_ending=prior_scene_ending,
             working_state=state or None,
+            prior_exit_state=prior_exit_state,
         )
         for i in issues
     ):
@@ -413,6 +442,7 @@ def evaluate_scene_audit(
     working_state: dict[str, Any] | None = None,
     entry_summary: str = "",
     prior_scene_ending: str = "",
+    prior_exit_state: dict[str, Any] | None = None,
 ) -> SceneAuditDecision:
     """补全缺失 must 判定 → 证据接地 → 汇总是否阻断放行。"""
     must_ids = set(must_beat_ids)
@@ -435,6 +465,7 @@ def evaluate_scene_audit(
             working_state=working_state,
             entry_summary=entry_summary,
             prior_scene_ending=prior_scene_ending,
+            prior_exit_state=prior_exit_state,
         ),
         hard_fails=list(hard_fails or []),
         continuity_issues=issues,
