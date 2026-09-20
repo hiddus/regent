@@ -10,20 +10,47 @@ class Answer(BaseModel):
     answer: str
 
 
+def sse(
+    content: str,
+    *,
+    model: str = "test-model",
+    prompt_tokens: int = 4,
+    completion_tokens: int = 2,
+    finish_reason: str = "stop",
+) -> httpx.Response:
+    """把一次性 JSON 响应写成 SSE 流：generate_structured 现在是**流式接收**。
+
+    末帧必须带 usage——拿不到 usage 等于按 0 记账，provider 会直接判失败而不是
+    假装这次调用不要钱。
+    """
+    frames = [
+        {"model": model, "choices": [{"delta": {"content": content}}]},
+        {
+            "model": model,
+            "choices": [{"delta": {}, "finish_reason": finish_reason}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        },
+    ]
+    body = "".join(
+        f"data: {json.dumps(frame, ensure_ascii=False)}\n\n" for frame in frames
+    )
+    return httpx.Response(
+        200,
+        content=(body + "data: [DONE]\n\n").encode("utf-8"),
+        headers={"Content-Type": "text/event-stream"},
+    )
+
+
 async def test_openai_compatible_provider_validates_structured_output() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer secret"
         payload = json.loads(request.content)
         assert payload["response_format"] == {"type": "json_object"}
         assert "Required JSON Schema" in payload["messages"][0]["content"]
-        return httpx.Response(
-            200,
-            json={
-                "model": "test-model",
-                "choices": [{"message": {"content": '{"answer":"ok"}'}}],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
-            },
-        )
+        return sse('{"answer":"ok"}')
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = OpenAICompatibleProvider(
@@ -45,10 +72,7 @@ async def test_generate_structured_forwards_sampling_and_output_limits() -> None
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.update(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": '{"answer":"ok"}'}}]},
-        )
+        return sse('{"answer":"ok"}')
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = OpenAICompatibleProvider(
@@ -76,14 +100,7 @@ async def test_openai_compatible_provider_retries_schema_validation_errors() -> 
         payload = json.loads(request.content)
         requests.append(payload)
         content = '{"wrong":"shape"}' if len(requests) == 1 else '{"answer":"corrected"}'
-        return httpx.Response(
-            200,
-            json={
-                "model": "test-model",
-                "choices": [{"message": {"content": content}}],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
-            },
-        )
+        return sse(content)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = OpenAICompatibleProvider(
@@ -111,10 +128,7 @@ async def test_generate_structured_defaults_to_one_bounded_repair() -> None:
 
     async def handler(_request: httpx.Request) -> httpx.Response:
         hits["n"] += 1
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": '{"wrong":"shape"}'}}]},
-        )
+        return sse('{"wrong":"shape"}')
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = OpenAICompatibleProvider(
@@ -156,7 +170,7 @@ async def test_payment_required_is_never_retried() -> None:
 
 async def test_openai_compatible_provider_rejects_invalid_output() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"message": {"content": "no"}}]})
+        return sse("no")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = OpenAICompatibleProvider(
@@ -213,14 +227,7 @@ async def test_generate_structured_retries_http_504() -> None:
         hits["n"] += 1
         if hits["n"] < 3:
             return httpx.Response(504, text="gateway timeout")
-        return httpx.Response(
-            200,
-            json={
-                "model": "test-model",
-                "choices": [{"message": {"content": '{"answer":"ok"}'}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-            },
-        )
+        return sse('{"answer":"ok"}', prompt_tokens=1, completion_tokens=1)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = OpenAICompatibleProvider(
@@ -297,6 +304,39 @@ async def test_chat_sends_thinking_disabled_by_default() -> None:
         )
     assert seen.get("thinking") == {"type": "disabled"}
     assert result.message.tool_calls[0].name == "write_file"
+
+
+async def test_chat_omits_thinking_disabled_for_glm_53() -> None:
+    """glm-5.3-tx rejects thinking.type=disabled; omit so gateway default applies."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "glm-5.3-tx-20260821",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            base_url="https://ai.showmac.com/v1",
+            api_key="secret",
+            model="glm-5.3-tx-20260821",
+            client=client,
+        )
+        from regent.model.chat import ChatMessage
+
+        await provider.chat(messages=[ChatMessage(role="user", content="hi")])
+    assert "thinking" not in seen
 
 
 async def test_chat_length_error_includes_reasoning_diagnostics() -> None:
@@ -402,3 +442,56 @@ async def test_chat_parses_cached_tokens() -> None:
         result = await provider.chat(messages=[ChatMessage(role="user", content="x")])
     assert result.usage.cached_tokens == 80
     assert provider.last_chat_diagnostics["cached_tokens"] == 80
+
+
+async def test_stream_idle_without_first_byte_raises() -> None:
+    """流式空闲：首包迟迟不来应立刻判卡死，而不是闷到整段 timeout。"""
+    import asyncio
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.example/v1",
+        api_key="secret",
+        model="test-model",
+        stream_idle_seconds=0.15,
+    )
+
+    class FakeResponse:
+        async def aiter_lines(self):
+            await asyncio.sleep(1.0)
+            yield 'data: {"choices":[{"delta":{"content":"late"}}]}\n'
+
+    with pytest.raises(ModelOutputError, match="stream idle|first_byte"):
+        await provider._accumulate_stream(FakeResponse())
+
+
+async def test_stream_idle_mid_stream_raises() -> None:
+    import asyncio
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.example/v1",
+        api_key="secret",
+        model="test-model",
+        stream_idle_seconds=0.15,
+    )
+
+    class FakeResponse:
+        async def aiter_lines(self):
+            yield (
+                'data: {"choices":[{"delta":{"content":"{\\"answer\\":\\""}}]}\n'
+            )
+            await asyncio.sleep(1.0)
+            yield 'data: {"choices":[{"delta":{"content":"ok\\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n'
+            yield "data: [DONE]\n"
+
+    with pytest.raises(ModelOutputError, match="stream idle|mid_stream"):
+        await provider._accumulate_stream(FakeResponse())
+
+
+def test_default_stream_idle_capped_at_90() -> None:
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.example/v1",
+        api_key="secret",
+        model="test-model",
+        timeout_seconds=300,
+    )
+    assert provider._stream_idle_seconds == 90.0

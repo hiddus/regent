@@ -218,8 +218,8 @@ async def test_start_run_refuses_after_the_story_is_complete(novel_db, monkeypat
         assert stored.state == StoryWorkState.DONE.value
 
 
-async def test_volume_expansion_triggers_on_last_node(novel_db, monkeypatch):
-    """末节点完成时也要跨卷展开，即便卷完成度还没到 80%。"""
+async def test_volume_expansion_no_longer_auto_on_last_node(novel_db, monkeypatch):
+    """自动扩卷已退役：末节点完成也不再经 _maybe_expand_volume 静默扩卷。"""
 
     async def _noop_event(session, **kwargs):
         return None
@@ -237,7 +237,7 @@ async def test_volume_expansion_triggers_on_last_node(novel_db, monkeypatch):
         owner, work = await _work(session)
         await _volume(session, work, volume_no=1, state="ACTIVE", start=1, end=100)
         await _path_with_nodes(session, work)
-        work.latest_chapter_no = 5  # 完成度仅 5%，远低于 80%
+        work.latest_chapter_no = 5
         run = ChapterRunModel(
             id=uuid.uuid4(),
             work_id=work.id,
@@ -249,4 +249,5 @@ async def test_volume_expansion_triggers_on_last_node(novel_db, monkeypatch):
         session.add(run)
         await session.flush()
         await works._maybe_expand_volume(session, work=work, run=run)
-        assert expanded == [work.id]
+        assert expanded == []
+        del owner

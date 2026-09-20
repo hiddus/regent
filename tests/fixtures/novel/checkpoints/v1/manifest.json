@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "executors": {
+    "scene": {"architecture": "director_v2", "protocol": "scene"},
+    "beat": {"architecture": "director_v2_beat", "protocol": "beat"},
+    "script": {"architecture": "director_script", "protocol": "script"},
+    "script_scene": {
+      "architecture": "director_script_scene",
+      "protocol": "script_scene"
+    }
+  },
+  "command_contracts": {
+    "scene_validate": "v4:s1t2:VALIDATE:turn3:act0:rev1:dec1",
+    "script_scene_write": "v4:script:WRITE_SCENE:sc0:s1:srep2:rep1:dec1",
+    "logical_call": "run1:v4:s1t2:VALIDATE:turn3:act0:rev1:dec1::scene1:take2:VALIDATE"
+  },
+  "checkpoint_contracts": {
+    "user_decision": {
+      "required_keys": ["decision_resolutions", "input_version"],
+      "terminal_state": "PENDING_DECISION"
+    },
+    "budget_exhausted": {
+      "required_keys": ["call_count", "committed_minor", "budget_grant_calls"],
+      "recoverable_state": "PAUSED_COST"
+    },
+    "unknown_call": {
+      "states": ["RESERVED", "UNKNOWN", "SUCCEEDED", "FAILED"],
+      "must_not_duplicate_logical_call": true
+    },
+    "fact_replay": {
+      "required_keys": ["correction", "input_version"],
+      "new_attempt": true
+    },
+    "legacy_json": {
+      "optional_keys": ["script_protocol", "budget_grant_calls", "budget_grant_cost_minor"],
+      "default_protocol": "scene"
+    }
+  },
+  "immutable_fields": [
+    "production.phase",
+    "production.call_count",
+    "production.committed_minor",
+    "production.calls[].purpose",
+    "production.calls[].input_hash",
+    "run.input_version",
+    "run.review",
+    "run.generation_context.validated_content_hash"
+  ]
+}

@@ -45,8 +45,17 @@ _LATER_TABLES = frozenset(
 )
 
 _LATER_COLUMNS: dict[str, frozenset[str]] = {
-    "novel_works": frozenset(                                               # 0049 / 0055
-        {"total_volume_count", "ending_target_volume", "ending_statement"}
+    "novel_works": frozenset(                                        # 0049 / 0055 / 0056
+        {
+            "total_volume_count",
+            "ending_target_volume",
+            "ending_statement",
+            "story_bible",
+            "story_bible_locked_at",
+        }
+    ),
+    "novel_onboarding_sessions": frozenset(                              # 0056
+        {"world_bible", "world_bible_locked_at"}
     ),
     "novel_critical_nodes": frozenset({"volume_no", "arc_no"}),             # 0049
     "novel_chapter_runs": frozenset(                                        # 0050 / 0051

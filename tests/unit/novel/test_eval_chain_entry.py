@@ -29,7 +29,7 @@ from regent.novel.infrastructure.models import (
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy import select
 
-ARMS = ("director_v2", "legacy_v1")
+ARMS = ("director_v2", "director_v2_beat")
 TEXT = "他把钥匙放在桌上。" + "雨水沿窗棂流下，两个人仍旧没有开口。" * 65
 
 

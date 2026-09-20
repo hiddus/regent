@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from regent.novel.application import works
+from regent.novel.application import works, works_moderation
 from regent.novel.domain.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
 from regent.novel.domain.states import ChapterRunState, ModerationDecision
 from regent.novel.infrastructure.models import (
@@ -64,7 +64,7 @@ async def test_resolution_is_recorded(novel_db, monkeypatch):
     async def _record(session, **kwargs):
         events.append(kwargs)
 
-    monkeypatch.setattr(works, "append_event", _record)
+    monkeypatch.setattr(works_moderation, "append_event", _record)
 
     async with novel_db() as session:
         owner, work = await _work(session)
@@ -97,7 +97,7 @@ async def test_author_cannot_approve_own_case(novel_db, monkeypatch):
     async def _noop_event(session, **kwargs):
         return None
 
-    monkeypatch.setattr(works, "append_event", _noop_event)
+    monkeypatch.setattr(works_moderation, "append_event", _noop_event)
     async with novel_db() as session:
         owner, work = await _work(session)
         row = await _case(session, work)
@@ -117,7 +117,7 @@ async def test_only_approval_or_rejection_is_a_conclusion(novel_db, monkeypatch)
     async def _noop_event(session, **kwargs):
         return None
 
-    monkeypatch.setattr(works, "append_event", _noop_event)
+    monkeypatch.setattr(works_moderation, "append_event", _noop_event)
     async with novel_db() as session:
         owner, work = await _work(session)
         row = await _case(session, work)
@@ -135,7 +135,7 @@ async def test_double_resolution_is_rejected(novel_db, monkeypatch):
     async def _noop_event(session, **kwargs):
         return None
 
-    monkeypatch.setattr(works, "append_event", _noop_event)
+    monkeypatch.setattr(works_moderation, "append_event", _noop_event)
     async with novel_db() as session:
         owner, work = await _work(session)
         row = await _case(session, work)
@@ -163,7 +163,7 @@ async def test_appeal_outcome_is_recorded(novel_db, monkeypatch):
     async def _record(session, **kwargs):
         events.append(kwargs)
 
-    monkeypatch.setattr(works, "append_event", _record)
+    monkeypatch.setattr(works_moderation, "append_event", _record)
 
     async with novel_db() as session:
         owner, work = await _work(session)
@@ -209,7 +209,7 @@ async def test_appeal_requires_an_appealed_case(novel_db, monkeypatch):
     async def _noop_event(session, **kwargs):
         return None
 
-    monkeypatch.setattr(works, "append_event", _noop_event)
+    monkeypatch.setattr(works_moderation, "append_event", _noop_event)
     async with novel_db() as session:
         owner, work = await _work(session)
         row = await _case(session, work)
@@ -227,7 +227,7 @@ async def test_unknown_case_is_not_found(novel_db, monkeypatch):
     async def _noop_event(session, **kwargs):
         return None
 
-    monkeypatch.setattr(works, "append_event", _noop_event)
+    monkeypatch.setattr(works_moderation, "append_event", _noop_event)
     async with novel_db() as session:
         owner, work = await _work(session)
         with pytest.raises(NotFound):

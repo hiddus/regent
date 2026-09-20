@@ -59,7 +59,10 @@ class StoryOutline(BaseModel):
     nodes: list[StoryOutlineNode] = Field(min_length=10, max_length=16, description="关键路径节点（10-16 个）")
     personas: list[dict[str, str]] = Field(
         default_factory=list,
-        description="本作核心角色（3-5 个），每个包含 name/identity/drive/voice",
+        description=(
+            "本作核心角色（3-5 个）。每项含 name/identity/drive/voice；"
+            "穿越/性转/系统作另须含 kind（traveler|host_body）与 bio（≥40字小传）"
+        ),
     )
 
 
@@ -346,7 +349,12 @@ async def _canon_facts(
         .limit(20)
     )
     accepted_hashes = None
-    if run is not None and (run.generation_context or {}).get("architecture_version") == "director_v2":
+    if run is not None and (run.generation_context or {}).get("architecture_version") in {
+        "director_v2",
+        "director_v2_beat",
+        "director_script",
+        "director_script_scene",
+    }:
         accepted_rows = (await session.scalars(select(ChapterRunModel).where(
             ChapterRunModel.work_id == work.id,
             ChapterRunModel.branch_id == work.branch_id,
@@ -456,6 +464,8 @@ async def generate_direction_cards(
     raw_intent: str,
     genre: str,
     answers: dict[str, str],
+    revision_feedback: str = "",
+    previous_cards: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """根据用户 premise + 澄清答案，动态生成方向卡。"""
     sys_prompt = (
@@ -468,11 +478,15 @@ async def generate_direction_cards(
         "protagonist_desire（主角想要什么+转折）、core_conflict（核心阻力+特色）、"
         "genre_promise（给读者的体验承诺）、pacing（阅读节奏）、differentiator（与其他卡的差异点）\n"
         "5. 方向卡的描述要具体到这篇故事的角色、设定、冲突——不要用泛泛的模板语言\n"
+        "6. 若提供 revision_feedback：上一轮卡片被用户否决，必须按反馈重做，"
+        "不得复述被否决的套路；card_id 要用新的标识\n"
     )
     usr_prompt = json.dumps({
         "raw_intent": raw_intent,
         "genre": genre or "未指定",
         "clarify_answers": answers,
+        "revision_feedback": revision_feedback or "",
+        "previous_cards": previous_cards or [],
     }, ensure_ascii=False)
     response = await provider.generate_structured(
         system_prompt=sys_prompt,
@@ -480,6 +494,39 @@ async def generate_direction_cards(
         response_model=DirectionCards,
     )
     return response.output.cards
+
+
+async def generate_world_bible(
+    provider: ModelProvider,
+    *,
+    raw_intent: str,
+    genre: str,
+    direction_keywords: list[str] | None = None,
+    locked_direction: dict[str, Any] | None = None,
+    revise_notes: str = "",
+    previous_bible: dict[str, Any] | None = None,
+) -> "WorldBible":
+    """编剧：开写前产出故事世界设定书。"""
+    from regent.novel.domain.world_bible import (
+        SCREENWRITER_SYSTEM,
+        WorldBible,
+        screenwriter_user_payload,
+    )
+
+    payload = screenwriter_user_payload(
+        raw_intent=raw_intent,
+        genre=genre,
+        direction_keywords=list(direction_keywords or []),
+        locked_direction=dict(locked_direction or {}),
+        revise_notes=revise_notes,
+        previous_bible=previous_bible,
+    )
+    response = await provider.generate_structured(
+        system_prompt=SCREENWRITER_SYSTEM,
+        user_prompt=json.dumps(payload, ensure_ascii=False),
+        response_model=WorldBible,
+    )
+    return response.output
 
 
 async def generate_outline(
@@ -491,25 +538,39 @@ async def generate_outline(
     protagonist_desire: str,
     core_conflict: str,
     genre_promise: str,
+    direction_keywords: list[str] | None = None,
 ) -> StoryOutline:
     """根据 premise + 方向卡生成定制化故事大纲。
 
     替代硬编码的路径节点模板，让 LLM 根据用户的具体设定
     生成定制化的路径节点、角色、卷结构。
     """
+    from regent.novel.domain.dossiers import outline_persona_instructions
+    from regent.novel.domain.principle_lenses import lenses_as_prompt_block, resolve_lenses
+
+    lens_block = lenses_as_prompt_block(resolve_lenses(direction_keywords))
     sys_prompt = (
         "你是小说架构师。根据用户的故事前提和选定方向，设计故事大纲。\n"
         "要求：\n"
-        "1. 节点标题必须具体到角色名、地名、事件\n"
-        "2. 每个节点有 promise（读者体验）和 consequences（后续影响）\n"
+        "1. 节点标题必须具体到角色名、地名、事件；时间锚点用词不可歧义"
+        "（重生回到『开播前夜』不得写成『重生前夜』这类可被读成未重生的标题）\n"
+        "2. 每个节点有 promise（读者期待）和 consequences（后续影响）\n"
         "3. 节点间有因果链，不是独立事件\n"
-        "4. 角色具体到名字和身份\n"
-        "5. 混搭多种套路，拒绝单一公式\n"
-        "6. 10-16 个节点，3-5 个弧段，3-5 个角色\n"
+        "4. 角色具体到名字和身份；主角开局身份必须可核对（职业/节目中的位置），"
+        "若 genre/方向含性转，主角身份必须写明性转处境\n"
+        "5. 金手指/外挂须一句话可核对机制（如何运作+边界），禁止『无法解释的库』"
+        "『不去想从哪来』；默认仅主角携带重生记忆，勿无依据让全员重生；"
+        "外挂名称与玩法从本作发明\n"
+        "6. 混搭多种套路，拒绝单一公式\n"
+        "7. 10-16 个节点，3-5 个弧段，3-5 个角色\n"
+        f"8. {outline_persona_instructions()}\n"
+        "9. 先按原则透镜回答问题，再落地到本作设定；禁止套用他书具体梗。\n"
+        + (f"{lens_block}\n" if lens_block else "")
     )
     usr_prompt = json.dumps({
         "raw_intent": raw_intent,
         "genre": genre,
+        "direction_keywords": list(direction_keywords or []),
         "direction": direction_title,
         "protagonist_desire": protagonist_desire,
         "core_conflict": core_conflict,
@@ -524,7 +585,8 @@ async def generate_outline(
 
 
 if TYPE_CHECKING:  # 仅用于类型注解：运行时在函数内导入，避免循环导入
-    from regent.novel.application.direction import EndingVerdict
+    from regent.novel.application.directing_contracts import EndingVerdict
+    from regent.novel.domain.world_bible import WorldBible
 
 
 async def generate_ending_verdict(
@@ -556,8 +618,10 @@ async def generate_ending_verdict(
     调用走 CallBroker：与场景调用同样的预算、持久化和幂等恢复约束。终局判断是
     一次会改变作品终态的调用，不能因为「它不在六步里」就绕过计费与恢复。
     """
-    from regent.novel.application.direction import MAX_COST_MINOR, EndingVerdict, ProductionStopped
+    from regent.novel.application.directing_budget import MAX_COST_MINOR
+    from regent.novel.application.directing_contracts import EndingVerdict
     from regent.novel.application.production import CallBroker
+    from regent.novel.domain.errors import ProductionStopped
 
     sys_prompt = (
         "你是小说的总导演。判断用户最初想讲的这个故事是否已经讲完。\n"
@@ -656,7 +720,14 @@ async def generate_volume_expansion_outline(
 async def assemble(
     session: AsyncSession, *, work: StoryWorkModel, run: ChapterRunModel
 ) -> None:
-    architecture_version = (run.generation_context or {}).get("architecture_version", "legacy_v1")
+    from regent.novel.application.directing_protocol import (
+        ARCHITECTURE,
+        DIRECTED_ARCHITECTURES,
+    )
+
+    architecture_version = (run.generation_context or {}).get(
+        "architecture_version", ARCHITECTURE
+    )
     goal = await _latest_goal(session, work.id)
     path = await session.scalar(
         select(CriticalPathModel)
@@ -682,7 +753,7 @@ async def assemble(
     story_complete = False
     current_vol = None
     if nodes:
-        from regent.novel.application.works import CHAPTERS_PER_NODE
+        from regent.novel.application.works_constants import CHAPTERS_PER_NODE
         # 查找当前章节所属的卷
         current_vol = await session.scalar(
             select(VolumeModel).where(
@@ -742,7 +813,7 @@ async def assemble(
         })
         if len(recent_chapters) >= 3:
             break
-    if architecture_version == "director_v2" and nodes:
+    if architecture_version in DIRECTED_ARCHITECTURES and nodes:
         previous = recent_chapters[0] if recent_chapters else {}
         previous_id = previous.get("target_node", {}).get("id")
         previous_index = next((i for i, node in enumerate(nodes) if node.node_id == previous_id), None)
@@ -780,13 +851,45 @@ async def assemble(
     # replay_reason / corrections 若在重建那一刻被清掉，重演拿到的就是一次
     # 「不知道要改什么」的普通重跑——纠错内容只躺在事件里，永远到不了导演请求。
     old_context = run.generation_context or {}
+    story_ledger_payload, story_ledger_block, open_hooks = _story_ledger_for_chapter(
+        old_context=old_context,
+        previous_rows=recent_rows,
+        chapter_no=int(run.chapter_no),
+    )
+    from regent.novel.domain.story_direction import (
+        clarify_rails_from_assumptions,
+        format_direction_line,
+        keywords_from_assumptions,
+        locked_direction_from_assumptions,
+    )
+    from regent.novel.domain.genre_packs import assemble_context_rails
+    from regent.novel.domain.principle_lenses import resolve_lenses, lenses_payload
+    from regent.novel.domain.world_bible import bible_as_context, bible_director_block
+
+    direction_kw = keywords_from_assumptions(goal.assumptions or [])
+    locked_direction = locked_direction_from_assumptions(goal.assumptions or [])
+    clarify_rails = clarify_rails_from_assumptions(goal.assumptions or [])
+    # 锁定世界书正史优先；遗留作品可能仍只有草稿 conventions
+    story_bible = dict(getattr(work, "story_bible", None) or {})
+    bible_ctx = bible_as_context(story_bible if story_bible.get("world_premise") else None)
+    # 共享公约须来自已锁定圣经；空 conventions 不回退到旧 attempt 的堆叠草稿。
+    work_conventions = bible_ctx.get("work_conventions") or {}
+    if not (isinstance(work_conventions, dict) and work_conventions.get("conventions")):
+        work_conventions = {}
+    commons_rails, principle_lenses = assemble_context_rails(
+        direction_kw,
+        work_conventions=work_conventions or None,
+    )
+    if not principle_lenses:
+        principle_lenses = lenses_payload(resolve_lenses(direction_kw))
+    bible_payload = bible_ctx.get("world_bible") or story_bible or None
     run.generation_context = {
         # 执行器身份先落位：ASSEMBLE 每次重建上下文，重建丢了它就等于
         # 「这一章跑的哪个臂」不可举证。
         **executor_app.carry_over(old_context),
         **{
             key: old_context[key]
-            for key in ("correction", "replay_reason", "corrections")
+            for key in ("correction", "replay_reason", "corrections", "dual_dossiers")
             if key in old_context
         },
         "architecture_version": architecture_version,
@@ -795,8 +898,25 @@ async def assemble(
         "raw_intent": goal.raw_intent,
         "normalized_goal": goal.normalized_goal,
         "assumptions": goal.assumptions or [],
+        "direction_keywords": direction_kw,
+        "direction": format_direction_line(direction_kw),
+        "locked_direction": locked_direction,
+        "clarify_rails": clarify_rails,
+        "commons_rails": commons_rails,
+        "principle_lenses": principle_lenses,
+        "world_bible": bible_payload,
+        "work_conventions": work_conventions or {},
+        "dramatic_engine": bible_ctx.get("dramatic_engine") or {},
+        "reader_contract": bible_ctx.get("reader_contract") or {},
+        "prose_style": bible_ctx.get("prose_style") or {},
+        "story_bible_block": bible_director_block(
+            bible_payload if isinstance(bible_payload, dict) else None
+        ),
         "genre": work.genre,
         "chapter_no": run.chapter_no,
+        "story_ledger": story_ledger_payload,
+        "story_ledger_block": story_ledger_block,
+        "open_hooks": open_hooks,
         "volume": {
             "volume_no": int(current_vol.volume_no) if current_vol else 1,
             "title": current_vol.title if current_vol else "",
@@ -820,7 +940,8 @@ async def assemble(
         } if next_node else {},
         "chapter_assignment": (
             {"objective": "由导演按人物、因果与阅读体验决定本章职责"}
-            if architecture_version == "director_v2" else _chapter_assignment(run.chapter_no)
+            if architecture_version in DIRECTED_ARCHITECTURES
+            else _chapter_assignment(run.chapter_no)
         ),
         "actual_state": recent_chapters[0].get("actual_state", {}) if recent_chapters else {},
         "recent_chapters": recent_chapters,
@@ -861,369 +982,134 @@ def _memory_view(
     return memory_domain.project_payloads(payloads, audience, persona)
 
 
+def _story_ledger_for_chapter(
+    *,
+    old_context: dict[str, Any],
+    previous_rows: Sequence[Any],
+    chapter_no: int,
+) -> tuple[dict[str, Any], str, list[str]]:
+    """继承跨章创作账本：优先本 run，其次上一已正典章。"""
+    from regent.novel.domain.story_ledger import StoryLedger
+
+    raw = old_context.get("story_ledger")
+    if not isinstance(raw, dict):
+        raw = None
+        for row in previous_rows:
+            if int(getattr(row, "chapter_no", 0) or 0) >= chapter_no:
+                continue
+            ctx = getattr(row, "generation_context", None) or {}
+            candidate = ctx.get("story_ledger")
+            if isinstance(candidate, dict):
+                raw = candidate
+                break
+    ledger = StoryLedger.from_dict(raw)
+    ledger.ensure_segment(chapter_no)
+    return (
+        ledger.to_dict(),
+        ledger.prompt_block(chapter_no=chapter_no),
+        list(ledger.open_hooks),
+    )
+
+
+def commit_story_ledger(
+    run: ChapterRunModel,
+    *,
+    facts: Sequence[Any],
+    hooks_opened: Sequence[str] | None = None,
+    hooks_closed: Sequence[str] | None = None,
+    character_shifts: Sequence[str] | None = None,
+    protagonist: str = "",
+) -> None:
+    """整章验收通过后更新并回写 story_ledger（草稿不得调用）。"""
+    from regent.novel.domain.story_ledger import StoryLedger
+
+    fact_texts: list[str] = []
+    for fact in facts:
+        if isinstance(fact, dict):
+            fact_texts.append(str(fact.get("statement") or "").strip())
+        else:
+            statement = getattr(fact, "statement", None)
+            fact_texts.append(str(statement if statement is not None else fact).strip())
+    fact_texts = [t for t in fact_texts if t]
+    ledger = StoryLedger.from_dict(
+        (run.generation_context or {}).get("story_ledger")
+        if isinstance((run.generation_context or {}).get("story_ledger"), dict)
+        else None
+    )
+    try:
+        ledger.ingest_chapter_outcome(
+            chapter_no=int(run.chapter_no),
+            facts=fact_texts,
+            hooks_opened=list(hooks_opened or []),
+            hooks_closed=list(hooks_closed or []),
+            character_shifts=list(character_shifts or []),
+            protagonist=protagonist,
+        )
+    except ValueError as exc:
+        from regent.novel.domain.errors import ProductionStopped
+
+        raise ProductionStopped(f"story_ledger 拒绝提交：{exc}") from exc
+    run.generation_context = {
+        **(run.generation_context or {}),
+        "story_ledger": ledger.to_dict(),
+        "story_ledger_block": ledger.prompt_block(chapter_no=int(run.chapter_no)),
+        "open_hooks": list(ledger.open_hooks),
+    }
+
+
 async def perform(
     session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel
 ) -> None:
-    personas = list((await session.scalars(
-        select(PersonaSpecModel).where(PersonaSpecModel.work_id == work.id)
-    )).all())
-    canon = list(run.generation_context.get("canon", []))
-    scene_id = f"chapter-{run.chapter_no}"
-    recalled_payloads = list(run.generation_context.get("memory", []))
+    """legacy_v1 已退役。"""
+    del session, provider, work, run
+    from regent.novel.domain.errors import ProductionStopped
 
-    async def one(persona: PersonaSpecModel) -> dict[str, Any]:
-        grants = [
-            fact for fact in canon
-            if not fact.get("known_by")
-            or persona.name in fact.get("known_by", [])
-            or "ALL" in fact.get("known_by", [])
-        ]
-        excluded = [str(fact.get("statement", "")) for fact in canon if fact not in grants]
-        context_hash = hashlib.sha256(
-            json.dumps(grants, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        existing = await session.scalar(select(InformationSetModel).where(
-            InformationSetModel.persona_id == persona.id,
-            InformationSetModel.scene_id == scene_id,
-            InformationSetModel.context_hash == context_hash,
-        ))
-        if existing is None:
-            session.add(InformationSetModel(
-                id=uuid.uuid4(), work_id=work.id, persona_id=persona.id,
-                scene_id=scene_id, grants=grants, exclusions=excluded,
-                context_hash=context_hash,
-            ))
-        sys_prompt = (
-            "你正在独立扮演一个小说人物。只能依据角色设定、已知事实和本章任务行动；"
-            "不得猜测未提供的秘密。给出有个人动机和独特声纹的具体行动，不写完整章节。"
-        )
-        recent = run.generation_context.get("recent_chapters", [])
-        usr_prompt = json.dumps({
-            "persona": persona.name, "identity": persona.identity,
-            "drives": persona.drives, "voice": persona.voice,
-            "known_facts": grants,
-            # 长期记忆按「这个人物」投影：跨章记住的是他自己知道/误信/承诺过的
-            # 事，读者认知与导演笔记不进人物上下文（C-03）。
-            "character_memory": _memory_view(recalled_payloads, "character", persona.name),
-            "chapter_assignment": run.generation_context.get("chapter_assignment", {}),
-            "target_node": run.generation_context.get("target_node", {}),
-            "previous_ending": recent[0].get("ending", "") if recent else "",
-        }, ensure_ascii=False)
-        response = await provider.generate_structured(
-            system_prompt=sys_prompt, user_prompt=usr_prompt, response_model=Performance,
-        )
-        await _record_call(
-            session, work=work, run=run, step="PERFORM", purpose=f"persona:{persona.name}",
-            response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
-        )
-        return response.output.model_dump(mode="json")
-
-    run.performances = list(await asyncio.gather(*(one(persona) for persona in personas)))
+    raise ProductionStopped(
+        "legacy_v1 执行链已退役；历史章节只读，请以 director_v2 重新开跑"
+    )
 
 
-async def direct(session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel) -> None:
-    genre = work.genre or ""
-    ctx = run.generation_context
-    target = ctx.get("target_node", {})
-    prev_n = ctx.get("prev_node", {})
-    next_n = ctx.get("next_node", {})
-    # 构建节点因果链提示
-    chain_hint = ""
-    if target.get("promise"):
-        chain_hint += f"\n本章承诺给读者的体验：{target['promise']}"
-    if prev_n.get("consequences"):
-        chain_hint += f"\n上一章的后果（必须承接）：{prev_n['consequences']}"
-    if next_n.get("preconditions"):
-        chain_hint += f"\n下一章的前置条件（必须埋下伏笔）：{next_n['preconditions']}"
-    if "玄幻" in genre:
-        rhythm_hint = (
-            "本章的爽点不能是单一套路：可以是实力碾压、谜团揭示、反套路反转、多方博弈的意外交汇。"
-            "禁止纯过渡、纯描写、纯心理活动——每章都要有冲突升级或主角获胜/顿悟的瞬间。"
-            "结尾必须留下悬念或下一个冲突的钩子。"
-        )
-    else:
-        rhythm_hint = (
-            "本章必须包含至少一个情节转折点或冲突升级。结尾留下悬念。"
-        )
-    sys_prompt = (
-        "你是小说导演。将多个角色相互隔离后产生的外显表演编排为因果清晰的场景计划。\n"
-        "要求：\n"
-        "- 角色只能基于自己已知的事实行动，不能知道其他角色的秘密\n"
-        "- 每个角色的行动必须具体到可执行的动作，不是抽象描述\n"
-        "- 关键台词要符合角色说话风格，简洁有力\n"
-        "- 场景计划必须有明确的冲突升级和因果链\n"
-        "- 严格完成 chapter_assignment 指定的章节职责和状态变化\n"
-        "- state_before 必须继承上一章 state_after；state_after 至少改变位置、关系、资源、伤势、知识或目标中的两项\n"
-        "- 必须从 recent_chapters 最后一章结尾继续，禁止复写已经发生的冲突、动作和钩子\n"
-        f"{rhythm_hint}\n"
-        "不写正文，只输出结构化计划。"
+async def direct(
+    session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel
+) -> None:
+    """legacy_v1 已退役。"""
+    del session, provider, work, run
+    from regent.novel.domain.errors import ProductionStopped
+
+    raise ProductionStopped(
+        "legacy_v1 执行链已退役；历史章节只读，请以 director_v2 重新开跑"
     )
-    usr_prompt = json.dumps(
-        {
-            "story_intent": ctx.get("raw_intent", ""),
-            "story_goal": ctx.get("normalized_goal", ""),
-            "genre": genre,
-            "target_node": target,
-            "performances": _visible_performances(run),
-            "prev_consequences": prev_n.get("consequences", []),
-            "next_preconditions": next_n.get("preconditions", []),
-            "chapter_assignment": ctx.get("chapter_assignment", {}),
-            "recent_chapters": ctx.get("recent_chapters", []),
-            # 导演看全部六类视图（含自己的待办笔记）；未兑现承诺是它排场景的硬约束。
-            "director_memory": _memory_view(ctx.get("memory", []), "director"),
-        },
-        ensure_ascii=False,
-    )
-    response = await provider.generate_structured(
-        system_prompt=sys_prompt,
-        user_prompt=usr_prompt,
-        response_model=DirectorPlan,
-    )
-    await _record_call(
-        session, work=work, run=run, step="DIRECT", purpose="scene_plan",
-        response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
-    )
-    context = dict(run.generation_context)
-    director_plan = response.output.model_dump(mode="json")
-    # 后处理：强制 state_before 继承上一章 state_after（如果有的话）
-    recent = ctx.get("recent_chapters", [])
-    if recent:
-        prev_chapter = recent[0]  # recent_chapters[0] 是最近的一章
-        prev_dp = prev_chapter.get("director_plan", {})
-        prev_state_after = prev_dp.get("state_after", {})
-        if prev_state_after:
-            # 强制覆盖 state_before，确保跨章状态继承准确
-            director_plan["state_before"] = prev_state_after
-    context["director_plan"] = director_plan
-    run.generation_context = context
 
 
-async def weave(session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel) -> None:
-    genre = work.genre or ""
-    if "玄幻" in genre:
-        style_hint = (
-            "网文风格：节奏明快，冲突密集，爽点多样。"
-            "爽点不能只是打脸——可以是实力碾压、谜团揭示、反套路反转、多方博弈的意外交汇。"
-            "使用四字短语和短句增强气势；修炼突破场景要写出震撼感；"
-            "悬疑揭示场景要写出“原来如此”的顿悟时刻；"
-            "对话简洁有力，符合古代语境；避免现代口语。"
-            "禁止大段纯景物描写或纯心理独白——一切描写必须服务于冲突推进。"
-        )
-    else:
-        style_hint = "用动作、对话和具体感官推动情节。每章至少一个冲突升级或转折。"
-    # 人在回路：注入检查点 1 的场景计划反馈
-    guidance = run.user_guidance or {}
-    plan_feedback = guidance.get("after_direct", "")
-    feedback_hint = ""
-    if plan_feedback:
-        feedback_hint = f"\n用户反馈（必须体现在正文中）：{plan_feedback}"
-    revision_instructions = list(
-        run.generation_context.get("revision_instructions", []) or []
+async def weave(
+    session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel
+) -> None:
+    """legacy_v1 已退役。"""
+    del session, provider, work, run
+    from regent.novel.domain.errors import ProductionStopped
+
+    raise ProductionStopped(
+        "legacy_v1 执行链已退役；历史章节只读，请以 director_v2 重新开跑"
     )
-    revision_hint = ""
-    if revision_instructions:
-        revision_hint = (
-            "\n这是质量复审后的重写。必须逐项修复："
-            + "；".join(str(item) for item in revision_instructions)
-        )
-    # 从导演计划中获取状态变化作为硬约束
-    dp = run.generation_context.get("director_plan", {})
-    state_before = dp.get("state_before", {}) if isinstance(dp, dict) else {}
-    state_after = dp.get("state_after", {}) if isinstance(dp, dict) else {}
-    ending_hook = dp.get("ending_hook", "") if isinstance(dp, dict) else ""
-    required_changes = [
-        key for key in set(state_before) | set(state_after)
-        if state_before.get(key) != state_after.get(key)
-    ]
-    state_hint = ""
-    if state_before or state_after:
-        # 列出完整的 state_before 和 state_after，让模型清楚知道开头和结尾的具体状态
-        state_hint = "\n【硬约束】本章的开头和结尾必须严格符合以下状态：\n"
-        if state_before:
-            state_hint += "【开头状态 state_before】：\n"
-            for key, value in state_before.items():
-                state_hint += f"  - {key}：{value}\n"
-        if state_after:
-            state_hint += "【结尾状态 state_after】：\n"
-            for key, value in state_after.items():
-                state_hint += f"  - {key}：{value}\n"
-        if required_changes:
-            state_hint += "【必须实现的状态变化】：\n"
-            for key in required_changes:
-                state_hint += f"  - {key}：{state_before.get(key, '未知')} → {state_after.get(key, '未知')}\n"
-        if ending_hook:
-            state_hint += f"【本章结尾必须】：{ending_hook}\n"
-        state_hint += (
-            "严禁正文中出现与上述状态相矛盾的时间、位置、人物关系、物件状态描述。"
-            "开头第一段必须体现 state_before 的位置和时间，结尾最后一段必须体现 state_after 的位置和时间。"
-        )
-    sys_prompt = (
-        "你是中文类型小说写作者。依据导演计划和角色表演写一章可直接阅读的正文。"
-        f"目标 1800–2500 个中文字符；{style_hint}{feedback_hint}{revision_hint}{state_hint}"
-        "避免总结式大纲、元叙事和设定堆砌；结尾必须兑现本章推进并留下自然悬念。"
-        "承接最近章节的准确结束状态，但严禁复用其事件、动作序列、威胁台词和结尾钩子。"
-    )
-    # 从导演计划中获取角色行动（替代旧的 performances）
-    char_actions = dp.get("character_actions", []) if isinstance(dp, dict) else []
-    usr_prompt = json.dumps(
-        {"director_plan": dp, "character_actions": char_actions,
-         "performances": _visible_performances(run),
-         "revision_instructions": revision_instructions,
-         # 正文只拿叙述者视图：读者认知可以出现，导演笔记永不进正文（C-03）。
-         "narrator_memory": _memory_view(
-             run.generation_context.get("memory", []), "narrator"
-         ),
-         "context": run.generation_context},
-        ensure_ascii=False,
-    )
-    response = await provider.generate_structured(
-        system_prompt=sys_prompt,
-        user_prompt=usr_prompt,
-        response_model=ChapterDraft,
-        temperature=0.85,
-    )
-    await _record_call(
-        session, work=work, run=run, step="WEAVE", purpose="prose",
-        response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
-    )
-    run.title = response.output.title
-    run.content = response.output.content.strip()
-    run.word_count = len(run.content)
-    if revision_instructions:
-        context = dict(run.generation_context)
-        context.pop("revision_instructions", None)
-        run.generation_context = context
 
 
-async def review(session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel) -> None:
-    is_first_chapter = run.chapter_no <= 1
-    sys_prompt = (
-        "你是严格的小说编辑。对照 Canon、导演计划的 state_before/state_after、近期章节检查本章。\n"
-        "【严重程度区分】：\n"
-        "- continuity_issues：仅记录真正的事实矛盾（时间线、位置、人物关系、物件状态与上一章/director_plan 直接矛盾）。过渡略仓促、场景未充分铺垫不算 continuity_issues。\n"
-        "- leakage_issues：仅记录角色知道了他不应知道的信息。\n"
-        "- prose_issues：节奏/文风/描写层面的小问题（包括“告知而非展示”、“内心独白过长”、“意象重复”等）。\n"
-        "【passed 规则】：仅当 continuity_issues 或 leakage_issues 非空、或存在跨章复写、或未实现 required_state_change 时 passed=false。"
-        "只有 prose_issues 时 passed=true（小问题交给改稿处理）。"
+async def review(
+    session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel
+) -> None:
+    """legacy_v1 已退役。"""
+    del session, provider, work, run
+    from regent.novel.domain.errors import ProductionStopped
+
+    raise ProductionStopped(
+        "legacy_v1 执行链已退役；历史章节只读，请以 director_v2 重新开跑"
     )
-    if is_first_chapter:
-        sys_prompt += (
-            "\n注意：这是第一章，没有前一章需要承接。不要因'未承接上一章结尾'而扣分。"
-            "重点关注：信息泄露（角色不应知道的信息）、因果推进、正文与 director_plan 的 state_after 一致性。"
-        )
-    else:
-        sys_prompt += (
-            "\n本章开头必须继承上一章的 state_after（时间、位置、人物关系）。"
-            "若本章开头与上一章 state_after 存在事实矛盾（非小过渡问题），必须在 continuity_issues 中列出。"
-        )
-    # 人在回路：注入检查点 2 的初稿反馈
-    guidance = run.user_guidance or {}
-    draft_feedback = guidance.get("after_weave", "")
-    dp = run.generation_context.get("director_plan", {})
-    usr_prompt_data: dict[str, Any] = {
-        "context": run.generation_context,
-        "director_plan": dp,
-        "character_actions": dp.get("character_actions", []) if isinstance(dp, dict) else [],
-        "draft": {"title": run.title, "content": run.content},
-    }
-    if draft_feedback:
-        usr_prompt_data["user_feedback"] = draft_feedback
-    usr_prompt = json.dumps(usr_prompt_data, ensure_ascii=False)
-    response = await provider.generate_structured(
-        system_prompt=sys_prompt,
-        user_prompt=usr_prompt,
-        response_model=ChapterReview,
-    )
-    await _record_call(
-        session, work=work, run=run, step="REVIEW", purpose="edit_check",
-        response=response, system_prompt=sys_prompt, user_prompt=usr_prompt,
-    )
-    result = response.output
-    if result.continuity_issues or result.leakage_issues:
-        result = result.model_copy(update={"passed": False})
-    revision_attempted = False
-    prose_hard_issues = _hard_quality_issues(
-        run.content, list(run.generation_context.get("recent_chapters", [])),
-    )
-    structural_issues = _structural_quality_issues(run)
-    hard_issues = prose_hard_issues + structural_issues
-    if hard_issues:
-        result = result.model_copy(update={
-            "passed": False,
-            "prose_issues": list(result.prose_issues) + hard_issues,
-            "revision_instructions": list(result.revision_instructions) + [
-                "删除与近期章节重复的事件和表达，确保本章产生新的状态变化"
-            ],
-        })
-    # 一次证据驱动修订；修订后必须重新经过模型和确定性硬规则复审。
-    if not result.passed:
-        revision_attempted = True
-        rev_sys = (
-            "你是中文类型小说改稿编辑。严格执行问题清单，重写为完整可读章节；"
-            "保留正确情节，修复连续性、信息泄露、节奏和文风问题。"
-        )
-        rev_usr = json.dumps(
-            {"draft": run.content, "issues": result.model_dump(mode="json"),
-             "context": run.generation_context}, ensure_ascii=False,
-        )
-        revised = await provider.generate_structured(
-            system_prompt=rev_sys,
-            user_prompt=rev_usr,
-            response_model=ChapterDraft,
-        )
-        await _record_call(
-            session, work=work, run=run, step="REVIEW", purpose="revision",
-            response=revised, system_prompt=rev_sys, user_prompt=rev_usr,
-        )
-        run.title = revised.output.title
-        run.content = revised.output.content.strip()
-        run.word_count = len(run.content)
-        recheck_usr = json.dumps({
-            **usr_prompt_data,
-            "draft": {"title": run.title, "content": run.content},
-            "previous_review": result.model_dump(mode="json"),
-            "review_stage": "revision_recheck",
-        }, ensure_ascii=False)
-        rechecked = await provider.generate_structured(
-            system_prompt=sys_prompt, user_prompt=recheck_usr, response_model=ChapterReview,
-        )
-        await _record_call(
-            session, work=work, run=run, step="REVIEW", purpose="revision_recheck",
-            response=rechecked, system_prompt=sys_prompt, user_prompt=recheck_usr,
-        )
-        result = rechecked.output
-        if result.continuity_issues or result.leakage_issues:
-            result = result.model_copy(update={"passed": False})
-        prose_hard_issues = _hard_quality_issues(
-            run.content, list(run.generation_context.get("recent_chapters", [])),
-        )
-        structural_issues = _structural_quality_issues(run)
-        hard_issues = prose_hard_issues + structural_issues
-        if hard_issues:
-            result = result.model_copy(update={
-                "passed": False, "prose_issues": list(result.prose_issues) + hard_issues,
-            })
-    run.review = {
-        **result.model_dump(mode="json"),
-        "revised": revision_attempted,
-    }
-    if not result.passed:
-        failure_classes: list[str] = []
-        if result.leakage_issues:
-            failure_classes.append("PERFORMANCE")
-        if structural_issues or result.continuity_issues:
-            failure_classes.append("STRUCTURE")
-        if prose_hard_issues or result.prose_issues:
-            failure_classes.append("PROSE")
-        run.review["failure_classes"] = failure_classes
-        raise RuntimeError("QUALITY_GATE_FAILED")
 
 
 async def canon(
     session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel
 ) -> None:
     source_hash = hashlib.sha256(run.content.encode("utf-8")).hexdigest()
-    from regent.novel.application.direction import is_directed
+    from regent.novel.application.directing_protocol import is_directed
 
     if is_directed(run):
         if not run.review.get("passed") or run.generation_context.get("validated_content_hash") != source_hash:
@@ -1269,7 +1155,7 @@ async def canon(
         chapter_no=int(run.chapter_no),
     )
     if is_directed(run) and parent != run.generation_context.get("parent_canon_version", 0):
-        from regent.novel.application.direction import ProductionStopped
+        from regent.novel.domain.errors import ProductionStopped
 
         raise ProductionStopped("父事实版本已变化，不能提交过期场景")
     session.add(
@@ -1308,12 +1194,10 @@ async def execute_step(
     session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel,
     run: ChapterRunModel, step: ChapterStep,
 ) -> bool:
-    from regent.novel.application.direction import (
-        is_directed,
-        plan_chapter,
-        produce_tick,
-        validate_chapter,
-    )
+    from regent.novel.application.chapter_review import validate_chapter
+    from regent.novel.application.directing_planning import plan_chapter
+    from regent.novel.application.directing_protocol import is_directed
+    from regent.novel.application.directing_scene_loop import produce_tick
 
     if is_directed(run) and step != ChapterStep.ASSEMBLE:
         if step == ChapterStep.DIRECT:
@@ -1329,14 +1213,10 @@ async def execute_step(
         return True
     if step == ChapterStep.ASSEMBLE:
         await assemble(session, work=work, run=run)
-    elif step == ChapterStep.PERFORM:
-        await perform(session, provider=provider, work=work, run=run)
-    elif step == ChapterStep.DIRECT:
-        await direct(session, provider=provider, work=work, run=run)
-    elif step == ChapterStep.WEAVE:
-        await weave(session, provider=provider, work=work, run=run)
-    elif step == ChapterStep.REVIEW:
-        await review(session, provider=provider, work=work, run=run)
-    elif step == ChapterStep.CANON:
-        await canon(session, provider=provider, work=work, run=run)
-    return True
+        return True
+    # legacy_v1 执行链已退役：历史作品只读；不得再推进 PERFORM/DIRECT/WEAVE。
+    from regent.novel.domain.errors import ProductionStopped
+
+    raise ProductionStopped(
+        "legacy_v1 执行链已退役；历史章节只读，请以 director_v2 重新开跑"
+    )

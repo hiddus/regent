@@ -200,7 +200,9 @@ def _run() -> SimpleNamespace:
 
 def _plan(monkeypatch, outputs, names=CAST_NAMES):
     log = _CallLog(outputs)
-    monkeypatch.setattr(d, "_call", log)
+    from regent.novel.application import directing_planning
+
+    monkeypatch.setattr(directing_planning, "_call", log)
     run = _run()
     session = _Session(names)
     asyncio.run(

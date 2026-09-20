@@ -132,7 +132,9 @@ async def test_input_version_bump_is_recorded(novel_db, monkeypatch):
     async def append_event(session, **kwargs):
         recorded.append(kwargs)
 
-    monkeypatch.setattr(works, "append_event", append_event)
+    from regent.novel.application import works_input
+
+    monkeypatch.setattr(works_input, "append_event", append_event)
     owner = uuid.uuid4()
     async with novel_db() as session:
         session.add(NovelPrincipalModel(id=owner, subject="version-test"))

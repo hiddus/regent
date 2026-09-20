@@ -11,8 +11,8 @@
     python -m regent.novel.eval_cli decide --eval-id pilot-1
 
 ``--config-file`` 是 EvalConfig 的 JSON 载荷（arms 用执行器名，如
-``["director_v2", "legacy_v1"]``）。评分与标准确认为人工步骤，本工具只负责
-把样本、评分、证据、结论在真实数据上贯通并落库。
+``["director_v2", "director_v2_beat"]``）。``legacy_v1`` 已退役。
+评分与标准确认为人工步骤，本工具只负责把样本、评分、证据、结论在真实数据上贯通并落库。
 """
 
 from __future__ import annotations

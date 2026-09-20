@@ -245,6 +245,17 @@ class CallBroker:
         sampling = {"model": model_hint, "temperature": temperature}
         config_hash = config_fingerprint(model=model_hint, sampling=sampling)
 
+        # 提交必须发生在预留**之前**（2026-09-10 缺陷 5）。
+        #
+        # 预留会对作品行 ``FOR UPDATE``，而会计会话是**另一条连接**：业务会话
+        # 此刻事务还开着（步骤已标 RUNNING、事件已写入、租约已领），会计会话
+        # 就会一直等业务会话提交；而业务会话又要等预留返回才走到提交——两条
+        # 连接互等，章卡在 DIRECT 直到锁超时。把 commit_before_call 放在 HTTP
+        # 调用前是不够的：死锁发生在调用**之前**的预留阶段。
+        if commit_before_call and _in_transaction(session):
+            # 事务外调用：行锁不再跨越 HTTP 往返，租约保证无人并行推进。
+            await session.commit()
+
         async with self._tx(session) as acc:
             ticket = await self._prepare(
                 acc,
@@ -264,10 +275,6 @@ class CallBroker:
             )
             if ticket is None:
                 return await self._reuse(acc, logical_call_id, schema)
-
-        if commit_before_call and _in_transaction(session):
-            # 事务外调用：行锁不再跨越 HTTP 往返，租约保证无人并行推进。
-            await session.commit()
 
         try:
             response = await provider.generate_structured(
@@ -316,6 +323,19 @@ class CallBroker:
     ) -> _Ticket | None:
         existing = await _latest_call(session, logical_call_id)
         if existing is not None:
+            # UNKNOWN 必须先对账：若先比 hash，步骤重试带着略变的 repair 入参会
+            # 误报 CallConflict，把本可自愈的章直接烧死。
+            if existing.status == CALL_STATUS_UNKNOWN:
+                # 无外部 request_id 时无法对账（流挂死/进程被杀常见）：落 FAILED 允许同键重试，
+                # 避免章永远卡在 CALL_UNKNOWN。
+                if not str(existing.provider_request_id or "").strip():
+                    existing.status = CALL_STATUS_FAILED
+                    existing.error_code = existing.error_code or "UNKNOWN_UNRECONCILABLE"
+                    existing.lease_owner = None
+                    existing.lease_expires_at = None
+                    await session.flush()
+                else:
+                    raise CallUnknown(f"unreconciled call: {logical_call_id}")
             if existing.prompt_hash != prompt_hash or existing.context_hash != context_hash:
                 raise CallConflict(
                     "same logical call id with different inputs; refusing to merge (§5)"
@@ -331,8 +351,6 @@ class CallBroker:
                 and existing.output_json is not None
             ):
                 return None  # 复用
-            if existing.status == CALL_STATUS_UNKNOWN:
-                raise CallUnknown(f"unreconciled call: {logical_call_id}")
             if existing.status == CALL_STATUS_RESERVED:
                 if _lease_live(existing):
                     if existing.lease_owner == self.lease_owner:
@@ -340,7 +358,9 @@ class CallBroker:
                         raise CallUnknown(f"interrupted call: {logical_call_id}")
                     raise CallInFlight(f"call already leased: {logical_call_id}")
                 await _reap(session, existing)
-                raise CallUnknown(f"expired lease, call unknown: {logical_call_id}")
+                if existing.status == CALL_STATUS_UNKNOWN:
+                    raise CallUnknown(f"expired lease, call unknown: {logical_call_id}")
+                # 不可对账已 FAILED：下面开新 attempt
 
         attempt = 1 if existing is None else int(existing.attempt) + 1
         reserved = estimate_minor(
@@ -590,6 +610,10 @@ class CallBroker:
         prepared: list[tuple[str, _Ticket | None, BatchCall]] = []
         saved_limit = self.budget_limit_minor
         remaining = saved_limit
+        # 与 run() 同理：预留会锁作品行，业务事务必须先落地，否则会计会话
+        #（另一条连接）会等业务会话提交，而业务会话在等预留返回（缺陷 5）。
+        if commit_before_call and _in_transaction(session):
+            await session.commit()
         try:
             for spec in calls:
                 logical_call_id = logical_call_key(
@@ -786,6 +810,46 @@ def _in_transaction(session: Any) -> bool:
         return True
 
 
+class TransactionFreeProvider:
+    """包装 ModelProvider：发起网络调用前先结束业务事务。
+
+    ``CallBroker.run`` 有 ``commit_before_call``，但它只保护**走 broker** 的
+    调用；直接 ``provider.generate_structured(...)`` 的路径（``generation`` 里
+    的世界观与大纲生成就有多处）不受保护——业务事务会在整个 HTTP 往返期间
+    开着，会话停在「事务中空闲」并持有 xid，于是其他 worker 的 ``FOR UPDATE``
+    排队等这个 xid。``skip_locked`` 绕不过这种等待（它不是行锁竞争，是等一个
+    事务结束），而库里 ``idle_in_transaction_session_timeout = 0`` 时泄漏可以
+    永久存活，症状**完全静默**：没有报错、没有日志、健康检查照常 200，
+    整条流水线停在原地（2026-09-10 缺陷 4，实测泄漏 15 分钟且自己等自己）。
+
+    包装器把「事务外调用」变成所有调用路径的默认行为，而不是要求每个调用点
+    都记得传参数——漏一个就整条线停摆的约束，不能靠自觉维持。
+
+    会话 ``expire_on_commit=False``：提交后已加载的 ORM 对象保留内存值，
+    后续写回会另起事务，不需要重新查询。
+    """
+
+    def __init__(self, inner: Any, session: AsyncSession) -> None:
+        self._inner = inner
+        self._session = session
+
+    def __getattr__(self, name: str) -> Any:
+        # 未显式覆盖的属性（model_name 等）原样透传给被包装的 provider。
+        return getattr(self._inner, name)
+
+    async def _detach(self) -> None:
+        if _in_transaction(self._session):
+            await self._session.commit()
+
+    async def generate_structured(self, **kwargs: Any) -> Any:
+        await self._detach()
+        return await self._inner.generate_structured(**kwargs)
+
+    async def chat(self, **kwargs: Any) -> Any:
+        await self._detach()
+        return await self._inner.chat(**kwargs)
+
+
 def _lease_live(call: ModelCallModel) -> bool:
     expires = call.lease_expires_at
     if expires is None:
@@ -825,10 +889,16 @@ async def _call_row(
 
 
 async def _reap(session: AsyncSession, call: ModelCallModel) -> None:
-    """租约过期：判定为 UNKNOWN，保留预留额等待对账，禁止盲重试（§4.4）。"""
+    """租约过期：一律转 UNKNOWN 等对账（保留预留与可审计时间）。
+
+    无 request_id 时对账查不到供应商结果，由 recover 的有界对账结算为
+    RECONCILE_EXHAUSTED → FAILED；不得在回收瞬间直接 FAILED，
+    否则跳过对账记账，重启恢复测试与账本守恒都会失真。
+    """
     call.status = CALL_STATUS_UNKNOWN
     call.error_code = "LEASE_EXPIRED"
     call.lease_expires_at = None
+    call.lease_owner = None
     call.updated_at = datetime.now(UTC)
     await session.flush()
 
@@ -836,7 +906,7 @@ async def _reap(session: AsyncSession, call: ModelCallModel) -> None:
 async def reclaim_expired_calls(
     session: AsyncSession, *, now: datetime | None = None, limit: int = 50
 ) -> list[str]:
-    """把租约过期仍停留在 RESERVED 的调用判定为 UNKNOWN。"""
+    """把租约过期仍停留在 RESERVED 的调用收口（UNKNOWN 或不可对账 FAILED）。"""
     moment = now or datetime.now(UTC)
     rows = (
         await session.scalars(
@@ -849,14 +919,11 @@ async def reclaim_expired_calls(
             .limit(limit)
         )
     ).all()
+    keys: list[str] = []
     for call in rows:
-        call.status = CALL_STATUS_UNKNOWN
-        call.error_code = "LEASE_EXPIRED"
-        call.lease_expires_at = None
-        call.updated_at = moment
-    if rows:
-        await session.flush()
-    return [str(call.logical_call_id) for call in rows]
+        await _reap(session, call)
+        keys.append(str(call.logical_call_id))
+    return keys
 
 
 async def recover_novel_calls(
@@ -1051,6 +1118,7 @@ __all__ = [
     "CallResult",
     "StaleLease",
     "CallUnknown",
+    "TransactionFreeProvider",
     "acquire_run_lease",
     "lease_is_free",
     "lease_is_valid",

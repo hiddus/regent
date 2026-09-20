@@ -1,15 +1,9 @@
-"""A-05（一）：改意按**依赖范围**失效，而不是按类别整批失效。
+"""A-05（一）：改意按保守范围失效记忆（职责删减后不再宣称最小子图）。
 
 可证伪命题：
-- 依赖图完整时，改动一个节点只失效「它 + 它的下游」；上游、无关支线、世界规则
-  必须活下来。若实现退回整批失效（旧行为），这两条会被误杀 → 用例失败。
-- 依赖图不完整时必须走保守退路，并在事件里写明走了退路。若实现假装能算出
-  最小子图 → 用例失败。
-- 「改路径改的是承诺」：只改承诺文本、标题不动也算改动。若改动判定只看
-  标题/顺序 → 用例失败。
-
-人物 MECE 提醒：这里刻意区分了「上游」「下游」「无关支线」三类，因为整批失效
-恰恰是把这三类一视同仁才错的。
+- 改路径后承诺类记忆保守失效；世界规则不因改路径误杀。
+- 失效是打标记不是删除。
+- 「改路径改的是承诺」：只改承诺文本、标题不动也算改动。
 """
 
 from __future__ import annotations
@@ -162,11 +156,11 @@ def _titles_with_change() -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_complete_graph_invalidates_only_downstream(novel_db, monkeypatch):
-    """图完整 → 只失效「被改节点 + 下游」；上游、支线、规则不受牵连。"""
-    from regent.novel.application import works
+async def test_path_change_always_invalidates_conservatively(novel_db, monkeypatch):
+    """依赖子图已退役：改路径一律保守失效同类记忆，规则不误杀。"""
+    from regent.novel.application import works, works_path
 
-    events = _capture_events(monkeypatch, works)
+    events = _capture_events(monkeypatch, works_path)
 
     async with novel_db() as s:
         work = await _work(s)
@@ -176,32 +170,22 @@ async def test_complete_graph_invalidates_only_downstream(novel_db, monkeypatch)
 
         _path_out, impact = await _update(s, work, titles=_titles_with_change())
         await s.commit()
-        plan = await memory_app.plan_replay(
-            s, work=work, changed_subjects=[TITLES[CHANGED_INDEX]]
-        )
 
     assert impact.affected_chapters, "改动必须算出受影响章节"
-    assert plan.complete, "依赖边齐备时应给出最小子图"
 
     async with novel_db() as s:
         rows = list((await s.scalars(select(MemoryItemModel))).all())
     invalidated = {r.item_key for r in rows if r.invalidated_at is not None}
     alive = {r.item_key for r in rows if r.invalidated_at is None}
 
-    # 被改节点自身 + 它的全部下游
-    expected_downstream = {
-        _promise_key(t) for t in TITLES[CHANGED_INDEX:]
-    }
-    assert invalidated == expected_downstream
-    # 上游（改它不需要推翻上游）、无关支线、世界规则全部存活
-    assert _promise_key(TITLES[0]) in alive
-    assert _promise_key(SIDE_THREAD, "支线旧宅密室另有隐情") in alive
+    # 保守：所有承诺（含支线）失效；世界规则存活
+    assert _promise_key(SIDE_THREAD, "支线旧宅密室另有隐情") in invalidated
+    assert _promise_key(TITLES[0]) in invalidated
     assert domain.item_key("rule", RULE_SUBJECT) in alive
     assert len(rows) == len(TITLES) + 2  # 失效是打标记，不是删除
 
     data = events[-1]["data"]
-    assert data["invalidated_scope"] == "dependency_subgraph"
-    assert data["invalidated_memory_items"] == len(expected_downstream)
+    assert data["invalidated_scope"] == "conservative_batch"
 
 
 @pytest.mark.asyncio
@@ -209,7 +193,9 @@ async def test_incomplete_graph_falls_back_conservatively(novel_db, monkeypatch)
     """依赖覆盖记录缺失 = 图不完整，必须保守失效同类整批，并如实记录走了退路。"""
     from regent.novel.application import works
 
-    events = _capture_events(monkeypatch, works)
+    from regent.novel.application import works_path
+
+    events = _capture_events(monkeypatch, works_path)
 
     async with novel_db() as s:
         work = await _work(s)
@@ -244,7 +230,9 @@ async def test_promise_only_edit_counts_as_path_change(novel_db, monkeypatch):
     """「改路径改的是承诺」：标题与顺序不动、只改承诺文本也必须判定为改动。"""
     from regent.novel.application import works
 
-    events = _capture_events(monkeypatch, works)
+    from regent.novel.application import works_path
+
+    events = _capture_events(monkeypatch, works_path)
 
     async with novel_db() as s:
         work = await _work(s)
@@ -265,8 +253,10 @@ async def test_promise_only_edit_counts_as_path_change(novel_db, monkeypatch):
     async with novel_db() as s:
         rows = list((await s.scalars(select(MemoryItemModel))).all())
     invalidated = {r.item_key for r in rows if r.invalidated_at is not None}
-    assert invalidated == {_promise_key(t) for t in TITLES[CHANGED_INDEX:]}
-    assert _promise_key(TITLES[0]) in {
-        r.item_key for r in rows if r.invalidated_at is None
-    }
+    alive = {r.item_key for r in rows if r.invalidated_at is None}
+    # 保守失效：全部承诺失效；规则存活
+    assert _promise_key(TITLES[CHANGED_INDEX]) in invalidated
+    assert _promise_key(TITLES[0]) in invalidated
+    assert domain.item_key("rule", RULE_SUBJECT) in alive
     assert events[-1]["data"]["changed_subjects"] == [TITLES[CHANGED_INDEX]]
+    assert events[-1]["data"]["invalidated_scope"] == "conservative_batch"

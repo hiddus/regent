@@ -229,7 +229,7 @@ async def test_restatements_do_not_reopen_a_resolved_promise(novel_db):
 
 @pytest.mark.asyncio
 async def test_isolated_node_without_coverage_record_is_not_complete(novel_db):
-    """探测三条记忆、只记一条边：不得宣称图完整（B-02）。"""
+    """探测三条记忆、只覆盖两条：不得宣称图完整（B-02）。"""
     async with novel_db() as s:
         work = await _work(s)
         await memory_app.record_chapter_memory(
@@ -246,18 +246,16 @@ async def test_isolated_node_without_coverage_record_is_not_complete(novel_db):
         rows = {r.subject: r.item_key for r in
                 (await s.scalars(select(MemoryItemModel))).all()}
         await memory_app.link_memory(
+            s, work=work,
+            upstream_key=domain.INDEPENDENT_MARKER,
+            downstream_key=rows["a"],
+            edge_kind="independent",
+        )
+        await memory_app.link_memory(
             s, work=work, upstream_key=rows["a"], downstream_key=rows["b"]
         )
         await s.commit()
-        # 建图入口为三条都登记了 independent；抹掉 c 的那条，模拟「漏记了依赖」。
-        await s.execute(
-            delete(MemoryEdgeModel).where(
-                MemoryEdgeModel.downstream_key == rows["c"],
-                MemoryEdgeModel.edge_kind == "independent",
-            )
-        )
-        await s.commit()
-        # 只剩 a→b：c 既可能独立，也可能是漏记了 b→c
+        # c 没有任何覆盖记录：独立还是漏记无从区分
         plan = await memory_app.plan_replay(s, work=work, changed_subjects=["a"])
     assert not plan.complete
     assert rows["c"] in plan.unknown
@@ -297,8 +295,8 @@ async def test_reported_fact_actually_queues_replay_of_the_right_chapters(novel_
         await s.commit()
 
     assert response.accepted
-    assert response.replay_scope in ("dependency_subgraph", "conservative_batch")
-    assert 1 in response.affected_chapters, f"第 1 章没有被排进重演：{response.affected_chapters}"
+    assert response.replay_scope == "conservative_batch"
+    assert response.affected_chapters == [1, 2, 3]
 
     async with novel_db() as s:
         runs = list(

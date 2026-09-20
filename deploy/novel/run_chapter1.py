@@ -38,6 +38,9 @@ def _api(
     url = f"http://localhost:8000/v1/novel{path}"
     if params:
         url += f"?{params}"
+    # 每次调用独立临时文件，避免并发/重启时互相覆盖 /tmp/_ch1_call.py 读到脏响应。
+    tag = secrets.token_hex(4)
+    remote_py = f"/tmp/_novel_api_{tag}.py"
     script = "\n".join(
         [
             "import urllib.request, urllib.error, json",
@@ -67,9 +70,10 @@ def _api(
             '    print(json.dumps({"status": 0, "body": {"error": str(e)[:300]}}))',
         ]
     ) + "\n"
-    r.write_text("/tmp/_ch1_call.py", script)
-    r.run("docker cp /tmp/_ch1_call.py regent-api:/tmp/_ch1_call.py", timeout=15)
-    res = r.run(f"docker exec regent-api python /tmp/_ch1_call.py", timeout=timeout + 60)
+    r.write_text(remote_py, script)
+    r.run(f"docker cp {remote_py} regent-api:{remote_py}", timeout=15)
+    res = r.run(f"docker exec regent-api python {remote_py}", timeout=timeout + 60)
+    r.run(f"rm -f {remote_py}", timeout=10)
     try:
         return json.loads(res.out.strip())
     except (json.JSONDecodeError, ValueError):
@@ -200,6 +204,52 @@ def main() -> int:
             if tag != last:
                 print(f"    {time.strftime('%H:%M:%S')} {tag}")
                 last = tag
+            if state == "PENDING_DECISION":
+                # 自动化验收：走默认项继续（G-13）。嵌套 _api 对 resolve 偶发非 JSON（HTTP -1），
+                # 改为容器内 urllib 直调（与 _r21_resolve_curl / F4 解锁同路径）。
+                decs = _api(r, "GET", f"/works/{work_id}/decisions", token=token).get("body") or []
+                for item in decs:
+                    if str(item.get("state") or "").upper() != "PENDING":
+                        continue
+                    body = {
+                        "option_id": item.get("default_option_id"),
+                        "accept_default": True,
+                        "confirm_nonce": item.get("confirm_nonce"),
+                        "client_nonce": f"auto-{secrets.token_hex(4)}",
+                    }
+                    script = (
+                        "import urllib.request, urllib.error, json\n"
+                        f"url='http://localhost:8000/v1/novel/works/{work_id}/decisions/{item['decision_id']}/resolve'\n"
+                        f"payload={json.dumps(body, ensure_ascii=False)!r}\n"
+                        f"token={token!r}\n"
+                        "req=urllib.request.Request(url, method='POST', data=payload.encode('utf-8'))\n"
+                        "req.add_header('Content-Type','application/json')\n"
+                        "req.add_header('Authorization','Bearer '+token)\n"
+                        "try:\n"
+                        "    with urllib.request.urlopen(req, timeout=120) as resp:\n"
+                        "        print(json.dumps({'status': resp.status, 'body': json.loads(resp.read().decode() or '{}')}))\n"
+                        "except urllib.error.HTTPError as e:\n"
+                        "    data=e.read().decode()\n"
+                        "    try: b=json.loads(data)\n"
+                        "    except Exception: b={'raw': data[:400]}\n"
+                        "    print(json.dumps({'status': e.code, 'body': b}))\n"
+                        "except Exception as e:\n"
+                        "    print(json.dumps({'status': 0, 'body': {'error': str(e)[:300]}}))\n"
+                    )
+                    r.write_text("/tmp/_ch1_resolve.py", script)
+                    r.run("docker cp /tmp/_ch1_resolve.py regent-api:/tmp/_ch1_resolve.py", timeout=15)
+                    raw = r.run(
+                        "docker exec regent-api python /tmp/_ch1_resolve.py", timeout=180
+                    ).out.strip()
+                    try:
+                        res = json.loads(raw)
+                    except json.JSONDecodeError:
+                        res = {"status": -1, "body": {"raw": raw[:400]}}
+                    print(
+                        f"    裁决默认项 HTTP {res.get('status')} "
+                        f"decision={item.get('decision_id')}"
+                    )
+                continue
             if state == "CANONIZED":
                 print("[OK] 第 1 章已 CANONIZED")
                 ch = _api(r, "GET", f"/works/{work_id}/chapters/1", token=token).get("body", {})

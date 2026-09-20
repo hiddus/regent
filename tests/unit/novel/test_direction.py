@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from regent.model import ModelUsage, StructuredModelResponse
 from regent.novel.application import direction as d
+from regent.novel.application import executor as executor_app
 from regent.novel.application import works
 from regent.novel.application.generation import assemble, canon, execute_step
 from regent.novel.domain.states import ChapterStep, chapter_step_order
@@ -48,15 +49,36 @@ def brief(instruction="让对方主动开口"):
 
 
 class Provider:
-    def __init__(self, outputs):
+    """罐装输出。``repair`` 可给出"自修后改对了"的输出，缺省是**坚持原判**。
+
+    自修调用（payload 带 ``repair_instructions``）不消费队列：否则它会取到下一个
+    罐装输出，拿到别的结构体，测试失败的原因就不是"被 Runtime 拒绝"而是"类型不对"。
+    """
+
+    def __init__(self, outputs, repair=None):
         self.outputs = list(outputs)
         self.requests = []
+        self.repair = repair
+        self.last = None
 
     async def generate_structured(self, *, response_model, **kwargs):
         self.requests.append({"schema": response_model, **kwargs})
-        output = self.outputs.pop(0)
+        if response_model.__name__ == "EditorAuditResult":
+            output = response_model(passed=True, issues=[])
+            return StructuredModelResponse(
+                output=output, usage=ModelUsage(10, 20), model="test"
+            )
+        prompt = str(kwargs.get("user_prompt") or "")
+        if "repair_instructions" in prompt:
+            output = self.repair if self.repair is not None else self.last
+        else:
+            output = self.outputs.pop(0)
         assert isinstance(output, response_model), (output, response_model)
-        return StructuredModelResponse(output=output, usage=ModelUsage(10, 20), model="test")
+        self.last = output
+        # 深拷贝：自修的就地收束不能污染下一次尝试（生产里每次调用都是新对象）。
+        return StructuredModelResponse(
+            output=output.model_copy(deep=True), usage=ModelUsage(10, 20), model="test"
+        )
 
 
 def resolution(statement="他把钥匙放在桌上。", changes=None):
@@ -82,12 +104,13 @@ def take_decision(action="RENDER", revised=None, evidence="他把钥匙放在桌
     )
 
 
-def prose_decision(action="ACCEPT"):
+def prose_decision(action="ACCEPT", revision_mode=None):
     return d.ProseDirection(
         action=action,
         observation="留白形成担忧",
         evidence=["他把钥匙放在桌上。"],
         instruction="缩短雨景，用动作表现犹豫",
+        revision_mode=revision_mode,
     )
 
 
@@ -102,11 +125,20 @@ def validation():
                 entities=["钥匙"],
             )
         ],
+        requirements=[
+            d.RequirementVerdict(
+                requirement_id="state:key:final",
+                status="supported",
+                quote="他把钥匙放在桌上。",
+                explanation="钥匙在桌上",
+            )
+        ],
         state_changes=[d.VerifiedStateChange(key="key", value="桌上", quote="他把钥匙放在桌上。")],
     )
 
 
 def successful_outputs():
+    """逐节拍对照臂（director_v2_beat）整章罐装输出。"""
     return [
         d.ChapterDirection(
             title="交付", reader_intent="为信任担心", ending_reason="交付已成立", scenes=[brief()]
@@ -114,6 +146,22 @@ def successful_outputs():
         d.ActorTurn(intention="信任", actions=["伸手"], private_reasoning="PRIVATE_THOUGHT"),
         resolution(),
         take_decision(),
+        d.SceneText(content=TEXT),
+        prose_decision(),
+        validation(),
+        d.ChapterValidation(
+            passed=True, node_completed=True, completion_quote="他把钥匙放在桌上。"
+        ),
+    ]
+
+
+def successful_scene_outputs():
+    """生产默认场景协议（director_v2@2）整章罐装输出。"""
+    return [
+        d.ChapterDirection(
+            title="交付", reader_intent="为信任担心", ending_reason="交付已成立", scenes=[brief()]
+        ),
+        resolution(),
         d.SceneText(content=TEXT),
         prose_decision(),
         validation(),
@@ -155,8 +203,11 @@ class Session:
 
 
 def context():
+    # 本文件大量用例覆盖逐节拍隔离 / RETAKE；默认钉对照臂。
     return {
-        "architecture_version": d.ARCHITECTURE,
+        "architecture_version": d.BEAT_ARCHITECTURE,
+        "executor": d.BEAT_ARCHITECTURE,
+        "executor_version": "director_v2@1",
         "canon": [
             {"statement": "SECRET_OTHER", "known_by": ["同伴"]},
             {"statement": "SECRET_MISSING_VISIBILITY"},
@@ -184,12 +235,16 @@ def run_object():
 
 
 async def tick_to_done(session, provider, work, run):
+    # 一个 tick 提交**一个决策**，但可能发出多次模型调用：引文或命令被拒时会
+    # 带反馈自修（上限见 MAX_JUDGE_REPAIRS / MAX_COMMAND_REPAIRS）。预算不以
+    # tick 计——call_count 按模型调用累加并受 MAX_CALLS 约束，金额另有上限。
+    max_calls_per_tick = 1 + d.MAX_JUDGE_REPAIRS + d.MAX_COMMAND_REPAIRS
     for _ in range(50):
         before = len(provider.requests)
         done = await execute_step(
             session, provider=provider, work=work, run=run, step=ChapterStep.PRODUCE
         )
-        assert len(provider.requests) - before <= 1
+        assert len(provider.requests) - before <= max_calls_per_tick
         if done:
             return
     pytest.fail("director did not converge")
@@ -234,17 +289,41 @@ async def test_retake_keeps_rejected_events_out_of_state_and_future_context():
     assert "REJECTED_SECRET" not in actors[1]["user_prompt"]
 
 
+def prose_patch(base: str, new_text: str) -> d.SceneTextPatch:
+    """把整场替换表达为覆盖全部段落的补丁（有旧稿时 RENDER 只收 SceneTextPatch）。"""
+    from regent.novel.domain.prose_patch import content_hash, split_paragraphs
+
+    paras = split_paragraphs(base)
+    return d.SceneTextPatch(
+        base_content_hash=content_hash(base),
+        purpose="test-rewrite",
+        replacements=[
+            d.ParagraphReplacement(
+                paragraph_ids=[p.paragraph_id for p in paras],
+                text=new_text,
+            )
+        ],
+    )
+
+
 async def test_director_rewrite_is_rewatched_and_revalidated():
     outputs = successful_outputs()
-    outputs[5:5] = [prose_decision("REWRITE"), d.SceneText(content=TEXT + "门外响起雨声。")]
+    # 有旧稿时 REWRITE 强制补丁路径（即使 revision_mode=full）。
+    outputs[5:5] = [
+        prose_decision("REWRITE", revision_mode="full"),
+        prose_patch(TEXT, TEXT + "门外响起雨声。"),
+    ]
     provider = Provider(outputs)
     session, run, work = Session(), run_object(), SimpleNamespace(id=uuid.uuid4())
     await d.plan_chapter(session, provider=provider, work=work, run=run)
     await tick_to_done(session, provider, work, run)
     schemas = [r["schema"] for r in provider.requests]
     assert schemas.count(d.ProseDirection) == 2
+    assert d.SceneTextPatch in schemas
     assert schemas[-1] is d.SceneValidation
-    assert len(run.generation_context["production"]["takes"][0]["prose_versions"]) == 2
+    take = run.generation_context["production"]["takes"][0]
+    assert len(take["prose_versions"]) == 2
+    assert take.get("last_patch")
 
 
 async def test_director_cannot_override_failed_independent_validation():
@@ -305,17 +384,20 @@ async def test_worker_reloads_each_checkpoint_and_commits_only_verified_facts(
     async def append_event(session, **kwargs):
         events.append(kwargs)
 
-    monkeypatch.setattr(works, "append_event", append_event)
+    from regent.novel.application import works_advance
+
+    monkeypatch.setattr(executor_app, "STABLE_EXECUTOR", d.ARCHITECTURE)
+    monkeypatch.setattr(works_advance, "append_event", append_event)
     # 与计费库同源：ModelCall / 预留 / 成本流水必须落在同一本账上。
     sessions = novel_db
     engine = sessions.kw["bind"]
     owner, work_id = uuid.uuid4(), uuid.uuid4()
-    outputs = successful_outputs()
+    outputs = successful_scene_outputs()
     if repair:
         outputs[-1:] = [
             d.ChapterValidation(passed=False, issues=["场景衔接冲突"], failed_scene_index=0),
-            prose_decision("REWRITE"),
-            d.SceneText(content=TEXT + "门外响起雨声。"),
+            prose_decision("REWRITE", revision_mode="full"),
+            prose_patch(TEXT, TEXT + "门外响起雨声。"),
             prose_decision(),
             validation(),
             d.ChapterValidation(passed=True),
@@ -419,7 +501,7 @@ async def test_worker_reloads_each_checkpoint_and_commits_only_verified_facts(
             )
             assert edition.content == expected
             following = SimpleNamespace(
-                chapter_no=2, generation_context={"architecture_version": d.ARCHITECTURE}
+                chapter_no=2, generation_context={"architecture_version": d.BEAT_ARCHITECTURE}
             )
             await assemble(session, work=await session.get(StoryWorkModel, work_id), run=following)
             assert "ORPHAN_SECRET" not in json.dumps(following.generation_context)
@@ -447,13 +529,53 @@ async def test_later_scene_receives_only_accepted_prior_observations():
 
 async def test_state_changes_without_prose_evidence_cannot_be_accepted():
     outputs = successful_outputs()[:6]
-    outputs += [validation().model_copy(update={"state_changes": []}), prose_decision()]
+    outputs += [
+        validation().model_copy(
+            update={
+                "state_changes": [],
+                "requirements": [
+                    d.RequirementVerdict(
+                        requirement_id="state:key:final",
+                        status="missing",
+                        quote="",
+                        explanation="正文未呈现钥匙在桌上",
+                    )
+                ],
+            }
+        ),
+        prose_decision(),
+    ]
     provider = Provider(outputs)
     session, run, work = Session(), run_object(), SimpleNamespace(id=uuid.uuid4())
     await d.plan_chapter(session, provider=provider, work=work, run=run)
     with pytest.raises(d.ProductionStopped, match="不能接受"):
         await tick_to_done(session, provider, work, run)
     assert run.generation_context["production"]["working_state"] == {}
+
+
+async def test_empty_validation_report_cannot_reach_accepted():
+    """入口级：有状态要求时双空核验报告不得接受场景（R21-F1）。"""
+    empty = d.SceneValidation(
+        passed=True,
+        facts=[
+            d.VerifiedFact(
+                statement="雨水",
+                quote="雨水沿窗棂流下",
+                known_by=["主角"],
+            )
+        ],
+        requirements=[],
+        state_changes=[],
+    )
+    outputs = successful_outputs()[:6] + [empty, prose_decision("ACCEPT")]
+    provider = Provider(outputs)
+    session, run, work = Session(), run_object(), SimpleNamespace(id=uuid.uuid4())
+    await d.plan_chapter(session, provider=provider, work=work, run=run)
+    with pytest.raises(d.ProductionStopped, match="不能接受"):
+        await tick_to_done(session, provider, work, run)
+    take = run.generation_context["production"]["takes"][0]
+    assert take.get("validation", {}).get("report_invalid") is True
+    assert take.get("status") != "ACCEPTED"
 
 
 async def test_continue_uses_resolved_observations_before_next_action():
@@ -512,10 +634,13 @@ async def test_first_chapter_completes_without_per_scene_review(novel_db, monkey
     async def append_event(session, **kwargs):
         events.append(kwargs)
 
-    monkeypatch.setattr(works, "append_event", append_event)
+    from regent.novel.application import works_advance
+
+    monkeypatch.setattr(executor_app, "STABLE_EXECUTOR", d.ARCHITECTURE)
+    monkeypatch.setattr(works_advance, "append_event", append_event)
 
     owner, work_id = uuid.uuid4(), uuid.uuid4()
-    provider = Provider(successful_outputs())
+    provider = Provider(successful_scene_outputs())
     async with novel_db() as session:
         session.add(NovelPrincipalModel(id=owner, subject="journey-test"))
         work = StoryWorkModel(id=work_id, owner_id=owner, state="READY", genre="悬疑")

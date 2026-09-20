@@ -145,6 +145,77 @@ def test_ellipsis_does_not_rescue_a_fabricated_quote():
     assert not d._is_grounded("他跪下了……承认了一切", STAGE_TEXT)
 
 
+def test_citation_dash_with_paraphrase_is_accepted():
+    """真机形态：「原话」——评注。评注不在正文，但引号内原话接地即可。"""
+    prose = "她就站在门口，没有急着进来，一只手还扶着门框。走廊灯闪了一下。"
+    quote = "「她就站在门口，没有急着进来，一只手还扶着门框」——苏瑶已站在门口，门外走廊与敲"
+    assert d._is_grounded(quote, prose)
+    d._quote_check([quote], prose)
+
+
+def test_citation_dash_without_grounded_span_is_rejected():
+    """破折号不是改写许可证：前半段也对不上正文时仍判死。"""
+    prose = "她就站在门口，没有急着进来，一只手还扶着门框。"
+    quote = "「他当场跪下承认了四十年前的旧案」——场面已经失控"
+    assert not d._is_grounded(quote, prose)
+    with pytest.raises(ProductionStopped):
+        d._quote_check([quote], prose)
+
+
+def test_nested_quote_span_is_accepted():
+    """嵌套引号：外层评述 + 内层台词，内层命中即可。"""
+    prose = "林晚反套：「对了瑶瑶，我昨晚是不是跟你在一起呀？我脑子好乱……」苏瑶一僵。"
+    quote = "「林晚反套「对了瑶瑶，我昨晚是不是跟你在一起呀？我脑子好乱……」」"
+    assert d._is_grounded(quote, prose)
+
+
+def test_absence_claim_is_accepted_when_content_really_missing():
+    """真机形态：审阅指出缺失时写「全文无X」，X 不在正文即可接地。"""
+    prose = "镜子里坐着一个女人。巴掌脸，皮肤白得发光。"
+    quote = "全文无掐手臂、疼痛确认非梦的动作"
+    assert d._is_grounded(quote, prose)
+    d._quote_check([quote], prose)
+
+
+def test_absence_claim_is_rejected_when_content_is_present():
+    """正文里已有所缺内容时，「全文无X」不能当证据蒙混。"""
+    prose = "我掐了一把自己的手臂。疼。真他妈疼。"
+    quote = "全文无掐手臂、疼痛确认非梦的动作"
+    assert not d._is_grounded(quote, prose)
+    with pytest.raises(ProductionStopped):
+        d._quote_check([quote], prose)
+
+
+def test_mixed_quote_and_absence_is_accepted():
+    """真机形态：跳到『原话』，全文无X——两边都要核对。"""
+    prose = "我飞快划开鱼塘列表。头像一个接一个跳出来。"
+    quote = (
+        "正文直接跳到『我飞快划开鱼塘列表』，"
+        "全文无林晚拿起原身手机发现多个不同男人未读暧"
+    )
+    assert d._is_grounded(quote, prose)
+    d._quote_check([quote], prose)
+
+
+def test_mixed_quote_and_absence_rejects_false_absence():
+    """混合证据里「全文无X」若 X 其实在正文，整条不成立。"""
+    prose = "我飞快划开鱼塘列表。林晚拿起原身手机发现多个不同男人未读暧昧消息。"
+    quote = (
+        "正文直接跳到『我飞快划开鱼塘列表』，"
+        "全文无林晚拿起原身手机发现多个不同男人未读暧"
+    )
+    assert not d._is_grounded(quote, prose)
+
+
+def test_absence_claim_with_quoted_missing_phrase():
+    """真机形态：全文无「台词」——引号只是标缺失短语，不是要命中的原话。"""
+    prose = "系统冷冷弹出一行字。我盯着屏幕，后背发凉。"
+    quote = "全文无「你也不想死第二次吧」"
+    assert d._is_grounded(quote, prose)
+    d._quote_check([quote], prose)
+    assert not d._is_grounded(quote, prose + "你也不想死第二次吧")
+
+
 def test_rule_issues_are_quotable():
     """提示词要求「有 rule_issues 必须重演」，那规则提示本身就必须是可引用的原文。"""
     take = {

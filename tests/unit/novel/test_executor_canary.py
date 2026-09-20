@@ -20,7 +20,6 @@ import uuid
 import pytest
 from regent.novel.application import executor as executor_app
 from regent.novel.application import works
-from regent.novel.application.direction import ARCHITECTURE
 from regent.novel.infrastructure.models import ChapterRunModel
 from sqlalchemy import select
 
@@ -32,12 +31,13 @@ from test_last_node_and_volume import (  # noqa: E402
 )
 
 CANARY = "director_v3"
+STABLE = executor_app.STABLE_EXECUTOR
 
 
 def _future_arm(monkeypatch, *, percent: str) -> None:
     """模拟一个未来实现的新执行器上线，并按给定比例灰度。"""
     monkeypatch.setattr(
-        executor_app, "KNOWN_EXECUTORS", frozenset({ARCHITECTURE, CANARY})
+        executor_app, "KNOWN_EXECUTORS", frozenset({STABLE, CANARY})
     )
     monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", CANARY)
     monkeypatch.setenv("NOVEL_EXECUTOR_CANARY_PERCENT", percent)
@@ -50,7 +50,7 @@ def test_bucket_is_deterministic_and_splits_traffic(monkeypatch):
     first = {wid: executor_app.choose_executor(wid) for wid in work_ids}
     again = {wid: executor_app.choose_executor(wid) for wid in reversed(work_ids)}
     assert first == again, "同一作品换次序遍历就换桶，灰度期间会来回横跳"
-    assert set(first.values()) == {ARCHITECTURE, CANARY}, "50% 灰度没有真的分流"
+    assert set(first.values()) == {STABLE, CANARY}, "50% 灰度没有真的分流"
 
 
 def test_unknown_executor_name_is_ignored(monkeypatch):
@@ -59,11 +59,13 @@ def test_unknown_executor_name_is_ignored(monkeypatch):
     monkeypatch.setenv("NOVEL_EXECUTOR_CANARY_PERCENT", "100")
     assert executor_app.canary_executor() == ""
     assert executor_app.canary_percent() == 0, "没有灰度臂时开关必须在坡底"
-    assert executor_app.choose_executor("any-work") == ARCHITECTURE
+    assert executor_app.choose_executor("any-work") == STABLE
 
 
 async def test_in_flight_chapter_keeps_its_pinned_executor(novel_db, monkeypatch):
     """在途章不换执行器也不停摆；灰度比例调整只作用于之后的章。"""
+    pinned = executor_app.SCENE_EXECUTOR
+    monkeypatch.setattr(executor_app, "STABLE_EXECUTOR", pinned)
     events: list[dict] = []
 
     async def _capture(session, **kwargs):
@@ -83,7 +85,7 @@ async def test_in_flight_chapter_keeps_its_pinned_executor(novel_db, monkeypatch
                 ChapterRunModel.work_id == work_id, ChapterRunModel.chapter_no == 1
             )
         )
-        assert (run.generation_context or {}).get("executor") == ARCHITECTURE
+        assert (run.generation_context or {}).get("executor") == pinned
 
     # 灰度拉满：新章走灰度臂，但已经在跑的第一章继续用出生时钉住的那个
     _future_arm(monkeypatch, percent="100")
@@ -96,7 +98,7 @@ async def test_in_flight_chapter_keeps_its_pinned_executor(novel_db, monkeypatch
             )
         )
     context = run.generation_context or {}
-    assert context.get("executor") == ARCHITECTURE, "在途章被中途换了执行器"
+    assert context.get("executor") == pinned, "在途章被中途换了执行器"
     scope = context.get(executor_app.DEFER_MARKER) or {}
     assert scope.get("requested") == CANARY, "没有留下「切换被推迟」的记录"
     deferred = [e for e in events if e["event_type"] == "executor.switch_deferred"]

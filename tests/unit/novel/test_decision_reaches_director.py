@@ -109,7 +109,10 @@ async def _noop_event(session, **kwargs):
     return None
 
 
-async def _boot(sessions) -> tuple[uuid.UUID, uuid.UUID]:
+async def _boot(sessions, monkeypatch) -> tuple[uuid.UUID, uuid.UUID]:
+    # 裁决请求发生在 WATCH_TAKE；钉对照臂以覆盖该路径。
+    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", d.BEAT_ARCHITECTURE)
+    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY_PERCENT", "100")
     owner, work_id = uuid.uuid4(), uuid.uuid4()
     async with sessions() as session:
         session.add(NovelPrincipalModel(id=owner, subject=f"a02:{owner}"))
@@ -177,7 +180,7 @@ async def test_director_receives_full_semantics_of_user_choice(novel_db, monkeyp
     """用户选择：下一次导演请求必须含所选后果，且不含未选分支。"""
     monkeypatch.setattr(works, "append_event", _noop_event)
     provider = _Provider([_plan(), _actor(), resolution(), _request()])
-    owner, work_id = await _boot(novel_db)
+    owner, work_id = await _boot(novel_db, monkeypatch)
 
     pending = await _tick_until_decision(novel_db, provider, owner, work_id)
     run = await _run_row(novel_db)
@@ -237,7 +240,7 @@ async def test_default_option_reaches_director_after_deadline(novel_db, monkeypa
     """到期默认：默认项的语义同样必须进入导演请求。"""
     monkeypatch.setattr(works, "append_event", _noop_event)
     provider = _Provider([_plan(), _actor(), resolution(), _request("MEDIUM")])
-    owner, work_id = await _boot(novel_db)
+    owner, work_id = await _boot(novel_db, monkeypatch)
 
     await _tick_until_decision(novel_db, provider, owner, work_id)
     run = await _run_row(novel_db)
@@ -271,7 +274,7 @@ async def test_decision_is_applied_once_under_restart(novel_db, monkeypatch):
     """重启后重复推进：裁决只被消费一次，不会二次改变后续创作。"""
     monkeypatch.setattr(works, "append_event", _noop_event)
     provider = _Provider([_plan(), _actor(), resolution(), _request()])
-    owner, work_id = await _boot(novel_db)
+    owner, work_id = await _boot(novel_db, monkeypatch)
 
     pending = await _tick_until_decision(novel_db, provider, owner, work_id)
     async with novel_db() as session:

@@ -42,6 +42,21 @@ class WorkStateOut(StrEnum):
     ARCHIVED = "ARCHIVED"
 
 
+class WorkResumeOut(BaseModel):
+    """恢复结果：状态 + 可执行 blocker，禁止只回 RUNNING 假装成功。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: WorkStateOut
+    blocker_code: str = ""
+    recoverability: str = ""
+    failed_phase: str = ""
+    chapter_no: int | None = None
+    run_state: str = ""
+    recommended_actions: list[str] = Field(default_factory=list)
+    detail: str = ""
+
+
 class PathNodeType(StrEnum):
     INCITING = "INCITING"
     REVERSAL = "REVERSAL"
@@ -197,6 +212,15 @@ class ClarifyQuestion(BaseModel):
     default_assumption: str = ""
 
 
+class DirectionKeywordsOut(BaseModel):
+    """方向标签候选池与默认勾选（用户可改选并自填）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    options: list[str] = Field(default_factory=list)
+    default_selection: list[str] = Field(default_factory=list)
+
+
 class CreateWorkRequest(BaseModel):
     """FR-01：首次提交必填仅目标文本。"""
 
@@ -204,7 +228,9 @@ class CreateWorkRequest(BaseModel):
 
     raw_intent: str = Field(min_length=1, max_length=4000)
     title: str = Field(default="", max_length=200)
-    genre: str = Field(default="", max_length=64)
+    genre: str = Field(default="", max_length=200)
+    direction_keywords: list[str] = Field(default_factory=list, max_length=24)
+    direction_custom_keywords: list[str] = Field(default_factory=list, max_length=12)
     client_nonce: str = Field(default="", max_length=128)
 
 
@@ -213,12 +239,43 @@ class OnboardingOut(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: str  # CLARIFYING | READY
+    status: str  # CLARIFYING | DIRECTIONS | WORLD_REVIEW | READY
     clarify_round: int = 0
     question_count: int = 0
     questions: list[ClarifyQuestion] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     directions: list[DirectionCard] = Field(default_factory=list)
+    world_bible: dict[str, Any] | None = None
+
+
+class ConfirmDirectionOut(BaseModel):
+    """方向确认后进入世界书审阅：路径已生成，作品仍 ONBOARDING。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: CriticalPathOut
+    onboarding: OnboardingOut
+
+
+class WorldBibleLockRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_nonce: str = ""
+
+
+class WorldBibleReviseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    notes: str = Field(min_length=1, max_length=2000)
+    client_nonce: str = ""
+
+
+class WorldBibleOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str  # draft | locked
+    world_bible: dict[str, Any]
+    locked_at: datetime | None = None
 
 
 class CreateWorkResponse(BaseModel):
@@ -239,7 +296,17 @@ class AnswerClarifyRequest(BaseModel):
 class ConfirmDirectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    card_id: str
+    card_id: str = ""
+    custom_direction: str = Field(default="", max_length=2000)
+    client_nonce: str = ""
+
+
+class ReviseDirectionsRequest(BaseModel):
+    """都不合适时：用用户意见重出方向卡，仍停在引导选择页。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feedback: str = Field(min_length=1, max_length=2000)
     client_nonce: str = ""
 
 
@@ -373,6 +440,11 @@ class RunProgressOut(BaseModel):
     scene_no: int = 0
     scene_count: int = 0
     completed_scenes: int = 0
+    # BQ-1：作品级预算暂停（章 run 可仍为 RUNNING，前端靠 work_state 展示续作入口）
+    work_state: str = ""
+    budget_pause: dict[str, Any] | None = None
+    public_stage: str | None = None
+    available_actions: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +467,29 @@ class AutoAdvanceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
+
+
+class ContinuationPolicyRequest(BaseModel):
+    """作品级连续创作授权（与章内 auto_advance 分离）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    target_chapter_no: int | None = Field(default=None, ge=1, le=500)
+    max_chapters: int | None = Field(default=None, ge=1, le=500)
+    volume_scope: Literal["current", "authorized", "unbounded"] = "current"
+    budget_grant_note: str = Field(default="", max_length=200)
+
+
+class ContinuationPolicyOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    target_chapter_no: int | None = None
+    max_chapters: int | None = None
+    volume_scope: str = "current"
+    version: int = 1
+    budget_grant_note: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +520,19 @@ class ResumeCorrectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ticket_id: str = Field(default="", max_length=64)
+
+
+class BudgetAuthorizeRequest(BaseModel):
+    """预算暂停后的显式授权续作（BQ-1）。
+
+    累加 ``production.budget_grant_*``，不清零已用调用/金额账本。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant_calls: int = Field(default=0, ge=0, le=500)
+    grant_cost_minor: int = Field(default=0, ge=0, le=500_000)
+    client_nonce: str = Field(default="", max_length=128)
 
 
 class ReportFactRequest(BaseModel):
@@ -605,12 +713,16 @@ __all__ = [
     "HUMAN_REQUIRED_NODE_TYPES",
     "AnswerClarifyRequest",
     "AutoAdvanceRequest",
+    "ContinuationPolicyOut",
+    "ContinuationPolicyRequest",
     "ChapterOut",
     "ClarifyQuestion",
     "ConfirmDirectionRequest",
+    "ReviseDirectionsRequest",
     "CreateShareRequest",
     "CreateWorkRequest",
     "CreateWorkResponse",
+    "DirectionKeywordsOut",
     "CriticalNode",
     "CriticalPathOut",
     "CriticalPathUpdate",
@@ -626,6 +738,10 @@ __all__ = [
     "ModerationCaseOut",
     "NovelEvent",
     "OnboardingOut",
+    "WorldBibleOut",
+    "WorldBibleLockRequest",
+    "WorldBibleReviseRequest",
+    "ConfirmDirectionOut",
     "PathChangeImpact",
     "PathNodeType",
     "ReportFactRequest",
@@ -636,5 +752,6 @@ __all__ = [
     "StoryGoalOut",
     "UXProjection",
     "WorkDetail",
+    "WorkResumeOut",
     "WorkStateOut",
 ]

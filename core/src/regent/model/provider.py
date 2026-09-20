@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import random
 import time
 from dataclasses import dataclass
@@ -10,11 +11,14 @@ from pydantic import BaseModel, ValidationError
 
 from regent.model.chat import ChatMessage, ChatResponse, ChatUsage, ToolCall, ToolSpec
 
+logger = logging.getLogger(__name__)
+
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 # M1-2: retryable HTTP statuses; 400/401/403 never retry.
 _RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _NO_RETRY_STATUS = frozenset({400, 401, 402, 403})
+_OK_STATUS = frozenset({200})
 
 
 class ModelConfigurationError(RuntimeError):
@@ -129,6 +133,8 @@ class OpenAICompatibleProvider:
         max_http_retries: int = 3,
         retry_deadline_seconds: float | None = None,
         thinking_mode: str = "disabled",
+        stream: bool = True,
+        stream_idle_seconds: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not base_url or not api_key or not model:
@@ -153,6 +159,18 @@ class OpenAICompatibleProvider:
         self._max_output_tokens = max_output_tokens
         self._max_http_retries = max_http_retries
         self._thinking_mode = mode
+        # Kill switch: 流式接收有问题的场合可以退回一次性读取，不需要重新发版。
+        self._stream = bool(stream)
+        # 流式空闲：SSE 帧之间超过该秒数无任何行 → 判模型卡死，而不是闷到整段 timeout。
+        # 默认取 timeout 与 90s 的较小值，且至少 15s。
+        idle = (
+            float(stream_idle_seconds)
+            if stream_idle_seconds is not None
+            else min(90.0, float(timeout_seconds))
+        )
+        if idle <= 0:
+            raise ModelConfigurationError("stream_idle_seconds must be positive")
+        self._stream_idle_seconds = idle
         # Budget must cover multiple slow 504/timeouts — not just one request.
         # Old default (== timeout) made provider retries unreachable once a
         # single gateway wait burned the whole deadline.
@@ -164,6 +182,20 @@ class OpenAICompatibleProvider:
         self._client = client
         self.last_http_attempts: list[dict[str, Any]] = []
         self.last_chat_diagnostics: dict[str, Any] = {}
+
+    def _httpx_timeout(self) -> httpx.Timeout:
+        """流式读超时按空闲预算；连接/写用短超时，避免整段 timeout 闷死。"""
+        read = (
+            float(self._stream_idle_seconds)
+            if self._stream
+            else float(self._timeout)
+        )
+        return httpx.Timeout(
+            connect=min(30.0, float(self._timeout)),
+            read=read,
+            write=min(30.0, float(self._timeout)),
+            pool=min(30.0, float(self._timeout)),
+        )
 
     async def generate_structured(
         self,
@@ -184,7 +216,7 @@ class OpenAICompatibleProvider:
             {"role": "user", "content": user_prompt},
         ]
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        client = self._client or httpx.AsyncClient(timeout=self._httpx_timeout())
         total_input = 0
         total_output = 0
         total_cached = 0
@@ -205,9 +237,22 @@ class OpenAICompatibleProvider:
                 self._apply_thinking_mode(payload)
                 # Same M1-2 HTTP retry as chat(): production artifact-backed
                 # generation uses this path; previously 504 raised immediately.
-                response = await self._post_chat_completions(client, payload)
+                if self._stream:
+                    payload["stream"] = True
+                    # 没有这一项，最后一帧不带 usage —— 那就只能按 0 记账。
+                    payload["stream_options"] = {"include_usage": True}
+                    response = await self._post_chat_completions(client, payload, stream=True)
+                    try:
+                        body = await self._accumulate_stream(response)
+                    finally:
+                        await response.aclose()
+                else:
+                    response = await self._post_chat_completions(client, payload)
+                    try:
+                        body = response.json()
+                    except ValueError as exc:
+                        raise ModelOutputError("model response is not JSON") from exc
                 try:
-                    body = response.json()
                     content = body["choices"][0]["message"]["content"]
                     model_name = str(body.get("model", self._model))
                 except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -259,12 +304,26 @@ class OpenAICompatibleProvider:
                 await client.aclose()
 
     def _apply_thinking_mode(self, payload: dict[str, Any]) -> None:
-        """DeepSeek V4: thinking defaults on and shares max_tokens with content/tools."""
+        """Apply thinking flag; some gateways reject ``disabled`` for certain models.
+
+        DeepSeek V4 flash accepts ``{"type":"disabled"}``. GLM-5.3 (tx) rejects
+        closing thinking and expects omit / enabled (or low|high|max budgets).
+        Sending ``disabled`` to those models yields HTTP 400 and burns the call.
+        """
         if self._thinking_mode == "disabled":
-            payload["thinking"] = {"type": "disabled"}
+            if self._model_rejects_thinking_disabled(self._model):
+                payload.pop("thinking", None)
+            else:
+                payload["thinking"] = {"type": "disabled"}
         elif self._thinking_mode == "enabled":
             payload["thinking"] = {"type": "enabled"}
         # "default" → omit; provider/model default applies.
+
+    @staticmethod
+    def _model_rejects_thinking_disabled(model: str) -> bool:
+        name = str(model or "").lower()
+        # glm-5.3-tx / glm-5.3：网关要求开启思考，不能 type=disabled。
+        return "glm-5.3" in name or name.startswith("glm-5.3")
 
     async def chat(
         self,
@@ -275,7 +334,7 @@ class OpenAICompatibleProvider:
     ) -> ChatResponse:
         """Multi-turn chat with optional OpenAI-style tool calling + M1-2 HTTP retry."""
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        client = self._client or httpx.AsyncClient(timeout=self._httpx_timeout())
         self.last_http_attempts = []
         self.last_chat_diagnostics = {}
         payload: dict[str, Any] = {
@@ -373,19 +432,35 @@ class OpenAICompatibleProvider:
                 await client.aclose()
 
     async def _post_chat_completions(
-        self, client: httpx.AsyncClient, payload: dict[str, Any]
+        self,
+        client: httpx.AsyncClient,
+        payload: dict[str, Any],
+        *,
+        stream: bool = False,
     ) -> httpx.Response:
-        """POST /chat/completions with M1-2 retry for 408/429/5xx and transport errors."""
+        """POST /chat/completions with M1-2 retry for 408/429/5xx and transport errors.
+
+        ``stream=True`` 时响应体**不读**，由调用方负责读完并关闭。
+        """
         started = time.monotonic()
         attempt = 0
         while True:
             attempt += 1
             try:
-                response = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    json=payload,
-                )
+                if stream:
+                    request = client.build_request(
+                        "POST",
+                        f"{self._base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        json=payload,
+                    )
+                    response = await client.send(request, stream=True)
+                else:
+                    response = await client.post(
+                        f"{self._base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        json=payload,
+                    )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 self.last_http_attempts.append(
                     {
@@ -409,16 +484,151 @@ class OpenAICompatibleProvider:
                     "retryable": status in _RETRYABLE_STATUS,
                 }
             )
-            if status in _NO_RETRY_STATUS:
-                response.raise_for_status()
-            if status in _RETRYABLE_STATUS:
-                if not self._should_retry_transport(attempt=attempt, started=started):
+            try:
+                if status in _NO_RETRY_STATUS:
                     response.raise_for_status()
-                retry_after = response.headers.get("Retry-After")
-                await self._sleep_backoff(attempt=attempt, retry_after=retry_after)
-                continue
-            response.raise_for_status()
+                if status in _RETRYABLE_STATUS:
+                    if not self._should_retry_transport(attempt=attempt, started=started):
+                        response.raise_for_status()
+                    retry_after = response.headers.get("Retry-After")
+                    await self._sleep_backoff(attempt=attempt, retry_after=retry_after)
+                    continue
+                response.raise_for_status()
+            finally:
+                # 流式响应体不读就丢会一直占着连接；只在 200 时交给调用方关闭。
+                # continue 也会先走 finally，所以重试前一定会把连接还回去。
+                if stream and status not in _OK_STATUS:
+                    await response.aclose()
             return response
+
+    async def _accumulate_stream(self, response: httpx.Response) -> dict[str, Any]:
+        """把 SSE 流攒成与非流式同形的响应信封；**校验不在这里做**。
+
+        先收完整段再校验，是因为增量解析会把半截 JSON 当成"已经有结果"——被截断的
+        输出会被当成合法输出放行。收完以后调用方走的是同一套 ``model_validate_json``
+        判据，判据本身一次都没有放宽。
+
+        流式空闲检测：任意两帧 **有效 data** 之间超过 ``stream_idle_seconds`` 无进展，
+        判模型卡死。SSE 心跳/空行不刷新空闲时钟（否则会挂满整段租约）。
+        另有墙钟上限 ``timeout_seconds``，防止缓慢滴答拖死章生产。
+        首包与进度会打 INFO，便于区分「还在想」和「已挂」。
+        """
+        parts: list[str] = []
+        model_name = self._model
+        usage: dict[str, Any] = {}
+        finish_reason = "stop"
+        started = time.monotonic()
+        first_content_at: float | None = None
+        data_frames = 0
+        last_progress_log = started
+        last_useful = started
+        wall_limit = float(self._timeout)
+        lines = response.aiter_lines()
+        while True:
+            now = time.monotonic()
+            if now - started >= wall_limit:
+                raise ModelOutputError(
+                    f"model stream wall timeout {wall_limit:.0f}s "
+                    f"(elapsed={now - started:.0f}s; frames={data_frames}; "
+                    f"chars={sum(len(p) for p in parts)}; model={self._model})"
+                )
+            idle_left = self._stream_idle_seconds - (now - last_useful)
+            if idle_left <= 0:
+                phase = "first_byte" if first_content_at is None else "mid_stream"
+                raise ModelOutputError(
+                    f"model stream idle {self._stream_idle_seconds:.0f}s "
+                    f"({phase}; elapsed={now - started:.0f}s; frames={data_frames}; "
+                    f"chars={sum(len(p) for p in parts)}; model={self._model})"
+                )
+            try:
+                raw = await asyncio.wait_for(
+                    lines.__anext__(),
+                    timeout=min(idle_left, wall_limit - (now - started)),
+                )
+            except StopAsyncIteration:
+                break
+            except TimeoutError as exc:
+                elapsed = time.monotonic() - started
+                phase = "first_byte" if first_content_at is None else "mid_stream"
+                raise ModelOutputError(
+                    f"model stream idle {self._stream_idle_seconds:.0f}s "
+                    f"({phase}; elapsed={elapsed:.0f}s; frames={data_frames}; "
+                    f"chars={sum(len(p) for p in parts)}; model={self._model})"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                elapsed = time.monotonic() - started
+                phase = "first_byte" if first_content_at is None else "mid_stream"
+                raise ModelOutputError(
+                    f"model stream read timeout ({phase}; elapsed={elapsed:.0f}s; "
+                    f"frames={data_frames}; chars={sum(len(p) for p in parts)}; "
+                    f"model={self._model}): {exc}"
+                ) from exc
+
+            line = raw.strip()
+            if not line or not line.startswith("data:"):
+                # SSE 心跳/空行：不刷新 last_useful，避免挂满租约。
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError:
+                # 心跳或注释行：不因为一行噪声判死整通调用。
+                continue
+            data_frames += 1
+            last_useful = time.monotonic()
+            if chunk.get("model"):
+                model_name = str(chunk["model"])
+            chunk_usage = chunk.get("usage")
+            if isinstance(chunk_usage, dict) and chunk_usage:
+                usage = chunk_usage
+            for choice in chunk.get("choices") or []:
+                reason = choice.get("finish_reason")
+                if isinstance(reason, str) and reason:
+                    finish_reason = reason
+                delta = choice.get("delta") or {}
+                piece = delta.get("content")
+                if isinstance(piece, str) and piece:
+                    parts.append(piece)
+                    if first_content_at is None:
+                        first_content_at = time.monotonic()
+                        logger.info(
+                            "model stream first content: model=%s wait=%.1fs",
+                            self._model,
+                            first_content_at - started,
+                        )
+            now = time.monotonic()
+            if now - last_progress_log >= 15.0:
+                logger.info(
+                    "model stream progress: model=%s elapsed=%.0fs frames=%s chars=%s",
+                    self._model,
+                    now - started,
+                    data_frames,
+                    sum(len(p) for p in parts),
+                )
+                last_progress_log = now
+        if not usage:
+            # 记账靠 usage：拿不到就等于按 0 计费，货币上限会被静默算穿。
+            # 宁可判失败（由调用方挂账等待对账），也不能假装这次调用不要钱。
+            raise ModelOutputError("streamed response carried no usage; refusing to bill zero")
+        logger.info(
+            "model stream complete: model=%s elapsed=%.1fs frames=%s chars=%s",
+            model_name,
+            time.monotonic() - started,
+            data_frames,
+            sum(len(p) for p in parts),
+        )
+        return {
+            "model": model_name,
+            "choices": [
+                {
+                    "message": {"content": "".join(parts)},
+                    "finish_reason": finish_reason,
+                }
+            ],
+            "usage": usage,
+        }
 
     def _should_retry_transport(self, *, attempt: int, started: float) -> bool:
         if attempt > self._max_http_retries + 1:

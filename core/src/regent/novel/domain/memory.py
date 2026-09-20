@@ -8,8 +8,16 @@
   裁剪掉——伏笔回收的失败是不可逆的阅读体验损失。
 - **改意只失效不修改**：用户改意后旧条目标 ``invalidated`` 保留，事实链不动，
   避免「旧版上下文污染新版」。
-- **重演取最小子图**：只重演依赖被改动节点的下游；依赖信息不完整时**保守**
-  退回重做当前章后续场景，不假装能算出子图。
+- **重演取保守章窗口**：改某章后重生成该章起连续后续范围；不再宣称最小依赖子图。
+
+对外逻辑槽（职责删减后的统一接口）：
+
+- ``fact``：事实账（rule / relation）
+- ``known``：角色已知/误信（belief）
+- ``promise``：未兑现承诺
+- ``summary``：短摘要（character_arc / reader_knowledge / director_note）
+
+存储仍用细 kind 落库（兼容既有 CHECK），投影按受众裁剪不变。
 """
 
 from __future__ import annotations
@@ -24,7 +32,20 @@ MemoryKind = Literal[
     "rule", "character_arc", "promise", "relation",
     "belief", "reader_knowledge", "director_note",
 ]
+MemorySlot = Literal["fact", "known", "promise", "summary"]
 MemoryState = Literal["OPEN", "RESOLVED", "ABANDONED"]
+
+# 存储 kind ←→ 逻辑槽。投影仍按 VIEW_OF_KIND / VISIBLE_TO，不按槽直接喂模型。
+SLOT_OF_KIND: dict[str, MemorySlot] = {
+    "rule": "fact",
+    "relation": "fact",
+    "belief": "known",
+    "promise": "promise",
+    "character_arc": "summary",
+    "reader_knowledge": "summary",
+    "director_note": "summary",
+}
+MEMORY_SLOTS: tuple[str, ...] = ("fact", "known", "promise", "summary")
 
 # 六视图（技术方案 §3.2）←→ 存储 kind 的对应：
 #   世界事实 = rule；人物状态 = character_arc + relation；人物认知 = belief；
@@ -36,17 +57,22 @@ MEMORY_KINDS: tuple[str, ...] = (
 MEMORY_STATES: tuple[str, ...] = ("OPEN", "RESOLVED", "ABANDONED")
 
 # 显式标注的别名：Canon 事实可以带 memory_kind / kind，写错就不记，不猜。
+# 逻辑槽名也可写入，映射到默认存储 kind。
 _KIND_ALIASES: dict[str, str] = {
     "rule": "rule",
     "world_rule": "rule",
     "stable_rule": "rule",
     "stable": "rule",
     "world_fact": "rule",
+    "fact": "rule",
+    "事实": "rule",
     "设定": "rule",
     "character_arc": "character_arc",
     "arc": "character_arc",
     "arc_stage": "character_arc",
     "character_state": "character_arc",
+    "summary": "character_arc",
+    "摘要": "character_arc",
     "人物弧线": "character_arc",
     "promise": "promise",
     "foreshadow": "promise",
@@ -58,6 +84,8 @@ _KIND_ALIASES: dict[str, str] = {
     "belief": "belief",
     "misbelief": "belief",
     "character_belief": "belief",
+    "known": "belief",
+    "已知": "belief",
     "误信": "belief",
     "reader_knowledge": "reader_knowledge",
     "reader_cognition": "reader_knowledge",
@@ -167,6 +195,7 @@ class MemoryItem:
         return {
             "key": self.key,
             "kind": self.kind,
+            "slot": SLOT_OF_KIND.get(self.kind, "summary"),
             "subject": self.subject,
             "content": self.content,
             "entities": list(self.entities),
@@ -178,6 +207,11 @@ class MemoryItem:
             "basis": self.basis,
             "resolved_chapter_no": self.resolved_chapter_no,
         }
+
+    @property
+    def slot(self) -> str:
+        """逻辑槽：fact / known / promise / summary。"""
+        return SLOT_OF_KIND.get(self.kind, "summary")
 
     @property
     def view(self) -> str:
@@ -545,8 +579,24 @@ def project_payloads(
             entities = {str(e) for e in (payload.get("entities") or ())}
             if persona not in entities and persona != str(payload.get("subject") or ""):
                 continue
-        out.append(payload)
+        enriched = dict(payload)
+        enriched.setdefault("slot", SLOT_OF_KIND.get(kind, "summary"))
+        out.append(enriched)
     return out
+
+
+def group_by_slot(payloads: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """把已投影（或未投影）的 payload 按逻辑槽分组，供诊断与统一接口。"""
+    grouped: dict[str, list[dict[str, Any]]] = {slot: [] for slot in MEMORY_SLOTS}
+    for payload in payloads or ():
+        if not isinstance(payload, dict):
+            continue
+        kind = str(payload.get("kind") or "")
+        slot = str(payload.get("slot") or SLOT_OF_KIND.get(kind, "summary"))
+        if slot not in grouped:
+            slot = "summary"
+        grouped[slot].append(payload)
+    return grouped
 
 
 def project_for(

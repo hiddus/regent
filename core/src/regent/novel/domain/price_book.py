@@ -84,16 +84,77 @@ def actual_minor(
     output_tokens: int = 0,
     cached_input_tokens: int = 0,
 ) -> int:
-    """按实际用量计价。缓存命中部分单独计价，最低 1 个最小单位。"""
+    """按实际用量计价。缓存命中部分单独计价，最低 1 个最小单位。
+
+    未配置缓存单价时不得默认为 0：按未命中输入价保守计费，避免低估。
+    """
     price = lookup(model)
     cached = min(int(cached_input_tokens), int(input_tokens))
     billed_input = max(0, int(input_tokens) - cached)
+    cached_rate = price.cached_input_minor_per_mtok
+    if cached_rate <= 0:
+        cached_rate = price.input_minor_per_mtok
     total = (
         _minor(billed_input, price.input_minor_per_mtok)
-        + _minor(cached, price.cached_input_minor_per_mtok)
+        + _minor(cached, cached_rate)
         + _minor(int(output_tokens), price.output_minor_per_mtok)
     )
     return max(1, total)
+
+
+def cache_avoided_minor(
+    model: str,
+    *,
+    input_tokens: int = 0,
+    cached_input_tokens: int = 0,
+) -> int:
+    """相对「同量输入全未命中」，缓存命中少花了多少最小货币单位。
+
+    用于实验/复盘证明缓存是否省钱；不等于供应商账单，但是可比口径。
+    """
+    full = actual_minor(
+        model,
+        input_tokens=input_tokens,
+        output_tokens=0,
+        cached_input_tokens=0,
+    )
+    hit = actual_minor(
+        model,
+        input_tokens=input_tokens,
+        output_tokens=0,
+        cached_input_tokens=cached_input_tokens,
+    )
+    return max(0, full - hit)
+
+
+def cache_usage_report(
+    model: str,
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cached_input_tokens: int = 0,
+) -> dict[str, int | str | float]:
+    """一次或累计调用的缓存用量摘要。"""
+    cached = min(int(cached_input_tokens), int(input_tokens))
+    billed = actual_minor(
+        model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached,
+    )
+    avoided = cache_avoided_minor(
+        model, input_tokens=input_tokens, cached_input_tokens=cached
+    )
+    hit_rate = (cached / input_tokens) if input_tokens else 0.0
+    return {
+        "model": model,
+        "input_tokens": int(input_tokens),
+        "output_tokens": int(output_tokens),
+        "cached_input_tokens": cached,
+        "cache_hit_rate": round(hit_rate, 4),
+        "billed_minor": billed,
+        "cache_avoided_minor": avoided,
+    }
 
 
 def estimate_minor(
@@ -121,6 +182,8 @@ __all__ = [
     "PRICE_BOOK_VERSION",
     "ModelPrice",
     "actual_minor",
+    "cache_avoided_minor",
+    "cache_usage_report",
     "estimate_minor",
     "lookup",
 ]

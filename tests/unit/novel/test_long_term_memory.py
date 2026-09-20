@@ -209,6 +209,7 @@ def test_incomplete_dependency_graph_refuses_precision():
 
 @pytest.mark.asyncio
 async def test_plan_replay_reads_edges_from_store(novel_db):
+    """手工建边仍可供离线 plan_replay；根节点须显式登记 independent。"""
     async with novel_db() as s:
         work = await _work(s)
         await memory_app.record_chapter_memory(
@@ -216,10 +217,18 @@ async def test_plan_replay_reads_edges_from_store(novel_db):
             facts=[_rule("境界", "境界不可越级"),
                    {"memory_kind": "promise", "subject": "密约", "fact": "密约待兑现"}],
         )
+        rule_key = domain.item_key("rule", "境界")
+        promise_key = domain.item_key("promise", "密约", "密约待兑现")
         await memory_app.link_memory(
             s, work=work,
-            upstream_key=domain.item_key("rule", "境界"),
-            downstream_key=domain.item_key("promise", "密约", "密约待兑现"),
+            upstream_key=domain.INDEPENDENT_MARKER,
+            downstream_key=rule_key,
+            edge_kind="independent",
+        )
+        await memory_app.link_memory(
+            s, work=work,
+            upstream_key=rule_key,
+            downstream_key=promise_key,
         )
         await s.commit()
         plan = await memory_app.plan_replay(s, work=work, changed_subjects=["境界"])

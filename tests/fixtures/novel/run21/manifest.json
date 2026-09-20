@@ -1,0 +1,544 @@
+{
+  "correspondence": {
+    "remote_run_id": "e85633cb-6433-4361-8d98-7db0cf508485",
+    "meta_line": "",
+    "basis": "id match or latest FAIL; features: WATCH_PROSE hard-fail + multi prose_versions",
+    "handoff_label": "run21"
+  },
+  "take": {
+    "take_no": 2,
+    "scene_index": 0,
+    "revisions": 2,
+    "phase_at_dump": "WATCH_PROSE"
+  },
+  "prose_versions": [
+    {
+      "index": 0,
+      "chars": 1170,
+      "sha256": "9481ac489555f940561ccc8e692a359ef8c7e7f0b0badfc1006192a3c6bd9db6"
+    },
+    {
+      "index": 1,
+      "chars": 3263,
+      "sha256": "30c97ed40d36c01b5869b8983990fc46c2e6a953fc28b832adb4f5913710b85d"
+    },
+    {
+      "index": 2,
+      "chars": 511,
+      "sha256": "81a6aca1a7f224d539d17c261abd31a270d17c94700ef6d36bc87284001ab38d"
+    }
+  ],
+  "revision_instruction": "保留开盖前的全部内容（至「他盯着秒针看了五秒，然后右手伸向工具架，取下了开盖用的橡胶球」为止）。从开盖动作开始，重写后半段：\n1. 开盖后只描述最关键的异常——所有齿轮顺时针转，唯独秒针轴逆时针转。用一句话交代换向机构的存在，不展开惰轮、换向轮的逐一命名和方向罗列。\n2. 陈默触碰惰轮导致秒针轴仍逆时针转的实验保留，但压缩为两到三句，突出「机械逻辑断裂」的瞬间感受，而非逐帧记录。\n3. 删除后续所有重复的指尖悬停、目镜反复摘戴、螺丝刀拆秒轮桥、检查秒针榫头等冗余动作。\n4. 结尾回到氛围：陈默面对这个无法用机械逻辑解释的机芯，保持静止观察，台灯光圈里秒针逆走，影子一格一格倒退——与开盖前形成呼应，强化诡异感。\n5. 整体字数控制在开盖后不超过300字，保持白描节奏，不让技术细节淹没情绪。",
+  "render_instruction": "陈默已确认换向机构存在非机械逻辑的异常，且指尖未感知到任何记忆或能量。此刻他面临选择：是继续拆解换向轮组以追查异常源头，还是暂停并尝试用指尖直接触碰机芯以触发能力感知。推进至他做出决定并执行第一步动作。",
+  "events": [
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默从待修托盘里拿起一只老上海牌机械表，表盘泛黄，表蒙有一道细裂纹。他把目镜卡进眼窝，拇指和食指捏住表壳边缘，在台灯下缓缓转动。指尖触到后盖的瞬间，一段记忆涌进来——自行车铃声、搪瓷杯磕在木桌上的闷响、一个女声说「慢点骑，看路」。陈默面无表情，镊子尖已经挑开了后盖，机芯里的油泥味混着旧时光的霉味散出来。",
+      "state_changes": {
+        "工作台": "待修托盘里少了一只老上海表，后盖已打开"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "他用镊子拨了拨擒纵轮，齿轮纹丝不动，锈住了。指尖再次碰到夹板时，又一段碎片——黄昏的光从西窗斜进来，照在水泥地上，有人用粉笔在地上画跳房子的格子，远处收音机里播着评书。陈默的呼吸节奏没变，他从零件柜里取出一枚同型号的擒纵轮，开始替换。动作精准得像一台机器。",
+      "state_changes": {
+        "老上海表": "擒纵轮已更换，待组装"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "他把修好的老上海表放到已完成的托盘里，伸手去拿下一只。手指在半空中顿住了——托盘最右边躺着那只倒走表，表盘朝上，秒针正无声地逆时针转动。陈默的指尖悬在表壳上方两厘米处，没有落下去。他盯着那根逆走的秒针看了四秒，然后收回手，转而拿起旁边一只双狮表。",
+      "state_changes": {
+        "倒走表": "秒针持续逆时针走动，未被触碰"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "双狮表的自动陀在他掌心转了半圈，记忆立刻灌进来——雨打芭蕉的声音，潮湿的，带着土腥味；一个老人在咳嗽，痰盂磕在地砖上；有人在隔壁炒菜，油锅滋啦一声。陈默把自动陀拆下来，上油，装回去，全程没有抬头。但他的余光知道，那只倒走表还在逆着走。",
+      "state_changes": {
+        "双狮表": "自动陀已上油并装回，待组装"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "巷外传来收废品的吆喝声——「收旧冰箱旧彩电旧洗衣机——」声音拖得很长，在巷子里来回撞。陈默把最后一只普通旧表修完，盖上后盖，用绒布擦了擦表壳，放进已完成托盘。然后他站起来，走到门口，拉下卷帘门。金属门哗啦啦落到底，把傍晚的天光切成一条一条的细线，最后完全隔绝在外。",
+      "state_changes": {
+        "工作台": "所有普通旧表已完成修理，倒走表仍在待修托盘内",
+        "时隙斋": "卷帘门已关闭，与外界隔绝"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "他回到工作台前，把已完成托盘推到一边，将倒走表单独置于台面正中央。然后他伸手调整台灯，灯臂的关节发出轻微的咔咔声，光圈收缩，聚在倒走表的表盘上。秒针在强光下逆时针划过，影子被放大，投在木纹台面上，一格一格地倒退。",
+      "state_changes": {
+        "台灯": "灯光聚焦于倒走表表盘",
+        "倒走表": "位于工作台中央，被强光照射"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默拉开工作台右侧的抽屉，从绒布内衬里取出一副备用目镜，镜片比日常用的那副更厚，放大倍率更高。他又从工具架上抽出最细的那把镊子，尖端在灯光下几乎看不见厚度。他把目镜和镊子并排放在倒走表旁边，然后坐下，双手平放在台面上，指尖离表壳只有一厘米。他没有立刻动手，只是看着那根逆走的秒针。",
+      "state_changes": {
+        "主角": "坐于工作台前，准备拆解倒走表",
+        "工作台": "备用目镜和最细镊子已取出，置于倒走表旁"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默的指尖悬停在倒走表上方一厘米处。他保持这个姿势不动，感受指尖的触感——没有温差，没有振动，只有空气本身微凉的触感。秒针继续无声地逆时针划过，他的指尖纹丝不动。",
+      "state_changes": {
+        "主角": "指尖悬停于倒走表上方一厘米处，未感知到任何异常温差或振动"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "他收回手，拿起备用目镜卡入眼窝，俯身将目镜凑到表盘正上方三厘米处。从十二点方向开始，他顺时针逐格检查：表盘刻度完整，夜光涂层有细微龟裂；指针轴心稳固，无松动；表蒙边缘与表壳的接缝处有一圈极细的积尘，但密封胶圈看起来完好。秒针在他眼前一格一格倒退，影子在虹膜上反复划过。",
+      "state_changes": {
+        "主角": "目镜已佩戴，完成表盘正面外观检查",
+        "倒走表": "表盘刻度、指针轴心、表蒙边缘已检查，未见明显异常"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默直起身，用最细镊子的尖端轻触表冠。镊子尖与表冠接触的瞬间，他停顿了一秒——指尖通过镊子传来的触感告诉他，表冠的金属表面是凉的，与室温一致。他夹住表冠，以极小幅度转动半圈：阻尼感均匀，档位清晰，与正常机械表无异。他松开镊子，表冠停在原位。",
+      "state_changes": {
+        "倒走表": "表冠已测试，阻尼感和档位正常"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "他将倒走表翻面，表盘朝下置于绒布上。后盖是不锈钢材质，表面有细微的拉丝纹路。他用目镜逐段检查：后盖与表壳的接缝紧密，没有撬口痕迹；四颗螺丝对称分布，螺丝槽口完好，没有拧动过的划痕。整只表看起来从未被打开过。",
+      "state_changes": {
+        "倒走表": "后盖已检查，接缝紧密，螺丝完好，无开盖痕迹"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "他用指尖沿表壳侧面缓慢滑动一圈。金属触感冰凉而光滑，从表耳到表冠护肩，再到另一侧的表耳，没有任何微裂纹或不平整。指尖划过表壳与后盖的接缝时，他感觉到一道几乎不可察觉的棱线——那是正常加工公差，不是损伤。他收回手，指尖在绒布上蹭了蹭，蹭掉一层极薄的金属粉尘。",
+      "state_changes": {
+        "主角": "指尖完成表壳侧面触检，未发现异常",
+        "倒走表": "表壳侧面无微裂纹或不平整"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默把倒走表翻回正面，表盘朝上。他摘下备用目镜，放在镊子旁边，双手再次平放在台面上。台灯的光圈里，秒针还在逆着走，影子一格一格倒退。他盯着秒针看了五秒，然后右手伸向工具架，取下了开盖用的橡胶球。",
+      "state_changes": {
+        "主角": "完成外部检查，准备开盖",
+        "工作台": "橡胶球已取出，置于倒走表旁"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默拿起橡胶球，对准倒走表后盖按下去，橡胶唇口咬住不锈钢边缘。他逆时针旋转手腕，橡胶球带动后盖转动。旋开的过程中，阻尼感均匀，没有卡涩也没有松动——和正常旋入式后盖完全一样。他旋了四圈半，后盖脱离表壳，发出一声极轻的金属分离声。",
+      "state_changes": {
+        "倒走表": "后盖已旋开，与表壳分离"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默将旋下的后盖内面朝上，轻轻放在绒布上。不锈钢内面反射出台灯的光斑，表面干净，没有水汽残留或锈迹。他没有多看，俯身将目镜凑到暴露的机芯上方。",
+      "state_changes": {
+        "倒走表": "后盖内面朝上置于绒布上，机芯暴露"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "目镜视野里，机芯的摆轮正在摆动——顺时针转半圈，停顿，逆时针转半圈，停顿。摆轮游丝均匀地呼吸，振幅正常。陈默的视线从摆轮移到擒纵叉：叉瓦交替卡入擒纵轮齿，擒纵轮顺时针一格一格转动。他的目光继续向下——传动轮系的所有齿轮都在顺时针转动，从秒轮、过轮到中心轮，方向一致。秒针轴在机芯夹板下方逆时针旋转，与表盘上秒针的逆走方向吻合。",
+      "state_changes": {
+        "倒走表": "机芯内部已检查：摆轮、擒纵叉、擒纵轮、传动轮系均顺时针运转；秒针轴逆时针旋转"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默直起身，目镜仍卡在眼窝里。他盯着机芯看了三秒——所有齿轮顺时针转，只有秒针轴逆时针转。这意味着机芯内部有一套额外的换向机构，把顺时针的传动变成了秒针的逆时针输出。他的镊子尖悬在摆轮上方，没有落下去。",
+      "state_changes": {
+        "主角": "确认机芯内部齿轮顺时针运转，秒针轴逆时针运转，存在换向机构"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默用镊子尖极轻地触碰摆轮边缘。镊子尖与摆轮接触的瞬间，摆轮停顿了不到半秒，然后恢复摆动，振幅没有明显变化。他收回镊子，摆轮继续均匀地左右摆动，游丝的呼吸节奏稳定。",
+      "state_changes": {
+        "倒走表": "摆轮经镊子触碰后恢复摆动，振幅正常"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默摘下目镜，放在绒布上。他双手平放在台面，指尖离机芯只有两厘米。台灯光圈里，暴露的机芯在运转——摆轮左右摆，擒纵轮顺时针转，秒针轴逆时针转。他保持这个姿势不动，只是看着。",
+      "state_changes": {
+        "主角": "目镜已摘下，观察暴露的机芯运转"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默从工具架上取下最细的一字螺丝刀，刀头宽度与机芯夹板上的螺丝槽口精确匹配。他将螺丝刀垂直插入第一颗螺丝槽口，逆时针旋转三圈，螺丝脱离螺纹，他用镊子夹住螺帽取出，轻轻放在绒布上。接着是第二颗、第三颗，每颗螺丝都按取出顺序在绒布上排成一行。",
+      "state_changes": {
+        "倒走表": "秒轮桥上的三颗固定螺丝已取出，按顺序排列在绒布上"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默用镊子夹住秒轮桥的边缘，以极小幅度左右晃动，确认桥板与主夹板之间的定位销已经松动。然后他垂直向上提起镊子，秒轮桥脱离机芯，桥板下方露出秒轮轴的上轴尖和换向轮的齿面。他将秒轮桥内面朝上放在绒布上，与三颗螺丝对齐。",
+      "state_changes": {
+        "倒走表": "秒轮桥已取下，秒轮轴上轴尖和换向轮暴露"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默俯身将目镜凑到暴露的秒轮轴上方。目镜视野里，秒轮轴的轴齿与一枚金色换向轮的齿面啮合——换向轮由擒纵轮驱动，顺时针旋转；换向轮另一侧与一枚银色惰轮啮合，惰轮再与秒针轴底部的齿轮啮合。金色换向轮顺时针转，银色惰轮逆时针转，秒针轴齿轮顺时针转——但秒针轴本身却逆时针旋转。陈默的镊子尖悬在惰轮上方，没有落下。",
+      "state_changes": {
+        "主角": "发现换向机构存在逻辑矛盾：齿轮传动方向与秒针轴实际旋转方向不符",
+        "倒走表": "换向机构已定位：金色换向轮顺时针转，银色惰轮逆时针转，秒针轴齿轮顺时针转，但秒针轴逆时针旋转"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默用镊子尖极轻地触碰银色惰轮的齿面。镊子尖与惰轮接触的瞬间，惰轮停顿，金色换向轮继续顺时针转动，秒针轴齿轮也继续顺时针转动——但秒针轴仍在逆时针旋转。惰轮停转后，秒针轴的旋转方向没有发生任何改变。陈默收回镊子，惰轮恢复逆时针转动。",
+      "state_changes": {
+        "倒走表": "惰轮停转时秒针轴仍逆时针旋转，换向机构未按预期工作"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默直起身，摘下目镜。他盯着暴露的机芯看了五秒——金色换向轮顺时针转，银色惰轮逆时针转，秒针轴齿轮顺时针转，秒针轴逆时针转。齿轮传动链的方向与秒针轴的实际旋转方向之间存在一个无法用机械逻辑解释的断层。他把目镜放在绒布上，双手平放在台面，指尖离机芯边缘只有一厘米。",
+      "state_changes": {
+        "主角": "确认换向机构存在非机械逻辑的异常，暂停拆解"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默的右手食指指尖缓慢前移，悬停在暴露的机芯正上方，离金色换向轮只有两毫米。他保持这个姿势不动，感受指尖的触感——没有温差，没有振动，只有空气本身微凉的触感。秒针轴在他指尖下方继续逆时针旋转，影子投在机芯夹板上，一格一格倒退。他收回手指，指尖在绒布上蹭了蹭。",
+      "state_changes": {
+        "主角": "指尖悬停于机芯上方，未感知到任何异常温差或振动"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默拿起备用目镜重新卡入眼窝，俯身将目镜凑到秒针轴与秒针的连接处。目镜视野里，秒针轴的顶端是一个方形榫头，秒针的轴孔紧密套合在榫头上，没有松动。他用镊子尖轻触秒针的针尖——秒针微微颤动了一下，但继续逆时针旋转。镊子尖离开后，秒针恢复稳定逆走。",
+      "state_changes": {
+        "倒走表": "秒针与秒针轴连接牢固，无松动"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    },
+    {
+      "known_by": [
+        "主角"
+      ],
+      "statement": "陈默摘下目镜，放在绒布上。他把拆下的秒轮桥和三颗螺丝推到绒布一角，与倒走表的后盖并排。然后他双手平放在台面上，指尖离机芯边缘只有一厘米。台灯光圈里，暴露的机芯仍在运转——摆轮左右摆，擒纵轮顺时针转，金色换向轮顺时针转，银色惰轮逆时针转，秒针轴齿轮顺时针转，秒针轴逆时针转。他保持这个姿势不动，只是看着。",
+      "state_changes": {
+        "主角": "暂停拆解，观察暴露的机芯运转",
+        "工作台": "秒轮桥、三颗螺丝与后盖并排置于绒布上"
+      },
+      "reader_visible": true,
+      "dialogue_by_character": {}
+    }
+  ],
+  "validation": {
+    "facts": [
+      {
+        "quote": "他拿起橡胶球，对准倒走表后盖按下去，橡胶唇口咬住不锈钢边缘。逆时针旋转四圈半，后盖脱离表壳，发出一声极轻的金属分离声。",
+        "subject": "",
+        "entities": [
+          "倒走表",
+          "橡胶球"
+        ],
+        "known_by": [
+          "主角"
+        ],
+        "resolves": "",
+        "statement": "陈默用橡胶球旋开了倒走表后盖，逆时针旋转四圈半后盖脱离表壳。",
+        "memory_kind": ""
+      },
+      {
+        "quote": "目镜视野里，摆轮正在摆动，游丝均匀地呼吸。擒纵叉交替卡入擒纵轮齿，擒纵轮顺时针一格一格转动。传动轮系的所有齿轮都在顺时针转——从秒轮、过轮到中心轮，方向一致。只有秒针轴在机芯夹板下方逆时针旋转，与表盘上秒针的逆走方向吻合。",
+        "subject": "",
+        "entities": [
+          "倒走表"
+        ],
+        "known_by": [
+          "主角"
+        ],
+        "resolves": "",
+        "statement": "倒走表机芯内部所有传动齿轮（摆轮、擒纵轮、秒轮、过轮、中心轮）均顺时针转动，唯独秒针轴逆时针旋转。",
+        "memory_kind": ""
+      },
+      {
+        "quote": "金色换向轮顺时针转，银色惰轮逆时针转，秒针轴齿轮顺时针转——但秒针轴本身却逆时针旋转。",
+        "subject": "",
+        "entities": [
+          "倒走表"
+        ],
+        "known_by": [
+          "主角"
+        ],
+        "resolves": "",
+        "statement": "陈默发现机芯内存在换向机构：金色换向轮顺时针转，银色惰轮逆时针转，秒针轴齿轮顺时针转，但秒针轴本身逆时针旋转。",
+        "memory_kind": ""
+      },
+      {
+        "quote": "他用镊子尖极轻地触碰换向轮组中的惰轮齿面。接触的瞬间，惰轮停顿，其余齿轮继续顺时针转动——但秒针轴仍在逆时针旋转。惰轮停转后，秒针轴的旋转方向没有发生任何改变。",
+        "subject": "",
+        "entities": [
+          "倒走表"
+        ],
+        "known_by": [
+          "主角"
+        ],
+        "resolves": "",
+        "statement": "陈默用镊子尖触碰银色惰轮使其停转，但秒针轴仍继续逆时针旋转，换向机构未按机械逻辑工作。",
+        "memory_kind": ""
+      },
+      {
+        "quote": "齿轮传动链的方向与秒针轴的实际旋转方向之间存在一个无法用机械逻辑解释的断层。",
+        "subject": "",
+        "entities": [
+          "倒走表"
+        ],
+        "known_by": [
+          "主角"
+        ],
+        "resolves": "",
+        "statement": "陈默确认齿轮传动链方向与秒针轴实际旋转方向之间存在无法用机械逻辑解释的断层。",
+        "memory_kind": ""
+      }
+    ],
+    "issues": [
+      "事实证据不在正文中",
+      "事实证据不在正文中",
+      "正文实际状态与场景结算不一致",
+      "状态变化缺少正文证据"
+    ],
+    "passed": false,
+    "state_changes": [
+      {
+        "key": "倒走表",
+        "quote": "后盖脱离表壳，发出一声极轻的金属分离声。",
+        "value": "后盖已旋开，机芯暴露；秒轮桥已取下，换向机构暴露；秒针轴持续逆时针旋转，换向机构存在非机械逻辑异常"
+      },
+      {
+        "key": "主角",
+        "quote": "陈默摘下目镜，放在绒布上。他双手平放在台面，指尖离机芯边缘只有一厘米。",
+        "value": "目镜已摘下，双手平放台面，指尖离机芯边缘一厘米，暂停拆解，观察机芯运转"
+      },
+      {
+        "key": "工作台",
+        "quote": "他把拆下的秒轮桥和三颗螺丝推到绒布一角，与倒走表的后盖并排。",
+        "value": "秒轮桥、三颗螺丝与后盖并排置于绒布上，倒走表机芯暴露于台面中央"
+      }
+    ]
+  },
+  "model_sampling": {
+    "note": "frozen from production.calls fingerprints where present",
+    "calls_summary": [
+      {
+        "purpose": "scene0:take2:RENDER",
+        "input_hash": "914db26a9f17c0194f60eaf0cacbacc34fdb9395dfffaec25870994e9eefaa93",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "3bead58dadb51cae4c0ae457a8def717af7432ae3e273e042f02b6206a34ec94",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "96f41677f764e123ccd86bd447a8adf3c93b4b2ba355373d2f4ec1c14263f2ec",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:VALIDATE",
+        "input_hash": "688aa001df18d65b71043309bd5aa1d953623146cdbd66bf9f8613fb9a095ace",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "40117cd0513080861f17b7f8c190c13c1fe11d7c62d8379f8f19d3850eeae4b8",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "46598c5bf295bacd8854b795ae11a15ac1a86a6318f1c98c1791c9985e1ae3b0",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:RENDER",
+        "input_hash": "c2103bdaf9d50e37e9f5a3aa0368b17344084508679b4c5baebead7c15dc6896",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "7fdd3ec2bc4a827400f32800ed5381c58a95d3ba08a50661c64860ae3365ee52",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "1b174bffbf88e17b97838cce6efeffcbf228a695774a89c5c31d5a9932901825",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:RENDER",
+        "input_hash": "5b4bae3056abe94c5127f6ef2205ca6e3b99afe3f8f8944f1a3ebb930f9d7ec1",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "f0e61255e9d617d79397f3ea5136a556938a16878e7d002846243824f8e3fb97",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "418673a516ae35c2c15a45345dd750489b5184a8198af4ba9f9c2d6b93664a60",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:VALIDATE",
+        "input_hash": "b580453c608f136d535ce36ff06506af7fbbaaed7fee5da0335b7b1469a5d69a",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "de61f2bdd100d540e7426934976f7f728ad0b6b73f68e9ff7f11cd4a89393ca2",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "782369105a707398fcc7d682f99126916c5c0f723f257779a5afecd12a4e2886",
+        "reused": false,
+        "model": null
+      },
+      {
+        "purpose": "scene0:take2:WATCH_PROSE",
+        "input_hash": "2c14c3fc399c46adfc5d9d7f23271a2ec1d1824682f19d84daf47ae445972296",
+        "reused": false,
+        "model": null
+      }
+    ]
+  },
+  "independent_faults": [
+    "local_rewrite_overwrote_full_scene",
+    "director_rewrite_vs_settled_events",
+    "validator_fabricated_quotes"
+  ],
+  "baseline_tests": {
+    "novel_plus_provider_sse": 316,
+    "note": "定向基线，非全仓"
+  }
+}

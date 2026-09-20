@@ -25,6 +25,7 @@ from regent.novel.infrastructure.models import (
     ChapterRunModel,
     CriticalNodeModel,
     CriticalPathModel,
+    MemoryEdgeModel,
     NovelPrincipalModel,
     StoryWorkModel,
     VolumeModel,
@@ -165,8 +166,8 @@ async def test_user_volume_cap_blocks_expansion_on_last_node(novel_db, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_last_node_still_expands_when_user_set_no_cap(novel_db, monkeypatch):
-    """对照组：用户没限定卷数时，末节点完成仍要扩卷——不能把扩卷路径整个删掉（P1-3）。"""
+async def test_last_node_no_longer_auto_expands(novel_db, monkeypatch):
+    """自动扩卷已移出主链：末节点完成也不再静默 expand（职责删减）。"""
     expanded: list[object] = []
 
     async def fake_expand(session, *, work, provider=None):
@@ -184,7 +185,7 @@ async def test_last_node_still_expands_when_user_set_no_cap(novel_db, monkeypatc
         await session.flush()
         await works._maybe_expand_volume(session, work=work, run=run)
 
-    assert expanded == [work.id], "无卷数上限且末节点已完成，却没有扩卷"
+    assert expanded == [], "自动扩卷仍被触发"
 
 
 # ---------------------------------------------------------------------------
@@ -383,17 +384,15 @@ async def test_resume_without_queued_replay_is_rejected(novel_db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_disjoint_entities_are_not_auto_certified_independent(novel_db):
-    """实体无交集不等于独立：启发式没命中必须保持 unknown，不能宣称图完整（C-04）。"""
+    """实体无交集不等于独立：不再自动建边认证完整子图（C-04 / 职责删减）。"""
     async with novel_db() as s:
         work = await _work(s, latest_chapter_no=2)
-        # 第一批：此刻还没有任何记忆，「没有上游」是结构性事实
         await memory_app.record_chapter_memory(
             s, work=work, chapter_no=1,
             facts=[{"statement": "甲承诺归还钥匙", "known_by": ["甲"]}],
             cast=["甲", "乙"],
         )
         await s.commit()
-        # 第二批：关于乙，与已有的甲记忆没有任何共享实体
         await memory_app.record_chapter_memory(
             s, work=work, chapter_no=2,
             facts=[{"statement": "乙立誓复仇", "known_by": ["乙"]}],
@@ -402,36 +401,46 @@ async def test_disjoint_entities_are_not_auto_certified_independent(novel_db):
         await s.commit()
         plan = await memory_app.plan_replay(s, work=work, changed_subjects=["甲"])
 
-    assert not plan.complete, (
-        "实体无交集被自动认证为独立，于是宣称依赖图完整——这正是 C-04 要堵住的推断"
-    )
-    assert plan.unknown, "没有独立性证据的条目应落在 unknown 里"
+    assert not plan.complete, "无依赖覆盖时不得宣称最小子图完整"
 
 
 @pytest.mark.asyncio
-async def test_declared_independent_is_certified(novel_db):
-    """创作输入显式声明独立，才算有独立性证据（C-04）。"""
+async def test_plan_local_replay_uses_conservative_chapter_window(novel_db):
+    """纠错重演固定为改章起连续窗口，不再宣称精确子图。"""
     async with novel_db() as s:
-        work = await _work(s, latest_chapter_no=2)
+        work = await _work(s, latest_chapter_no=10)
+        plan, chapters, conservative = await memory_app.plan_local_replay(
+            s,
+            work=work,
+            changed_subjects=["甲"],
+            from_chapter_no=2,
+            max_chapters=3,
+        )
+
+    assert conservative is True
+    assert plan.complete is False
+    assert chapters == [2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_auto_dependency_edges_are_no_longer_written(novel_db):
+    """建边已退役：record_chapter_memory 不再自动登记 independent/depends。"""
+    async with novel_db() as s:
+        work = await _work(s, latest_chapter_no=1)
         await memory_app.record_chapter_memory(
             s, work=work, chapter_no=1,
             facts=[{"statement": "甲承诺归还钥匙", "known_by": ["甲"]}],
-            cast=["甲", "乙"],
+            cast=["甲"],
         )
         await s.commit()
-        await memory_app.record_chapter_memory(
-            s, work=work, chapter_no=2,
-            facts=[{
-                "statement": "乙立誓复仇", "known_by": ["乙"],
-                # 创作输入显式声明：这条与既有记忆没有依赖
-                "independent": True,
-            }],
-            cast=["甲", "乙"],
+        edges = list(
+            (
+                await s.scalars(
+                    select(MemoryEdgeModel).where(MemoryEdgeModel.work_id == work.id)
+                )
+            ).all()
         )
-        await s.commit()
-        plan = await memory_app.plan_replay(s, work=work, changed_subjects=["甲"])
-
-    assert plan.complete, f"已显式声明独立却仍判图不完整：{plan.unknown}"
+    assert edges == []
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="REGENT_", env_file=".env", extra="ignore")
     environment: Literal["development", "test", "production"] = "development"
+    # Migration: combined keeps current process shape; target default is novel.
+    service_mode: Literal["novel", "legacy", "combined"] = "combined"
+    # Drain phase: set false to reject new Generated-App creates (410) while finishing in-flight work.
+    legacy_accept_new: bool = True
+    # Editorial repair: off|shadow|auto. auto is further gated by editor_repair_auto_percent.
+    editor_repair_mode: Literal["off", "shadow", "auto"] = "shadow"
+    # Stable work-id canary for auto apply (0 = never apply, stay shadow even if mode=auto).
+    editor_repair_auto_percent: int = Field(default=0, ge=0, le=100)
     database_url: str = "postgresql+psycopg://regent:regent@localhost:5432/regent"
     log_level: str = "INFO"
     artifact_root: str = "/var/lib/regent/artifacts"
@@ -34,6 +42,9 @@ class Settings(BaseSettings):
     model_api_key: SecretStr | None = None
     # GLM / long codegen often exceeds 180s; 504s still retry via outbox backoff.
     model_timeout_seconds: float = Field(default=300.0, ge=30.0, le=1800.0)
+    # Stream idle: no SSE line for this many seconds → ModelOutputError (卡死可观测)。
+    # Default None → provider uses min(90, model_timeout_seconds).
+    model_stream_idle_seconds: float | None = Field(default=None, ge=15.0, le=1800.0)
     # M1-1: configurable chat completion output cap (None disables max_tokens).
     model_max_output_tokens: int | None = Field(default=8192, ge=256, le=128_000)
     model_input_cost_per_million: float = Field(default=0.0, ge=0.0)

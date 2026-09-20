@@ -12,40 +12,12 @@ from time import monotonic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from regent.application.budget_ledger import BudgetLedger
-from regent.application.event_engine import EventEngine
-from regent.application.execution_orchestrator import (
-    ExecutionOrchestrator,
-    get_p1_event_handlers,
-)
 from regent.application.human_task_service import HumanTaskService
 from regent.application.permit_service import PermitService
-from regent.application.run_advancement import reclaim_stale_created_runs
-from regent.application.runtime_profile_service import RuntimeProfileService
-from regent.application.scheduler_service import SchedulerService
+from regent.bootstrap.event_scope import claimable_event_types
+from regent.bootstrap.service_mode import ServiceMode, resolve_service_mode
 from regent.config import get_settings
-from regent.infrastructure.artifact_store import FileArtifactStore
-from regent.application.generator_factory import build_generator_selector
-from regent.infrastructure.code_generator import ArtifactUriResolver
 from regent.infrastructure.database import create_engine, create_session_factory
-from regent.infrastructure.delivery_review_capability import ensure_delivery_review_capability
-from regent.infrastructure.deployment import StaticPreviewDeploymentProvider
-from regent.infrastructure.runtime_preview import RuntimePreviewDeploymentProvider
-from regent.infrastructure.evidence_capability import ensure_allowlisted_http_capability
-from regent.infrastructure.evidence_sources import (
-    AllowlistedHttpEvidenceConnector,
-    CompositeEvidenceSourceConnector,
-    GoalIntentEvidenceConnector,
-)
-from regent.infrastructure.product_surface_capability import ensure_product_surface_capability
-from regent.infrastructure.environment_heal_capability import (
-    ensure_environment_heal_capability,
-)
-from regent.infrastructure.sandbox import (
-    DockerDependencyMaterializer,
-    DockerSandboxDriver,
-    LocalSandboxDriver,
-)
-from regent.infrastructure.workspace_writer import WorkspaceWriter
 from regent.model import ModelConfigurationError
 from regent.model import ModelProvider
 from regent.model.factory import build_model_provider
@@ -67,18 +39,20 @@ class Worker:
         timers: DurableTimerService | None = None,
         permits: PermitService | None = None,
         human_tasks: HumanTaskService | None = None,
-        scheduler: SchedulerService | None = None,
+        scheduler: object | None = None,
         scheduler_org_keys: list[str] | None = None,
         poll_seconds: float,
         heartbeat_seconds: float,
-        event_engine: EventEngine | None = None,
+        event_engine: object | None = None,
         novel_provider: ModelProvider | None = None,
+        service_mode: ServiceMode = ServiceMode.COMBINED,
     ) -> None:
         self.worker_id = worker_id
         self.dispatcher = dispatcher
         self.leases = leases
         self.sessions = sessions
-        if sessions is not None:
+        self.service_mode = service_mode
+        if sessions is not None and service_mode.includes_novel:
             from regent.novel.application.production import configure_session_factory
 
             configure_session_factory(sessions)
@@ -106,9 +80,8 @@ class Worker:
         self._behavior_monitor_enabled = True
         self._novel_recovery_interval = 30.0
         self._next_novel_recovery = 0.0
-        if sessions is not None:
+        if sessions is not None and service_mode.includes_legacy:
             from regent.application.reconciliation_worker import ReconciliationWorker
-            from regent.config import get_settings
 
             self._reconciliation = ReconciliationWorker(sessions)
             settings = get_settings()
@@ -123,44 +96,73 @@ class Worker:
             self._behavior_monitor_interval = float(
                 getattr(settings, "behavior_monitor_interval_seconds", 600.0)
             )
+        elif sessions is not None:
+            settings = get_settings()
+            # Novel-only: measure via /health; do not soft-pause legacy goals or prune previews.
+            self._host_guard_enabled = False
+            self._host_guard_interval = float(settings.host_guard_interval_seconds)
+            self._behavior_monitor_enabled = False
+            self._privacy_retention = None
+            self._reconciliation = None
 
     async def serve(self) -> None:
         lease = await self.leases.acquire(
             self.worker_id,
-            metadata={"hostname": socket.gethostname(), "pid": os.getpid()},
+            metadata={
+                "hostname": socket.gethostname(),
+                "pid": os.getpid(),
+                "service_mode": self.service_mode.value,
+            },
         )
         next_heartbeat = monotonic() + self.heartbeat_seconds
-        logger.info("worker lease acquired", extra={"worker_id": self.worker_id})
+        logger.info(
+            "worker lease acquired",
+            extra={"worker_id": self.worker_id, "service_mode": self.service_mode.value},
+        )
         if self.event_engine is not None:
-            await self.event_engine.start()
-        # 重启即恢复：先把崩溃进程留下的 RESERVED/UNKNOWN 调用收口，再开始推进
-        if self.sessions is not None:
+            await self.event_engine.start()  # type: ignore[union-attr]
+        if self.sessions is not None and self.service_mode.includes_novel:
             await self._novel_recovery_tick(startup=True)
         try:
             while not self._stopping.is_set():
-                if self.permits is not None:
-                    await self.permits.expire_due()
-                if self.human_tasks is not None:
-                    await self.human_tasks.timeout_due()
-                if self.timers is not None:
-                    await self.timers.dispatch_due(self.worker_id)
-                if self.sessions is not None:
-                    try:
-                        n = await reclaim_stale_created_runs(
-                            self.sessions,
-                            actor=f"worker:{self.worker_id}",
-                            limit=10,
-                        )
-                        if n:
-                            logger.info("advanced CREATED runs", extra={"count": n})
-                    except Exception:
-                        logger.exception("CREATED run reclaim failed")
-                if self.sessions is not None and monotonic() >= self._next_novel_recovery:
+                if self.service_mode.includes_legacy:
+                    if self.permits is not None:
+                        await self.permits.expire_due()
+                    if self.human_tasks is not None:
+                        await self.human_tasks.timeout_due()
+                    if self.timers is not None:
+                        await self.timers.dispatch_due(self.worker_id)
+                    if self.sessions is not None:
+                        try:
+                            from regent.application.run_advancement import (
+                                reclaim_stale_created_runs,
+                            )
+
+                            n = await reclaim_stale_created_runs(
+                                self.sessions,
+                                actor=f"worker:{self.worker_id}",
+                                limit=10,
+                            )
+                            if n:
+                                logger.info("advanced CREATED runs", extra={"count": n})
+                        except Exception:
+                            logger.exception("CREATED run reclaim failed")
+                if (
+                    self.sessions is not None
+                    and self.service_mode.includes_novel
+                    and monotonic() >= self._next_novel_recovery
+                ):
                     await self._novel_recovery_tick()
                     self._next_novel_recovery = monotonic() + self._novel_recovery_interval
-                if self.sessions is not None and self.novel_provider is not None:
+                if (
+                    self.sessions is not None
+                    and self.novel_provider is not None
+                    and self.service_mode.includes_novel
+                ):
                     try:
-                        from regent.novel.application.works import advance_background_run
+                        from regent.novel.application.works_runtime import (
+                            advance_background_run,
+                        )
 
                         async with self.sessions() as novel_session:
                             progressed = await advance_background_run(
@@ -170,9 +172,13 @@ class Worker:
                                 await novel_session.commit()
                     except Exception:
                         logger.exception("novel Agent loop tick failed")
-                if self.scheduler is not None:
+                if self.service_mode.includes_legacy and self.scheduler is not None:
                     await self._scheduler_tick()
-                if self._reconciliation is not None and monotonic() >= self._next_reconciliation:
+                if (
+                    self.service_mode.includes_legacy
+                    and self._reconciliation is not None
+                    and monotonic() >= self._next_reconciliation
+                ):
                     try:
                         reconciled = await self._reconciliation.tick()
                         if reconciled:
@@ -210,7 +216,8 @@ class Worker:
                             logger.exception("zombie reclaim tick failed")
                     self._next_reconciliation = monotonic() + self._reconciliation_interval
                 if (
-                    self._privacy_retention is not None
+                    self.service_mode.includes_legacy
+                    and self._privacy_retention is not None
                     and monotonic() >= self._next_privacy_retention
                 ):
                     try:
@@ -227,10 +234,13 @@ class Worker:
                     self._next_privacy_retention = (
                         monotonic() + self._privacy_retention_interval
                     )
-                if self._host_guard_enabled and monotonic() >= self._next_host_guard:
+                if (
+                    self._host_guard_enabled
+                    and self.service_mode.includes_legacy
+                    and monotonic() >= self._next_host_guard
+                ):
                     try:
                         from regent.application.host_guard import tick_host_resource_guard
-                        from regent.config import get_settings
 
                         hs = get_settings()
                         host_stats = await tick_host_resource_guard(
@@ -242,9 +252,9 @@ class Worker:
                             prune_keep_newest=hs.host_prune_preview_keep,
                             prune_disk_percent=hs.host_prune_disk_percent,
                             prune_mem_percent=hs.host_prune_mem_percent,
-                            reap_processes=hs.host_reap_preview_processes,
+                            reap_processes=bool(hs.host_reap_preview_processes),
                         )
-                        decision = (host_stats.get("decision") or {})
+                        decision = host_stats.get("decision") or {}
                         if decision.get("unhealthy") or (decision.get("pruned") or {}).get(
                             "removed_count"
                         ):
@@ -253,7 +263,8 @@ class Worker:
                         logger.exception("host resource guard tick failed")
                     self._next_host_guard = monotonic() + self._host_guard_interval
                 if (
-                    self._behavior_monitor_enabled
+                    self.service_mode.includes_legacy
+                    and self._behavior_monitor_enabled
                     and self.sessions is not None
                     and monotonic() >= self._next_behavior_monitor
                 ):
@@ -272,7 +283,6 @@ class Worker:
                                 extra=bm_stats,
                             )
                     except (ImportError, ModuleNotFoundError):
-                        # Module not available in this build; disable silently.
                         self._behavior_monitor_enabled = False
                     except Exception:
                         logger.exception("behavior monitor tick failed")
@@ -290,27 +300,21 @@ class Worker:
         finally:
             if self.event_engine is not None:
                 with suppress(Exception):
-                    await self.event_engine.stop()
+                    await self.event_engine.stop()  # type: ignore[union-attr]
             with suppress(Exception):
                 await self.leases.release(lease)
             logger.info("worker stopped", extra={"worker_id": self.worker_id})
 
     async def _novel_recovery_tick(self, *, startup: bool = False) -> None:
-        """回收过期调用并对账 UNKNOWN 调用（Tech-Spec §4.4 / P0-1）。
-
-        崩溃留下的 ``RESERVED`` 记录先判定为 ``UNKNOWN``（保留预留额、不猜结果），
-        再逐条对账：供应商可查则据实结算，查不到按对账次数有界终止。
-        失败只记录日志，不得让整个 worker 循环停摆。
-        """
+        """回收过期调用并对账 UNKNOWN 调用（Tech-Spec §4.4 / P0-1）。"""
         try:
             from regent.novel.application.production import recover_novel_calls
-            from regent.novel.application.works import sweep_expired_decisions
+            from regent.novel.application.decisions import sweep_expired_decisions
 
             async with self.sessions() as session:  # type: ignore[misc]
                 stats = await recover_novel_calls(
                     session, provider=self.novel_provider
                 )
-                # 到期未选的裁决按默认项落定，与用户提交竞争（G-13）
                 expired = await sweep_expired_decisions(session)
                 await session.commit()
         except Exception:
@@ -331,10 +335,10 @@ class Worker:
         assert self.scheduler is not None
         org_keys = self.scheduler_org_keys
         if not org_keys:
-            org_keys = await self.scheduler.list_active_org_keys()
+            org_keys = await self.scheduler.list_active_org_keys()  # type: ignore[union-attr]
         for org_key in org_keys:
             try:
-                result = await self.scheduler.tick(
+                result = await self.scheduler.tick(  # type: ignore[union-attr]
                     org_key=org_key, actor=f"worker:{self.worker_id}"
                 )
                 if result.get("selected"):
@@ -355,6 +359,7 @@ async def log_state_change(payload: dict[str, object]) -> None:
 
 def create_worker() -> tuple[Worker, object]:
     settings = get_settings()
+    mode = resolve_service_mode(settings)
     engine = create_engine(settings)
     sessions = create_session_factory(engine)
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -362,130 +367,158 @@ def create_worker() -> tuple[Worker, object]:
         sessions,
         lease_seconds=max(settings.worker_lease_seconds, 900),
     )
-    timers = DurableTimerService(sessions, lease_seconds=settings.worker_lease_seconds)
-    permits = PermitService(sessions)
-    human_tasks = HumanTaskService(sessions)
 
-    async def validate_permit(permit_id: str, action: str) -> None:
-        claimed = await permits.claim(uuid.UUID(permit_id), actor_id="regent-worker")
-        if claimed.binding.action != action:
-            raise ValueError("permit action mismatch")
-        await permits.consume(claimed.id, nonce=claimed.nonce)
-
-    # Build optional P1 main chain dependencies
     model_provider = None
     try:
         model_provider = build_model_provider(settings)
     except ModelConfigurationError:
-        logger.warning("model provider not configured; P1 discovery/requirement disabled")
+        logger.warning("model provider not configured; generation disabled")
 
-    artifact_root = Path(settings.artifact_root)
-    artifacts = FileArtifactStore(artifact_root)
-    evidence_proxy = settings.evidence_egress_proxy or settings.dependency_egress_proxy
-    allowed_domains = [
-        item.strip() for item in settings.evidence_allowed_domains.split(",") if item.strip()
-    ]
-    evidence_connector = CompositeEvidenceSourceConnector(
-        [
-            GoalIntentEvidenceConnector(artifacts),
-            AllowlistedHttpEvidenceConnector(
-                artifacts,
-                allowed_domains=allowed_domains,
-                egress_proxy=evidence_proxy,
-                max_bytes=settings.evidence_max_bytes,
-            ),
-        ]
-    )
-    preview_root = Path(settings.workspace_root) / "previews"
-    public_base = (settings.public_base_url or "http://regent-api:8000").rstrip("/")
-    static_preview = StaticPreviewDeploymentProvider(
-        preview_root=preview_root,
-        base_url=public_base,
-    )
-    deployment_provider = RuntimePreviewDeploymentProvider(
-        preview_root=preview_root,
-        static_provider=static_preview,
-        base_url=public_base,
-    )
+    claim_types = claimable_event_types(mode)
+    event_engine = None
+    timers = None
+    permits = None
+    human_tasks = None
+    scheduler = None
+    scheduler_org_keys: list[str] = []
+    handlers: dict[str, object] = {}
 
-    generator = None
-    workspace_writer = None
-    if model_provider is not None:
-        # GQ-1/GQ-3: build a per-goal GeneratorSelector (fail-closed on mismatch).
-        # A single injected generator would cap canary at the startup default.
-        generator = build_generator_selector(
-            settings,
-            model_provider,
-            artifacts,
-            sessions=sessions,
-            enforce_consistency=True,
+    if mode.includes_legacy:
+        from regent.application.event_engine import EventEngine
+        from regent.application.execution_orchestrator import (
+            ExecutionOrchestrator,
+            get_p1_event_handlers,
         )
-        resolver = ArtifactUriResolver(artifact_root)
-        workspace_writer = WorkspaceWriter(Path(settings.workspace_root), resolver)
+        from regent.application.generator_factory import build_generator_selector
+        from regent.application.scheduler_service import SchedulerService
+        from regent.infrastructure.artifact_store import FileArtifactStore
+        from regent.infrastructure.code_generator import ArtifactUriResolver
+        from regent.infrastructure.deployment import StaticPreviewDeploymentProvider
+        from regent.infrastructure.evidence_sources import (
+            AllowlistedHttpEvidenceConnector,
+            CompositeEvidenceSourceConnector,
+            GoalIntentEvidenceConnector,
+        )
+        from regent.infrastructure.runtime_preview import RuntimePreviewDeploymentProvider
+        from regent.infrastructure.sandbox import (
+            DockerDependencyMaterializer,
+            DockerSandboxDriver,
+            LocalSandboxDriver,
+            parse_host_path_map,
+            resolve_agent_sandbox_user,
+        )
+        from regent.infrastructure.workspace_writer import WorkspaceWriter
 
-    from regent.infrastructure.sandbox import (
-        parse_host_path_map,
-        resolve_agent_sandbox_user,
-    )
+        timers = DurableTimerService(sessions, lease_seconds=settings.worker_lease_seconds)
+        permits = PermitService(sessions)
+        human_tasks = HumanTaskService(sessions)
 
-    path_map = parse_host_path_map(getattr(settings, "host_path_map", None))
-    sandbox_user = resolve_agent_sandbox_user(settings)
-    if settings.sandbox_mode == "local":
-        sandbox = LocalSandboxDriver(root=Path(settings.build_root) / "sandbox")
-    else:
-        sandbox = DockerSandboxDriver(
-            root=Path(settings.build_root) / "sandbox",
-            image=settings.sandbox_image,
+        async def validate_permit(permit_id: str, action: str) -> None:
+            claimed = await permits.claim(uuid.UUID(permit_id), actor_id="regent-worker")
+            if claimed.binding.action != action:
+                raise ValueError("permit action mismatch")
+            await permits.consume(claimed.id, nonce=claimed.nonce)
+
+        artifact_root = Path(settings.artifact_root)
+        artifacts = FileArtifactStore(artifact_root)
+        evidence_proxy = settings.evidence_egress_proxy or settings.dependency_egress_proxy
+        allowed_domains = [
+            item.strip()
+            for item in settings.evidence_allowed_domains.split(",")
+            if item.strip()
+        ]
+        evidence_connector = CompositeEvidenceSourceConnector(
+            [
+                GoalIntentEvidenceConnector(artifacts),
+                AllowlistedHttpEvidenceConnector(
+                    artifacts,
+                    allowed_domains=allowed_domains,
+                    egress_proxy=evidence_proxy,
+                    max_bytes=settings.evidence_max_bytes,
+                ),
+            ]
+        )
+        preview_root = Path(settings.workspace_root) / "previews"
+        public_base = (settings.public_base_url or "http://regent-api:8000").rstrip("/")
+        static_preview = StaticPreviewDeploymentProvider(
+            preview_root=preview_root,
+            base_url=public_base,
+        )
+        deployment_provider = RuntimePreviewDeploymentProvider(
+            preview_root=preview_root,
+            static_provider=static_preview,
+            base_url=public_base,
+        )
+
+        generator = None
+        workspace_writer = None
+        if model_provider is not None:
+            generator = build_generator_selector(
+                settings,
+                model_provider,
+                artifacts,
+                sessions=sessions,
+                enforce_consistency=True,
+            )
+            resolver = ArtifactUriResolver(artifact_root)
+            workspace_writer = WorkspaceWriter(Path(settings.workspace_root), resolver)
+
+        path_map = parse_host_path_map(getattr(settings, "host_path_map", None))
+        sandbox_user = resolve_agent_sandbox_user(settings)
+        if settings.sandbox_mode == "local":
+            sandbox = LocalSandboxDriver(root=Path(settings.build_root) / "sandbox")
+        else:
+            sandbox = DockerSandboxDriver(
+                root=Path(settings.build_root) / "sandbox",
+                image=settings.sandbox_image,
+                host_path_map=path_map,
+                run_as_user=sandbox_user,
+                require_host_path_map_in_container=True,
+            )
+        materializer = DockerDependencyMaterializer(
+            root=Path(settings.build_root) / "deps",
+            image=settings.dependency_resolver_image,
+            egress_proxy=settings.dependency_egress_proxy,
+            permit_validator=validate_permit,
             host_path_map=path_map,
             run_as_user=sandbox_user,
-            require_host_path_map_in_container=True,
         )
-    materializer = DockerDependencyMaterializer(
-        root=Path(settings.build_root) / "deps",
-        image=settings.dependency_resolver_image,
-        egress_proxy=settings.dependency_egress_proxy,
-        permit_validator=validate_permit,
-        host_path_map=path_map,
-        run_as_user=sandbox_user,
-    )
 
-    orchestrator = ExecutionOrchestrator(
-        sessions,
-        evidence_connector=evidence_connector,
-        model_provider=model_provider,
-        generator=generator,
-        workspace_writer=workspace_writer,
-        sandbox=sandbox,
-        materializer=materializer,
-        deployment_provider=deployment_provider,
-        permits=permits,
-        budget_ledger=BudgetLedger(sessions),
-    )
-    p1_handlers = get_p1_event_handlers(orchestrator)
-
-    dispatcher = OutboxDispatcher(
-        sessions,
-        handlers={
+        orchestrator = ExecutionOrchestrator(
+            sessions,
+            evidence_connector=evidence_connector,
+            model_provider=model_provider,
+            generator=generator,
+            workspace_writer=workspace_writer,
+            sandbox=sandbox,
+            materializer=materializer,
+            deployment_provider=deployment_provider,
+            permits=permits,
+            budget_ledger=BudgetLedger(sessions),
+        )
+        p1_handlers = get_p1_event_handlers(orchestrator)
+        handlers = {
             "GoalStateChanged": log_state_change,
             "GoalSpecFrozen": log_state_change,
             **p1_handlers,
             "WorkStateChanged": log_state_change,
             "RunStateChanged": log_state_change,
-            # Observability-only: delivery state is already on goal.metadata.
             "DeliveryStateChanged": log_state_change,
-            # TimerFired handled by orchestrator (GAC-C2) via p1_handlers override.
-        },
-        # Generation/discovery LLM calls routinely exceed short leases; avoid mid-handler reclaim.
+        }
+        scheduler = SchedulerService(sessions) if settings.scheduler_enabled else None
+        scheduler_org_keys = [
+            item.strip() for item in settings.scheduler_org_keys.split(",") if item.strip()
+        ]
+        event_engine = EventEngine(sessions)
+        event_engine.register_handlers(p1_handlers)
+
+    dispatcher = OutboxDispatcher(
+        sessions,
+        handlers=handlers,  # type: ignore[arg-type]
         lease_seconds=max(settings.worker_lease_seconds, 900),
         dispatch_concurrency=settings.worker_dispatch_concurrency,
+        event_types=claim_types,
     )
-    scheduler = SchedulerService(sessions) if settings.scheduler_enabled else None
-    scheduler_org_keys = [
-        item.strip() for item in settings.scheduler_org_keys.split(",") if item.strip()
-    ]
-    # Phase 3.3: EventEngine wraps OutboxDispatcher for unified event routing
-    event_engine = EventEngine(sessions)
-    event_engine.register_handlers(p1_handlers)
     worker = Worker(
         worker_id=worker_id,
         dispatcher=dispatcher,
@@ -499,39 +532,54 @@ def create_worker() -> tuple[Worker, object]:
         poll_seconds=settings.worker_poll_seconds,
         heartbeat_seconds=max(1.0, settings.worker_lease_seconds / 3),
         event_engine=event_engine,
-        novel_provider=model_provider,
+        novel_provider=model_provider if mode.includes_novel else None,
+        service_mode=mode,
     )
     return worker, engine
 
 
 async def run_async() -> None:
+    from regent.application.runtime_profile_service import RuntimeProfileService
+    from regent.infrastructure.delivery_review_capability import (
+        ensure_delivery_review_capability,
+    )
+    from regent.infrastructure.environment_heal_capability import (
+        ensure_environment_heal_capability,
+    )
+    from regent.infrastructure.evidence_capability import ensure_allowlisted_http_capability
+    from regent.infrastructure.product_surface_capability import (
+        ensure_product_surface_capability,
+    )
+
     worker, engine = create_worker()
     sessions = create_session_factory(engine)
-    try:
-        await ensure_allowlisted_http_capability(sessions)
-        logger.info("seeded allowlisted-http-source-v1 capability")
-    except Exception:
-        logger.exception("failed to seed allowlisted-http-source-v1 capability")
-    try:
-        await ensure_delivery_review_capability(sessions)
-        logger.info("seeded delivery-review-v1 capability")
-    except Exception:
-        logger.exception("failed to seed delivery-review-v1 capability")
-    try:
-        await ensure_product_surface_capability(sessions)
-        logger.info("seeded product-surface-v1 capability")
-    except Exception:
-        logger.exception("failed to seed product-surface-v1 capability")
+    mode = worker.service_mode
+    if mode.includes_legacy:
+        try:
+            await ensure_allowlisted_http_capability(sessions)
+            logger.info("seeded allowlisted-http-source-v1 capability")
+        except Exception:
+            logger.exception("failed to seed allowlisted-http-source-v1 capability")
+        try:
+            await ensure_delivery_review_capability(sessions)
+            logger.info("seeded delivery-review-v1 capability")
+        except Exception:
+            logger.exception("failed to seed delivery-review-v1 capability")
+        try:
+            await ensure_product_surface_capability(sessions)
+            logger.info("seeded product-surface-v1 capability")
+        except Exception:
+            logger.exception("failed to seed product-surface-v1 capability")
+        try:
+            n = await RuntimeProfileService(sessions).seed_bootstrap()
+            logger.info("seeded runtime profiles", extra={"count": n})
+        except Exception:
+            logger.exception("failed to seed runtime profiles")
     try:
         await ensure_environment_heal_capability(sessions)
         logger.info("seeded environment-heal-v1 capability")
     except Exception:
         logger.exception("failed to seed environment-heal-v1 capability")
-    try:
-        n = await RuntimeProfileService(sessions).seed_bootstrap()
-        logger.info("seeded runtime profiles", extra={"count": n})
-    except Exception:
-        logger.exception("failed to seed runtime profiles")
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):

@@ -169,3 +169,16 @@ deploy/novel/r[0-9]*.txt
 deploy/novel/rfinal.txt
 deploy/novel/regression-*.txt
 /_full_unit.txt
+
+# M2/M4 旅程与整树部署的运行产物：保留结论（报告、终态截图），不提交逐帧churn
+deploy/novel/_sync_tree.tar.gz
+deploy/novel/_sync_manifest.json
+deploy/novel/_m2js.json
+deploy/novel/_ab.js
+deploy/novel/artifacts/*.log
+deploy/novel/artifacts/j1*_run.txt
+deploy/novel/artifacts/m2_*_s[0-9][0-9].png
+deploy/novel/artifacts/m2_j1_step*.png
+
+# Disposable novel deploy probes (keep durable helpers like _ssh.py)
+deploy/novel/_tmp*

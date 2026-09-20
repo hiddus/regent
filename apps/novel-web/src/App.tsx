@@ -11,9 +11,61 @@ function uuid(): string {
 }
 
 type Direction = {card_id:string;title:string;protagonist_desire:string;core_conflict:string;genre_promise:string;pacing:string;differentiator:string}
-type Onboarding = {status:string;questions:{question_id:string;prompt:string;options:string[];default_assumption:string}[];directions:Direction[];assumptions:string[]}
+type WorldPersona = {name:string;identity?:string;kind?:string;bio:string;voice:string;drives?:string}
+type WorldConvention = {convention_id:string;lens_id:string;statement:string;check_hint?:string}
+type DramaticEngine = {
+  protagonist_want:string
+  opposing_force:string
+  conflict_price:string
+  escalation_logic:string
+}
+type ReaderContract = {
+  must_deliver:string[]
+  forbidden?:string[]
+  emotional_payoff:string
+}
+type ProseStyle = {
+  viewpoint:string
+  narrative_distance:string
+  tone:string
+  dialogue_density:string
+  avoid?:string[]
+}
+type WorldBible = {
+  world_premise:string
+  underlying_rules:string[]
+  background:string
+  power_system?:string
+  personas:WorldPersona[]
+  dramatic_engine?:DramaticEngine
+  reader_contract?:ReaderContract
+  prose_style?:ProseStyle
+  conventions?:WorldConvention[]
+  open_questions?:string[]
+}
+type Onboarding = {
+  status:string
+  questions:{question_id:string;prompt:string;options:string[];default_assumption:string}[]
+  directions:Direction[]
+  assumptions:string[]
+  world_bible?:WorldBible|null
+}
 type Work = {work_id:string;title:string;genre:string;state:string;latest_chapter_no:number;projection?:{stage_label:string}}
-type Progress = {chapter_no:number;state:string;current_step?:string;steps:Record<string,string>;auto_advance?:boolean;awaiting_input?:boolean;scene_no?:number;scene_count?:number;completed_scenes?:number}
+type Progress = {
+  chapter_no:number
+  state:string
+  current_step?:string
+  steps:Record<string,string>
+  auto_advance?:boolean
+  awaiting_input?:boolean
+  scene_no?:number
+  scene_count?:number
+  completed_scenes?:number
+  work_state?:string
+  budget_pause?:{kind?:string;message?:string;call_count?:number;committed_minor?:number;phase?:string;scene_index?:number}|null
+  public_stage?:string|null
+  available_actions?:string[]
+}
 type Chapter = {title:string;content:string;word_count:number;ai_disclosure:string}
 type ChapterSummary = {chapter_no:number;title:string;word_count:number;state:string;attempt:number;version_count:number}
 type ChapterVersion = {attempt:number;title:string;word_count:number;state:string;created_at:string|null}
@@ -40,6 +92,8 @@ const STEP_LABELS: Record<string,string> = {
 const STEP_ORDER = ['ASSEMBLE','PERFORM','DIRECT','WEAVE','REVIEW','CANON']
 const DIRECTOR_STEP_ORDER = ['ASSEMBLE','DIRECT','PRODUCE','REVIEW','CANON']
 const TERMINAL = new Set(['CANONIZED','TERMINAL_FAILED','CANCELLED'])
+// 预算暂停不是终态：继续轮询/展示续作入口，但不假装「仍在生成」。
+const BUDGET_PAUSED = new Set(['PAUSED_QUOTA','PAUSED_COST'])
 // FR-15 / FR-23：AI 显著标识。后端返回完整披露文案，缺失时用最短标识兜底。
 const AI_FALLBACK = '本篇内容由 AI 参与生成'
 
@@ -47,12 +101,21 @@ export default function App() {
   const [works, setWorks] = useState<Work[]>([])
   const [workId, setWorkId] = useState('')
   const [intent, setIntent] = useState('')
+  const [directionCatalog, setDirectionCatalog] = useState<{options:string[];default_selection:string[]} | null>(null)
+  const [selectedDirectionKw, setSelectedDirectionKw] = useState<string[]>([])
+  const [customKwInput, setCustomKwInput] = useState('')
+  const [customDirectionKw, setCustomDirectionKw] = useState<string[]>([])
   const [onboarding, setOnboarding] = useState<Onboarding | null>(null)
   const [answers, setAnswers] = useState<Record<string,string>>({})
   const [progress, setProgress] = useState<Progress | null>(null)
   const [chapter, setChapter] = useState<Chapter | null>(null)
   const [busy, setBusy] = useState(false)
   const [choosingDirection, setChoosingDirection] = useState(false)
+  const [directionFeedback, setDirectionFeedback] = useState('')
+  const [revisingDirections, setRevisingDirections] = useState(false)
+  const [worldNotes, setWorldNotes] = useState('')
+  const [revisingWorld, setRevisingWorld] = useState(false)
+  const [lockingWorld, setLockingWorld] = useState(false)
   const [error, setError] = useState('')
   const [streaming, setStreaming] = useState(false)
   const sseActive = useRef(false)
@@ -75,10 +138,15 @@ export default function App() {
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [typingText, setTypingText] = useState('')
   const typingRef = useRef<number | null>(null)
+  // 「就写这个方向」只允许提交一次：连点会在锁定方向后重复 POST，
+  // 第二次必然被后端拒绝，用户在最关键的一步看到报错（M2）。
+  const choosingRef = useRef(false)
+  const lockingRef = useRef(false)
   // 人在回路检查点状态
   const [awaitingInput, setAwaitingInput] = useState(false)
   const [guidanceText, setGuidanceText] = useState('')
   const [autoAdvance, setAutoAdvance] = useState(false)
+  const [continuationEnabled, setContinuationEnabled] = useState(false)
   const [checkpointStep, setCheckpointStep] = useState<string>('')
   const [allChapters, setAllChapters] = useState<ChapterSummary[]>([])
   const [characters, setCharacters] = useState<Character[]>([])
@@ -149,7 +217,28 @@ export default function App() {
       return
     }
     void api('/me').catch(() => {})
+    void api<{options:string[];default_selection:string[]}>('/direction-keywords')
+      .then(cat => {
+        setDirectionCatalog(cat)
+        setSelectedDirectionKw(cat.default_selection)
+      })
+      .catch(() => {})
   }, [])
+
+  function toggleDirectionKw(label: string) {
+    setSelectedDirectionKw(prev =>
+      prev.includes(label) ? prev.filter(x => x !== label) : [...prev, label],
+    )
+  }
+  function addCustomDirectionKw() {
+    const t = customKwInput.trim()
+    if (!t) return
+    setCustomDirectionKw(prev => (prev.includes(t) ? prev : [...prev, t]))
+    setCustomKwInput('')
+  }
+  function removeCustomDirectionKw(label: string) {
+    setCustomDirectionKw(prev => prev.filter(x => x !== label))
+  }
 
   // --- Load volumes + metadata when work is selected ---
   useEffect(() => {
@@ -171,6 +260,7 @@ export default function App() {
       const wid = decodeURIComponent(m[1])
       setWorkId(wid); setTab('work')
       void loadWorks().then(() => void loadProgress(wid))
+      void restoreOnboarding(wid)
     } else {
       setTab('shelf')
       void loadWorks()
@@ -359,6 +449,16 @@ export default function App() {
         setChapter(null); setViewChapterNo(0)
       }
     } catch { /* no run yet */ }
+  }
+
+  /** 刷新恢复：作品仍在引导中时，回到澄清/方向卡，而不是卡在「实时生成中」假象（M2） */
+  async function restoreOnboarding(wid: string) {
+    try {
+      const ob = await api<Onboarding>(`/works/${wid}/onboarding`)
+      if (ob && (ob.questions?.length || ob.directions?.length || ob.world_bible)) {
+        setOnboarding(ob); setProgress(null); setChapter(null); setViewChapterNo(0)
+      }
+    } catch { /* 已完成引导：无需恢复 */ }
   }
 
   async function loadVolumes() {
@@ -648,9 +748,65 @@ export default function App() {
     if (!workId) return
     setBusy(true); setError('')
     try {
-      await api(`/works/${workId}/${paused ? 'resume' : 'pause'}`, {method:'POST'})
-      setPaused(!paused)
+      if (paused) {
+        const out = await api<{
+          state?: string
+          blocker_code?: string
+          detail?: string
+          recommended_actions?: string[]
+        }>(`/works/${workId}/resume`, {method:'POST'})
+        if (out?.blocker_code) {
+          const actions = (out.recommended_actions || []).join('、')
+          setError(
+            out.detail ||
+              `无法恢复：${out.blocker_code}` + (actions ? `（可尝试：${actions}）` : ''),
+          )
+          setPaused(true)
+          await loadProgress(workId).catch(() => undefined)
+          return
+        }
+        setPaused(false)
+      } else {
+        await api(`/works/${workId}/pause`, {method:'POST'})
+        setPaused(true)
+      }
     } catch(e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+
+  async function setContinuation(enabled: boolean, targetChapterNo?: number) {
+    if (!workId) return
+    setBusy(true); setError('')
+    try {
+      await api(`/works/${workId}/continuation`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled,
+          target_chapter_no: targetChapterNo ?? null,
+          volume_scope: 'current',
+        }),
+      })
+      setContinuationEnabled(enabled)
+    } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+
+  // BQ-1：额度/成本暂停后的显式授权续作（与手动 pause 区分）
+  async function authorizeBudgetContinue() {
+    if (!workId || !progress) return
+    const kind = progress.budget_pause?.kind || (progress.work_state === 'PAUSED_COST' ? 'cost' : 'calls')
+    setBusy(true); setError('')
+    try {
+      await api(`/works/${workId}/budget/authorize`, {
+        method: 'POST',
+        body: JSON.stringify({
+          grant_calls: kind === 'calls' ? 40 : 0,
+          grant_cost_minor: kind === 'cost' ? 10_000 : 0,
+          client_nonce: uuid(),
+        }),
+      })
+      setPaused(false)
+      await loadProgress(workId)
+      await loadWorks()
+    } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
 
   // --- Actions ---
@@ -663,7 +819,13 @@ export default function App() {
     setBusy(true); setError('')
     try {
       const r = await api<{work_id:string;onboarding:Onboarding}>('/works', {
-        method:'POST', body: JSON.stringify({raw_intent: intent, client_nonce: uuid()})
+        method:'POST',
+        body: JSON.stringify({
+          raw_intent: intent,
+          direction_keywords: selectedDirectionKw,
+          direction_custom_keywords: customDirectionKw,
+          client_nonce: uuid(),
+        }),
       })
       setWorkId(r.work_id); pushUrl(r.work_id)
       setOnboarding(r.onboarding); setProgress(null); setChapter(null); setViewChapterNo(0)
@@ -681,10 +843,79 @@ export default function App() {
   }
 
   async function choose(cardId: string) {
+    if (choosingRef.current) return          // 连点/双击：这一步只提交一次
+    choosingRef.current = true
     setChoosingDirection(true); setBusy(true); setError('')
     try {
-      await api(`/works/${workId}/directions`, {
+      const out = await api<{onboarding:Onboarding}>(`/works/${workId}/directions`, {
         method:'POST', body: JSON.stringify({card_id: cardId, client_nonce: uuid()})
+      })
+      setOnboarding(out.onboarding)
+      setChoosingDirection(false)
+      await loadWorks()
+    } catch(e) { setError((e as Error).message); setChoosingDirection(false) }
+      finally { setBusy(false); choosingRef.current = false }
+  }
+
+  async function reviseDirections() {
+    const feedback = directionFeedback.trim()
+    if (!feedback || !workId || revisingDirections) return
+    setRevisingDirections(true); setBusy(true); setError('')
+    try {
+      const next = await api<Onboarding>(`/works/${workId}/directions/revise`, {
+        method:'POST',
+        body: JSON.stringify({feedback, client_nonce: uuid()}),
+      })
+      setOnboarding(next)
+      setDirectionFeedback('')
+    } catch(e) { setError((e as Error).message) }
+    finally { setRevisingDirections(false); setBusy(false) }
+  }
+
+  async function chooseCustomDirection() {
+    const feedback = directionFeedback.trim()
+    if (!feedback || !workId || choosingRef.current) return
+    choosingRef.current = true
+    setChoosingDirection(true); setBusy(true); setError('')
+    try {
+      const out = await api<{onboarding:Onboarding}>(`/works/${workId}/directions`, {
+        method:'POST',
+        body: JSON.stringify({
+          card_id: 'card-custom',
+          custom_direction: feedback,
+          client_nonce: uuid(),
+        }),
+      })
+      setOnboarding(out.onboarding)
+      setDirectionFeedback('')
+      setChoosingDirection(false)
+      await loadWorks()
+    } catch(e) { setError((e as Error).message); setChoosingDirection(false) }
+    finally { setBusy(false); choosingRef.current = false }
+  }
+
+  async function reviseWorldBible() {
+    const notes = worldNotes.trim()
+    if (!notes || !workId || revisingWorld) return
+    setRevisingWorld(true); setBusy(true); setError('')
+    try {
+      const next = await api<Onboarding>(`/works/${workId}/world-bible/revise`, {
+        method:'POST',
+        body: JSON.stringify({notes, client_nonce: uuid()}),
+      })
+      setOnboarding(next)
+      setWorldNotes('')
+    } catch(e) { setError((e as Error).message) }
+    finally { setRevisingWorld(false); setBusy(false) }
+  }
+
+  async function lockWorldBible() {
+    if (!workId || lockingWorld || lockingRef.current) return
+    lockingRef.current = true
+    setLockingWorld(true); setBusy(true); setError('')
+    try {
+      await api(`/works/${workId}/world-bible/lock`, {
+        method:'POST', body: JSON.stringify({client_nonce: uuid()}),
       })
       const run = await api<Progress>(`/works/${workId}/runs`, {
         method:'POST', headers:{'Idempotency-Key': uuid()},
@@ -692,9 +923,9 @@ export default function App() {
       setProgress(run); setOnboarding(null); setChapter(null); setMessages([]); setTypingText('')
       setViewChapterNo(0); setTab('work'); setImmersive(false)
       if (typingRef.current) { clearInterval(typingRef.current); typingRef.current = null }
-      setChoosingDirection(false)
       await loadWorks()
-    } catch(e) { setError((e as Error).message); setChoosingDirection(false) } finally { setBusy(false) }
+    } catch(e) { setError((e as Error).message) }
+    finally { setBusy(false); setLockingWorld(false); lockingRef.current = false }
   }
 
   async function openWork(id: string) {
@@ -702,6 +933,10 @@ export default function App() {
     setOnboarding(null); setChapter(null); setError(''); setProgress(null); setQualityReport(null); setFeedbackSent(false)
     setViewChapterNo(0); setTab('work'); setImmersive(false); setSheet(null)
     await loadProgress(id)
+    try {
+      const pol = await api<{enabled?: boolean}>(`/works/${id}/continuation`)
+      setContinuationEnabled(!!pol.enabled)
+    } catch { setContinuationEnabled(false) }
   }
 
   async function nextChapter() {
@@ -772,6 +1007,22 @@ export default function App() {
   async function handleComposerSend(text: string) {
     const trimmed = text.trim()
     if (!trimmed || composerBusy) return
+    // 方向卡选择页：底部输入直接按意见重出卡（以前误打 facts/report，会卡死）
+    if (onboarding && !onboarding.questions.length) {
+      setDirectionFeedback(trimmed)
+      setComposerText('')
+      setComposerBusy(true)
+      try {
+        const next = await api<Onboarding>(`/works/${workId}/directions/revise`, {
+          method:'POST',
+          body: JSON.stringify({feedback: trimmed, client_nonce: uuid()}),
+        })
+        setOnboarding(next)
+        setDirectionFeedback('')
+      } catch(e) { setError((e as Error).message) }
+      finally { setComposerBusy(false) }
+      return
+    }
     setComposerBusy(true)
     try {
       if (trimmed === '续写下一章' || trimmed.startsWith('续写')) {
@@ -830,6 +1081,33 @@ export default function App() {
           <textarea value={intent} onChange={e => setIntent(e.target.value)}
             placeholder="例如：一个能听见旧物记忆的修表匠，发现父亲失踪前修过的最后一块表正在倒着走……"
             aria-label="故事目标" />
+          <div className="direction-kw-block">
+            <p className="eyebrow">方向标签</p>
+            <p className="muted small">从默认关键词里勾选，也可自填；不选则只按上面一句话发挥。</p>
+            <div className="chips" role="group" aria-label="方向标签">
+              {(directionCatalog?.options ?? []).map(o => (
+                <button key={o} type="button"
+                  className={selectedDirectionKw.includes(o) ? 'selected' : ''}
+                  aria-pressed={selectedDirectionKw.includes(o)}
+                  onClick={() => toggleDirectionKw(o)}>{o}</button>
+              ))}
+            </div>
+            <div className="row direction-kw-custom">
+              <input value={customKwInput} onChange={e => setCustomKwInput(e.target.value)}
+                placeholder="自填标签，回车添加"
+                aria-label="自填方向标签"
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomDirectionKw() } }} />
+              <button type="button" className="ghost" disabled={!customKwInput.trim()} onClick={addCustomDirectionKw}>添加</button>
+            </div>
+            {customDirectionKw.length > 0 && (
+              <div className="chips" aria-label="已添加的自定义标签">
+                {customDirectionKw.map(c => (
+                  <button key={c} type="button" className="selected"
+                    onClick={() => removeCustomDirectionKw(c)} title="点击移除">{c} ×</button>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="row">
             <span className="hint">{intent.trim() ? `${intent.trim().length} 字` : '一句话即可开始'}</span>
             <button className="go" disabled={busy || !intent.trim()} onClick={create}>{busy ? '正在理解…' : '开始构思'}</button>
@@ -873,11 +1151,11 @@ export default function App() {
       </div> : null}
 
       {/* 引导：方向卡横向轮播 */}
-      {!onShelf && onboarding && !onboarding.questions.length && <div className="msg-block direction-block">
+      {!onShelf && onboarding && !onboarding.questions.length && onboarding.status !== 'WORLD_REVIEW' && !onboarding.world_bible && <div className="msg-block direction-block">
         {choosingDirection && <div className="overlay-spinner">
           <div className="spinner" />
-          <p>正在生成故事大纲…</p>
-          <small>模型正在为你的故事设计定制化大纲，约需 1-2 分钟</small>
+          <p>正在生成故事大纲与世界设定…</p>
+          <small>编剧正在搭建可开写的世界，约需 1-3 分钟</small>
         </div>}
         <p className="eyebrow">选择你最想追下去的方向</p>
         <h2>三种不同的故事承诺</h2>
@@ -895,6 +1173,127 @@ export default function App() {
           ))}
         </div>
         <p className="carousel-hint">左右滑动查看更多方向</p>
+        <div className="direction-revise">
+          <p className="eyebrow">都不合适？</p>
+          <p className="muted small">写明你想要的故事承诺，可重出三张卡，或直接按意见开写。</p>
+          <textarea
+            value={directionFeedback}
+            onChange={e => setDirectionFeedback(e.target.value)}
+            rows={3}
+            placeholder="例如：不要恋综修罗场，改成幕后制作人重生；金手指要明确是记忆文抄，不要系统面板…"
+            disabled={busy}
+            aria-label="方向修订意见"
+          />
+          <div className="row direction-revise-actions">
+            <button type="button" className="ghost" disabled={busy || !directionFeedback.trim()}
+              onClick={reviseDirections}>
+              {revisingDirections ? '正在重出方向…' : '按意见重出方向卡'}
+            </button>
+            <button type="button" className="primary" disabled={busy || !directionFeedback.trim()}
+              onClick={chooseCustomDirection}>
+              不选卡，按这段意见开写
+            </button>
+          </div>
+        </div>
+      </div>}
+
+      {/* 引导：故事世界审锁 */}
+      {!onShelf && onboarding && (onboarding.status === 'WORLD_REVIEW' || onboarding.world_bible) && onboarding.world_bible && <div className="msg-block world-bible-block">
+        {(revisingWorld || lockingWorld) && <div className="overlay-spinner">
+          <div className="spinner" />
+          <p>{lockingWorld ? '正在锁定世界并开工…' : '编剧正在按你的意见重写世界…'}</p>
+        </div>}
+        <p className="eyebrow">开写前确认</p>
+        <h2>故事世界与创作规范</h2>
+        <p className="muted small">含世界、人物、核心矛盾、读者承诺与行文风格。确认后才会开始写第一章。</p>
+        <section className="world-section">
+          <h3>世界前提</h3>
+          <p>{onboarding.world_bible.world_premise}</p>
+        </section>
+        <section className="world-section">
+          <h3>底层规则</h3>
+          <ul>{(onboarding.world_bible.underlying_rules || []).map((r, i) => <li key={i}>{r}</li>)}</ul>
+        </section>
+        <section className="world-section">
+          <h3>背景</h3>
+          <p>{onboarding.world_bible.background}</p>
+        </section>
+        {!!onboarding.world_bible.power_system && <section className="world-section">
+          <h3>外挂 / 能力机制</h3>
+          <p>{onboarding.world_bible.power_system}</p>
+        </section>}
+        {!!onboarding.world_bible.dramatic_engine && <section className="world-section">
+          <h3>核心矛盾</h3>
+          <dl className="world-dl">
+            <dt>主角要什么</dt><dd>{onboarding.world_bible.dramatic_engine.protagonist_want}</dd>
+            <dt>谁在挡</dt><dd>{onboarding.world_bible.dramatic_engine.opposing_force}</dd>
+            <dt>代价</dt><dd>{onboarding.world_bible.dramatic_engine.conflict_price}</dd>
+            <dt>如何升级</dt><dd>{onboarding.world_bible.dramatic_engine.escalation_logic}</dd>
+          </dl>
+        </section>}
+        {!!onboarding.world_bible.reader_contract && <section className="world-section">
+          <h3>读者承诺</h3>
+          <p className="muted small">须兑现</p>
+          <ul>{(onboarding.world_bible.reader_contract.must_deliver || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+          {!!(onboarding.world_bible.reader_contract.forbidden || []).length && <>
+            <p className="muted small">明确禁止</p>
+            <ul>{(onboarding.world_bible.reader_contract.forbidden || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+          </>}
+          <p>情绪回报：{onboarding.world_bible.reader_contract.emotional_payoff}</p>
+        </section>}
+        {!!onboarding.world_bible.prose_style && <section className="world-section">
+          <h3>行文风格</h3>
+          <dl className="world-dl">
+            <dt>视角</dt><dd>{onboarding.world_bible.prose_style.viewpoint}</dd>
+            <dt>叙述距离</dt><dd>{onboarding.world_bible.prose_style.narrative_distance}</dd>
+            <dt>语气</dt><dd>{onboarding.world_bible.prose_style.tone}</dd>
+            <dt>对白比重</dt><dd>{onboarding.world_bible.prose_style.dialogue_density}</dd>
+          </dl>
+          {!!(onboarding.world_bible.prose_style.avoid || []).length && <>
+            <p className="muted small">禁用</p>
+            <ul>{(onboarding.world_bible.prose_style.avoid || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+          </>}
+        </section>}
+        <section className="world-section">
+          <h3>主要人物</h3>
+          <div className="world-personas">
+            {(onboarding.world_bible.personas || []).map(p => (
+              <article key={p.name}>
+                <h4>{p.name}{p.kind ? <small> · {p.kind === 'traveler' ? '穿越者' : p.kind === 'host_body' ? '原身' : p.kind}</small> : null}</h4>
+                {p.identity && <p className="muted small">{p.identity}</p>}
+                <p>{p.bio}</p>
+                <p className="muted small">声纹：{p.voice}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+        {!!(onboarding.world_bible.conventions || []).length && <section className="world-section">
+          <h3>本作约定</h3>
+          <ul>{(onboarding.world_bible.conventions || []).map(c => (
+            <li key={c.convention_id}>{c.statement}</li>
+          ))}</ul>
+        </section>}
+        <div className="direction-revise">
+          <p className="eyebrow">要改设定？</p>
+          <textarea
+            value={worldNotes}
+            onChange={e => setWorldNotes(e.target.value)}
+            rows={3}
+            placeholder="例如：原身要更有过人之处；外挂绑定后先给一次针对录制危机的抽取…"
+            disabled={busy}
+            aria-label="世界设定修订意见"
+          />
+          <div className="row direction-revise-actions">
+            <button type="button" className="ghost" disabled={busy || !worldNotes.trim()}
+              onClick={reviseWorldBible}>
+              {revisingWorld ? '正在重写…' : '按意见重写世界'}
+            </button>
+            <button type="button" className="primary" disabled={busy}
+              onClick={lockWorldBible}>
+              {lockingWorld ? '正在确认…' : '确认世界，开始创作'}
+            </button>
+          </div>
+        </div>
       </div>}
 
       {/* 阅读态：正文 + 版本 + 质量卡 */}
@@ -949,22 +1348,43 @@ export default function App() {
       {!onShelf && !onboarding && !reading && <>
         {volumeNotice && <button className="notice-bar" onClick={() => openCatalog('volumes')}>{volumeNotice} · 点击查看</button>}
         <div className="stream-head">
-          <span className="eyebrow">{progress ? '正在创作' : '等待开工'}</span>
+          <span className="eyebrow">{
+            progress && BUDGET_PAUSED.has(progress.work_state || '')
+              ? (progress.public_stage === 'paused_cost' ? '成本达上限，已暂停' : '额度用完，已暂停')
+              : progress ? '正在创作' : '等待开工'
+          }</span>
           <b>第 {progress?.chapter_no || 1} 章 · {workTitle || '故事'}</b>
         </div>
         <div className="step-progress" aria-hidden="true">
           {(progress?.steps && 'PRODUCE' in progress.steps ? DIRECTOR_STEP_ORDER : STEP_ORDER).map(s => <i key={s} className={stepState(s)} />)}
         </div>
-        {!!progress?.scene_count && <p role="status" aria-live="polite">
+        {progress && BUDGET_PAUSED.has(progress.work_state || '') && <div className="checkpoint-card" role="status">
+          <div className="checkpoint-header">
+            <span className="checkpoint-icon">⏸</span>
+            <span>{progress.public_stage === 'paused_cost' ? '成本达到上限，已暂停' : '额度用完了，已暂停'}</span>
+          </div>
+          <p className="muted" style={{margin:'8px 0 12px'}}>
+            {progress.budget_pause?.message || '草稿与检查点已保留，授权后续作不会重计已用额度。'}
+            {typeof progress.completed_scenes === 'number' && progress.scene_count
+              ? ` 已完成 ${progress.completed_scenes}/${progress.scene_count} 场。`
+              : ''}
+          </p>
+          <div className="checkpoint-actions">
+            <button className="checkpoint-approve" disabled={busy} onClick={authorizeBudgetContinue}>
+              授权后续作
+            </button>
+          </div>
+        </div>}
+        {!!progress?.scene_count && !BUDGET_PAUSED.has(progress.work_state || '') && <p role="status" aria-live="polite">
           导演正在创作第 {progress.scene_no} 场 · 已完成 {progress.completed_scenes || 0}/{progress.scene_count} 场
         </p>}
         {!progress && <div className="empty-hint">
-          方向已确定，随时可以让 Agent 动工。
+          故事世界已确认，可以开始第一章。
           <button className="primary" style={{marginTop:14}} disabled={busy} onClick={nextChapter}>开始第一章</button>
         </div>}
 
         {/* Agent 步骤流 */}
-        {progress && <div className="stream">
+        {progress && !BUDGET_PAUSED.has(progress.work_state || '') && <div className="stream">
           {messages.length === 0 && <article className="message pending">
             <div className="avatar">境</div>
             <div className="body">
@@ -1029,6 +1449,15 @@ export default function App() {
         <label className="auto-toggle">
           <input type="checkbox" checked={autoAdvance} onChange={toggleAutoAdvance} disabled={busy} />
           <span>自动模式（跳过审查，直接继续）</span>
+        </label>
+        <label className="auto-toggle">
+          <input
+            type="checkbox"
+            checked={continuationEnabled}
+            onChange={() => void setContinuation(!continuationEnabled, (progress?.chapter_no || 0) + 3 || 3)}
+            disabled={busy}
+          />
+          <span>连续创作（关页后台自动开下一章，目标至多再写三章）</span>
         </label>
         {/* FR-06：暂停与恢复——暂停后 worker 释放，恢复从检查点继续，不重复调用 */}
         {progress && !TERMINAL.has(progress.state) && <div className="pause-row">

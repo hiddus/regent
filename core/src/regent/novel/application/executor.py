@@ -4,6 +4,11 @@
 并钉进自己的上下文，之后任何灰度比例的调整都不得改变在途运行——否则同一章
 的前半段和后半段来自两个执行器，盲评与复盘都说不清哪个方案。
 
+生产默认臂为 ``director_script_scene``（四剧本选题 → 择优 → 逐场演绎）。
+对照臂为 ``director_v2``（场景协议直写）、``director_v2_beat``（逐节拍 Hive）、
+``director_script``（择优后整章执笔）。
+``legacy_v1`` 已退役，不再进入 ``KNOWN_EXECUTORS``。
+
 配置（环境变量，未配置即灰度关闭）：
 
 - ``NOVEL_EXECUTOR_CANARY``：灰度臂的执行器名；必须是已知架构，否则忽略。
@@ -15,23 +20,36 @@ from __future__ import annotations
 
 import os
 
-from regent.novel.application.direction import ARCHITECTURE
+from regent.novel.application.directing_protocol import (
+    ARCHITECTURE,
+    BEAT_ARCHITECTURE,
+)
+from regent.novel.application.directing_types import (
+    SCRIPT_ARCHITECTURE,
+    SCRIPT_SCENE_ARCHITECTURE,
+)
 from regent.novel.domain import evaluation
 
-# 第二个**真实可执行**的策略：六步流水线 ASSEMBLE→PERFORM→DIRECT→WEAVE→
-# REVIEW→CANON（generation.perform/direct/weave/review/canon），由
-# ``chapter_step_order`` 按 ``architecture_version`` 分派。它不是占位名——
-# 灰度臂落到它时，整章走的是这条完整可运行的链路。
+# 生产默认：多剧本筛选后再分场；其余为对照/回退臂。
+STABLE_EXECUTOR = SCRIPT_SCENE_ARCHITECTURE
+SCENE_EXECUTOR = ARCHITECTURE
+BEAT_EXECUTOR = BEAT_ARCHITECTURE
+SCRIPT_EXECUTOR = SCRIPT_ARCHITECTURE
+SCRIPT_SCENE_EXECUTOR = SCRIPT_SCENE_ARCHITECTURE
+# 历史名保留只读识别；不得再被 choose_executor 选中。
 LEGACY_EXECUTOR = "legacy_v1"
-STABLE_EXECUTOR = ARCHITECTURE
-# 只有已知的成文架构才能当灰度臂：未知名字会让整章走进无法重放的路径。
-KNOWN_EXECUTORS = frozenset({ARCHITECTURE, LEGACY_EXECUTOR})
+KNOWN_EXECUTORS = frozenset(
+    {ARCHITECTURE, BEAT_ARCHITECTURE, SCRIPT_ARCHITECTURE, SCRIPT_SCENE_ARCHITECTURE}
+)
 
 # 固定版本号：策略身份与其实现一起冻结，盲评与复盘据此归因；采样可比性的
 # 前提是「同版本」。改动任一策略的行为必须显式升版本，否则旧采样的结论
-# 会被静默套到新实现头上（B-04 验收：两个真实可执行且**固定版本**的策略）。
+# 会被静默套到新实现头上。
 EXECUTOR_VERSIONS: dict[str, str] = {
-    ARCHITECTURE: "director_v2@1",
+    ARCHITECTURE: "director_v2@2",
+    BEAT_ARCHITECTURE: "director_v2@1",
+    SCRIPT_ARCHITECTURE: "director_script@1",
+    SCRIPT_SCENE_ARCHITECTURE: "director_script_scene@1",
     LEGACY_EXECUTOR: "legacy_v1@1",
 }
 

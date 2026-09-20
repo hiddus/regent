@@ -1,16 +1,11 @@
-"""B-04 双策略灰度的验收：两个真实可执行且固定版本的策略。
+"""B-04 双策略灰度：director_v2@2（场景协议）与 director_v2_beat@1（逐节拍对照）。
 
-命题指向「实现退回旧行为就会失败」的具体断言：
+legacy_v1 已退役。两臂共享导演五步链，差异在 PRODUCE 协议（scene vs beat）。
 
-- 注册：KNOWN_EXECUTORS 含 director_v2 与 legacy_v1 两个**真实**策略，各有
-  固定版本号；两策略步骤链不同且都可整章执行。
-- 隔离：灰度臂（legacy_v1）能端到端产出定典章节；重演按作品桶钉住执行器，
-  不再硬编码 director_v2；executor_version 活过 ASSEMBLE 重建。
-- 回退：灰度旋钮撤除后新运行落回 stable；在途运行不换臂，留下
-  ``executor.switch_deferred`` 记录并继续跑完（不许切换 ≠ 停摆）。
-
-Chinese fixture prose deliberately uses full-width punctuation.
-ruff: noqa: RUF001
+命题：
+- 注册：KNOWN_EXECUTORS 含两真实策略，版本钉死为 @2 / @1。
+- 隔离：灰度臂能被钉进 run；重演按作品桶钉住；executor_version 活过 ASSEMBLE。
+- 回退：撤灰度后新运行落 stable；在途不换臂并留下 defer 记录。
 """
 
 from __future__ import annotations
@@ -18,26 +13,22 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from regent.model import ModelUsage, StructuredModelResponse
 from regent.novel.application import executor as executor_app
 from regent.novel.application import works
 from regent.novel.application import memory as memory_app
-from regent.novel.application.generation import (
-    CanonExtraction,
-    ChapterDraft,
-    ChapterReview,
-    DirectorPlan,
-    CharacterAction,
-    Performance,
+from regent.novel.application.direction import (
+    ARCHITECTURE,
+    BEAT_ARCHITECTURE,
+    PROTOCOL_BEAT,
+    PROTOCOL_SCENE,
+    SCRIPT_ARCHITECTURE,
+    SCRIPT_SCENE_ARCHITECTURE,
+    production_protocol,
 )
-from regent.novel.application.direction import ARCHITECTURE
 from regent.novel.domain.states import ChapterRunState, ChapterStep, chapter_step_order
 from regent.novel.domain.models import ReportFactRequest
 from regent.novel.infrastructure.models import (
-    CanonCommitModel,
     ChapterRunModel,
-    CriticalNodeModel,
-    CriticalPathModel,
     NovelPrincipalModel,
     PersonaSpecModel,
     StoryGoalModel,
@@ -45,50 +36,9 @@ from regent.novel.infrastructure.models import (
 )
 from sqlalchemy import select
 
-TEXT = "他把钥匙放在桌上。" + "雨水沿窗棂流下，两个人仍旧没有开口。" * 65
-
-
-class Provider:
-    def __init__(self, outputs):
-        self.outputs = list(outputs)
-        self.requests = []
-
-    async def generate_structured(self, *, response_model, **kwargs):
-        self.requests.append({"schema": response_model, **kwargs})
-        output = self.outputs.pop(0)
-        assert isinstance(output, response_model), (output, response_model)
-        return StructuredModelResponse(output=output, usage=ModelUsage(10, 20), model="test")
-
 
 def _fact(statement: str, **extra) -> dict:
     return {"statement": statement, "quote": statement, "known_by": ["甲"], **extra}
-
-
-def _legacy_outputs() -> list:
-    """legacy 六步链的全部模型输出：PERFORM×N、DIRECT、WEAVE、REVIEW、CANON。"""
-    return [
-        Performance(
-            persona="主角", immediate_goal="拿回钥匙", private_reasoning="PRIVATE_THOUGHT",
-            actions=["伸手"], dialogue=["拿着吧"], emotional_shift="紧张",
-        ),
-        DirectorPlan(
-            scene_goal="建立不对等信任",
-            character_actions=[
-                CharacterAction(persona="主角", scene_actions=["把钥匙放在桌上"],
-                                key_dialogue=["拿着吧"], emotional_arc="试探到松手")
-            ],
-            beats=["进门", "对峙", "放手"],
-            state_before={"place": "旧宅", "trust": "低"},
-            state_after={"place": "河堤", "trust": "中"},
-            ending_hook="雨还没停",
-        ),
-        ChapterDraft(title="交付", content=TEXT),
-        ChapterReview(passed=True),
-        CanonExtraction(facts=[
-            {"statement": "钥匙放在桌上", "entities": ["钥匙"], "known_by": ["ALL"],
-             "confidence": "high", "quote": "他把钥匙放在桌上。"},
-        ]),
-    ]
 
 
 async def _seed_work(session, *, work_id=None, latest_chapter_no: int = 0):
@@ -105,16 +55,15 @@ async def _seed_work(session, *, work_id=None, latest_chapter_no: int = 0):
 
 
 @pytest.mark.asyncio
-async def test_canary_arm_produces_a_full_chapter_end_to_end(novel_db, monkeypatch):
-    """灰度臂 legacy_v1 是**真实可执行**的：整章六步走完并定典（B-04）。"""
-    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", "legacy_v1")
+async def test_canary_arm_pins_beat_protocol(novel_db, monkeypatch):
+    """灰度臂 director_v2_beat 被钉进 run，步骤链含 PRODUCE（B-04）。"""
+    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", BEAT_ARCHITECTURE)
     monkeypatch.setenv("NOVEL_EXECUTOR_CANARY_PERCENT", "100")
 
     async def _noop_event(session, **kwargs):
         return None
 
     monkeypatch.setattr(works, "append_event", _noop_event)
-    provider = Provider(_legacy_outputs())
 
     async with novel_db() as s:
         owner, work_id = await _seed_work(s)
@@ -124,50 +73,49 @@ async def test_canary_arm_produces_a_full_chapter_end_to_end(novel_db, monkeypat
         await s.commit()
         run = await s.scalar(select(ChapterRunModel))
         assert run is not None
-        assert run.generation_context["executor"] == "legacy_v1"
-        assert run.generation_context["executor_version"] == "legacy_v1@1"
-        # legacy 臂走六步链：有 PERFORM/WEAVE，没有 PRODUCE
+        assert run.generation_context["executor"] == BEAT_ARCHITECTURE
+        assert run.generation_context["executor_version"] == "director_v2@1"
         steps = {st.value for st in chapter_step_order(run.generation_context)}
-        assert {"PERFORM", "WEAVE"} <= steps and "PRODUCE" not in steps
-
-    for _ in range(12):
-        async with novel_db() as session:
-            progress = await works.advance_background_run(session, provider=provider)
-            await session.commit()
-            if progress and progress.state.value == "CANONIZED":
-                break
-    else:
-        pytest.fail("legacy 臂没有跑完整章")
-
-    async with novel_db() as session:
-        run = await session.scalar(select(ChapterRunModel))
-        assert run.content == TEXT
-        assert run.generation_context["executor"] == "legacy_v1"
-        # 版本号活过了 ASSEMBLE 重建（否则盲评无法归因）
-        assert run.generation_context["executor_version"] == "legacy_v1@1"
-        assert run.review["passed"] is True
-        commit = await session.scalar(select(CanonCommitModel))
-        assert commit is not None and commit.facts
+        assert "PRODUCE" in steps and "PERFORM" not in steps
+        assert production_protocol(run) == PROTOCOL_BEAT
 
 
 def test_two_real_strategies_are_registered_and_version_pinned():
-    """两个策略都已注册、各有固定版本、步骤链真实不同（B-04 验收口径）。"""
-    assert executor_app.KNOWN_EXECUTORS == {ARCHITECTURE, "legacy_v1"}
-    assert executor_app.STABLE_EXECUTOR == ARCHITECTURE
-    assert executor_app.executor_version(ARCHITECTURE) == "director_v2@1"
-    assert executor_app.executor_version("legacy_v1") == "legacy_v1@1"
-    # 两臂的步骤链必须真实不同——同一条链谈不上两个策略
-    legacy_steps = chapter_step_order({"architecture_version": "legacy_v1"})
+    """策略已注册、版本钉死；协议不同（B-04 + script/script_scene 对照臂）。"""
+    assert executor_app.KNOWN_EXECUTORS == {
+        ARCHITECTURE,
+        BEAT_ARCHITECTURE,
+        SCRIPT_ARCHITECTURE,
+        SCRIPT_SCENE_ARCHITECTURE,
+    }
+    assert executor_app.STABLE_EXECUTOR == SCRIPT_SCENE_ARCHITECTURE
+    assert executor_app.executor_version(ARCHITECTURE) == "director_v2@2"
+    assert executor_app.executor_version(BEAT_ARCHITECTURE) == "director_v2@1"
+    assert executor_app.executor_version(SCRIPT_ARCHITECTURE) == "director_script@1"
+    assert executor_app.executor_version(SCRIPT_SCENE_ARCHITECTURE) == "director_script_scene@1"
+    assert BEAT_ARCHITECTURE not in {"legacy_v1"}
+    # 步骤链相同（同为导演五步）；差异在 protocol / executor_version
+    beat_steps = chapter_step_order({"architecture_version": BEAT_ARCHITECTURE})
     stable_steps = chapter_step_order({"architecture_version": ARCHITECTURE})
-    assert legacy_steps != stable_steps
-    assert ChapterStep.PERFORM in legacy_steps and ChapterStep.PRODUCE not in legacy_steps
-    assert ChapterStep.PRODUCE in stable_steps and ChapterStep.WEAVE not in stable_steps
+    assert beat_steps == stable_steps
+    assert ChapterStep.PRODUCE in stable_steps
+    assert production_protocol({"architecture_version": ARCHITECTURE}) == PROTOCOL_SCENE
+    assert production_protocol(
+        type("R", (), {"generation_context": {"architecture_version": BEAT_ARCHITECTURE}})()
+    ) == PROTOCOL_BEAT
+    assert production_protocol(
+        type(
+            "R",
+            (),
+            {"generation_context": {"architecture_version": SCRIPT_ARCHITECTURE}},
+        )()
+    ) == "script"
 
 
 @pytest.mark.asyncio
 async def test_replay_pins_the_work_bucket_executor(novel_db, monkeypatch):
-    """纠错重演按作品桶钉住执行器，不再硬编码 director_v2（B-04）。"""
-    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", "legacy_v1")
+    """纠错重演按作品桶钉住执行器（B-04）。"""
+    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", BEAT_ARCHITECTURE)
     monkeypatch.setenv("NOVEL_EXECUTOR_CANARY_PERCENT", "100")
 
     async def _noop_event(session, **kwargs):
@@ -183,7 +131,7 @@ async def test_replay_pins_the_work_bucket_executor(novel_db, monkeypatch):
             latest_chapter_no=3,
         )
         s.add(work)
-        await s.flush()  # branch_id 等服务端默认值落定后才能建章节运行
+        await s.flush()
         for chapter_no in range(1, 4):
             s.add(ChapterRunModel(
                 id=uuid.uuid4(), work_id=work.id, branch_id=work.branch_id,
@@ -209,11 +157,11 @@ async def test_replay_pins_the_work_bucket_executor(novel_db, monkeypatch):
 
     assert replay is not None
     ctx = dict(replay.generation_context or {})
-    assert ctx["executor"] == "legacy_v1", (
+    assert ctx["executor"] == BEAT_ARCHITECTURE, (
         f"重演被硬编码回 stable，盲评无法归因：{ctx.get('executor')}"
     )
-    assert ctx["architecture_version"] == "legacy_v1"
-    assert ctx["executor_version"] == "legacy_v1@1"
+    assert ctx["architecture_version"] == BEAT_ARCHITECTURE
+    assert ctx["executor_version"] == "director_v2@1"
     assert (ctx.get("correction") or {}).get("statement") == "甲其实从未持有钥匙"
 
 
@@ -223,9 +171,6 @@ async def test_rollback_returns_new_runs_to_stable_and_defers_in_flight(
 ):
     """回退：新运行落回 stable；在途运行不换臂、留 defer 记录并继续执行（B-04）。"""
 
-    async def _noop_event(session, **kwargs):
-        return None
-
     deferred_events: list[dict] = []
 
     async def _event(session, **kwargs):
@@ -233,8 +178,10 @@ async def test_rollback_returns_new_runs_to_stable_and_defers_in_flight(
             deferred_events.append(kwargs)
         return None
 
-    monkeypatch.setattr(works, "append_event", _event)
-    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", "legacy_v1")
+    from regent.novel.application import works_advance
+
+    monkeypatch.setattr(works_advance, "append_event", _event)
+    monkeypatch.setenv("NOVEL_EXECUTOR_CANARY", BEAT_ARCHITECTURE)
     monkeypatch.setenv("NOVEL_EXECUTOR_CANARY_PERCENT", "100")
 
     async with novel_db() as s:
@@ -244,27 +191,33 @@ async def test_rollback_returns_new_runs_to_stable_and_defers_in_flight(
         await works.start_run(s, owner_id=owner, work_id=work_id)
         await s.commit()
         first = await s.scalar(select(ChapterRunModel))
-        assert first.generation_context["executor"] == "legacy_v1"
+        assert first.generation_context["executor"] == BEAT_ARCHITECTURE
 
-    # 回退：撤掉灰度旋钮
     monkeypatch.delenv("NOVEL_EXECUTOR_CANARY")
     monkeypatch.delenv("NOVEL_EXECUTOR_CANARY_PERCENT")
 
-    assert executor_app.choose_executor(work_id) == ARCHITECTURE, "回退后新运行仍进灰度臂"
+    assert executor_app.choose_executor(work_id) == SCRIPT_SCENE_ARCHITECTURE, (
+        "回退后新运行仍进灰度臂"
+    )
 
-    # 在途运行：不换臂，留 defer 记录，继续推进
+    from regent.model import ModelUsage, StructuredModelResponse
+
+    class EmptyProvider:
+        async def generate_structured(self, **kwargs):
+            raise AssertionError("ASSEMBLE 不应调模型")
+
     async with novel_db() as s:
-        progress = await works.advance_background_run(s, provider=Provider([]))
+        progress = await works.advance_background_run(s, provider=EmptyProvider())
         await s.commit()
         run = await s.scalar(select(ChapterRunModel))
         ctx = dict(run.generation_context or {})
 
-    assert ctx.get("executor") == "legacy_v1", "在途运行被换臂"
-    assert ctx["architecture_version"] == "legacy_v1"
+    assert ctx.get("executor") == BEAT_ARCHITECTURE, "在途运行被换臂"
+    assert ctx["architecture_version"] == BEAT_ARCHITECTURE
     assert ctx.get(executor_app.DEFER_MARKER) == {
-        "pinned": "legacy_v1",
-        "requested": ARCHITECTURE,
+        "pinned": BEAT_ARCHITECTURE,
+        "requested": SCRIPT_SCENE_ARCHITECTURE,
         "chapter_no": int(run.chapter_no),
     }
     assert len(deferred_events) == 1, "回退没有留下可查的切换推迟记录"
-    assert progress is not None  # 继续执行（ASSEMBLE 已推进），不是停摆
+    assert progress is not None

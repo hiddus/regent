@@ -142,6 +142,40 @@ a{color:var(--accent)}
 .composer-card button.go{
   padding:10px 20px;border-radius:99px;background:var(--accent);color:#fff;font-size:13px;font-weight:600;
 }
+.composer-card .direction-kw-block{padding:4px 8px 8px;border-top:1px solid var(--line);margin-top:4px}
+.composer-card .direction-kw-block .eyebrow{margin:8px 0 4px;font-size:10px}
+.composer-card .direction-kw-block .chips{margin:6px 0}
+.composer-card .direction-kw-custom input{
+  flex:1;min-width:0;border:0;background:var(--sink);border-radius:10px;padding:8px 10px;font-size:13px;outline:none;
+}
+.composer-card button.ghost{
+  padding:8px 12px;border-radius:10px;font-size:12px;color:var(--accent);background:transparent;
+}
+.direction-revise{
+  margin-top:16px;padding:12px;border-top:1px solid var(--line);
+  display:flex;flex-direction:column;gap:8px;
+}
+.direction-revise textarea{
+  width:100%;border:1px solid var(--line);border-radius:12px;background:var(--sink);
+  padding:10px 12px;font-size:14px;line-height:1.6;resize:vertical;outline:none;
+}
+.direction-revise-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+.direction-revise-actions .ghost{
+  padding:10px 14px;border-radius:12px;font-size:13px;color:var(--accent);background:var(--sink);
+}
+.direction-revise-actions .primary{
+  padding:10px 14px;border-radius:12px;font-size:13px;font-weight:600;background:var(--accent);color:#fff;
+}
+.world-bible-block .world-section{margin:14px 0}
+.world-bible-block .world-section h3{font-size:0.95rem;margin:0 0 6px}
+.world-bible-block .world-section ul{margin:0;padding-left:1.2rem}
+.world-personas{display:grid;gap:10px}
+.world-personas article{padding:10px 0;border-top:1px solid color-mix(in srgb, currentColor 12%, transparent)}
+.world-personas h4{margin:0 0 4px;font-size:1rem}
+.world-personas small{font-weight:400;opacity:0.7}
+.world-dl{display:grid;grid-template-columns:6.5rem 1fr;gap:6px 10px;margin:0}
+.world-dl dt{opacity:0.65;font-size:0.85rem}
+.world-dl dd{margin:0}
 .principles{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin:12px 0 22px}
 .principles span{
   font-size:10px;color:var(--muted);background:var(--sink);border-radius:99px;padding:5px 10px;

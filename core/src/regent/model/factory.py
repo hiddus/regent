@@ -18,4 +18,5 @@ def build_model_provider(settings: Settings) -> OpenAICompatibleProvider:
         timeout_seconds=float(settings.model_timeout_seconds),
         max_output_tokens=settings.model_max_output_tokens,
         thinking_mode=settings.model_thinking_mode,
+        stream_idle_seconds=settings.model_stream_idle_seconds,
     )

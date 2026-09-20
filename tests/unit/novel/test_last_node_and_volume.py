@@ -19,6 +19,7 @@ import uuid
 import pytest
 from regent.model import ModelUsage, StructuredModelResponse
 from regent.novel.application import direction as d
+from regent.novel.application import executor as executor_app
 from regent.novel.application import works
 from regent.novel.application.generation import StoryOutline, StoryOutlineNode
 from regent.novel.domain.errors import Conflict
@@ -42,9 +43,14 @@ from test_direction import (  # noqa: E402
     brief,
     prose_decision,
     resolution,
-    take_decision,
     validation,
 )
+
+
+@pytest.fixture(autouse=True)
+def _use_scene_executor(monkeypatch):
+    """These fixtures model the scene protocol, not the production default arm."""
+    monkeypatch.setattr(executor_app, "STABLE_EXECUTOR", d.ARCHITECTURE)
 
 
 def _volume_outline(volume_title="第二卷") -> StoryOutline:
@@ -96,7 +102,7 @@ class _Provider(Provider):
 
 
 def _chapter_outputs(node_completed: bool) -> list:
-    """一章从规划到成章所需的模型输出。"""
+    """一章从规划到成章所需的模型输出（生产默认：场景协议）。"""
     return [
         d.ChapterDirection(
             title="交付",
@@ -104,9 +110,7 @@ def _chapter_outputs(node_completed: bool) -> list:
             ending_reason="交付已成立",
             scenes=[brief()],
         ),
-        d.ActorTurn(intention="信任", actions=["伸手"], private_reasoning="PRIVATE"),
         resolution(),
-        take_decision(),
         d.SceneText(content=TEXT),
         prose_decision(),
         validation(),
@@ -129,7 +133,9 @@ def _capture_events(monkeypatch) -> list[dict]:
         captured.append(kwargs)
         return None
 
-    monkeypatch.setattr(works, "append_event", _fake)
+    from regent.novel.application import works_volumes
+
+    monkeypatch.setattr(works_volumes, "append_event", _fake)
     return captured
 
 
@@ -250,16 +256,15 @@ async def _volumes(sessions, work_id) -> list[VolumeModel]:
         )
 
 
-async def test_last_node_expands_volume_and_next_chapter_has_a_target(
+async def test_last_node_requires_explicit_expand_before_next_volume(
     novel_db, monkeypatch
 ):
-    """末节点成章后必须扩卷，下一章有真实目标节点，不是空章。"""
-    monkeypatch.setattr(works, "append_event", _noop_event)
+    """末节点成章后不静默扩卷；用户确认 expand 后下一章才有新卷目标。"""
+    events = _capture_events(monkeypatch)
     provider = _Provider(
         _chapter_outputs(True) + _chapter_outputs(True) + _chapter_outputs(False),
         outline=_volume_outline(),
     )
-    # 用户要写两卷：第一卷末节点完成后应当继续扩卷
     owner, work_id = await _boot(novel_db, node_count=2, end_chapter=6, ending_target_volume=2)
 
     async with novel_db() as session:
@@ -267,7 +272,6 @@ async def test_last_node_expands_volume_and_next_chapter_has_a_target(
         await session.commit()
     await _run_chapter(novel_db, provider, owner, work_id, 1)
 
-    # 第一节点完成、不是末节点：不该扩卷，也不该结束
     assert await _node_ids(novel_db, work_id) == ["n1", "n2"]
     assert len(await _volumes(novel_db, work_id)) == 1
 
@@ -276,21 +280,33 @@ async def test_last_node_expands_volume_and_next_chapter_has_a_target(
         await session.commit()
     await _run_chapter(novel_db, provider, owner, work_id, 2)
 
-    # 末节点成章：v2 也必须扩卷（审计前这里不会发生）
+    # 自动扩卷已退役：此时仍只有旧节点，作品进入待确认
+    assert await _node_ids(novel_db, work_id) == ["n1", "n2"]
+    async with novel_db() as session:
+        work = await session.get(StoryWorkModel, work_id)
+        assert work.state == StoryWorkState.PENDING_DECISION.value
+        assert any(e.get("event_type") == "volume.expansion_pending" for e in events)
+        # 用户确认扩卷：服务须自行解除 PENDING_DECISION，测试不得手改 state
+        volume = await works.expand_next_volume(session, work=work, provider=provider)
+        assert volume is not None
+        assert work.state == StoryWorkState.RUNNING.value, (
+            f"扩卷后应恢复 RUNNING，实际 {work.state}"
+        )
+        await session.commit()
+
     node_ids = await _node_ids(novel_db, work_id)
-    assert len(node_ids) > 2, f"末节点完成后没有扩卷：{node_ids}"
+    assert len(node_ids) > 2, f"确认扩卷后仍无新节点：{node_ids}"
     volumes = await _volumes(novel_db, work_id)
     assert [int(v.volume_no) for v in volumes] == [1, 2]
-    assert int(volumes[1].start_chapter_no) == 3, "新卷起点不是下一章"
+    assert int(volumes[1].start_chapter_no) == 3
 
     async with novel_db() as session:
         work = await session.get(StoryWorkModel, work_id)
-        assert work.state == StoryWorkState.RUNNING.value, "扩出卷了却把整本结束了"
+        assert work.state == StoryWorkState.RUNNING.value
         progress = await works.start_run(session, owner_id=owner, work_id=work_id)
         await session.commit()
     assert progress.chapter_no == 3
 
-    # 第三章必须拿到新卷里的目标节点，而不是空 target
     await _run_chapter(novel_db, provider, owner, work_id, 3)
     async with novel_db() as session:
         run = await session.scalar(
@@ -380,12 +396,11 @@ async def test_director_can_end_the_story_when_user_gave_no_volume_target(
             await works.start_run(session, owner_id=owner, work_id=work_id)
 
 
-async def test_expansion_failure_keeps_the_story_open_instead_of_rewriting_it(
+async def test_expansion_pending_keeps_the_story_open_for_user_confirm(
     novel_db, monkeypatch
 ):
-    """B-05：该继续但扩卷失败时，保留待定状态，不套模板也不算完结。"""
+    """末节点判定应继续时：进入待确认扩卷，不静默扩卷、也不完结。"""
     events = _capture_events(monkeypatch)
-    # 用户要三卷，当前第一卷：判定必须继续，但大纲拿不到
     provider = _Provider(_chapter_outputs(True) + _chapter_outputs(True))
     owner, work_id = await _boot(novel_db, node_count=2, end_chapter=6, ending_target_volume=3)
 
@@ -400,7 +415,7 @@ async def test_expansion_failure_keeps_the_story_open_instead_of_rewriting_it(
 
     async with novel_db() as session:
         work = await session.get(StoryWorkModel, work_id)
-        assert work.state != StoryWorkState.DONE.value, "扩卷失败被当成了完结"
+        assert work.state == StoryWorkState.PENDING_DECISION.value
         run = await session.scalar(
             select(ChapterRunModel).where(
                 ChapterRunModel.work_id == work_id, ChapterRunModel.chapter_no == 2
@@ -409,7 +424,6 @@ async def test_expansion_failure_keeps_the_story_open_instead_of_rewriting_it(
         decision = (run.generation_context or {}).get("ending_decision") or {}
     assert decision.get("choice") == "undecided", decision
     assert any(
-        e.get("event_type") == "volume.expansion_failed" for e in events
-    ), "扩卷失败没有留下可恢复的事件记录"
-    # 没有新卷、也没有凭空多出一章
+        e.get("event_type") == "volume.expansion_pending" for e in events
+    ), "应继续时没有留下待确认扩卷事件"
     assert [int(v.volume_no) for v in await _volumes(novel_db, work_id)] == [1]

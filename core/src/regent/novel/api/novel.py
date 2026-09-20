@@ -17,7 +17,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,14 +25,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from regent.config import get_settings
 from regent.model import ModelProvider
 from regent.model.factory import build_model_provider
+from regent.novel.application import decisions as decisions_app
 from regent.novel.application import events as events_app
 from regent.novel.application import ledger as ledger_app
-from regent.novel.application import works as works_app
+from regent.novel.application import works_advance as advance_app
+from regent.novel.application import works_exports as exports_app
+from regent.novel.application import works_lifecycle as lifecycle_app
+from regent.novel.application import works_moderation as moderation_app
+from regent.novel.application import works_onboarding as onboarding_app
+from regent.novel.application import works_path as path_app
+from regent.novel.application import works_query as query_app
+from regent.novel.application import works_replay as replay_app
+from regent.novel.application import works_run_control as run_app
+from regent.novel.application import works_sharing as sharing_app
+from regent.novel.application import works_volumes as volumes_app
+from regent.novel.application import works_world_bible as bible_app
 from regent.novel.application.principal import (
     CurrentPrincipal,
     hash_token,
     issue_token,
 )
+from regent.novel.application.works_access import get_owned_work
+from regent.novel.application.works_constants import AI_DISCLOSURE
 from regent.novel.domain import money
 from regent.novel.domain.errors import (
     IdempotencyConflict,
@@ -44,13 +58,18 @@ from regent.novel.domain.models import (
     AcknowledgeExportNoticeRequest,
     AnswerClarifyRequest,
     AutoAdvanceRequest,
+    BudgetAuthorizeRequest,
+    ConfirmDirectionOut,
     ConfirmDirectionRequest,
+    ContinuationPolicyOut,
+    ContinuationPolicyRequest,
     CreateShareRequest,
     CreateWorkRequest,
     CreateWorkResponse,
     CriticalPathOut,
     CriticalPathUpdate,
     DecisionView,
+    DirectionKeywordsOut,
     EndingIntentRequest,
     EventPage,
     ExportNoticeOut,
@@ -67,12 +86,16 @@ from regent.novel.domain.models import (
     ResolveDecisionRequest,
     ResolveModerationRequest,
     ResumeCorrectionRequest,
+    ReviseDirectionsRequest,
     RunProgressOut,
     ShareOut,
     VolumeOut,
     WorkDetail,
     WorkStateOut,
     WorkSummary,
+    WorldBibleLockRequest,
+    WorldBibleOut,
+    WorldBibleReviseRequest,
 )
 from regent.novel.infrastructure.models import (
     IdempotencyRecordModel,
@@ -92,7 +115,7 @@ def _content_disposition(filename: str) -> str:
     ascii_fallback = "".join(
         ch if ch.isascii() and (ch.isalnum() or ch in "._-") else "_" for ch in filename
     )
-    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{quote(filename)}'
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +124,19 @@ def _content_disposition(filename: str) -> str:
 
 
 async def _session(request: Request):
-    async with request.app.state.sessions() as session, session.begin():
-        yield session
+    """Request-scoped session.
+
+    Do not wrap with ``session.begin()``: onboarding / generation may call the
+    model via ``TransactionFreeProvider``, which commits before the HTTP round
+    trip. Nested ``begin()`` forbids further writes after that commit.
+    """
+    async with request.app.state.sessions() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 DbSession = Annotated[AsyncSession, Depends(_session)]
@@ -234,6 +268,14 @@ async def _store_idempotency(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/direction-keywords", response_model=DirectionKeywordsOut)
+async def list_direction_keywords() -> DirectionKeywordsOut:
+    from regent.novel.domain.story_direction import catalog_payload
+
+    data = catalog_payload()
+    return DirectionKeywordsOut(**data)
+
+
 @router.post("/works", response_model=CreateWorkResponse, status_code=201)
 async def create_work(
     request: Request,
@@ -253,12 +295,14 @@ async def create_work(
     if cached is not None:
         return cached.response_body
 
-    work, onboarding = await works_app.create_work(
+    work, onboarding = await onboarding_app.create_work(
         session,
         owner_id=principal.id,
         raw_intent=payload.raw_intent,
         title=payload.title,
         genre=payload.genre,
+        direction_keywords=payload.direction_keywords,
+        direction_custom_keywords=payload.direction_custom_keywords,
         client_nonce=payload.client_nonce,
         provider=provider,
     )
@@ -285,7 +329,7 @@ async def list_works(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.list_works(session, owner_id=principal.id)
+    return await query_app.list_works(session, owner_id=principal.id)
 
 
 @router.get("/works/{work_id}", response_model=WorkDetail)
@@ -294,7 +338,7 @@ async def get_work(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.get_work(session, owner_id=principal.id, work_id=work_id)
+    return await query_app.get_work(session, owner_id=principal.id, work_id=work_id)
 
 
 @router.delete("/works/{work_id}", status_code=204, response_model=None)
@@ -310,7 +354,7 @@ async def delete_work(
         key=idempotency_key,
         payload={"work_id": str(work_id)},
     )
-    await works_app.soft_delete_work(session, owner_id=principal.id, work_id=work_id)
+    await lifecycle_app.soft_delete_work(session, owner_id=principal.id, work_id=work_id)
 
     return Response(status_code=204)
 
@@ -328,7 +372,7 @@ async def answer_clarify(
     provider: NovelModel,
     principal: CurrentPrincipal,
 ) -> Any:
-    out = await works_app.answer_clarify(
+    out = await onboarding_app.answer_clarify(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -340,7 +384,20 @@ async def answer_clarify(
     return out
 
 
-@router.post("/works/{work_id}/directions", response_model=CriticalPathOut)
+@router.get("/works/{work_id}/onboarding", response_model=OnboardingOut)
+async def restore_onboarding(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """刷新恢复：仍在引导中则返回 onboarding 会话，否则 404（前端按无引导处理）。"""
+    out = await onboarding_app.get_onboarding(session, owner_id=principal.id, work_id=work_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="onboarding not found")
+    return out
+
+
+@router.post("/works/{work_id}/directions", response_model=ConfirmDirectionOut)
 async def confirm_direction(
     work_id: uuid.UUID,
     payload: ConfirmDirectionRequest,
@@ -358,12 +415,18 @@ async def confirm_direction(
     )
     if cached is not None:
         return cached.response_body
-    _, path = await works_app.confirm_direction(
-        session, owner_id=principal.id, work_id=work_id, card_id=payload.card_id,
+    if not (payload.card_id or "").strip() and not (payload.custom_direction or "").strip():
+        raise HTTPException(status_code=422, detail="card_id or custom_direction required")
+    out_model = await onboarding_app.confirm_direction(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        card_id=payload.card_id,
         provider=provider,
+        custom_direction=payload.custom_direction,
     )
 
-    out = path.model_dump(mode="json")
+    out = out_model.model_dump(mode="json")
     await _store_idempotency(
         session,
         scope=f"works:directions:{principal.id}:{work_id}",
@@ -373,6 +436,98 @@ async def confirm_direction(
     )
 
     return out
+
+
+@router.get("/works/{work_id}/world-bible", response_model=WorldBibleOut)
+async def get_world_bible(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await bible_app.get_world_bible(session, owner_id=principal.id, work_id=work_id)
+
+
+@router.post("/works/{work_id}/world-bible/revise", response_model=OnboardingOut)
+async def revise_world_bible(
+    work_id: uuid.UUID,
+    payload: WorldBibleReviseRequest,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:world-bible-revise:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+    out_model = await bible_app.revise_world_bible(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        notes=payload.notes,
+        provider=provider,
+    )
+    out = out_model.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"works:world-bible-revise:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+        body=out,
+    )
+    return out
+
+
+@router.post("/works/{work_id}/world-bible/lock", response_model=OnboardingOut)
+async def lock_world_bible(
+    work_id: uuid.UUID,
+    payload: WorldBibleLockRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:world-bible-lock:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+    _, out_model = await bible_app.lock_world_bible(session, owner_id=principal.id, work_id=work_id)
+    out = out_model.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"works:world-bible-lock:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+        body=out,
+    )
+    return out
+
+
+@router.post("/works/{work_id}/directions/revise", response_model=OnboardingOut)
+async def revise_directions(
+    work_id: uuid.UUID,
+    payload: ReviseDirectionsRequest,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+) -> Any:
+    """都不合适：按用户意见重出方向卡，仍停在选择页。"""
+    return await onboarding_app.revise_directions(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        feedback=payload.feedback,
+        provider=provider,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -386,9 +541,7 @@ async def get_critical_path(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.get_critical_path(
-        session, owner_id=principal.id, work_id=work_id
-    )
+    return await path_app.get_critical_path(session, owner_id=principal.id, work_id=work_id)
 
 
 @router.put("/works/{work_id}/critical-path")
@@ -408,7 +561,7 @@ async def update_critical_path(
             raise ValidationFailed("If-Match must be an integer version") from exc
         if expected != payload.expected_version:
             raise ValidationFailed("If-Match does not match expected_version")
-    path, impact = await works_app.update_critical_path(
+    path, impact = await path_app.update_critical_path(
         session, owner_id=principal.id, work_id=work_id, payload=payload
     )
 
@@ -427,22 +580,16 @@ async def preview_critical_path(
     principal: CurrentPrincipal,
 ) -> Any:
     """只算影响，不落库。用于「改之前先看到代价」（PRD §3.2）。"""
-    from regent.novel.application.works import (
-        MAX_PATH_NODES,
-        MIN_PATH_NODES,
-        _preview_impact,
-        get_critical_path,
-    )
+    from regent.novel.application.works_constants import MAX_PATH_NODES, MIN_PATH_NODES
+    from regent.novel.application.works_path import get_critical_path, preview_impact
 
     if not MIN_PATH_NODES <= len(payload.nodes) <= MAX_PATH_NODES:
         raise ValidationFailed(
             f"critical path must contain {MIN_PATH_NODES}-{MAX_PATH_NODES} nodes"
         )
     current = await get_critical_path(session, owner_id=principal.id, work_id=work_id)
-    from regent.novel.infrastructure.models import StoryWorkModel
-
-    work = await session.get(StoryWorkModel, work_id)
-    return _preview_impact(
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    return preview_impact(
         current_nodes=current.nodes,
         next_nodes=payload.nodes,
         frozen_through_chapter=current.frozen_through_chapter,
@@ -461,7 +608,7 @@ async def get_volumes(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.get_volumes(session, owner_id=principal.id, work_id=work_id)
+    return await volumes_app.get_volumes(session, owner_id=principal.id, work_id=work_id)
 
 
 @router.get("/works/{work_id}/volumes/{volume_no}", response_model=VolumeOut)
@@ -471,7 +618,7 @@ async def get_volume(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    vols = await works_app.get_volumes(session, owner_id=principal.id, work_id=work_id)
+    vols = await volumes_app.get_volumes(session, owner_id=principal.id, work_id=work_id)
     for v in vols:
         if v.volume_no == volume_no:
             return v
@@ -486,13 +633,31 @@ async def expand_volume(
     provider: NovelModel,
     principal: CurrentPrincipal,
 ) -> Any:
-    work = await works_app._get_owned_work(session, work_id=work_id, owner_id=principal.id)
-    result = await works_app.expand_next_volume(
-        session, work=work, provider=provider,
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    expected = int(work.total_volume_count or 0) + 1
+    # 目标卷号参与幂等：已存在则直接返回；错号拒绝，避免连点扩出第 N+2 卷
+    if int(volume_no) != expected:
+        existing = next(
+            (v for v in await volumes_app.get_volumes(
+                session, owner_id=principal.id, work_id=work_id
+            ) if int(v.volume_no) == int(volume_no)),
+            None,
+        )
+        if existing is not None and int(volume_no) <= int(work.total_volume_count or 0):
+            return existing
+        raise ValidationFailed(
+            f"expand target volume_no={volume_no} mismatch; expected {expected}"
+        )
+    result = await volumes_app.expand_next_volume(
+        session,
+        work=work,
+        provider=provider,
+        target_volume_no=int(volume_no),
     )
     if result is None:
         raise ValidationFailed("cannot expand volume")
     from regent.novel.domain.models import VolumeOut as _VO
+
     return _VO(
         volume_no=int(result.volume_no),
         title=result.title,
@@ -518,7 +683,7 @@ async def set_ending_intent(
     principal: CurrentPrincipal,
 ) -> Any:
     """设定用户认可的终局：写完几卷，或者什么情况算讲完（B-05）。"""
-    return await works_app.set_ending_intent(
+    return await volumes_app.set_ending_intent(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -535,7 +700,7 @@ async def resolve_ending(
     provider: NovelModel,
 ) -> Any:
     """终局待定时重新判定：能判就结束或扩卷，判不了继续待定（B-05）。"""
-    return await works_app.resolve_ending(
+    return await volumes_app.resolve_ending(
         session, owner_id=principal.id, work_id=work_id, provider=provider
     )
 
@@ -545,6 +710,7 @@ async def start_run(
     work_id: uuid.UUID,
     session: DbSession,
     principal: CurrentPrincipal,
+    provider: NovelModel,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> Any:
     cached = await _guard_idempotency(
@@ -555,7 +721,9 @@ async def start_run(
     )
     if cached is not None:
         return cached.response_body
-    out = await works_app.start_run(session, owner_id=principal.id, work_id=work_id)
+    out = await run_app.start_run(
+        session, owner_id=principal.id, work_id=work_id, provider=provider
+    )
 
     body = out.model_dump(mode="json")
     await _store_idempotency(
@@ -575,7 +743,15 @@ async def get_run(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.get_run_progress(session, owner_id=principal.id, work_id=work_id)
+    """一章都没开时返回 404（不是编一个 QUEUED）。
+
+    这一层必须说实话：前端把「有没有 progress」当作「能不能开工」的判据，
+    编出来的进度会把真实故障（例如 POST /runs 失败）伪装成「正在生成」。
+    """
+    out = await run_app.get_active_run_progress(session, owner_id=principal.id, work_id=work_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="no chapter run yet")
+    return out
 
 
 @router.post("/works/{work_id}/runs/{chapter_no}/advance", response_model=RunProgressOut)
@@ -588,7 +764,7 @@ async def advance_step(
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> Any:
     """推进一个真实 Agent-loop 检查点，可安全重试。"""
-    out = await works_app.advance_step(
+    out = await advance_app.advance_step(
         session,
         provider=provider,
         owner_id=principal.id,
@@ -613,7 +789,7 @@ async def submit_guidance(
     principal: CurrentPrincipal,
 ) -> Any:
     """用户在检查点提交反馈，恢复流水线。"""
-    return await works_app.submit_guidance(
+    return await run_app.submit_guidance(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -631,7 +807,7 @@ async def set_auto_advance(
     principal: CurrentPrincipal,
 ) -> Any:
     """切换自动/手动模式。"""
-    return await works_app.set_auto_advance(
+    return await run_app.set_auto_advance(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -646,7 +822,7 @@ async def pause_work(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    state = await works_app.pause_work(session, owner_id=principal.id, work_id=work_id)
+    state = await run_app.pause_work(session, owner_id=principal.id, work_id=work_id)
 
     return {"state": state.value, "worker_released": True}
 
@@ -657,9 +833,104 @@ async def resume_work(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    state = await works_app.resume_work(session, owner_id=principal.id, work_id=work_id)
+    state = await run_app.resume_work(session, owner_id=principal.id, work_id=work_id)
+    # WorkResumeOut 含 state + blocker；兼容仅取 state 的旧客户端
+    return state
 
-    return {"state": state.value}
+
+@router.get("/works/{work_id}/continuation", response_model=ContinuationPolicyOut)
+async def get_continuation(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """读取作品级连续创作授权（默认关闭）。"""
+    from regent.novel.application.works_continuation import get_continuation_policy
+
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    pol = get_continuation_policy(work)
+    return ContinuationPolicyOut(
+        enabled=pol.enabled,
+        target_chapter_no=pol.target_chapter_no,
+        max_chapters=pol.max_chapters,
+        volume_scope=pol.volume_scope,
+        version=pol.version,
+        budget_grant_note=pol.budget_grant_note,
+    )
+
+
+@router.put("/works/{work_id}/continuation", response_model=ContinuationPolicyOut)
+async def put_continuation(
+    work_id: uuid.UUID,
+    payload: ContinuationPolicyRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """启停作品级连续创作；与章内 auto_advance 分离。"""
+    from regent.novel.application.works_continuation import set_continuation_policy
+
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    pol = set_continuation_policy(
+        work,
+        enabled=payload.enabled,
+        target_chapter_no=payload.target_chapter_no,
+        max_chapters=payload.max_chapters,
+        volume_scope=payload.volume_scope,
+        budget_grant_note=payload.budget_grant_note,
+    )
+    await session.flush()
+    return ContinuationPolicyOut(
+        enabled=pol.enabled,
+        target_chapter_no=pol.target_chapter_no,
+        max_chapters=pol.max_chapters,
+        volume_scope=pol.volume_scope,
+        version=pol.version,
+        budget_grant_note=pol.budget_grant_note,
+    )
+
+
+@router.post("/works/{work_id}/budget/authorize")
+async def authorize_budget(
+    work_id: uuid.UUID,
+    payload: BudgetAuthorizeRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    """预算暂停后授权追加额度并恢复创作（BQ-1）。"""
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:budget_authorize:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached.response_body
+    state = await run_app.authorize_budget(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        grant_calls=payload.grant_calls,
+        grant_cost_minor=payload.grant_cost_minor,
+        client_nonce=payload.client_nonce,
+    )
+    body = {
+        "state": getattr(state, "state", state).value
+        if hasattr(getattr(state, "state", state), "value")
+        else str(getattr(state, "state", state)),
+        "blocker_code": getattr(state, "blocker_code", ""),
+        "recommended_actions": list(getattr(state, "recommended_actions", []) or []),
+        "grant_calls": payload.grant_calls,
+        "grant_cost_minor": payload.grant_cost_minor,
+    }
+    await _store_idempotency(
+        session,
+        scope=f"works:budget_authorize:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+        body=body,
+    )
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -676,8 +947,11 @@ async def get_chapter(
     attempt: Annotated[int | None, Query(ge=1)] = None,
 ) -> Any:
     """只读路径。attempt 默认返回最新版本。"""
-    out = await works_app.get_chapter(
-        session, owner_id=principal.id, work_id=work_id, chapter_no=chapter_no,
+    out = await query_app.get_chapter(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        chapter_no=chapter_no,
         attempt=attempt,
     )
     return out
@@ -691,7 +965,7 @@ async def list_chapter_versions(
     principal: CurrentPrincipal,
 ) -> Any:
     """列出指定章节的所有版本。"""
-    return await works_app.list_chapter_versions(
+    return await query_app.list_chapter_versions(
         session, owner_id=principal.id, work_id=work_id, chapter_no=chapter_no
     )
 
@@ -704,7 +978,7 @@ async def regenerate_chapter(
     principal: CurrentPrincipal,
 ) -> Any:
     """重写指定章节（创建新 attempt）。"""
-    return await works_app.regenerate_chapter(
+    return await replay_app.regenerate_chapter(
         session, owner_id=principal.id, work_id=work_id, chapter_no=chapter_no
     )
 
@@ -716,9 +990,7 @@ async def list_chapters(
     principal: CurrentPrincipal,
 ) -> Any:
     """列出所有已完成章节（仅摘要）。"""
-    return await works_app.list_chapters(
-        session, owner_id=principal.id, work_id=work_id
-    )
+    return await query_app.list_chapters(session, owner_id=principal.id, work_id=work_id)
 
 
 @router.get("/works/{work_id}/characters")
@@ -728,9 +1000,7 @@ async def list_characters(
     principal: CurrentPrincipal,
 ) -> Any:
     """列出作品所有角色。"""
-    return await works_app.list_characters(
-        session, owner_id=principal.id, work_id=work_id
-    )
+    return await query_app.list_characters(session, owner_id=principal.id, work_id=work_id)
 
 
 # ---------------------------------------------------------------------------
@@ -741,15 +1011,15 @@ async def list_characters(
 @router.get("/decisions", response_model=list[DecisionView])
 async def list_decisions(session: DbSession, principal: CurrentPrincipal) -> Any:
     """跨作品待裁决收件箱（FR-12）：只返回本人作品的待裁决项。"""
-    return await works_app.list_pending_decisions(session, owner_id=principal.id)
+    return await decisions_app.list_pending_decisions(session, owner_id=principal.id)
 
 
 @router.get("/works/{work_id}/decisions", response_model=list[DecisionView])
 async def list_work_decisions(
     work_id: uuid.UUID, session: DbSession, principal: CurrentPrincipal
 ) -> Any:
-    await works_app.get_work(session, work_id=work_id, owner_id=principal.id)
-    return await works_app.list_pending_decisions(
+    await query_app.get_work(session, work_id=work_id, owner_id=principal.id)
+    return await decisions_app.list_pending_decisions(
         session, owner_id=principal.id, work_id=work_id
     )
 
@@ -761,7 +1031,7 @@ async def get_decision(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.get_decision(
+    return await decisions_app.get_decision(
         session, owner_id=principal.id, work_id=work_id, decision_id=decision_id
     )
 
@@ -783,7 +1053,7 @@ async def resolve_decision(
     )
     if cached is not None:
         return cached.response_body
-    out = await works_app.resolve_decision(
+    out = await decisions_app.resolve_decision(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -827,7 +1097,7 @@ async def report_fact(
     )
     if cached is not None:
         return cached.response_body
-    out = await works_app.report_fact(
+    out = await replay_app.report_fact(
         session, owner_id=principal.id, work_id=work_id, payload=payload
     )
 
@@ -846,7 +1116,7 @@ async def resume_after_correction(
     完结或暂停的作品，后台不会领取任务；报错后必须由用户明确恢复，重演才会
     真正发生。这是「恢复后才执行」那句话对应的动作，不是自动恢复。
     """
-    return await works_app.resume_after_correction(
+    return await run_app.resume_after_correction(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -863,7 +1133,7 @@ async def resume_after_correction(
 async def read_public_share(token: str, session: DbSession) -> Response:
     if len(token) < 20 or len(token) > 64:
         raise ValidationFailed("invalid share token")
-    body = await works_app.get_public_share(session, token=token)
+    body = await sharing_app.get_public_share(session, token=token)
     return JSONResponse(
         content=json.loads(json.dumps(body, ensure_ascii=False, default=str)),
         headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "private, no-store"},
@@ -889,7 +1159,7 @@ async def create_share(
     if cached is not None:
         return cached.response_body
     base = str(request.base_url).rstrip("/")
-    out = await works_app.create_share(
+    out = await sharing_app.create_share(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -921,7 +1191,7 @@ async def revoke_share(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Response:
-    await works_app.revoke_share(
+    await sharing_app.revoke_share(
         session, owner_id=principal.id, work_id=work_id, share_id=share_id
     )
 
@@ -939,9 +1209,7 @@ async def get_export_notice(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.get_export_notice(
-        session, owner_id=principal.id, work_id=work_id
-    )
+    return await exports_app.get_export_notice(session, owner_id=principal.id, work_id=work_id)
 
 
 @router.post("/works/{work_id}/export-notice/acknowledge", response_model=ExportNoticeOut)
@@ -951,7 +1219,7 @@ async def acknowledge_export_notice(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    out = await works_app.acknowledge_export_notice(
+    out = await exports_app.acknowledge_export_notice(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -980,7 +1248,7 @@ async def export_work(
     if cached is not None:
         return cached.response_body
     base = str(request.base_url).rstrip("/")
-    out = await works_app.export_work(
+    out = await exports_app.export_work(
         session, owner_id=principal.id, work_id=work_id, payload=payload, base_url=base
     )
 
@@ -1003,17 +1271,18 @@ async def get_export_content(
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    filename, text = await works_app.get_export_payload(
+    filename, text = await exports_app.get_export_payload(
         session, owner_id=principal.id, export_id=export_id
     )
     from urllib.parse import quote
+
     return Response(
         content=text.encode("utf-8"),
         media_type="text/plain; charset=utf-8",
         headers={
             "Content-Disposition": _content_disposition(filename),
             # G-15：导出物始终带 AI 标识（URL 编码中文）
-            "X-AI-Disclosure": quote(works_app.AI_DISCLOSURE),
+            "X-AI-Disclosure": quote(AI_DISCLOSURE),
             "X-Content-Options": "nosniff",
         },
     )
@@ -1024,15 +1293,13 @@ async def get_export_content(
 # ---------------------------------------------------------------------------
 
 
-@router.get(
-    "/works/{work_id}/moderation", response_model=list[ModerationCaseOut]
-)
+@router.get("/works/{work_id}/moderation", response_model=list[ModerationCaseOut])
 async def list_moderation(
     work_id: uuid.UUID,
     session: DbSession,
     principal: CurrentPrincipal,
 ) -> Any:
-    return await works_app.list_moderation_cases(
+    return await moderation_app.list_moderation_cases(
         session, owner_id=principal.id, work_id=work_id
     )
 
@@ -1053,7 +1320,7 @@ async def report_moderation(
     )
     if cached is not None:
         return cached.response_body
-    out = await works_app.report_moderation(
+    out = await moderation_app.report_moderation(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -1075,7 +1342,7 @@ async def scan_moderation(
 
     只提名不判定：未配置词表时返回 configured=false，不产生“通过”含义（G-23）。
     """
-    return await works_app.scan_chapter_rules(
+    return await moderation_app.scan_chapter_rules(
         session, owner_id=principal.id, work_id=work_id, chapter_no=chapter_no
     )
 
@@ -1089,7 +1356,7 @@ async def appeal_moderation(
     reason: Annotated[str, Query(max_length=2000)] = "",
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> Any:
-    out = await works_app.appeal_moderation(
+    out = await moderation_app.appeal_moderation(
         session, owner_id=principal.id, work_id=work_id, case_id=case_id, reason=reason
     )
 
@@ -1114,7 +1381,7 @@ async def resolve_moderation(
     )
     if cached is not None:
         return cached.response_body
-    out = await works_app.resolve_moderation(
+    out = await moderation_app.resolve_moderation(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -1147,7 +1414,7 @@ async def resolve_appeal(
     )
     if cached is not None:
         return cached.response_body
-    out = await works_app.resolve_appeal(
+    out = await moderation_app.resolve_appeal(
         session,
         owner_id=principal.id,
         work_id=work_id,
@@ -1173,7 +1440,7 @@ async def work_costs(
     currency: Annotated[str, Query(max_length=3)] = "CNY",
 ) -> Any:
     money.currency_exponent(currency)
-    await works_app._get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    await get_owned_work(session, work_id=work_id, owner_id=principal.id)
     return await ledger_app.work_cost(session, work_id=work_id, currency=currency.upper())
 
 
@@ -1190,10 +1457,8 @@ async def get_events(
     after_seq: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> Any:
-    await works_app._get_owned_work(session, work_id=work_id, owner_id=principal.id)
-    return await events_app.read_events(
-        session, work_id=work_id, after_seq=after_seq, limit=limit
-    )
+    await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    return await events_app.read_events(session, work_id=work_id, after_seq=after_seq, limit=limit)
 
 
 @router.get("/works/{work_id}/events/stream")
@@ -1221,9 +1486,7 @@ async def stream_events(
                 return
             try:
                 async with factory() as session:
-                    await works_app._get_owned_work(
-                        session, work_id=work_id, owner_id=principal.id
-                    )
+                    await get_owned_work(session, work_id=work_id, owner_id=principal.id)
                     page = await events_app.read_events(
                         session, work_id=work_id, after_seq=start, limit=200
                     )

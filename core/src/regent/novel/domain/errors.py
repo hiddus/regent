@@ -126,9 +126,22 @@ class InvalidState(NovelError):
     status_code = 409
     code = "invalid_state"
 
-    def __init__(self, message: str, *, current: str | None = None) -> None:
-        details = {"current_state": current} if current else {}
-        super().__init__(message, available_actions=["reload"], details=details)
+    def __init__(
+        self,
+        message: str,
+        *,
+        current: str | None = None,
+        available_actions: list[str] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        merged: dict[str, Any] = {"current_state": current} if current else {}
+        if details:
+            merged.update(details)
+        super().__init__(
+            message,
+            available_actions=available_actions or ["reload"],
+            details=merged,
+        )
 
 
 class QuotaExceeded(NovelError):
@@ -175,6 +188,18 @@ class ProductionStopped(RuntimeError):
     """导演循环停止，草稿保留。"""
 
     failure_code = "DIRECTOR_PRODUCTION_STOPPED"
+
+
+class BudgetExhausted(ProductionStopped):
+    """调用或金额额度耗尽：作品可恢复暂停，草稿与账本保留。"""
+
+    failure_code = "DIRECTOR_BUDGET_EXHAUSTED"
+
+    def __init__(self, message: str, *, kind: str) -> None:
+        if kind not in {"calls", "cost"}:
+            raise ValueError(f"unknown budget kind: {kind}")
+        self.kind = kind
+        super().__init__(message)
 
 
 class CommandRejected(ProductionStopped):

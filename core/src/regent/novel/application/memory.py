@@ -4,12 +4,10 @@
 
 - **抽取不经过模型**：Canon 事实进、记忆条目出，全部由 ``domain.memory`` 的
   确定性规则决定，因此「这条规则为什么被记住」可以举证。
-- **召回按需且有下限**：上下文预算有限，但**未兑现的承诺永不因限额被裁掉**——
-  伏笔回收失败是不可逆的阅读体验损失。
-- **改意只失效不修改**：``invalidate`` 打 ``invalidated_at``，事实链不动；
-  旧版上下文因此不会污染新版。
-- **重演取最小子图，图不完整就保守**：依赖边缺一条就返回 ``complete=False``，
-  让调用方重做当前章之后的场景，而不是拿不完整的图假装精确。
+- **召回按需且有下限**：上下文预算有限，但**未兑现的承诺永不因限额被裁掉**。
+- **改意只失效不修改**：``invalidate`` 打 ``invalidated_at``，事实链不动。
+- **重演取保守章窗口**：改某章后重生成该章起连续后续范围；不再宣称最小依赖子图。
+  逻辑槽对外为 fact / known / promise / summary（存储仍用细 kind）。
 """
 
 from __future__ import annotations
@@ -90,45 +88,14 @@ async def _link_dependencies(
     previous: dict[str, domain.MemoryItem],
     written: Sequence[domain.MemoryItem],
 ) -> int:
-    """按共享实体/主体登记依赖边（A-05）。
+    """依赖边自动建图已退役（职责删减）。
 
-    后续事实之所以成立，是因为先前的事实已经成立——共享同一个实体就是这条
-    依赖最保守的表达。没有边，重演就没有图可走，只能整章重做。
+    纠错与改意一律走保守章窗口重做，不再宣称最小子图。函数保留签名以免
+    ``record_chapter_memory`` 调用方立刻炸；恒返回 0。手工 ``link_memory``
+    仍可供离线对照使用。
     """
-    if not previous:
-        # 第一批记忆的「没有上游」是**结构性事实**——此前一条记忆都不存在，不是
-        # 「关键词没命中所以假装独立」。这是有证据的独立，不是启发式（C-04）。
-        for item in written:
-            await link_memory(
-                session, work=work, upstream_key=INDEPENDENT_MARKER,
-                downstream_key=item.key, edge_kind="independent",
-            )
-        return len(written)
-    links = 0
-    for item in written:
-        anchors = set(item.entities) | {item.subject}
-        attached = False
-        for other in previous.values():
-            if other.key == item.key or other.invalidated:
-                continue
-            if anchors & (set(other.entities) | {other.subject}):
-                await link_memory(
-                    session, work=work, upstream_key=other.key,
-                    downstream_key=item.key, edge_kind="depends",
-                )
-                links += 1
-                attached = True
-        # 实体不相交**不等于独立**：同章的因果、跨实体的因果都不会体现在实体交集
-        # 里，启发式没命中说明「不知道」，不能反推出「独立」。没命中就保持 unknown
-        # ——重演时保守重做，而不是假装算出了最小子图（C-04）。
-        # 只有创作输入显式声明独立的条目才登记 independent。
-        if not attached and item.declared_independent:
-            await link_memory(
-                session, work=work, upstream_key=INDEPENDENT_MARKER,
-                downstream_key=item.key, edge_kind="independent",
-            )
-            links += 1
-    return links
+    del session, work, previous, written
+    return 0
 
 
 def _keep_resolution(
@@ -344,25 +311,25 @@ async def plan_local_replay(
     from_chapter_no: int,
     max_chapters: int = 3,
 ) -> tuple[domain.ReplayPlan, list[int], bool]:
-    """纠错后的局部重演范围：图完整只重演子图命中的章，不完整就保守重做后续章。
+    """纠错后的局部重演范围：固定为「改章起连续后续窗口」。
 
-    返回 ``(计划, 待重演章号, 是否走了保守退路)``。
+    依赖图 / 最小子图已移出生产主链（职责删减）。返回的计划恒为
+    ``complete=False``，第三项恒为 ``True``（保守退路），避免对外宣称精确子图。
 
-    ``max_chapters`` 是**成本硬约束**不是调度策略：一次纠错重演半本书，账本先崩。
-    截断必须如实反映在返回里，由调用方告诉用户「还有几章没重演」。
+    ``max_chapters`` 是成本硬约束：一次纠错不得重演半本书。
     """
-    plan = await plan_replay(session, work=work, changed_subjects=changed_subjects)
+    del session, changed_subjects
     latest = int(work.latest_chapter_no)
     start = max(1, int(from_chapter_no))
-    if not plan.complete:
-        chapters = [c for c in range(start, latest + 1)]
-        if len(chapters) > max_chapters:
-            chapters = chapters[:max_chapters]
-        return plan, chapters, True
-    chapters = sorted({c for c in plan.chapters if start <= c <= latest})
+    chapters = list(range(start, latest + 1))
     if len(chapters) > max_chapters:
         chapters = chapters[:max_chapters]
-    return plan, chapters, False
+    plan = domain.ReplayPlan(
+        complete=False,
+        reason="conservative chapter window: replay from changed chapter forward",
+        chapters=tuple(chapters),
+    )
+    return plan, chapters, True
 
 
 async def invalidate_changed(
@@ -373,25 +340,32 @@ async def invalidate_changed(
     reason: str,
     fallback_kinds: Sequence[str] = (),
 ) -> tuple[int, bool]:
-    """按依赖范围失效：图完整就只失效子图，不完整就保守失效整批（A-05）。
+    """按保守范围失效记忆：不再宣称最小子图（职责删减）。
 
-    返回 ``(失效条数, 是否走了保守退路)``。
+    有 ``fallback_kinds`` 时只失效这些 kind；否则失效全部未失效条目中与
+    ``changed_subjects`` 主体/实体相交者；若 subjects 为空则不失效。
+    返回 ``(失效条数, True)``——第二项恒为保守退路。
     """
     subjects = [str(part).strip() for part in changed_subjects if str(part).strip()]
     if not subjects:
-        # 没有改动就没有失效理由：此时走保守退路会把全部记忆误杀。
         return 0, False
-    plan = await plan_replay(session, work=work, changed_subjects=subjects)
     rows = {row.item_key: row for row in await _rows(session, work)}
-    if plan.complete:
-        targets = set(plan.keys)
-    else:
-        # 依赖不完整：宁可多失效，也不能把已经不可信的记忆继续喂给下一章。
+    subject_set = set(subjects)
+    if fallback_kinds:
         targets = {
             key
             for key, row in rows.items()
-            if not fallback_kinds or row.kind in fallback_kinds
+            if row.kind in fallback_kinds
         }
+    else:
+        targets = {
+            key
+            for key, row in rows.items()
+            if subject_set & ({str(row.subject)} | {str(e) for e in (row.entities or [])})
+        }
+        # 无实体命中时仍保守：失效全部（等同旧「图不完整」分支但按主体收窄失败时）
+        if not targets:
+            targets = set(rows)
     now = datetime.now(UTC)
     count = 0
     for key in sorted(targets):
@@ -402,4 +376,4 @@ async def invalidate_changed(
         row.invalidated_reason = (reason or "direction_changed")[:200]
         count += 1
     await session.flush()
-    return count, not plan.complete
+    return count, True

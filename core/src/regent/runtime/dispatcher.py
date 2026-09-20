@@ -73,27 +73,44 @@ def is_retryable_handler_error(exc: BaseException) -> bool:
     return True
 
 
-def claim_statement(limit: int) -> Select[tuple[OutboxEventModel]]:
-    """Claim PENDING/FAILED due events, and reclaim expired DISPATCHING leases."""
+def claim_statement(
+    limit: int,
+    *,
+    event_types: frozenset[str] | None = None,
+) -> Select[tuple[OutboxEventModel]]:
+    """Claim PENDING/FAILED due events, and reclaim expired DISPATCHING leases.
+
+    ``event_types``:
+    - ``None``: no product filter (combined / legacy default).
+    - empty frozenset: claim nothing (novel worker until it owns Outbox work).
+    - non-empty: only those ``event_type`` values.
+    """
+    from sqlalchemy import false
+
+    due = or_(
+        and_(
+            OutboxEventModel.status.in_(("PENDING", "FAILED")),
+            OutboxEventModel.available_at <= func.now(),
+            or_(
+                OutboxEventModel.lease_expires_at.is_(None),
+                OutboxEventModel.lease_expires_at < func.now(),
+            ),
+        ),
+        and_(
+            OutboxEventModel.status == "DISPATCHING",
+            OutboxEventModel.lease_expires_at.is_not(None),
+            OutboxEventModel.lease_expires_at < func.now(),
+        ),
+    )
+    scope = due
+    if event_types is not None:
+        if not event_types:
+            scope = and_(due, false())
+        else:
+            scope = and_(due, OutboxEventModel.event_type.in_(tuple(sorted(event_types))))
     return (
         select(OutboxEventModel)
-        .where(
-            or_(
-                and_(
-                    OutboxEventModel.status.in_(("PENDING", "FAILED")),
-                    OutboxEventModel.available_at <= func.now(),
-                    or_(
-                        OutboxEventModel.lease_expires_at.is_(None),
-                        OutboxEventModel.lease_expires_at < func.now(),
-                    ),
-                ),
-                and_(
-                    OutboxEventModel.status == "DISPATCHING",
-                    OutboxEventModel.lease_expires_at.is_not(None),
-                    OutboxEventModel.lease_expires_at < func.now(),
-                ),
-            )
-        )
+        .where(scope)
         .order_by(OutboxEventModel.available_at, OutboxEventModel.occurred_at)
         .with_for_update(skip_locked=True)
         .limit(limit)
@@ -110,6 +127,7 @@ class OutboxDispatcher:
         retry_seconds: int = 5,
         max_attempts: int = 8,
         dispatch_concurrency: int = 1,
+        event_types: frozenset[str] | None = None,
     ) -> None:
         self._sessions = sessions
         self._handlers = handlers
@@ -117,11 +135,18 @@ class OutboxDispatcher:
         self._retry_seconds = retry_seconds
         self._max_attempts = max_attempts
         self._dispatch_concurrency = max(1, int(dispatch_concurrency))
+        self._event_types = event_types
 
     async def claim(self, worker_id: str, *, limit: int = 10) -> list[ClaimedEvent]:
         async with self._sessions() as session, session.begin():
             db_now = await self._database_now(session)
-            events = list((await session.scalars(claim_statement(limit))).all())
+            events = list(
+                (
+                    await session.scalars(
+                        claim_statement(limit, event_types=self._event_types)
+                    )
+                ).all()
+            )
             lease_expires_at = db_now + timedelta(seconds=self._lease_seconds)
             claimed: list[ClaimedEvent] = []
             for event in events:

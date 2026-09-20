@@ -156,6 +156,13 @@ class StoryWorkModel(Timestamped, NovelBase):
     # 扩不出来才结束」。0 / 空串表示用户没说，只能由导演补位。
     ending_target_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ending_statement: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    # 编剧锁定的故事世界（开写前硬门）；ASSEMBLE 只读引用
+    story_bible: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    story_bible_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     # 产品软删除；财务与创作证据不级联物理删除
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -292,6 +299,12 @@ class OnboardingSessionModel(Timestamped, NovelBase):
     )
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     selected_card_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    world_bible: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    world_bible_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import uuid
 
 import pytest
 from regent.novel.application import direction as d
+from regent.novel.application import executor as executor_app
 from regent.novel.application import memory as memory_app
 from regent.novel.application import works
 from regent.novel.domain import memory as domain
@@ -31,8 +32,13 @@ from regent.novel.infrastructure.models import (
 )
 from sqlalchemy import select
 
-from test_direction import Provider, TEXT, brief, prose_decision, resolution, take_decision  # noqa: E402
+from test_direction import Provider, TEXT, brief, prose_decision, resolution  # noqa: E402
 from test_last_node_and_volume import _Provider, _run_chapter  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _use_scene_executor(monkeypatch):
+    monkeypatch.setattr(executor_app, "STABLE_EXECUTOR", d.ARCHITECTURE)
 
 QUOTE = "他把钥匙放在桌上。"
 
@@ -64,6 +70,14 @@ def _validation() -> d.SceneValidation:
             ),
         ],
         state_changes=[d.VerifiedStateChange(key="key", value="桌上", quote=QUOTE)],
+        requirements=[
+            d.RequirementVerdict(
+                requirement_id="state:key:final",
+                status="supported",
+                quote=QUOTE,
+                explanation="钥匙在桌上",
+            )
+        ],
     )
 
 
@@ -75,9 +89,7 @@ def _chapter_outputs(node_completed: bool) -> list:
             ending_reason="交付已成立",
             scenes=[brief()],
         ),
-        d.ActorTurn(intention="信任", actions=["伸手"], private_reasoning="PRIVATE"),
         resolution(),
-        take_decision(),
         d.SceneText(content=TEXT),
         prose_decision(),
         _validation(),

@@ -60,6 +60,9 @@ class RuntimeState:
     take_no: int = 1
     # 产物绑定：接受/成文必须基于已存在的稿件，不能凭空通过
     has_prose: bool = False
+    # BQ-1：授权后续作后的有效上限；缺省则回落 limits
+    call_cap: int | None = None
+    cost_cap: int | None = None
 
 
 # 命令 → (允许的前置状态集合, 目标状态)。DIRECTOR_VIEW 用 artifact 区分两次观看。
@@ -169,9 +172,11 @@ class CommandRuntime:
         elif current not in allowed:
             raise reject(f"当前阶段 {state.scene_state}/{state.artifact or '-'} 不允许该命令")
 
-        if state.calls_used >= self.limits.max_calls:
+        if state.calls_used >= (state.call_cap if state.call_cap is not None else self.limits.max_calls):
             raise reject("调用次数预算已耗尽")
-        if state.reserved_minor >= self.limits.max_cost_minor:
+        if state.reserved_minor >= (
+            state.cost_cap if state.cost_cap is not None else self.limits.max_cost_minor
+        ):
             raise reject("货币预算已耗尽")
 
         if kind is CommandKind.CONTINUE_SCENE and state.turn + 1 >= self.limits.max_turns:

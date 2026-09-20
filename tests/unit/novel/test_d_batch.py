@@ -239,11 +239,13 @@ async def test_different_correction_merges_into_queued_replay(novel_db, monkeypa
 def _install_advance_step_spy(monkeypatch) -> list[int]:
     claimed: list[int] = []
 
-    async def fake_advance_step(session, *, provider, owner_id, work_id, chapter_no):
+    async def fake_advance_step(session, *, provider, owner_id, work_id, chapter_no, **kwargs):
         claimed.append(int(chapter_no))
         return None
 
-    monkeypatch.setattr(works, "advance_step", fake_advance_step)
+    from regent.novel.application import works_advance
+
+    monkeypatch.setattr(works_advance, "advance_step", fake_advance_step)
     return claimed
 
 
@@ -394,6 +396,56 @@ async def test_barrier_blocks_on_retryable_failed_of_earlier_chapter(novel_db, m
 
     assert claimed == [1], (
         f"RETRYABLE_FAILED 的第一章属于在途，必须挡住第二章并续跑第一章，实际推进了 {claimed}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_barrier_does_not_starve_other_works(novel_db, monkeypatch):
+    """作品 A 大量被屏障挡住的 QUEUED 不得饿死作品 B 的可运行章（C04）。"""
+    claimed_works: list[str] = []
+
+    async def fake_advance_step(session, *, provider, owner_id, work_id, chapter_no, **kwargs):
+        claimed_works.append(str(work_id))
+        return None
+
+    from regent.novel.application import works_advance
+
+    monkeypatch.setattr(works_advance, "advance_step", fake_advance_step)
+
+    async with novel_db() as s:
+        blocked = await _work(s, latest_chapter_no=20)
+        # A：ch1 待裁决（屏障），ch2..ch17 全 QUEUED 且 updated_at 更旧
+        ch1 = _run(blocked, chapter_no=1, state=ChapterRunState.PENDING_DECISION.value)
+        ch1.lease_expires_at = None
+        rows = [ch1]
+        for n in range(2, 18):
+            r = _run(
+                blocked,
+                chapter_no=n,
+                state=ChapterRunState.QUEUED.value,
+                context={"architecture_version": "director_v2"},
+            )
+            r.updated_at = _OLD
+            rows.append(r)
+
+        free = await _work(s, latest_chapter_no=1)
+        runnable = _run(free, chapter_no=1, state=ChapterRunState.QUEUED.value)
+        runnable.updated_at = _OLD.replace(year=2090) if hasattr(_OLD, "replace") else _OLD
+        # 让 B 的 updated_at 更新，但若旧逻辑只扫前 16 条 A 的任务，B 永远进不了窗
+        from datetime import datetime as _dt
+
+        runnable.updated_at = _dt(2020, 1, 2, tzinfo=UTC)
+        for r in rows[1:]:
+            r.updated_at = _dt(2020, 1, 1, tzinfo=UTC)
+
+        s.add_all([*rows, runnable])
+        await s.commit()
+
+        await works.advance_background_run(s, provider=object())
+        await s.commit()
+
+    assert claimed_works == [str(free.id)], (
+        f"必须领取作品 B，实际 {claimed_works}"
     )
 
 
@@ -566,7 +618,10 @@ def test_plan_request_gets_director_view_not_raw_memory():
 
 @pytest.mark.asyncio
 async def test_director_v2_requests_carry_projected_memory(novel_db):
-    """真实请求级证明（D-03 验收）：plan/ACT/WATCH/RENDER 各拿到自己的投影。"""
+    """真实请求级证明（D-03 验收）：plan/ACT/WATCH/RENDER 各拿到自己的投影。
+
+    本用例钉对照臂（beat），覆盖逐节拍 ActorTurn 路径上的记忆投影。
+    """
     from test_direction import (
         Provider,
         Session,

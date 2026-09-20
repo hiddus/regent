@@ -176,7 +176,7 @@ async def test_same_key_different_input_is_conflict_not_reuse(novel_db):
 
 
 async def test_unknown_result_is_held_and_never_blind_retried(novel_db):
-    """调用中断 → 挂账 UNKNOWN，预留不释放；再次请求同一命令不得盲重试。"""
+    """调用中断 → 挂账 UNKNOWN；无 request_id 时二次进入会 fail-over 后允许新 attempt。"""
     provider = Provider([], fail=TimeoutError("gateway timeout"))
     async with novel_db() as session:
         work = await work_row(session)
@@ -198,30 +198,35 @@ async def test_unknown_result_is_held_and_never_blind_retried(novel_db):
         call = await session.scalar(select(ModelCallModel))
         assert call.status == production.CALL_STATUS_UNKNOWN
         assert call.reserved_amount_minor and call.reserved_amount_minor > 0
-        # 未对账前不得产生 CONSUME/RELEASE 流水：钱可能已经花掉
         assert (
             await session.scalar(
                 select(func.count()).select_from(CostEntryModel)
             )
         ) == 0
 
+    # 不可对账 UNKNOWN：落 FAILED 后允许同键新 attempt（恢复，不是静默吞掉）。
+    provider2 = Provider([Echo(text="recovered")])
     async with novel_db() as session:
         work = await work_row(session)
-        with pytest.raises(production.CallUnknown):
-            await broker().run(
-                session,
-                provider=provider,
-                schema=Echo,
-                work_id=work.id,
-                run_id=run_id,
-                chapter_no=1,
-                step="PRODUCE",
-                purpose="plan",
-                command_id="v1:plan",
-                system_prompt="sys",
-                user_prompt="user",
-            )
-    assert len(provider.requests) == 1  # 没有盲重试
+        result = await broker().run(
+            session,
+            provider=provider2,
+            schema=Echo,
+            work_id=work.id,
+            run_id=run_id,
+            chapter_no=1,
+            step="PRODUCE",
+            purpose="plan",
+            command_id="v1:plan",
+            system_prompt="sys",
+            user_prompt="user",
+        )
+        assert result.output.text == "recovered"
+        rows = (await session.scalars(select(ModelCallModel).order_by(ModelCallModel.attempt))).all()
+        assert any(c.status == production.CALL_STATUS_FAILED for c in rows)
+        assert any(c.status == production.CALL_STATUS_SUCCEEDED for c in rows)
+    assert len(provider.requests) == 1
+    assert len(provider2.requests) == 1
 
 
 async def test_reconcile_settles_unknown_after_attempts_are_exhausted(novel_db):
@@ -262,7 +267,8 @@ async def test_reconcile_settles_unknown_after_attempts_are_exhausted(novel_db):
         assert consumed == call.reserved_amount_minor
 
 
-async def test_expired_lease_becomes_unknown_instead_of_second_call(novel_db):
+async def test_expired_lease_becomes_failed_when_unreconcilable(novel_db):
+    """过期 RESERVED：回收先 UNKNOWN，对账耗尽后 FAILED，同键可重试。"""
     provider = Provider([Echo(text="x")])
     async with novel_db() as session:
         work = await work_row(session)
@@ -293,25 +299,41 @@ async def test_expired_lease_becomes_unknown_instead_of_second_call(novel_db):
         await session.flush()
         reaped = await production.reclaim_expired_calls(session)
         assert reaped == [key]
+        call = await session.scalar(select(ModelCallModel))
+        # 两阶段：回收保留 UNKNOWN 供对账记账，不在瞬间直接 FAILED
+        assert call.status == production.CALL_STATUS_UNKNOWN
+        assert call.error_code == "LEASE_EXPIRED"
+        await session.commit()
+
+    async with novel_db() as session:
+        stats = await production.recover_novel_calls(
+            session, grace=timedelta(0), reconcile_attempts=1
+        )
+        assert stats["reclaimed"] >= 0
+        call = await session.scalar(
+            select(ModelCallModel).where(ModelCallModel.logical_call_id == key)
+        )
+        assert call.status == production.CALL_STATUS_FAILED
+        assert call.error_code in ("RECONCILE_EXHAUSTED", "LEASE_EXPIRED_UNRECONCILABLE")
         await session.commit()
 
     async with novel_db() as session:
         work = await work_row(session)
-        with pytest.raises(production.CallUnknown):
-            await broker().run(
-                session,
-                provider=provider,
-                schema=Echo,
-                work_id=work.id,
-                run_id=run_id,
-                chapter_no=1,
-                step="PRODUCE",
-                purpose="plan",
-                command_id="cmd",
-                system_prompt="sys",
-                user_prompt="user",
-            )
-    assert not provider.requests
+        result = await broker().run(
+            session,
+            provider=provider,
+            schema=Echo,
+            work_id=work.id,
+            run_id=run_id,
+            chapter_no=1,
+            step="PRODUCE",
+            purpose="plan",
+            command_id="cmd",
+            system_prompt="sys",
+            user_prompt="user",
+        )
+        assert result.output.text == "x"
+    assert len(provider.requests) == 1
 
 
 async def test_currency_budget_stops_production_before_another_call(novel_db):

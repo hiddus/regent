@@ -189,12 +189,20 @@ def compile_writer_context(
     previous_draft: str = "",
     revision_instruction: str = "",
     memory: Sequence[dict[str, Any]] = (),
+    revision_mode: str = "",
+    base_content_hash: str = "",
+    paragraphs: Sequence[dict[str, Any]] = (),
+    editable_paragraph_ids: Sequence[str] = (),
+    must_preserve: Sequence[dict[str, Any]] = (),
 ) -> CompiledContext:
     """装配执笔者上下文：只有已发生且读者可见的事件。
 
     原始 Canon、人物内心、隐藏事件和未发生的后续场景一律不进入。
     ``memory`` 是叙述者视角的长期记忆（调用方负责投影）：读者认知可以出现，
     导演笔记不得进入正文材料。
+
+    局部修订（``revision_mode=patch``）另附段落表与可编辑范围；完整模式返回整场正文。
+    ``must_preserve`` 是结算冻结的可见最终状态清单，与核验共用同一批 requirement_id。
     """
     visible = reader_visible_events(events)
     memory_items = list(memory)
@@ -208,6 +216,11 @@ def compile_writer_context(
         "previous_draft": previous_draft,
         "revision_instruction": revision_instruction,
         "narrator_memory": memory_items,
+        "must_preserve": list(must_preserve),
+        "revision_mode": revision_mode or ("patch" if previous_draft and revision_instruction else "full"),
+        "base_content_hash": base_content_hash,
+        "paragraphs": list(paragraphs),
+        "editable_paragraph_ids": list(editable_paragraph_ids),
     }
     manifest = ContextManifest(
         audience="writer",

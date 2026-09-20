@@ -1,0 +1,85 @@
+---
+pid: 23844
+cwd: "C:\\regent"
+command: "$env:PYTHONPATH='deploy/novel'; $env:PYTHONUNBUFFERED='1'; python deploy/novel/_tmp_supervise_858a.py 7200 --no-clear"
+started_at: 2026-09-17T17:49:48.630Z
+running_for_ms: 851321   
+---
+[sup] start 858ad0b6-8fd4-447e-a560-553237862565 MAX_ATTEMPT_TOKENS=800000 MAX_REGENS=1
+[sup] psql probe ch2 latest non-cancelled: 28|CANONIZED
+
+===== �� 1 �� =====
+  stats a=1 CANONIZED/CANON/DONE w=2895
+  already CANONIZED words=2895 calls=62
+
+===== �� 2 �� =====
+  stats a=28 CANONIZED/CANON/DONE w=2933
+  already CANONIZED words=2933 calls=27
+
+===== �� 3 �� =====
+  stats a=4 RUNNING/ASSEMBLE/ w=0
+  in-flight attempt=4 state=RUNNING���ȴ�
+    13:50:25 ch3 a4 RUNNING/ASSEMBLE/ w=0 calls=0 tok=0
+    13:51:58 ch3 a4 RUNNING/PRODUCE/WRITE_SCRIPTS w=0 calls=5 tok=30922
+    13:52:21 ch3 a4 RUNNING/PRODUCE/SELECT w=0 calls=6 tok=164757
+    13:52:46 ch3 a4 RUNNING/PRODUCE/WRITE_SCENE w=0 calls=8 tok=244960
+    13:53:10 ch3 a4 RUNNING/PRODUCE/WRITE_SCENE w=0 calls=9 tok=284857
+    13:53:33 ch3 a4 RUNNING/PRODUCE/AUDIT_SCENE w=0 calls=11 tok=318539
+    13:53:56 ch3 a4 RUNNING/PRODUCE/AUDIT_SCENE w=0 calls=13 tok=356670
+    13:54:20 ch3 a4 RUNNING/PRODUCE/ASSEMBLE_CHAPTER w=0 calls=13 tok=361459
+    13:55:07 ch3 a4 RUNNING/PRODUCE/VALIDATE w=0 calls=14 tok=361459
+    13:55:31 ch3 a4 RUNNING/PRODUCE/AUDIT_SCENE w=0 calls=15 tok=418302
+    13:55:55 ch3 a4 RUNNING/PRODUCE/ASSEMBLE_CHAPTER w=0 calls=16 tok=422681
+    13:57:05 ch3 a4 RUNNING/PRODUCE/AUDIT_SCENE w=0 calls=18 tok=479744
+    13:57:29 ch3 a4 RUNNING/PRODUCE/ASSEMBLE_CHAPTER w=0 calls=19 tok=484213
+    13:57:53 ch3 a4 RUNNING/PRODUCE/VALIDATE w=0 calls=19 tok=484213
+    13:58:17 ch3 a4 TERMINAL_FAILED/PRODUCE/VALIDATE w=0 calls=20 tok=506701
+  TERMINAL a=4: (no error row)
+  fail reason: (no error row)
+  ���� HTTP 202 (regen #1)
+  �� attempt=5 state=RUNNING
+    13:58:53 ch3 a5 RUNNING/PRODUCE/WRITE_SCRIPTS w=0 calls=5 tok=30967
+    13:59:16 ch3 a5 RUNNING/PRODUCE/SELECT w=0 calls=5 tok=167399
+    13:59:39 ch3 a5 RUNNING/PRODUCE/SELECT w=0 calls=6 tok=167399
+    14:00:02 ch3 a5 RUNNING/PRODUCE/COMPILE_SCENES w=0 calls=6 tok=210316
+    14:00:24 ch3 a5 RUNNING/PRODUCE/WRITE_SCENE w=0 calls=7 tok=252748
+    14:00:47 ch3 a5 RUNNING/PRODUCE/AUDIT_SCENE w=0 calls=9 tok=289849
+    14:01:09 ch3 a5 RUNNING/PRODUCE/VALIDATE w=0 calls=9 tok=298902
+    14:01:32 ch3 a5 RUNNING/PRODUCE/ACCEPT_CHAPTER w=0 calls=11 tok=322298
+    14:01:55 ch3 a5 RUNNING/REVIEW/DONE w=2251 calls=12 tok=329090
+    14:02:18 ch3 a5 RUNNING/REVIEW/WRITE_SCENE w=2251 calls=13 tok=350004
+    14:02:41 ch3 a5 RUNNING/PRODUCE/AUDIT_SCENE w=2251 calls=14 tok=389563
+    14:03:04 ch3 a5 RUNNING/PRODUCE/VALIDATE w=2251 calls=15 tok=399143
+    14:03:27 ch3 a5 RUNNING/PRODUCE/ACCEPT_CHAPTER w=2251 calls=16 tok=423519
+    14:03:52 ch3 a5 TERMINAL_FAILED/REVIEW/DONE w=2251 calls=17 tok=431087
+  TERMINAL a=5: (no error row)
+  fail reason: (no error row)
+
+---------------- ��� ----------------
+���裺
+DIRECT|SUCCEEDED|1|
+REVIEW|FAILED|1|DIRECTOR_PRODUCTION_STOPPED
+ASSEMBLE|SUCCEEDED|1|
+CANON|PENDING|0|
+PRODUCE|SUCCEEDED|1|
+PRODUCE|FAILED|1|DIRECTOR_PRODUCTION_STOPPED
+DIRECT|SUCCEEDED|1|
+CANON|PENDING|0|
+ASSEMBLE|SUCCEEDED|1|
+REVIEW|PENDING|0|
+CANON|PENDING|0|
+REVIEW|PENDING|0|
+δ�տڵ��ã�
+(��)
+�����п��У�
+0
+--- regent-worker-3 ��־ ---
+WARNING:regent.novel.application.works_advance:chapter step failed: work=858ad0b6-8fd4-447e-a560-553237862565 chapter=3 step=PRODUCE attempt=1 code=DIRECTOR_PRODUCTION_STOPPED: �½ں���Ӳʧ�ܣ��ֳ��۲�������д��[front:redundant] ͬ�³�����ȫ��ͬ�����ظ��������ȥ�غ������գ�ժ¼�����ɿ�¼��������Ļ������һ���µļ�¼��ʱ��ʮһ�롣�����ֻ������ڴ����ͻ���
+WARNING:regent.novel.application.works_advance:chapter step failed: work=858ad0b6-8fd4-447e-a560-553237862565 chapter=3 step=REVIEW attempt=1 code=DIRECTOR_PRODUCTION_STOPPED: �޸�û�иı����ģ�ֹͣ����
+[STOP] chapter 3 exceeded 1 regens
+
+---
+exit_code: 2
+elapsed_ms: 852532
+ended_at: 2026-09-17T18:04:01.162Z
+---
