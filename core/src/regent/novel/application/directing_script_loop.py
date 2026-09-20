@@ -386,63 +386,18 @@ def _verify_model_location(
         return None
 
     quotes = tuple(str(q) for q in (data.get("evidence_quotes") or []) if str(q))
-    code = str(data.get("code") or "")
-    msg = str(data.get("message") or "")
 
     if not quotes:
-        # 缺失节拍：优先显式 beat_ids → scene 映射
+        # 缺失节拍：仅允许显式、合法 beat_ids → scene 映射（D2）
+        # 未知 ID / 混合无效 ID → 整条拒绝；不以 message 子串代替身份
         beat_map = _beat_scene_map(cards)
-        beat_ids = [str(b) for b in (data.get("beat_ids") or []) if str(b)]
-        if beat_ids:
-            mapped = tuple(
-                dict.fromkeys(beat_map[b] for b in beat_ids if b in beat_map)
-            )
-            if not mapped:
-                return None
-            # 声明场景必须与映射一致（允许映射结果替换错误声明）
-            return mapped
-        if not any(k in code for k in ("beat", "miss", "missing")):
+        beat_ids = [str(b).strip() for b in (data.get("beat_ids") or []) if str(b).strip()]
+        if not beat_ids:
             return None
-        # 无 beat_ids 时：message 中须出现完整 beat_id token，且落在所指卡上
-        for sid in sids:
-            card = next(
-                (
-                    c
-                    for c in cards
-                    if str(
-                        (
-                            c.get("scene_id")
-                            if isinstance(c, dict)
-                            else getattr(c, "scene_id", "")
-                        )
-                    )
-                    == sid
-                ),
-                None,
-            )
-            if card is None:
-                return None
-            beats = (
-                card.get("beats")
-                if isinstance(card, dict)
-                else getattr(card, "beats", []) or []
-            )
-            beat_ids_on_card = {
-                str(
-                    (
-                        b.get("beat_id")
-                        if isinstance(b, dict)
-                        else getattr(b, "beat_id", "")
-                    )
-                )
-                for b in beats
-            }
-            beat_ids_on_card.discard("")
-            if beat_ids_on_card and not any(
-                bid and bid in msg for bid in beat_ids_on_card
-            ):
-                return None
-        return sids
+        if any(b not in beat_map for b in beat_ids):
+            return None
+        mapped = tuple(dict.fromkeys(beat_map[b] for b in beat_ids))
+        return mapped if mapped else None
 
     # 有引文：每条引文必须归属至少一个声明场景；假引文 → 整条拒绝
     quote_scenes: list[set[str]] = []
@@ -1201,12 +1156,49 @@ async def _produce_script_tick(
         _scene_cards = list((sp.get("scene_plan") or {}).get("cards") or [])
         _scene_texts = list(sp.get("scene_texts") or [])
         _layout = build_scene_layout(scene_texts=_scene_texts, cards=_scene_cards)
+        _beat_map = {
+            str(
+                (
+                    b.get("beat_id")
+                    if isinstance(b, dict)
+                    else getattr(b, "beat_id", "")
+                )
+                or ""
+            ): str(
+                (
+                    c.get("scene_id")
+                    if isinstance(c, dict)
+                    else getattr(c, "scene_id", "")
+                )
+                or ""
+            )
+            for c in _scene_cards
+            for b in (
+                (
+                    c.get("beats")
+                    if isinstance(c, dict)
+                    else getattr(c, "beats", []) or []
+                )
+                or []
+            )
+            if str(
+                (
+                    b.get("beat_id")
+                    if isinstance(b, dict)
+                    else getattr(b, "beat_id", "")
+                )
+                or ""
+            )
+        }
         report = await call(
             ScriptChapterValidation,
             "核验正文是否兑现选定剧本的关键节拍与代价，有无越权新增事实。"
             "突破剧本终点或引入弃选路线记入 hard_fails。"
             "hard_fails 每条尽量带可检索摘录，格式：…摘录「原文片段」…；"
-            "若能判断场次，可填 located_issues（scene_ids/evidence_quotes）。"
+            "若能判断场次，可填 located_issues："
+            "有引文时填 scene_ids + evidence_quotes；"
+            "缺失节拍无引文时必须填 beat_ids（取自 payload.beat_id_to_scene），"
+            "禁止只在 message 里写节拍名代替 beat_ids。"
             "场次必须对照 payload.scene_layout（scene_index / scene_id / 字符区间），禁止自行猜分场。"
             "抽取有逐字 quote 的事实；你不负责戏剧决策，也不改写正文。",
             {
@@ -1217,6 +1209,7 @@ async def _produce_script_tick(
                 "canon": run.generation_context.get("canon", []),
                 "scene_hard_fails": sp.get("scene_hard_fails") or [],
                 "scene_layout": _layout,
+                "beat_id_to_scene": _beat_map,
                 "scene_plan": {
                     "cards": [
                         {
@@ -1226,6 +1219,32 @@ async def _produce_script_tick(
                             "purpose": (c or {}).get("purpose")
                             if isinstance(c, dict)
                             else getattr(c, "purpose", ""),
+                            "beat_ids": [
+                                str(
+                                    (
+                                        b.get("beat_id")
+                                        if isinstance(b, dict)
+                                        else getattr(b, "beat_id", "")
+                                    )
+                                    or ""
+                                )
+                                for b in (
+                                    (
+                                        c.get("beats")
+                                        if isinstance(c, dict)
+                                        else getattr(c, "beats", []) or []
+                                    )
+                                    or []
+                                )
+                                if str(
+                                    (
+                                        b.get("beat_id")
+                                        if isinstance(b, dict)
+                                        else getattr(b, "beat_id", "")
+                                    )
+                                    or ""
+                                )
+                            ],
                         }
                         for c in _scene_cards
                     ]

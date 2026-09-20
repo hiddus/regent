@@ -284,6 +284,24 @@ def _phrase_in(haystack: str, needle: str) -> bool:
     return bool(fn) and fn in fh
 
 
+def _relevant_state_for_issue(
+    issue: str, state: dict[str, Any]
+) -> dict[str, Any]:
+    """只保留问题文案涉及的实体/属性，避免无关状态值决定放行。"""
+    text = str(issue or "")
+    if not state or not text:
+        return {}
+    relevant: dict[str, Any] = {}
+    for key, val in state.items():
+        key_s = str(key or "").strip()
+        val_s = str(val or "").strip()
+        if key_s and _phrase_in(text, key_s):
+            relevant[key] = val
+        elif val_s and _phrase_in(text, val_s):
+            relevant[key] = val
+    return relevant
+
+
 def _state_values_agree_with_ending(
     state: dict[str, Any], ending: str
 ) -> bool:
@@ -296,27 +314,16 @@ def _state_values_agree_with_ending(
     return False
 
 
-def _prior_ending_contradicts_state(
+def _prior_ending_shows_new_value(
     state: dict[str, Any], ending: str
 ) -> bool:
-    """前场结尾是否对 working_state 中的实体记载了不同取值（可证滞后）。
+    """前场结尾是否对同一实体记载了可核对的新取值。
 
-    实体键出现在结尾中、但取值不在结尾中 → 结尾已改写该实体，
-    入场摘要可能仍停留在旧值。两端取值都在结尾中时不算矛盾证据。
+    858a round3 D1：旧值未出现 ≠ 已写新值。尚无结构化属性变更来源时，
+    不授予自动滞后例外（保持阻断，交有界修复）。
     """
-    if not state or not str(ending or "").strip():
-        return False
-    contradicted = 0
-    for key, val in state.items():
-        key_s = str(key or "").strip()
-        val_s = str(val or "").strip()
-        if not key_s:
-            continue
-        key_in = _phrase_in(ending, key_s)
-        val_in = bool(val_s) and _phrase_in(ending, val_s)
-        if key_in and not val_in:
-            contradicted += 1
-    return contradicted > 0
+    del state, ending
+    return False
 
 
 def is_entry_vs_ending_state_lag(
@@ -328,13 +335,12 @@ def is_entry_vs_ending_state_lag(
 ) -> bool:
     """入场状态摘要与上场结尾打架时，是否可证明为摘要滞后。
 
-    关闭条件（858a round2 C1）：
-    - 没有可核对来源（working_state / prior_scene_ending）时不授予滞后例外。
-    - 不用全文字符串不等作为事实冲突/滞后的证据。
-    - 对同一实体属性比较入口值与前场已接受正文；无法确定时保留阻断。
-
-    真实矛盾（入场与前场结尾事实一致，本场却出现不同状态）不得放行。
+    关闭条件（858a round2 C1 / round3 D1）：
+    - 没有可核对来源时不授予滞后例外。
+    - 不用全文字符串不等、也不用「旧值未出现」作为滞后证据。
+    - 按问题涉及的实体比对；无法证明属性已出现新值时保留阻断。
     """
+    del entry_summary  # 标签化摘要不作字符串不等证据
     text = str(issue or "").strip()
     if not text:
         return False
@@ -343,20 +349,22 @@ def is_entry_vs_ending_state_lag(
 
     state = working_state if isinstance(working_state, dict) else {}
     ending = str(prior_scene_ending or "").strip()
-    # 无来源 → 不授予滞后例外（不得靠措辞列表放行）
     if not state or not ending:
         return False
 
-    # 来源一致：working_state 取值出现在前场结尾 → 真实矛盾，不是滞后
-    if _state_values_agree_with_ending(state, ending):
+    scoped = _relevant_state_for_issue(text, state)
+    if not scoped:
+        # 问题未点名任何已知实体 → 无法按属性证明滞后
         return False
 
-    # 来源证明滞后：前场结尾对同一实体记载了不同取值
-    if _prior_ending_contradicts_state(state, ending):
+    # 来源一致：问题相关取值仍出现在前场结尾 → 真实矛盾，不是滞后
+    if _state_values_agree_with_ending(scoped, ending):
+        return False
+
+    # 须有可核对的新值才算滞后；当前无结构化变更源 → 不自动 soft
+    if _prior_ending_shows_new_value(scoped, ending):
         return True
 
-    # 不用 entry_summary 与 prior_scene_ending 的字符串不等作为证据
-    # 无法确定 → 保留阻断
     return False
 
 
@@ -370,7 +378,7 @@ def continuity_should_block(
 ) -> bool:
     """连续性是否硬阻断。
 
-    空入场发现误判可 soft；入场/上场结尾滞后仅在有来源且实体比对可证时 soft；
+    空入场发现误判可 soft；入场/上场结尾滞后仅在可证属性新值时 soft；
     无法证明滞后的真实矛盾必须阻断。
     """
     issues = [str(x).strip() for x in (continuity_issues or []) if str(x).strip()]

@@ -772,8 +772,8 @@ def test_empty_entry_discovery_continuity_is_not_blocking():
     assert gate.continuity_issues  # 仍保留记录，仅不硬杀
 
 
-def test_entry_vs_ending_state_lag_is_not_blocking():
-    """入场状态与上场结尾互相打架：有来源可证摘要滞后，不硬拦（858ad0b6 ch2）。"""
+def test_entry_vs_ending_state_lag_without_structured_new_value_blocks():
+    """D1：有来源叙述但无结构化新值 → 不自动 soft（858ad0b6 类问题改拦）。"""
     from regent.novel.domain.scene_card import BeatVerdict, evaluate_scene_audit
 
     gate = evaluate_scene_audit(
@@ -787,12 +787,11 @@ def test_entry_vs_ending_state_lag_is_not_blocking():
         ],
         scene_text="他把门推开。怀表安静地贴着掌心。",
         working_state={"门": "铁链锁死", "怀表": "倒转"},
-        # 可核对来源：前场已接受结尾记载了与 working_state 不同的实体取值
         prior_scene_ending="铁链哗啦落地，他推开门。怀表指针静止不动。",
         entry_summary="上场结尾：铁链哗啦落地，推开门\n累计状态：{\"门\": \"铁链锁死\", \"怀表\": \"倒转\"}",
     )
-    assert not gate.continuity_block
-    assert not gate.blocking
+    assert gate.continuity_block is True
+    assert gate.blocking is True
 
 
 def test_entry_vs_ending_lag_without_sources_blocks():

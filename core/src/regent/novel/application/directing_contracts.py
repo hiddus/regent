@@ -213,6 +213,10 @@ class LocatedIssueSpec(BaseModel):
     severity: Literal["hard", "soft"] = "hard"
     scene_ids: list[str] = Field(default_factory=list)
     evidence_quotes: list[str] = Field(default_factory=list)
+    beat_ids: list[str] = Field(
+        default_factory=list,
+        description="缺失节拍的显式 beat_id 列表；无引文时仅按此映射场次",
+    )
     content_hash: str = ""
     expected_action: str = "rewrite_scene"
     verify_rule: str = ""

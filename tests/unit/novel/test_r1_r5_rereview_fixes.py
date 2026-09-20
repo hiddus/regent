@@ -89,9 +89,15 @@ def test_r1_real_contradiction_not_soft_by_keywords():
     assert gate.blocking is True
 
 
-def test_r1_proven_lag_still_softable():
-    """有来源且前场结尾改写了实体取值 → 可 soft（非措辞放行）。"""
+def test_r1_proven_lag_without_structured_new_value_blocks():
+    """D1：前场改写叙述但无结构化新值来源 → 不得凭「旧值未出现」放行。"""
     issue = "入场状态仍留锁死，上场结尾已写铁链落地、怀表停转"
+    assert is_entry_vs_ending_state_lag(
+        issue,
+        working_state={"门": "铁链锁死", "怀表": "倒转"},
+        prior_scene_ending="铁链哗啦落地，推开门。怀表停转。",
+        entry_summary="上场结尾：锁仍锁着",
+    ) is False
     gate = evaluate_scene_audit(
         must_beat_ids=set(),
         verdicts=[],
@@ -103,7 +109,8 @@ def test_r1_proven_lag_still_softable():
         entry_summary="上场结尾：锁仍锁着",
         prior_scene_ending="铁链哗啦落地，推开门。怀表停转。",
     )
-    assert gate.continuity_block is False
+    assert gate.continuity_block is True
+    assert gate.blocking is True
 
 
 def test_r1_wording_only_no_sources_blocks():
@@ -166,21 +173,77 @@ def test_r1_string_inequality_is_not_lag_proof():
     assert gate.continuity_block is True
 
 
-def test_r1_source_entity_change_can_soft():
-    """working_state 实体在前场结尾被改写（取值不在结尾中）→ 可滞后处理。"""
-    issue = "入场状态与上场结尾矛盾：门锁状态不同"
+def test_r1_entity_mention_without_new_value_blocks():
+    """D1：只提及实体外观、旧值未写 ≠ 属性已变 → 阻断。"""
+    issue = (
+        "入场状态记录钥匙在甲手中；上场结尾没有发生交接，"
+        "本场却直接写钥匙在乙手中。"
+    )
     gate = evaluate_scene_audit(
         must_beat_ids=set(),
         verdicts=[],
         hard_fails=[],
         continuity_ok=False,
         continuity_issues=[issue],
-        scene_text="正文。",
-        working_state={"门": "铁链锁死"},
-        entry_summary="上场结尾：门锁着",
-        prior_scene_ending="铁链哗啦落地，他推开了门。",
+        scene_text="乙握着钥匙开门。",
+        working_state={"钥匙": "甲持有"},
+        entry_summary="钥匙仍由甲持有",
+        prior_scene_ending="钥匙泛着微光，屋外雨声渐密。",
     )
-    assert gate.continuity_block is False
+    assert gate.continuity_block is True
+    assert gate.blocking is True
+
+
+def test_r1_synonym_old_value_still_blocks():
+    """D1：前场同义描述旧值（甲仍握着）→ 不是滞后，保持阻断。"""
+    issue = "入场状态记录钥匙在甲手中；上场结尾描写甲仍握着钥匙，本场却变到乙手中。"
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="乙握着钥匙开门。",
+        working_state={"钥匙": "甲", "持有人": "甲"},
+        entry_summary="钥匙仍由甲持有",
+        prior_scene_ending="甲仍握着钥匙，没有交给任何人。",
+    )
+    assert gate.continuity_block is True
+
+
+def test_r1_handover_text_without_structured_delta_blocks():
+    """D1：正文像真正交接，但无结构化属性变更源 → 仍不自动 soft。"""
+    issue = "入场状态称钥匙归甲；上场结尾写钥匙已交到乙手中，本场状态却仍按甲。"
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="甲还以为钥匙在自己手里。",
+        working_state={"钥匙": "甲持有"},
+        entry_summary="钥匙在甲处",
+        prior_scene_ending="他把钥匙交到乙手中，乙收好后离开。",
+    )
+    assert gate.continuity_block is True
+
+
+def test_r1_unrelated_state_value_does_not_soft_issue():
+    """D1：无关状态值匹配不得决定钥匙问题是否放行。"""
+    issue = "入场状态记录钥匙在甲手中；上场结尾没有交接，本场却写钥匙在乙手中。"
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="乙握着钥匙。",
+        working_state={"钥匙": "甲持有", "天气": "雨声渐密"},
+        entry_summary="钥匙在甲处",
+        # 结尾只匹配无关「雨声」，不含钥匙归属新值
+        prior_scene_ending="屋外雨声渐密，灯火摇曳。",
+    )
+    assert gate.continuity_block is True
 
 
 def test_r1_multi_wording_real_conflict_all_block():
@@ -668,16 +731,17 @@ def test_r4_stale_hash_rejected():
     )
 
 
-def test_r4_beat_missing_without_card_mapping_rejected():
-    """beat 缺失类但 beat_id 不在所指场景卡上 → 拒绝。"""
+def test_r4_beat_missing_requires_explicit_beat_ids():
+    """D2：无引文的节拍定位必须带显式 beat_ids；仅 message 子串不得放行。"""
     cards = _cards_json(2)
     texts = ["甲场。" * 40, "乙场。" * 40]
     full = "\n\n".join(texts)
+    # message 含 b0 但无 beat_ids → 拒绝
     data = {
         "scene_ids": ["s0"],
         "evidence_quotes": [],
         "code": "beats_missed",
-        "message": "节拍 b1 完全缺失",  # s0 的 beat 是 b0
+        "message": "节拍 b0 完全缺失",
         "content_hash": content_hash(full),
     }
     assert (
@@ -686,11 +750,168 @@ def test_r4_beat_missing_without_card_mapping_rejected():
         )
         is None
     )
-    # beat_id 匹配 s0 的 b0 → 通过
-    data_ok = {**data, "message": "节拍 b0 完全缺失"}
+    # 显式 beat_ids=['b0'] → 映射到 s0
+    data_ok = {**data, "beat_ids": ["b0"], "message": "缺少关键节拍"}
     assert _verify_model_location(
         data=data_ok, cards=cards, texts=texts, full_chapter=full
     ) == ("s0",)
+
+
+def test_r4_beat_ids_mapping_used():
+    """C2/D2：缺失节拍用 beat_id→scene_id 映射，不靠 message 模糊匹配。"""
+    cards = _cards_json(3)  # s0/b0, s1/b1, s2/b2
+    texts = ["甲。" * 40, "乙。" * 40, "丙。" * 40]
+    full = "\n\n".join(texts)
+    data = {
+        "scene_ids": ["s0"],  # 声明错误
+        "evidence_quotes": [],
+        "code": "beats_missed",
+        "message": "节拍缺失",  # message 不含 beat_id
+        "beat_ids": ["b2"],
+        "content_hash": content_hash(full),
+    }
+    # 映射 b2→s2，应覆盖错误声明
+    assert _verify_model_location(
+        data=data, cards=cards, texts=texts, full_chapter=full
+    ) == ("s2",)
+    # 未知 beat_id → 拒绝
+    data_bad = {**data, "beat_ids": ["b99"]}
+    assert (
+        _verify_model_location(
+            data=data_bad, cards=cards, texts=texts, full_chapter=full
+        )
+        is None
+    )
+
+
+def test_d2_b1_does_not_match_b10():
+    """D2：b1 与 b10 不得互相命中；混合无效 ID 整条拒绝。"""
+    cards = [
+        {
+            "scene_id": "s0",
+            "purpose": "p",
+            "beats": [
+                {"beat_id": "b1", "must_show": True, "description": "d"},
+                {"beat_id": "b10", "must_show": True, "description": "d"},
+            ],
+        },
+        {
+            "scene_id": "s1",
+            "purpose": "p",
+            "beats": [{"beat_id": "b2", "must_show": True, "description": "d"}],
+        },
+    ]
+    texts = ["甲。" * 40, "乙。" * 40]
+    full = "\n\n".join(texts)
+    assert _verify_model_location(
+        data={
+            "scene_ids": ["s0"],
+            "evidence_quotes": [],
+            "code": "missing_beat",
+            "beat_ids": ["b10"],
+            "message": "缺 b1",  # 文案含 b1 不得影响
+        },
+        cards=cards,
+        texts=texts,
+        full_chapter=full,
+    ) == ("s0",)
+    # 混合有效+无效 → 拒绝（不得静默丢掉无效 ID）
+    assert (
+        _verify_model_location(
+            data={
+                "scene_ids": ["s0"],
+                "evidence_quotes": [],
+                "code": "missing_beat",
+                "beat_ids": ["b1", "b99"],
+                "message": "缺节拍",
+            },
+            cards=cards,
+            texts=texts,
+            full_chapter=full,
+        )
+        is None
+    )
+
+
+def test_d2_schema_parse_preserves_beat_ids_into_repair():
+    """D2：LocatedIssueSpec 解析 → model_dump → 生产定位路径保留 beat_ids。"""
+    from regent.novel.application.directing_contracts import (
+        LocatedIssueSpec,
+        ScriptChapterValidation,
+    )
+    from regent.novel.domain.errors import ProductionStopped
+
+    cards = _cards_json(2)
+    texts = ["甲场足够长的正文。" * 30, "乙场足够长的正文。" * 30]
+    full = "\n\n".join(texts)
+    raw = {
+        "hard_fails": ["[missing_beat] 缺少关键节拍"],
+        "soft_notes": [],
+        "facts": [],
+        "located_issues": [
+            {
+                "issue_id": "mb#1",
+                "code": "missing_beat",
+                "severity": "hard",
+                "scene_ids": ["s0"],
+                "evidence_quotes": [],
+                "beat_ids": ["b0"],
+                "content_hash": content_hash(full),
+                "expected_action": "rewrite_scene",
+                "verify_rule": "",
+                "message": "缺少关键节拍",  # 不含 b0
+            }
+        ],
+    }
+    report = ScriptChapterValidation.model_validate(raw)
+    dumped = report.located_issues[0].model_dump()
+    assert dumped.get("beat_ids") == ["b0"]
+    assert _verify_model_location(
+        data=dumped, cards=cards, texts=texts, full_chapter=full
+    ) == ("s0",)
+
+    sp: dict = {
+        "scene_plan": {"cards": cards, "chapter_goal": "x"},
+        "scene_texts": list(texts),
+        "scene_state_trail": [{"s": 0}, {"s": 1}],
+        "working_state": {"s": 1},
+        "scene_index": 1,
+        "working_summary": "",
+        "scene_entry_summaries": ["", ""],
+    }
+    production: dict = {"phase": "VALIDATE", "script_protocol": sp}
+    _begin_located_scene_repair(
+        production,
+        sp,
+        fails=["[missing_beat] 缺少关键节拍"],
+        instruction_prefix="改：",
+        model_located=list(report.located_issues),
+    )
+    assert production["phase"] == "WRITE_SCENE"
+    assert sp["scene_index"] == 0
+
+    # 无 beat_ids 的 schema 结果不得靠 message 放行
+    raw2 = {
+        "hard_fails": ["[missing_beat] 缺少关键节拍 b0"],
+        "located_issues": [
+            {
+                "issue_id": "mb#2",
+                "code": "missing_beat",
+                "scene_ids": ["s0"],
+                "evidence_quotes": [],
+                "message": "缺少关键节拍 b0",
+            }
+        ],
+    }
+    report2 = ScriptChapterValidation.model_validate(raw2)
+    dumped2 = report2.located_issues[0].model_dump()
+    assert dumped2.get("beat_ids") == []
+    assert (
+        _verify_model_location(
+            data=dumped2, cards=cards, texts=texts, full_chapter=full
+        )
+        is None
+    )
 
 
 def test_r4_unlocated_fail_with_fake_quote_stops():
@@ -919,33 +1140,6 @@ def test_r4_cross_scene_missing_scene_evidence_rejected():
     assert (
         _verify_model_location(
             data=data, cards=cards, texts=texts, full_chapter=full
-        )
-        is None
-    )
-
-
-def test_r4_beat_ids_mapping_used():
-    """C2：缺失节拍用 beat_id→scene_id 映射，不靠 message 模糊匹配。"""
-    cards = _cards_json(3)  # s0/b0, s1/b1, s2/b2
-    texts = ["甲。" * 40, "乙。" * 40, "丙。" * 40]
-    full = "\n\n".join(texts)
-    data = {
-        "scene_ids": ["s0"],  # 声明错误
-        "evidence_quotes": [],
-        "code": "beats_missed",
-        "message": "节拍缺失",  # message 不含 beat_id
-        "beat_ids": ["b2"],
-        "content_hash": content_hash(full),
-    }
-    # 映射 b2→s2，应覆盖错误声明
-    assert _verify_model_location(
-        data=data, cards=cards, texts=texts, full_chapter=full
-    ) == ("s2",)
-    # 未知 beat_id → 拒绝
-    data_bad = {**data, "beat_ids": ["b99"]}
-    assert (
-        _verify_model_location(
-            data=data_bad, cards=cards, texts=texts, full_chapter=full
         )
         is None
     )
