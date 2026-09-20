@@ -17,6 +17,7 @@ from regent.novel.application.directing_calls import (
 from regent.novel.application.directing_script_loop import (
     _audit_cont_softable,
     _begin_located_scene_repair,
+    _model_binds_to_unsolved_fail,
     _produce_script_tick,
     _verify_model_location,
 )
@@ -63,11 +64,11 @@ def _cards_json(n: int = 3) -> list[dict]:
     ]
 
 
-# ========== R1：连续性门 ==========
+# ========== R1 / C1：连续性门 ==========
 
 
 def test_r1_real_contradiction_not_soft_by_keywords():
-    """两端一致（也确认）而正文不同 → 真实矛盾，完整审核必须阻断。"""
+    """两端事实一致（甲持有钥匙）而正文不同 → 真实矛盾，完整审核必须阻断。"""
     issue = (
         "入场状态确认钥匙在甲手中，上场结尾也确认在甲手中，"
         "但本场无交接就变到乙手中"
@@ -89,9 +90,8 @@ def test_r1_real_contradiction_not_soft_by_keywords():
 
 
 def test_r1_proven_lag_still_softable():
-    """明确滞后措辞（入场仍留旧态 + 上场结尾已写新态）→ 可 soft。"""
+    """有来源且前场结尾改写了实体取值 → 可 soft（非措辞放行）。"""
     issue = "入场状态仍留锁死，上场结尾已写铁链落地、怀表停转"
-    assert is_entry_vs_ending_state_lag(issue) is True
     gate = evaluate_scene_audit(
         must_beat_ids=set(),
         verdicts=[],
@@ -99,11 +99,28 @@ def test_r1_proven_lag_still_softable():
         continuity_ok=False,
         continuity_issues=[issue],
         scene_text="铁链散落在地，怀表指针静止不动。",
-        working_state={"lock": "locked"},
+        working_state={"门": "铁链锁死", "怀表": "倒转"},
         entry_summary="上场结尾：锁仍锁着",
-        prior_scene_ending="铁链哗啦落地，怀表停转。",
+        prior_scene_ending="铁链哗啦落地，推开门。怀表停转。",
     )
     assert gate.continuity_block is False
+
+
+def test_r1_wording_only_no_sources_blocks():
+    """同一滞后措辞但无 working_state / prior_scene_ending → 不得放行。"""
+    issue = "入场状态仍留锁死，上场结尾已写铁链落地、怀表停转"
+    assert is_entry_vs_ending_state_lag(issue) is False
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="铁链散落在地。",
+        working_state={},
+        # 无 prior_scene_ending 来源
+    )
+    assert gate.continuity_block is True
 
 
 def test_r1_unproven_lag_blocks():
@@ -118,14 +135,40 @@ def test_r1_unproven_lag_blocks():
         continuity_issues=[issue],
         scene_text="正文内容。",
         working_state={"key_holder": "甲"},
-        # 无 entry_summary / prior_scene_ending 可比对
+        # 无 prior_scene_ending
     )
     assert gate.continuity_block is True
 
 
-def test_r1_source_mismatch_can_soft():
-    """有来源且 entry 与 prior ending 不一致 → 可按滞后处理。"""
+def test_r1_string_inequality_is_not_lag_proof():
+    """摘要带标签与 ending 字符串不等，但事实一致 → 不是滞后证据。"""
     issue = "入场状态与上场结尾矛盾：钥匙归属说法不同"
+    entry_summary = '上场结尾：甲把钥匙攥在掌心\n累计状态：{"持有人": "甲"}'
+    prior_ending = "甲把钥匙攥在掌心，没有交给任何人。"
+    working_state = {"持有人": "甲"}
+    assert is_entry_vs_ending_state_lag(
+        issue,
+        entry_summary=entry_summary,
+        prior_scene_ending=prior_ending,
+        working_state=working_state,
+    ) is False
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="乙拿着钥匙。",
+        working_state=working_state,
+        entry_summary=entry_summary,
+        prior_scene_ending=prior_ending,
+    )
+    assert gate.continuity_block is True
+
+
+def test_r1_source_entity_change_can_soft():
+    """working_state 实体在前场结尾被改写（取值不在结尾中）→ 可滞后处理。"""
+    issue = "入场状态与上场结尾矛盾：门锁状态不同"
     gate = evaluate_scene_audit(
         must_beat_ids=set(),
         verdicts=[],
@@ -133,11 +176,33 @@ def test_r1_source_mismatch_can_soft():
         continuity_ok=False,
         continuity_issues=[issue],
         scene_text="正文。",
-        working_state={},
-        entry_summary="上场结尾：钥匙锁在抽屉里",
-        prior_scene_ending="甲把钥匙交给了乙，乙已带走。",
+        working_state={"门": "铁链锁死"},
+        entry_summary="上场结尾：门锁着",
+        prior_scene_ending="铁链哗啦落地，他推开了门。",
     )
     assert gate.continuity_block is False
+
+
+def test_r1_multi_wording_real_conflict_all_block():
+    """同一真实矛盾的多种改述 → 全部阻断。"""
+    wordings = [
+        "入场状态确认钥匙在甲手中，上场结尾也确认在甲手中，但本场无交接就变到乙手中",
+        "入场状态记录钥匙在甲手中；上场结尾描写甲仍拿着钥匙，本场却无交接变到乙手中",
+        "入场状态称钥匙归甲；上场结尾写甲仍持有钥匙，本场却变到乙，无交接过程",
+    ]
+    for issue in wordings:
+        gate = evaluate_scene_audit(
+            must_beat_ids=set(),
+            verdicts=[],
+            hard_fails=[],
+            continuity_ok=False,
+            continuity_issues=[issue],
+            scene_text="乙接过钥匙。",
+            working_state={"钥匙": "甲手中", "持有人": "甲"},
+            prior_scene_ending="甲仍拿着钥匙，没有交给任何人。",
+            entry_summary='上场结尾：甲仍拿着钥匙\n累计状态：{"持有人": "甲"}',
+        )
+        assert gate.continuity_block is True, issue
 
 
 def test_r1_cont_softable_still_rejects_real_conflict():
@@ -628,7 +693,7 @@ def test_r4_beat_missing_without_card_mapping_rejected():
     ) == ("s0",)
 
 
-def test_r4_model_located_fake_does_not_change_target():
+def test_r4_unlocated_fail_with_fake_quote_stops():
     """硬失败无可检索位置 + 模型伪引文 → 不得进入 WRITE_SCENE 改写目标。"""
     cards = _cards_json(3)
     texts = [
@@ -675,7 +740,7 @@ def test_r4_model_located_fake_does_not_change_target():
 
 
 def test_r4_verified_model_location_fills_gap():
-    """确定性未定位 + 模型合法 ID + 真引文 → 可补齐并改写目标。"""
+    """确定性未定位 + 模型绑定该 fail + 真引文 → 可补齐并改写目标。"""
     cards = _cards_json(3)
     quote = "乙把钥匙放在了桌面正中"
     texts = [
@@ -694,6 +759,7 @@ def test_r4_verified_model_location_fills_gap():
         "scene_entry_summaries": ["", "", ""],
     }
     production: dict = {"phase": "VALIDATE", "script_protocol": sp}
+    fail_msg = "[fact_conflict] 乙的钥匙来源无法解释"
     model_located = [
         SimpleNamespace(
             model_dump=lambda: {
@@ -705,20 +771,286 @@ def test_r4_verified_model_location_fills_gap():
                 "content_hash": content_hash(full),
                 "expected_action": "rewrite_scene",
                 "verify_rule": "",
-                "message": "钥匙归属错误",
+                # 必须与待修 fail 实质对应，不能是无关问题
+                "message": "乙的钥匙来源无法解释",
             }
         )
     ]
     _begin_located_scene_repair(
         production,
         sp,
-        fails=["[fact_conflict] 某种无法从正文检索的问题"],
+        fails=[fail_msg],
         instruction_prefix="章节核验未过：",
         model_located=model_located,
     )
     assert production["phase"] == "WRITE_SCENE"
     assert sp["scene_index"] == 1
     assert sp["pending_repair_ticket"]["scene_id"] == "s1"
+
+
+def test_r4_unrelated_model_issue_cannot_change_target():
+    """C2：真实引文 + 正确 hash，但问题无关 → 不得改写目标。"""
+    from regent.novel.domain.errors import ProductionStopped
+    from regent.novel.application.directing_script_loop import (
+        _model_binds_to_unsolved_fail,
+    )
+
+    cards = _cards_json(3)
+    real_quote = "甲在门廊检查怀表，确认时间还早得很"
+    texts = [
+        real_quote + "，然后收起怀表离开。" * 20,
+        "乙场在仓库翻找铁链，没有找到钥匙。" * 20,
+        "丙场在走廊对峙，无关钥匙。" * 20,
+    ]
+    full = "\n\n".join(texts)
+    fail_msg = "[continuity] 乙的钥匙来源无法解释"
+    data = {
+        "issue_id": "model#unrelated",
+        "code": "unrelated",
+        "severity": "hard",
+        "scene_ids": ["s0"],
+        "evidence_quotes": [real_quote, "此处完全虚构且不存在的证据"],
+        "content_hash": content_hash(full),
+        "expected_action": "rewrite_scene",
+        "verify_rule": "",
+        "message": "与原核验无关的问题",
+    }
+    # 绑定检查：无关条目不得通过
+    assert (
+        _model_binds_to_unsolved_fail(data, fails=[fail_msg], located=[])
+        is False
+    )
+    # 即使单条引文真实，混合假引文也会被 _verify 拒绝
+    assert (
+        _verify_model_location(
+            data=data, cards=cards, texts=texts, full_chapter=full
+        )
+        is None
+    )
+
+    sp: dict = {
+        "scene_plan": {"cards": cards, "chapter_goal": "x"},
+        "scene_texts": list(texts),
+        "scene_state_trail": [{"s": i} for i in range(3)],
+        "working_state": {"s": 2},
+        "scene_index": 2,
+        "working_summary": "",
+        "scene_entry_summaries": ["", "", ""],
+    }
+    production: dict = {"phase": "VALIDATE", "script_protocol": sp}
+    model_located = [SimpleNamespace(model_dump=lambda: data)]
+    with pytest.raises(ProductionStopped):
+        _begin_located_scene_repair(
+            production,
+            sp,
+            fails=[fail_msg],
+            instruction_prefix="章节核验未过：",
+            model_located=model_located,
+        )
+    # 不得进入 WRITE_SCENE / 不得截到 s0
+    assert production.get("phase") != "WRITE_SCENE"
+    assert int(sp.get("scene_index", 2)) == 2
+
+
+def test_r4_mixed_real_fake_quotes_rejected():
+    """C2：真假引文混合 → 整条拒绝，不得只凭一条真引文放行。"""
+    cards = _cards_json(2)
+    real_q = "乙把钥匙放在了桌面正中"
+    texts = [
+        "甲场无关。" * 30,
+        real_q + "，然后离开房间。" * 30,
+    ]
+    full = "\n\n".join(texts)
+    data = {
+        "scene_ids": ["s1"],
+        "evidence_quotes": [real_q, "完全不存在的假证据句子"],
+        "code": "continuity",
+        "message": "乙的钥匙来源无法解释",
+        "content_hash": content_hash(full),
+    }
+    assert (
+        _verify_model_location(
+            data=data, cards=cards, texts=texts, full_chapter=full
+        )
+        is None
+    )
+
+
+def test_r4_cross_scene_multi_quotes_accepted():
+    """C2：跨场多引文，每条归属对应场景、每场有证据 → 可接受。"""
+    cards = _cards_json(3)
+    q0 = "甲在门廊收起怀表准备出发"
+    q2 = "丙在走廊拦住乙盘问钥匙下落"
+    texts = [
+        q0 + "，天色尚早。" * 20,
+        "乙场中段与定位无关。" * 20,
+        q2 + "，语气严厉。" * 20,
+    ]
+    full = "\n\n".join(texts)
+    data = {
+        "scene_ids": ["s0", "s2"],
+        "evidence_quotes": [q0, q2],
+        "code": "continuity",
+        "message": "钥匙交接链断裂",
+        "content_hash": content_hash(full),
+    }
+    assert _verify_model_location(
+        data=data, cards=cards, texts=texts, full_chapter=full
+    ) == ("s0", "s2")
+
+
+def test_r4_cross_scene_missing_scene_evidence_rejected():
+    """C2：声明 s0+s2，但 s2 无任何对应引文 → 拒绝。"""
+    cards = _cards_json(3)
+    q0 = "甲在门廊收起怀表准备出发"
+    texts = [
+        q0 + "，天色尚早。" * 20,
+        "乙场中段。" * 20,
+        "丙场没有怀表也没有钥匙的任何描述。" * 20,
+    ]
+    full = "\n\n".join(texts)
+    data = {
+        "scene_ids": ["s0", "s2"],
+        "evidence_quotes": [q0],
+        "code": "continuity",
+        "message": "钥匙交接链断裂",
+        "content_hash": content_hash(full),
+    }
+    assert (
+        _verify_model_location(
+            data=data, cards=cards, texts=texts, full_chapter=full
+        )
+        is None
+    )
+
+
+def test_r4_beat_ids_mapping_used():
+    """C2：缺失节拍用 beat_id→scene_id 映射，不靠 message 模糊匹配。"""
+    cards = _cards_json(3)  # s0/b0, s1/b1, s2/b2
+    texts = ["甲。" * 40, "乙。" * 40, "丙。" * 40]
+    full = "\n\n".join(texts)
+    data = {
+        "scene_ids": ["s0"],  # 声明错误
+        "evidence_quotes": [],
+        "code": "beats_missed",
+        "message": "节拍缺失",  # message 不含 beat_id
+        "beat_ids": ["b2"],
+        "content_hash": content_hash(full),
+    }
+    # 映射 b2→s2，应覆盖错误声明
+    assert _verify_model_location(
+        data=data, cards=cards, texts=texts, full_chapter=full
+    ) == ("s2",)
+    # 未知 beat_id → 拒绝
+    data_bad = {**data, "beat_ids": ["b99"]}
+    assert (
+        _verify_model_location(
+            data=data_bad, cards=cards, texts=texts, full_chapter=full
+        )
+        is None
+    )
+
+
+def test_r4_multiple_independent_same_code_issues():
+    """C2：同类多个独立问题，模型只补齐未定位的那一条。"""
+    cards = _cards_json(3)
+    q1 = "乙把钥匙放在了桌面正中"
+    texts = [
+        "甲场与问题无关的长叙述。" * 30,
+        q1 + "，然后离开。" * 30,
+        "丙场另一处也有钥匙相关的错误描述。" * 30,
+    ]
+    full = "\n\n".join(texts)
+    fail_located = "[fact_conflict] 甲场人物身份写错；摘录「甲场与问题无关」"
+    fail_open = "[fact_conflict] 乙的钥匙来源无法解释"
+    sp: dict = {
+        "scene_plan": {"cards": cards, "chapter_goal": "x"},
+        "scene_texts": list(texts),
+        "scene_state_trail": [{"s": i} for i in range(3)],
+        "working_state": {"s": 2},
+        "scene_index": 2,
+        "working_summary": "",
+        "scene_entry_summaries": ["", "", ""],
+    }
+    production: dict = {"phase": "VALIDATE", "script_protocol": sp}
+    model_located = [
+        SimpleNamespace(
+            model_dump=lambda: {
+                "issue_id": "model#open",
+                "code": "fact_conflict",
+                "severity": "hard",
+                "scene_ids": ["s1"],
+                "evidence_quotes": [q1],
+                "content_hash": content_hash(full),
+                "expected_action": "rewrite_scene",
+                "message": "乙的钥匙来源无法解释",
+            }
+        )
+    ]
+    _begin_located_scene_repair(
+        production,
+        sp,
+        fails=[fail_located, fail_open],
+        instruction_prefix="改本场：",
+        model_located=model_located,
+    )
+    # 确定性定位 fail_located 到 s0（摘录在甲场）；模型补 fail_open 到 s1
+    # 最早可定位场是 s0
+    assert sp["scene_index"] == 0
+    all_sids = [
+        sid
+        for i in sp["located_issues"]
+        for sid in (i.get("scene_ids") or [])
+    ]
+    assert "s0" in all_sids
+    assert "s1" in all_sids
+    assert sp["pending_repair_ticket"]["scene_id"] == "s0"
+
+
+def test_r4_model_located_fake_does_not_change_target():
+    """硬失败无可检索位置 + 模型伪引文 → 不得进入 WRITE_SCENE 改写目标。"""
+    cards = _cards_json(3)
+    texts = [
+        "甲场正文关于怀表的检查过程写得很细。" * 30,
+        "乙场正文关于仓库的搜索写得很细。" * 30,
+        "丙场正文关于走廊的对峙写得很细。" * 30,
+    ]
+    sp: dict = {
+        "scene_plan": {"cards": cards, "chapter_goal": "x"},
+        "scene_texts": list(texts),
+        "scene_state_trail": [{"s": i} for i in range(3)],
+        "working_state": {"s": 2},
+        "scene_index": 2,
+        "working_summary": "上场结尾：丙场…",
+        "scene_entry_summaries": ["", "s0…", "s1…"],
+    }
+    production: dict = {"phase": "VALIDATE", "script_protocol": sp}
+    fail_msg = "[continuity] 乙的钥匙来源无法解释"
+    model_located = [
+        SimpleNamespace(
+            model_dump=lambda: {
+                "issue_id": "model#1",
+                "code": "continuity",
+                "severity": "hard",
+                "scene_ids": ["s0"],
+                "evidence_quotes": ["完全不存在的引文"],
+                "content_hash": "",
+                "expected_action": "rewrite_scene",
+                "verify_rule": "",
+                "message": "乙的钥匙来源无法解释",
+            }
+        )
+    ]
+    from regent.novel.domain.errors import ProductionStopped
+
+    with pytest.raises(ProductionStopped):
+        _begin_located_scene_repair(
+            production,
+            sp,
+            fails=[fail_msg],
+            instruction_prefix="章节核验未过：",
+            model_located=model_located,
+        )
 
 
 def test_r4_conflicting_deterministic_not_overridden_by_model():
@@ -741,9 +1073,7 @@ def test_r4_conflicting_deterministic_not_overridden_by_model():
         "scene_entry_summaries": ["", "", ""],
     }
     production: dict = {"phase": "VALIDATE", "script_protocol": sp}
-    # 确定性：复读定位到 s1/s2
     det_msg = "[front:redundant] 同章出现完全相同段落重复；摘录「" + PARA + "」"
-    # 模型误报：同一复读问题却指向 s0
     model_located = [
         SimpleNamespace(
             model_dump=lambda: {

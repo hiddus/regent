@@ -262,48 +262,6 @@ def is_empty_state_discovery_false_positive(
     return False
 
 
-_LAG_AGREEMENT_MARKERS = (
-    "也确认",
-    "都确认",
-    "同样确认",
-    "同样",
-    "一致",
-    "也是",
-    "均为",
-    "都在",
-)
-_LAG_ENTRY_MARKERS = (
-    "入场状态仍",
-    "入场状态还",
-    "入场状态仍留",
-    "入场状态仍写",
-    "入场状态称",
-    "入场状态写",
-    "摘要仍",
-    "状态仍留",
-    "状态仍写",
-)
-_LAG_ENDING_MARKERS = (
-    "上场结尾已",
-    "上场结尾已经",
-    "上场结尾明确写",
-    "上场结尾写",
-    "上场已写",
-    "上场已",
-    "结尾已写",
-    "结尾已",
-)
-# 对比结构：入场主张 vs 上场结尾已是另一状态 → 滞后
-_LAG_CONTRAST_MARKERS = (
-    "但上场结尾",
-    "而上场结尾",
-    "与上场结尾直接冲突",
-    "与上场结尾矛盾",
-    "与上场结尾不一致",
-    "与上场结尾冲突",
-)
-
-
 def _fold_state_phrase(s: str) -> str:
     import re
 
@@ -312,6 +270,53 @@ def _fold_state_phrase(s: str) -> str:
         "",
         str(s or ""),
     )
+
+
+def _phrase_in(haystack: str, needle: str) -> bool:
+    """needle 是否出现在 haystack 中（含折叠去符号比较）。"""
+    n = str(needle or "").strip()
+    h = str(haystack or "")
+    if not n or not h:
+        return False
+    if n in h:
+        return True
+    fn, fh = _fold_state_phrase(n), _fold_state_phrase(h)
+    return bool(fn) and fn in fh
+
+
+def _state_values_agree_with_ending(
+    state: dict[str, Any], ending: str
+) -> bool:
+    """working_state 的取值是否出现在前场已接受结尾正文中（事实一致）。"""
+    if not state or not str(ending or "").strip():
+        return False
+    for val in state.values():
+        if _phrase_in(ending, str(val or "")):
+            return True
+    return False
+
+
+def _prior_ending_contradicts_state(
+    state: dict[str, Any], ending: str
+) -> bool:
+    """前场结尾是否对 working_state 中的实体记载了不同取值（可证滞后）。
+
+    实体键出现在结尾中、但取值不在结尾中 → 结尾已改写该实体，
+    入场摘要可能仍停留在旧值。两端取值都在结尾中时不算矛盾证据。
+    """
+    if not state or not str(ending or "").strip():
+        return False
+    contradicted = 0
+    for key, val in state.items():
+        key_s = str(key or "").strip()
+        val_s = str(val or "").strip()
+        if not key_s:
+            continue
+        key_in = _phrase_in(ending, key_s)
+        val_in = bool(val_s) and _phrase_in(ending, val_s)
+        if key_in and not val_in:
+            contradicted += 1
+    return contradicted > 0
 
 
 def is_entry_vs_ending_state_lag(
@@ -323,9 +328,12 @@ def is_entry_vs_ending_state_lag(
 ) -> bool:
     """入场状态摘要与上场结尾打架时，是否可证明为摘要滞后。
 
-    仅当能证明「入场摘要落后于上场结尾」时返回 True。
-    两端一致（也确认/都确认）或无法比对来源时返回 False，保留阻断——
-    真实矛盾（入场/上场结尾都说钥匙在甲，本场无交接却变到乙）不得放行。
+    关闭条件（858a round2 C1）：
+    - 没有可核对来源（working_state / prior_scene_ending）时不授予滞后例外。
+    - 不用全文字符串不等作为事实冲突/滞后的证据。
+    - 对同一实体属性比较入口值与前场已接受正文；无法确定时保留阻断。
+
+    真实矛盾（入场与前场结尾事实一致，本场却出现不同状态）不得放行。
     """
     text = str(issue or "").strip()
     if not text:
@@ -333,28 +341,22 @@ def is_entry_vs_ending_state_lag(
     if "入场状态" not in text or "上场结尾" not in text:
         return False
 
-    # 两端一致而正文不同 → 真实矛盾，不是滞后
-    if any(m in text for m in _LAG_AGREEMENT_MARKERS):
+    state = working_state if isinstance(working_state, dict) else {}
+    ending = str(prior_scene_ending or "").strip()
+    # 无来源 → 不授予滞后例外（不得靠措辞列表放行）
+    if not state or not ending:
         return False
 
-    # 明确滞后措辞：入场仍留/称旧态 + 上场结尾已是/写新态
-    has_lag_entry = any(m in text for m in _LAG_ENTRY_MARKERS)
-    has_lag_ending = any(m in text for m in _LAG_ENDING_MARKERS)
-    if has_lag_entry and has_lag_ending:
+    # 来源一致：working_state 取值出现在前场结尾 → 真实矛盾，不是滞后
+    if _state_values_agree_with_ending(state, ending):
+        return False
+
+    # 来源证明滞后：前场结尾对同一实体记载了不同取值
+    if _prior_ending_contradicts_state(state, ending):
         return True
 
-    # 对比结构：入场主张与上场结尾冲突/矛盾 → 摘要滞后
-    if any(m in text for m in _LAG_CONTRAST_MARKERS) and has_lag_entry:
-        return True
-
-    # 有来源时比对：prior ending 与 entry_summary 明显不一致才可能是滞后
-    ending = _fold_state_phrase(prior_scene_ending)
-    entry = _fold_state_phrase(entry_summary)
-    if ending and entry and ending != entry:
-        if not any(m in text for m in _LAG_AGREEMENT_MARKERS):
-            return True
-
-    # 无法证明滞后 → 保留阻断
+    # 不用 entry_summary 与 prior_scene_ending 的字符串不等作为证据
+    # 无法确定 → 保留阻断
     return False
 
 
@@ -368,7 +370,7 @@ def continuity_should_block(
 ) -> bool:
     """连续性是否硬阻断。
 
-    空入场发现误判、已证明的入场/上场结尾摘要滞后 → 不阻断；
+    空入场发现误判可 soft；入场/上场结尾滞后仅在有来源且实体比对可证时 soft；
     无法证明滞后的真实矛盾必须阻断。
     """
     issues = [str(x).strip() for x in (continuity_issues or []) if str(x).strip()]

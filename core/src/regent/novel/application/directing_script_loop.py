@@ -219,6 +219,137 @@ def _script_cards(sp: dict[str, Any]) -> list[Any]:
     return list(plan.get("cards") or [])
 
 
+def _normalize_msg(s: str) -> str:
+    import re
+
+    return re.sub(r"[\s\W_]+", "", str(s or ""), flags=re.UNICODE)
+
+
+def _msg_overlap(a: str, b: str) -> bool:
+    """问题文案是否有实质重叠（用于绑定模型定位到待修 hard fail）。"""
+    na, nb = _normalize_msg(a), _normalize_msg(b)
+    if not na or not nb:
+        return False
+    if na in nb or nb in na:
+        return True
+    window = 8
+    if len(na) >= window:
+        for i in range(0, len(na) - window + 1):
+            if na[i : i + window] in nb:
+                return True
+    if len(nb) >= window:
+        for i in range(0, len(nb) - window + 1):
+            if nb[i : i + window] in na:
+                return True
+    return False
+
+
+def _extract_fail_code(msg: str) -> str:
+    import re
+
+    m = re.match(r"^\[([a-z0-9_:-]+)\]", str(msg or "").strip())
+    return m.group(1) if m else ""
+
+
+def _model_binds_to_unsolved_fail(
+    data: dict[str, Any],
+    *,
+    fails: list[str],
+    located: list[Any],
+) -> bool:
+    """模型定位是否对应某个尚未解决的 hard fail。
+
+    关闭条件（C2）：通过稳定 issue_id 或明确映射绑定；
+    未知/无关条目不能改变修订目标。
+    """
+    code = str(data.get("code") or "").strip()
+    msg = str(data.get("message") or "").strip()
+    iid = str(data.get("issue_id") or "").strip()
+
+    located_ids = {getattr(i, "issue_id", "") for i in located}
+    # 已有确定性场景归属的问题身份
+    located_with_scenes = set()
+    for i in located:
+        if getattr(i, "scene_ids", None):
+            located_with_scenes.add(
+                (str(getattr(i, "code", "")), _normalize_msg(getattr(i, "message", ""))[:40])
+            )
+
+    for fail in fails:
+        fail_s = str(fail or "").strip()
+        if not fail_s:
+            continue
+        fail_code = _extract_fail_code(fail_s)
+        fail_key = (fail_code or "", _normalize_msg(fail_s)[:40])
+        # 该 fail 已有确定性场景归属 → 模型不得再改写其目标
+        already = fail_key in located_with_scenes
+        if not already and fail_code:
+            already = any(
+                c == fail_code and _msg_overlap(fail_s, m)
+                for c, m in (
+                    (
+                        str(getattr(i, "code", "")),
+                        str(getattr(i, "message", "")),
+                    )
+                    for i in located
+                    if getattr(i, "scene_ids", None)
+                )
+            )
+        # issue_id 明确出现在 fail 文案中
+        if iid and iid in fail_s:
+            if not already:
+                return True
+            continue
+        # code 必须一致（双方都有 code 时）；文案必须实质重叠
+        if code and fail_code and code != fail_code:
+            continue
+        if msg and _msg_overlap(msg, fail_s):
+            if not already:
+                return True
+
+    # 可补齐确定性未定位条目（scene_ids 为空）
+    for issue in located:
+        if getattr(issue, "scene_ids", None):
+            continue
+        issue_id = str(getattr(issue, "issue_id", "") or "")
+        issue_code = str(getattr(issue, "code", "") or "")
+        issue_msg = str(getattr(issue, "message", "") or "")
+        if iid and iid == issue_id:
+            return True
+        if code and issue_code and code != issue_code:
+            continue
+        if msg and _msg_overlap(msg, issue_msg):
+            return True
+        if iid and iid in located_ids and issue_msg and _msg_overlap(msg, issue_msg):
+            return True
+    return False
+
+
+def _beat_scene_map(cards: list[Any]) -> dict[str, str]:
+    """beat_id → scene_id 映射（缺失节拍定位必须用它，不得模糊搜 message）。"""
+    mapping: dict[str, str] = {}
+    for c in cards:
+        sid = str(
+            (c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", ""))
+            or ""
+        )
+        if not sid:
+            continue
+        beats = (
+            c.get("beats")
+            if isinstance(c, dict)
+            else getattr(c, "beats", []) or []
+        )
+        for b in beats:
+            bid = str(
+                (b.get("beat_id") if isinstance(b, dict) else getattr(b, "beat_id", ""))
+                or ""
+            )
+            if bid:
+                mapping[bid] = sid
+    return mapping
+
+
 def _verify_model_location(
     *,
     data: dict[str, Any],
@@ -226,10 +357,12 @@ def _verify_model_location(
     texts: list[str],
     full_chapter: str,
 ) -> tuple[str, ...] | None:
-    """核验模型定位：合法 scene_id + 引文接地 + hash 一致；否则返回 None。
+    """核验模型定位：合法 scene_id + 引文逐条归属 + hash 一致；否则 None。
 
-    程序生成/核对正文 hash，逐个校验引用与场景归属。
-    无法证明对应待修问题的定位不得改变目标。
+    关闭条件（C2）：
+    - 每条进入票据的引文必须归属至少一个所声明场景；
+      每个声明场景也必须有对应证据。假引文混入 → 整条拒绝。
+    - 缺失节拍优先 beat_id→scene_id 映射。
     """
     from regent.novel.domain.repair_locate import content_hash as _chash
     from regent.novel.domain.scene_card import evidence_grounded
@@ -237,32 +370,51 @@ def _verify_model_location(
     sids = tuple(str(x) for x in (data.get("scene_ids") or []) if str(x))
     if not sids:
         return None
-    known = {
-        str((c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", "")) or "")
-        for c in cards
-    }
-    known.discard("")
+    scene_idx: dict[str, int] = {}
+    for i, c in enumerate(cards):
+        sid = str(
+            (c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", ""))
+            or ""
+        )
+        if sid:
+            scene_idx[sid] = i
+    known = set(scene_idx)
     if any(sid not in known for sid in sids):
         return None
-    # content_hash 若给出，必须与当前完整正文一致
     model_hash = str(data.get("content_hash") or "").strip()
     if model_hash and model_hash != _chash(full_chapter):
         return None
+
     quotes = tuple(str(q) for q in (data.get("evidence_quotes") or []) if str(q))
+    code = str(data.get("code") or "")
+    msg = str(data.get("message") or "")
+
     if not quotes:
-        # 无引文：仅允许 code 为 beat/miss 类（用卡片映射验证），其余拒绝
-        code = str(data.get("code") or "")
+        # 缺失节拍：优先显式 beat_ids → scene 映射
+        beat_map = _beat_scene_map(cards)
+        beat_ids = [str(b) for b in (data.get("beat_ids") or []) if str(b)]
+        if beat_ids:
+            mapped = tuple(
+                dict.fromkeys(beat_map[b] for b in beat_ids if b in beat_map)
+            )
+            if not mapped:
+                return None
+            # 声明场景必须与映射一致（允许映射结果替换错误声明）
+            return mapped
         if not any(k in code for k in ("beat", "miss", "missing")):
             return None
-        # beat 类：message 中的 beat_id 必须落在所指场景卡上
-        msg = str(data.get("message") or "")
+        # 无 beat_ids 时：message 中须出现完整 beat_id token，且落在所指卡上
         for sid in sids:
             card = next(
                 (
                     c
                     for c in cards
                     if str(
-                        (c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", ""))
+                        (
+                            c.get("scene_id")
+                            if isinstance(c, dict)
+                            else getattr(c, "scene_id", "")
+                        )
                     )
                     == sid
                 ),
@@ -275,30 +427,39 @@ def _verify_model_location(
                 if isinstance(card, dict)
                 else getattr(card, "beats", []) or []
             )
-            beat_ids = {
-                str((b.get("beat_id") if isinstance(b, dict) else getattr(b, "beat_id", "")))
+            beat_ids_on_card = {
+                str(
+                    (
+                        b.get("beat_id")
+                        if isinstance(b, dict)
+                        else getattr(b, "beat_id", "")
+                    )
+                )
                 for b in beats
             }
-            if beat_ids and not any(bid and bid in msg for bid in beat_ids):
+            beat_ids_on_card.discard("")
+            if beat_ids_on_card and not any(
+                bid and bid in msg for bid in beat_ids_on_card
+            ):
                 return None
         return sids
-    # 有引文：每条引文必须出现在所指场景正文中
-    for sid in sids:
-        idx = next(
-            (
-                i
-                for i, c in enumerate(cards)
-                if str(
-                    (c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", ""))
-                )
-                == sid
-            ),
-            None,
-        )
-        if idx is None or idx >= len(texts):
+
+    # 有引文：每条引文必须归属至少一个声明场景；假引文 → 整条拒绝
+    quote_scenes: list[set[str]] = []
+    for q in quotes:
+        grounded_in: set[str] = set()
+        for sid in sids:
+            idx = scene_idx.get(sid)
+            if idx is None or idx >= len(texts):
+                continue
+            if evidence_grounded(q, texts[idx]):
+                grounded_in.add(sid)
+        if not grounded_in:
             return None
-        scene_text = texts[idx]
-        if not any(evidence_grounded(q, scene_text) for q in quotes):
+        quote_scenes.append(grounded_in)
+    # 每个声明场景必须至少有一条对应证据
+    for sid in sids:
+        if not any(sid in gs for gs in quote_scenes):
             return None
     return sids
 
@@ -314,7 +475,10 @@ def _begin_located_scene_repair(
 ) -> None:
     """按定位结果回退到目标场；无法定位则停机。禁止默认修末场。
 
-    模型定位只作核验后的补齐：合法 ID + 引文接地 + hash 一致才能改写目标。
+    模型定位只作核验后的补齐：
+    1) 必须绑定某个尚未解决的 hard fail（issue_id / code+文案重叠）；
+    2) 合法 scene_id + 引文逐条归属 + hash 一致；
+    3) 不得覆盖已有确定性定位。
     """
     from regent.novel.domain.repair_locate import (
         LocatedIssue,
@@ -329,16 +493,13 @@ def _begin_located_scene_repair(
     located = locate_fail_messages(
         fails, scene_texts=texts, cards=cards, chapter_content=full_chapter
     )
-    # 确定性已定位的问题身份（code+message 前缀），模型只补齐缺口
-    deterministic_keys = {
-        (i.code, str(i.message or "")[:60]) for i in located if i.scene_ids
-    }
-    deterministic_codes_located = {i.code for i in located if i.scene_ids}
-    # 模型定位：逐条核验，只在确定性未覆盖时补齐
     for raw in model_located or []:
         try:
             data = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
         except Exception:
+            continue
+        # 无关问题不得改变修订目标
+        if not _model_binds_to_unsolved_fail(data, fails=fails, located=located):
             continue
         verified_sids = _verify_model_location(
             data=data, cards=cards, texts=texts, full_chapter=full_chapter
@@ -347,20 +508,25 @@ def _begin_located_scene_repair(
             continue
         code = str(data.get("code") or "model")
         msg = str(data.get("message") or data.get("issue_id") or code)
-        # 同一问题身份已被确定性定位 → 不重复追加、不覆盖
-        if (code, msg[:60]) in deterministic_keys:
-            continue
-        if code in deterministic_codes_located and any(
-            i.code == code and i.scene_ids for i in located
+        # 同一问题已被确定性定位 → 不覆盖
+        if any(
+            i.scene_ids
+            and (
+                (str(data.get("issue_id") or "") and str(data.get("issue_id")) == i.issue_id)
+                or (code == i.code and _msg_overlap(msg, i.message))
+            )
+            for i in located
         ):
-            # 同 code 已有确定性定位：模型猜测不得改变目标
             continue
+        # 只保留接地引文（核验已保证每条可归属；此处再过滤空串）
         quotes = tuple(str(q) for q in (data.get("evidence_quotes") or []) if str(q))
         located.append(
             LocatedIssue(
                 issue_id=str(data.get("issue_id") or f"{code}#model"),
                 code=code,
-                severity="hard" if str(data.get("severity") or "hard") == "hard" else "soft",
+                severity="hard"
+                if str(data.get("severity") or "hard") == "hard"
+                else "soft",
                 scene_ids=verified_sids,
                 evidence_quotes=quotes,
                 content_hash=str(data.get("content_hash") or ""),
@@ -383,7 +549,6 @@ def _begin_located_scene_repair(
     if not target.locatable:
         raise ProductionStopped(target.instruction)
     apply_repair_target_to_script_state(sp, target)
-    # 截断不变量：目标场必须是列表末项，WRITE/AUDIT 用显式 idx 并可断言
     texts_after = list(sp.get("scene_texts") or [])
     idx = int(sp.get("scene_index") or 0)
     if texts_after and idx != len(texts_after) - 1:
