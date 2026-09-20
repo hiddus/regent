@@ -773,7 +773,7 @@ def test_empty_entry_discovery_continuity_is_not_blocking():
 
 
 def test_entry_vs_ending_state_lag_is_not_blocking():
-    """入场状态与上场结尾互相打架：摘要滞后，不硬拦（858ad0b6 ch2）。"""
+    """入场状态与上场结尾互相打架：有来源可证摘要滞后，不硬拦（858ad0b6 ch2）。"""
     from regent.novel.domain.scene_card import BeatVerdict, evaluate_scene_audit
 
     gate = evaluate_scene_audit(
@@ -787,9 +787,113 @@ def test_entry_vs_ending_state_lag_is_not_blocking():
         ],
         scene_text="他把门推开。怀表安静地贴着掌心。",
         working_state={"门": "铁链锁死", "怀表": "倒转"},
+        # 可核对来源：前场已接受结尾记载了与 working_state 不同的实体取值
+        prior_scene_ending="铁链哗啦落地，他推开门。怀表指针静止不动。",
+        entry_summary="上场结尾：铁链哗啦落地，推开门\n累计状态：{\"门\": \"铁链锁死\", \"怀表\": \"倒转\"}",
     )
     assert not gate.continuity_block
     assert not gate.blocking
+
+
+def test_entry_vs_ending_lag_without_sources_blocks():
+    """同一措辞但无 working_state / prior_scene_ending 来源 → 不得放行。"""
+    from regent.novel.domain.scene_card import BeatVerdict, evaluate_scene_audit
+
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[
+            "入场状态称『门被铁链锁死』，但上场结尾明确写『铁链哗啦落地』『推开门』，与上场结尾直接冲突。",
+        ],
+        scene_text="他把门推开。",
+        working_state={},
+        prior_scene_ending="",
+    )
+    assert gate.continuity_block is True
+
+
+def test_entry_vs_ending_real_conflict_multi_wording_blocks():
+    """同一真实矛盾的多种措辞：来源事实一致 → 必须阻断。"""
+    from regent.novel.domain.scene_card import BeatVerdict, evaluate_scene_audit
+
+    wordings = [
+        "入场状态确认钥匙在甲手中，上场结尾也确认在甲手中，但本场无交接就变到乙手中",
+        "入场状态记录钥匙在甲手中；上场结尾描写甲仍拿着钥匙，本场却无交接变到乙手中",
+        "入场状态称钥匙归甲；上场结尾写甲仍持有钥匙，本场却变到乙，无交接过程",
+    ]
+    for issue in wordings:
+        gate = evaluate_scene_audit(
+            must_beat_ids=set(),
+            verdicts=[],
+            hard_fails=[],
+            continuity_ok=False,
+            continuity_issues=[issue],
+            scene_text="乙接过钥匙，没有交代从何处得来。",
+            working_state={"钥匙": "甲手中", "持有人": "甲"},
+            prior_scene_ending="甲仍拿着钥匙，没有交给任何人。",
+            entry_summary=(
+                "上场结尾：甲仍拿着钥匙\n"
+                '累计状态：{"钥匙": "甲手中", "持有人": "甲"}'
+            ),
+        )
+        assert gate.continuity_block is True, issue
+        assert gate.blocking is True, issue
+
+
+def test_entry_vs_ending_labelled_summary_facts_agree_blocks():
+    """摘要带标签/累计状态但事实一致 → 字符串不等不能当滞后证据。"""
+    from regent.novel.domain.scene_card import (
+        BeatVerdict,
+        evaluate_scene_audit,
+        is_entry_vs_ending_state_lag,
+    )
+
+    issue = "入场状态与上场结尾矛盾：钥匙归属说法不同"
+    # entry 有标签，ending 是正文；working_state 与 ending 事实一致
+    entry_summary = '上场结尾：甲把钥匙攥在掌心\n累计状态：{"持有人": "甲"}'
+    prior_ending = "甲把钥匙攥在掌心，没有交给任何人。"
+    working_state = {"持有人": "甲"}
+    # 字符串不等，但取值「甲」出现在 ending → 不是滞后
+    assert is_entry_vs_ending_state_lag(
+        issue,
+        entry_summary=entry_summary,
+        prior_scene_ending=prior_ending,
+        working_state=working_state,
+    ) is False
+    gate = evaluate_scene_audit(
+        must_beat_ids=set(),
+        verdicts=[],
+        hard_fails=[],
+        continuity_ok=False,
+        continuity_issues=[issue],
+        scene_text="乙拿着钥匙。",
+        working_state=working_state,
+        entry_summary=entry_summary,
+        prior_scene_ending=prior_ending,
+    )
+    assert gate.continuity_block is True
+
+
+def test_entry_vs_ending_wording_only_without_data_blocks():
+    """仅滞后措辞、无任何来源 → 不授予例外。"""
+    from regent.novel.domain.scene_card import is_entry_vs_ending_state_lag
+
+    assert (
+        is_entry_vs_ending_state_lag(
+            "入场状态仍留锁死，上场结尾已写铁链落地、怀表停转"
+        )
+        is False
+    )
+    assert (
+        is_entry_vs_ending_state_lag(
+            "入场状态仍留锁死，上场结尾已写铁链落地",
+            working_state={},
+            prior_scene_ending="",
+        )
+        is False
+    )
 
 
 def test_nonempty_entry_continuity_still_blocks():
