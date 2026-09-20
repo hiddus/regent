@@ -190,14 +190,24 @@ def locate_fail_messages(
     cards: list[Any] | None = None,
     chapter_content: str = "",
 ) -> list[LocatedIssue]:
-    """把硬失败字符串映射到 scene_id；无法归属时 scene_ids 为空。"""
+    """把硬失败字符串映射到 scene_id；无法归属时 scene_ids 为空。
+
+    检测投影（长段拼接，供段落匹配）与权威正文 hash 分离：
+    content_hash 始终取实际完整正文，避免短对白导致票据 hash 永不相等。
+    """
     cards = list(cards or [])
     texts = [str(t or "") for t in scene_texts]
-    # 优先用场文本同源拼接，避免外部分段与映射不一致
-    chapter = _chapter_from_scenes(texts) or chapter_content or "\n\n".join(
+    # 检测投影：只连长段，与段落映射同源
+    detection_chapter = _chapter_from_scenes(texts)
+    # 权威正文：优先调用方传入的完整内容，否则用未过滤的场文本拼接
+    full_chapter = (chapter_content or "").strip() or "\n\n".join(
         t for t in texts if t.strip()
     )
-    ch_hash = content_hash(chapter)
+    if not full_chapter:
+        full_chapter = detection_chapter
+    ch_hash = content_hash(full_chapter)
+    # 重复检测仍用长段投影；hash 用完整正文
+    chapter = detection_chapter or full_chapter
     para_map = _paragraph_scene_map(texts)
     out: list[LocatedIssue] = []
 
@@ -457,19 +467,150 @@ def select_repair_target(
     )
 
 
+def _rebuild_working_summary(
+    *,
+    scene_index: int,
+    scene_texts: list[str],
+    working_state: dict[str, Any] | None,
+) -> str:
+    """按目标场入口重建 working_summary，禁止保留后场摘要。"""
+    import json
+
+    if scene_index <= 0:
+        return ""
+    prior = scene_texts[scene_index - 1] if scene_index - 1 < len(scene_texts) else ""
+    prior = (prior or "").strip()
+    state = working_state if isinstance(working_state, dict) else {}
+    if not prior:
+        return ""
+    return (
+        f"上场结尾：{prior[-300:]}\n"
+        f"累计状态：{json.dumps(state, ensure_ascii=False)[:400]}"
+    )
+
+
+_REQUIRED_FACT_MARKERS = (
+    "应在",
+    "应为",
+    "应当",
+    "必须是",
+    "必须在",
+    "正确状态",
+    "目标状态",
+    "须为",
+    "须在",
+)
+_FORBIDDEN_CLAIM_MARKERS = (
+    "误称",
+    "误写",
+    "错误断言",
+    "不应",
+    "不得主张",
+    "却说",
+    "却变成",
+    "无交接",
+    "错误地",
+)
+
+
+def split_rewrite_claims(
+    issues: list[LocatedIssue] | tuple[LocatedIssue, ...],
+) -> tuple[list[str], list[str]]:
+    """把 rewrite 问题拆成「禁止再主张」与「应写入的正确状态」。
+
+    「钥匙应在小李手中」是目标约束，不得进 forbidden_claims。
+    证据摘录里的错误断言仍走 evidence_quotes；此处只分类 message。
+    """
+    forbidden: list[str] = []
+    required: list[str] = []
+    for issue in issues:
+        if issue.expected_action != "rewrite_scene":
+            continue
+        msg = str(issue.message or "").strip()
+        if not msg:
+            continue
+        if any(m in msg for m in _REQUIRED_FACT_MARKERS):
+            required.append(msg)
+        elif any(m in msg for m in _FORBIDDEN_CLAIM_MARKERS):
+            forbidden.append(msg)
+        else:
+            # 默认当作修订目标（正确状态），避免把纠错说明误当成禁写句
+            required.append(msg)
+    return forbidden[:4], required[:4]
+
+
+def build_scene_layout(
+    *,
+    scene_texts: list[str] | None = None,
+    cards: list[Any] | None = None,
+    joiner: str = "\n\n",
+) -> dict[str, Any]:
+    """审校/核验用的分场边界：下标、scene_id、在合并正文中的字符区间。"""
+    texts = [str(t or "") for t in (scene_texts or [])]
+    card_list = list(cards or [])
+    scenes: list[dict[str, Any]] = []
+    boundaries: list[int] = []
+    offset = 0
+    for i, text in enumerate(texts):
+        sid = ""
+        if i < len(card_list):
+            card = card_list[i]
+            sid = str(
+                (
+                    card.get("scene_id")
+                    if isinstance(card, dict)
+                    else getattr(card, "scene_id", "")
+                )
+                or ""
+            )
+        if i > 0:
+            offset += len(joiner)
+        boundaries.append(offset)
+        scenes.append(
+            {
+                "scene_index": i,
+                "scene_id": sid or f"s{i}",
+                "char_start": offset,
+                "char_end": offset + len(text),
+                "char_len": len(text),
+            }
+        )
+        offset += len(text)
+    return {
+        "scene_count": len(scenes),
+        "scene_boundaries": boundaries,
+        "scenes": scenes,
+        "joiner": joiner,
+    }
+
+
 def apply_repair_target_to_script_state(
     sp: dict[str, Any],
     target: RepairTarget,
 ) -> None:
-    """按修订目标截断后续场并设置 scene_index / 意见 / 票据。"""
+    """按修订目标截断后续场并设置 scene_index / 意见 / 票据。
+
+    同步重建 working_summary：回退后不得继续携带未来场摘要，
+    否则 WRITE_SCENE 会同时发送「从起点重写」与「后续事件已发生」。
+    base_content_hash 绑定定位时刻的完整正文（截断前），供无进展止损比对。
+    """
     from copy import deepcopy
 
     texts = list(sp.get("scene_texts") or [])
     idx = int(target.scene_index)
     if idx < 0:
         raise ValueError("repair target not locatable")
+    # 权威 hash：定位时刻的完整正文（截断前），含短对白/短段
+    pre_truncation_chapter = "\n\n".join(t for t in texts if t.strip())
+    pre_hash = content_hash(pre_truncation_chapter)
+    # 确定性定位结果的 content_hash 已是完整正文 hash，优先采用
+    for issue in target.issues:
+        if issue.content_hash:
+            pre_hash = issue.content_hash
+            break
     if idx < len(texts):
         sp["scene_texts"] = texts[: idx + 1]
+        texts = list(sp["scene_texts"])
     trail = list(sp.get("scene_state_trail") or [])
     if trail and idx + 1 <= len(trail):
         sp["working_state"] = deepcopy(trail[idx])
@@ -477,6 +618,19 @@ def apply_repair_target_to_script_state(
     elif trail and idx < len(trail):
         sp["working_state"] = deepcopy(trail[idx])
         sp["scene_state_trail"] = trail[: idx + 1]
+    entries = list(sp.get("scene_entry_summaries") or [])
+    if idx < len(entries) and str(entries[idx] or "").strip():
+        sp["working_summary"] = str(entries[idx])
+    else:
+        sp["working_summary"] = _rebuild_working_summary(
+            scene_index=idx,
+            scene_texts=texts,
+            working_state=sp.get("working_state"),
+        )
+    # 截断入口快照，避免后场摘要在下一次 WRITE 被误用
+    sp["scene_entry_summaries"] = entries[: idx] + [
+        str(sp.get("working_summary") or "")
+    ]
     sp["scene_index"] = idx
     sp["scene_revision_instruction"] = target.instruction
     codes = list(dict.fromkeys(i.code for i in target.issues if i.code))
@@ -494,6 +648,7 @@ def apply_repair_target_to_script_state(
         for q in i.evidence_quotes
         if q
     ]
+    forbidden_claims, required_facts = split_rewrite_claims(target.issues)
     sp["pending_repair_ticket"] = {
         "scene_index": idx,
         "scene_id": target.scene_id,
@@ -501,12 +656,11 @@ def apply_repair_target_to_script_state(
         "issue_ids": [i.issue_id for i in target.issues],
         "codes": codes,
         "issues": [i.as_dict() for i in target.issues],
-        "base_content_hash": target.issues[0].content_hash if target.issues else "",
+        "base_content_hash": pre_hash,
         "must_remove_quotes": must_remove,
         "evidence_quotes": evidence_only,
-        "forbidden_claims": [
-            i.message for i in target.issues if i.expected_action == "rewrite_scene" and i.message
-        ][:4],
+        "forbidden_claims": forbidden_claims,
+        "required_facts": required_facts,
         "verify_rules": [i.verify_rule for i in target.issues if i.verify_rule],
         "expected_actions": [
             i.expected_action for i in target.issues if i.expected_action
@@ -565,6 +719,7 @@ __all__ = [
     "RepairTarget",
     "RedundantHit",
     "apply_repair_target_to_script_state",
+    "build_scene_layout",
     "content_hash",
     "find_near_duplicate_paragraphs",
     "format_revision_instruction",
@@ -572,5 +727,6 @@ __all__ = [
     "repair_target_from_scene_index",
     "scenes_containing_quote",
     "select_repair_target",
+    "split_rewrite_claims",
     "verify_repair_progress",
 ]

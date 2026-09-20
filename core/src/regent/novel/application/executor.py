@@ -97,7 +97,15 @@ DEFER_MARKER = "executor_switch_deferred"
 # 一次运行的执行器身份：任何重建 generation_context 的步骤都必须带上它们，
 # 否则 ASSEMBLE 一重建就把「这一章到底跑的哪个臂」抹掉了，盲评无法归因。
 # executor_version 同理：版本跟着臂走，重建不得丢。
-PINNED_CONTEXT_KEYS: tuple[str, ...] = ("executor", "executor_version", DEFER_MARKER)
+# call_key_version / continuation 是运行身份与授权来源：新旧调用键分流、
+# 连续授权追踪都依赖它们；ASSEMBLE 重建时丢失会让新运行按旧版解析。
+PINNED_CONTEXT_KEYS: tuple[str, ...] = (
+    "executor",
+    "executor_version",
+    DEFER_MARKER,
+    "call_key_version",
+    "continuation",
+)
 
 
 def carry_over(context: dict[str, object] | None) -> dict[str, object]:

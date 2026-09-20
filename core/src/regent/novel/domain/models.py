@@ -479,6 +479,9 @@ class ContinuationPolicyRequest(BaseModel):
     max_chapters: int | None = Field(default=None, ge=1, le=500)
     volume_scope: Literal["current", "authorized", "unbounded"] = "current"
     budget_grant_note: str = Field(default="", max_length=200)
+    expected_version: int | None = Field(default=None, ge=0)
+    authorized_volume_no: int | None = Field(default=None, ge=1, le=50)
+    authorized_end_chapter_no: int | None = Field(default=None, ge=1, le=500)
 
 
 class ContinuationPolicyOut(BaseModel):
@@ -490,6 +493,8 @@ class ContinuationPolicyOut(BaseModel):
     volume_scope: str = "current"
     version: int = 1
     budget_grant_note: str = ""
+    authorized_volume_no: int | None = None
+    authorized_end_chapter_no: int | None = None
 
 
 # ---------------------------------------------------------------------------

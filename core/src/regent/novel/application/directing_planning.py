@@ -470,6 +470,22 @@ async def _ensure_work_conventions(
     run.generation_context = ctx
 
 
+def _inherit_call_key_version(run: ChapterRunModel) -> dict[str, Any]:
+    """production 初始化时继承运行身份的 call_key_version。
+
+    start_run/ensure_next_run 写入 2；旧运行缺省为 1。
+    ASSEMBLE 重建后 root context 仍保留该字段，此处必须带进 production，
+    否则 hydrate 会找不到版本、按旧运行解析。
+    """
+    ctx = run.generation_context or {}
+    if "call_key_version" in ctx:
+        return {"call_key_version": int(ctx.get("call_key_version") or 1)}
+    old_prod = ctx.get("production")
+    if isinstance(old_prod, dict) and "call_key_version" in old_prod:
+        return {"call_key_version": int(old_prod.get("call_key_version") or 1)}
+    return {"call_key_version": 1}
+
+
 async def plan_chapter(
     session: AsyncSession,
     *,
@@ -650,6 +666,9 @@ async def plan_chapter(
             "working_state": run.generation_context.get("actual_state", {}),
         }
     )
+    # 运行身份：新旧调用键分流必须贯穿 production 初始化
+    if "call_key_version" not in production:
+        production.update(_inherit_call_key_version(run))
     _new_take(production, result.scenes[0].model_dump(mode="json"))
     run.title = result.title
     _save(run, production)
@@ -661,6 +680,7 @@ async def _plan_script_chapter(run: ChapterRunModel, *, cast: dict[str, Any]) ->
     production = {
         "schema_version": 1,
         "protocol": proto,
+        **_inherit_call_key_version(run),
         "plan": {
             "title": "",
             "reader_intent": (

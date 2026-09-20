@@ -212,6 +212,13 @@ async def validate_chapter(
     production = deepcopy(run.generation_context["production"])
     if production["phase"] != "DONE" or not production["accepted"]:
         raise ProductionStopped("未完成场景不能提交整章")
+    from regent.novel.domain.repair_locate import build_scene_layout
+
+    _sp = production.get("script_protocol") or {}
+    _scene_layout = build_scene_layout(
+        scene_texts=list(_sp.get("scene_texts") or []),
+        cards=list((_sp.get("scene_plan") or {}).get("cards") or []),
+    )
     result = await _call(
         session,
         provider,
@@ -222,13 +229,15 @@ async def validate_chapter(
         "核验组章后的连续性、因果、重复事件及角色知识。确认所有场景衔接成立。"
         "只要存在事实冲突就不通过。不要按两个状态字段或每章冲突升级来判断。"
         "失败时：issues 每条尽量带可检索摘录（用「摘录「…」」格式）；"
-        "failed_scene_index 填最早受影响场景下标（从0开始，相对分场顺序）。"
+        "failed_scene_index 填最早受影响场景下标（从0开始，相对 payload.scene_layout 分场顺序）。"
+        "必须对照 scene_layout 的 scene_index/scene_id/字符区间定位，禁止自行猜分场。"
         "判断目标节点是否真正完成；完成必须给出正文逐字completion_quote。",
         {
             "chapter": run.content,
             "recent_chapters": run.generation_context.get("recent_chapters", []),
             "target_node": run.generation_context.get("target_node", {}),
             "canon": run.generation_context.get("canon", []),
+            "scene_layout": _scene_layout,
         },
         "chapter_validation",
         # 正文变了就是一次新的核验；正文未变时复用上次结论，不重复付费（G-09）

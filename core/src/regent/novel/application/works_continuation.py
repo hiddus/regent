@@ -56,6 +56,9 @@ class ContinuationPolicy:
     volume_scope: str = "current"
     version: int = 1
     budget_grant_note: str = ""
+    # 授权时钉扎的卷身份；current/authorized 都依赖它，避免扩卷后静默越界
+    authorized_volume_no: int | None = None
+    authorized_end_chapter_no: int | None = None
 
 
 def _policy_raw(work: StoryWorkModel) -> dict[str, Any]:
@@ -68,6 +71,8 @@ def get_continuation_policy(work: StoryWorkModel) -> ContinuationPolicy:
     raw = _policy_raw(work)
     target = raw.get("target_chapter_no")
     max_ch = raw.get("max_chapters")
+    auth_vol = raw.get("authorized_volume_no")
+    auth_end = raw.get("authorized_end_chapter_no")
     return ContinuationPolicy(
         enabled=bool(raw.get("enabled")),
         target_chapter_no=int(target) if target not in (None, "", 0) else None,
@@ -75,6 +80,10 @@ def get_continuation_policy(work: StoryWorkModel) -> ContinuationPolicy:
         volume_scope=str(raw.get("volume_scope") or "current"),
         version=int(raw.get("version") or 1),
         budget_grant_note=str(raw.get("budget_grant_note") or ""),
+        authorized_volume_no=int(auth_vol) if auth_vol not in (None, "", 0) else None,
+        authorized_end_chapter_no=(
+            int(auth_end) if auth_end not in (None, "", 0) else None
+        ),
     )
 
 
@@ -86,6 +95,9 @@ def set_continuation_policy(
     max_chapters: int | None = None,
     volume_scope: str = "current",
     budget_grant_note: str = "",
+    expected_version: int | None = None,
+    authorized_volume_no: int | None = None,
+    authorized_end_chapter_no: int | None = None,
 ) -> ContinuationPolicy:
     scope = str(volume_scope or "current").strip().lower() or "current"
     if scope not in ("current", "authorized", "unbounded"):
@@ -94,6 +106,25 @@ def set_continuation_policy(
         raise ValidationFailed("target_chapter_no must be >= 1")
     if max_chapters is not None and int(max_chapters) < 1:
         raise ValidationFailed("max_chapters must be >= 1")
+    current = get_continuation_policy(work)
+    if expected_version is not None and int(expected_version) != int(current.version):
+        raise ValidationFailed(
+            f"continuation policy version conflict: expected {expected_version}, "
+            f"current {current.version}"
+        )
+    # current/authorized：钉扎卷身份。未显式传入时取作品当前卷号。
+    pin_vol = authorized_volume_no
+    pin_end = authorized_end_chapter_no
+    if scope in ("current", "authorized"):
+        if pin_vol is None:
+            pin_vol = int(work.total_volume_count or 0) or None
+        if pin_vol is not None and int(pin_vol) < 1:
+            raise ValidationFailed("authorized_volume_no must be >= 1")
+        if pin_end is not None and int(pin_end) < 1:
+            raise ValidationFailed("authorized_end_chapter_no must be >= 1")
+    else:
+        pin_vol = None
+        pin_end = None
     bible = dict(work.story_bible or {})
     policy = {
         "enabled": bool(enabled),
@@ -102,9 +133,48 @@ def set_continuation_policy(
         "volume_scope": scope,
         "version": int((_policy_raw(work).get("version") or 0)) + 1,
         "budget_grant_note": budget_grant_note,
+        "authorized_volume_no": pin_vol,
+        "authorized_end_chapter_no": pin_end,
         "set_at": datetime.now(UTC).isoformat(),
     }
     bible["continuation_policy"] = policy
+    work.story_bible = bible
+    work.version += 1
+    return get_continuation_policy(work)
+
+
+def refresh_continuation_after_volume_expand(
+    work: StoryWorkModel,
+    *,
+    new_volume_no: int,
+    new_end_chapter_no: int | None = None,
+) -> ContinuationPolicy | None:
+    """扩卷确认后的连续授权处理。
+
+    - volume_scope=current：扩卷即重新钉扎到新卷（确认扩卷=续写授权延展）
+    - volume_scope=authorized：不自动延展，仍停在原授权卷/章尾
+    - unbounded：无卷边界，仅 bump 备注
+    """
+    pol = get_continuation_policy(work)
+    if not pol.enabled:
+        return None
+    scope = pol.volume_scope
+    if scope == "authorized":
+        return pol
+    if scope == "unbounded":
+        return pol
+    # current：重新授权到新卷
+    bible = dict(work.story_bible or {})
+    raw = dict(_policy_raw(work))
+    raw["authorized_volume_no"] = int(new_volume_no)
+    if new_end_chapter_no is not None and int(new_end_chapter_no) > 0:
+        raw["authorized_end_chapter_no"] = int(new_end_chapter_no)
+    else:
+        raw["authorized_end_chapter_no"] = None
+    raw["version"] = int(raw.get("version") or 0) + 1
+    raw["reauthorized_by"] = "volume_expand"
+    raw["set_at"] = datetime.now(UTC).isoformat()
+    bible["continuation_policy"] = raw
     work.story_bible = bible
     work.version += 1
     return get_continuation_policy(work)
@@ -159,10 +229,18 @@ async def _current_volume_end_chapter(
     vol_no = int(work.total_volume_count or 0)
     if vol_no <= 0:
         return None
+    return await _volume_end_chapter(session, work=work, volume_no=vol_no)
+
+
+async def _volume_end_chapter(
+    session: AsyncSession, *, work: StoryWorkModel, volume_no: int
+) -> int | None:
+    if volume_no <= 0:
+        return None
     vol = await session.scalar(
         select(VolumeModel).where(
             VolumeModel.work_id == work.id,
-            VolumeModel.volume_no == vol_no,
+            VolumeModel.volume_no == int(volume_no),
         )
     )
     if vol is None:
@@ -220,9 +298,16 @@ async def ensure_next_run(
         return None
     if policy.max_chapters is not None and next_ch > int(policy.max_chapters):
         return None
-    # volume_scope=current：不超过当前卷 end_chapter_no
-    if policy.volume_scope == "current":
-        end_ch = await _current_volume_end_chapter(session, work=work)
+    # volume_scope：current/authorized 用钉扎卷尾；unbounded 不限卷
+    if policy.volume_scope in ("current", "authorized"):
+        end_ch = policy.authorized_end_chapter_no
+        if end_ch is None and policy.authorized_volume_no is not None:
+            end_ch = await _volume_end_chapter(
+                session, work=work, volume_no=int(policy.authorized_volume_no)
+            )
+        if end_ch is None:
+            # 兼容旧策略：未钉扎时回退到当前活跃卷尾
+            end_ch = await _current_volume_end_chapter(session, work=work)
         if end_ch is not None and next_ch > end_ch:
             return None
     existing = await _has_successor(session, work=work, chapter_no=next_ch)
@@ -345,5 +430,6 @@ __all__ = [
     "compensate_continuation",
     "ensure_next_run",
     "get_continuation_policy",
+    "refresh_continuation_after_volume_expand",
     "set_continuation_policy",
 ]

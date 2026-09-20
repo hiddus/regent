@@ -222,7 +222,9 @@ def test_f7_fact_issue_not_wrapped_as_dedup():
     ticket = sp["pending_repair_ticket"]
     assert ticket["must_remove_quotes"] == []
     assert "钥匙在小王手中" in ticket["evidence_quotes"]
-    assert any("钥匙应在小李" in c for c in ticket["forbidden_claims"])
+    # 「钥匙应在小李」是目标正确状态，不得进 forbidden_claims
+    assert not any("钥匙应在小李" in c for c in ticket.get("forbidden_claims") or [])
+    assert any("钥匙应在小李" in c for c in ticket.get("required_facts") or [])
 
 
 def test_f7_redundant_still_uses_dedup_template():

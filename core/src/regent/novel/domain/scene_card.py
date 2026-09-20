@@ -262,16 +262,100 @@ def is_empty_state_discovery_false_positive(
     return False
 
 
-def is_entry_vs_ending_state_lag(issue: str) -> bool:
-    """入场状态摘要与上场结尾正文互相打架：多半是 working_state 滞后，不是新正文硬伤。
+_LAG_AGREEMENT_MARKERS = (
+    "也确认",
+    "都确认",
+    "同样确认",
+    "同样",
+    "一致",
+    "也是",
+    "均为",
+    "都在",
+)
+_LAG_ENTRY_MARKERS = (
+    "入场状态仍",
+    "入场状态还",
+    "入场状态仍留",
+    "入场状态仍写",
+    "入场状态称",
+    "入场状态写",
+    "摘要仍",
+    "状态仍留",
+    "状态仍写",
+)
+_LAG_ENDING_MARKERS = (
+    "上场结尾已",
+    "上场结尾已经",
+    "上场结尾明确写",
+    "上场结尾写",
+    "上场已写",
+    "上场已",
+    "结尾已写",
+    "结尾已",
+)
+# 对比结构：入场主张 vs 上场结尾已是另一状态 → 滞后
+_LAG_CONTRAST_MARKERS = (
+    "但上场结尾",
+    "而上场结尾",
+    "与上场结尾直接冲突",
+    "与上场结尾矛盾",
+    "与上场结尾不一致",
+    "与上场结尾冲突",
+)
 
-    实跑 858ad0b6 ch2：上场结尾已写铁链落地/怀表停转，入场状态仍留锁死/倒转，
-    场记据此硬拦本场。应以已接受上场结尾为准，不因摘要滞后停机。
+
+def _fold_state_phrase(s: str) -> str:
+    import re
+
+    return re.sub(
+        r"[\s　，。！？、；：\"\"''「」『』《》【】（）()\[\]…·.,!?;:'\"\-—_]+",
+        "",
+        str(s or ""),
+    )
+
+
+def is_entry_vs_ending_state_lag(
+    issue: str,
+    *,
+    entry_summary: str = "",
+    prior_scene_ending: str = "",
+    working_state: dict[str, Any] | None = None,
+) -> bool:
+    """入场状态摘要与上场结尾打架时，是否可证明为摘要滞后。
+
+    仅当能证明「入场摘要落后于上场结尾」时返回 True。
+    两端一致（也确认/都确认）或无法比对来源时返回 False，保留阻断——
+    真实矛盾（入场/上场结尾都说钥匙在甲，本场无交接却变到乙）不得放行。
     """
     text = str(issue or "").strip()
     if not text:
         return False
-    return "入场状态" in text and "上场结尾" in text
+    if "入场状态" not in text or "上场结尾" not in text:
+        return False
+
+    # 两端一致而正文不同 → 真实矛盾，不是滞后
+    if any(m in text for m in _LAG_AGREEMENT_MARKERS):
+        return False
+
+    # 明确滞后措辞：入场仍留/称旧态 + 上场结尾已是/写新态
+    has_lag_entry = any(m in text for m in _LAG_ENTRY_MARKERS)
+    has_lag_ending = any(m in text for m in _LAG_ENDING_MARKERS)
+    if has_lag_entry and has_lag_ending:
+        return True
+
+    # 对比结构：入场主张与上场结尾冲突/矛盾 → 摘要滞后
+    if any(m in text for m in _LAG_CONTRAST_MARKERS) and has_lag_entry:
+        return True
+
+    # 有来源时比对：prior ending 与 entry_summary 明显不一致才可能是滞后
+    ending = _fold_state_phrase(prior_scene_ending)
+    entry = _fold_state_phrase(entry_summary)
+    if ending and entry and ending != entry:
+        if not any(m in text for m in _LAG_AGREEMENT_MARKERS):
+            return True
+
+    # 无法证明滞后 → 保留阻断
+    return False
 
 
 def continuity_should_block(
@@ -279,8 +363,14 @@ def continuity_should_block(
     continuity_ok: bool,
     continuity_issues: list[str] | None,
     working_state: dict[str, Any] | None = None,
+    entry_summary: str = "",
+    prior_scene_ending: str = "",
 ) -> bool:
-    """连续性是否硬阻断。空入场发现误判、入场/上场结尾摘要滞后 → 不阻断。"""
+    """连续性是否硬阻断。
+
+    空入场发现误判、已证明的入场/上场结尾摘要滞后 → 不阻断；
+    无法证明滞后的真实矛盾必须阻断。
+    """
     issues = [str(x).strip() for x in (continuity_issues or []) if str(x).strip()]
     if continuity_ok or not issues:
         return False
@@ -289,7 +379,15 @@ def continuity_should_block(
         is_empty_state_discovery_false_positive(i, working_state=state) for i in issues
     ):
         return False
-    if all(is_entry_vs_ending_state_lag(i) for i in issues):
+    if all(
+        is_entry_vs_ending_state_lag(
+            i,
+            entry_summary=entry_summary,
+            prior_scene_ending=prior_scene_ending,
+            working_state=state or None,
+        )
+        for i in issues
+    ):
         return False
     return True
 
@@ -303,6 +401,8 @@ def evaluate_scene_audit(
     continuity_issues: list[str] | None,
     scene_text: str,
     working_state: dict[str, Any] | None = None,
+    entry_summary: str = "",
+    prior_scene_ending: str = "",
 ) -> SceneAuditDecision:
     """补全缺失 must 判定 → 证据接地 → 汇总是否阻断放行。"""
     must_ids = set(must_beat_ids)
@@ -323,6 +423,8 @@ def evaluate_scene_audit(
             continuity_ok=continuity_ok,
             continuity_issues=issues,
             working_state=working_state,
+            entry_summary=entry_summary,
+            prior_scene_ending=prior_scene_ending,
         ),
         hard_fails=list(hard_fails or []),
         continuity_issues=issues,
@@ -342,8 +444,9 @@ SCENE_WRITE_SYSTEM = (
     "若 payload.is_revision 为真：这是定点修订，不是重写整章。"
     "严格按 revision_instruction 与 repair_ticket 执行："
     "1) expected_actions 含 remove_dup 时：must_remove_quotes 在本场至多保留一处，优先删后出现的复读；"
-    "2) expected_actions 含 rewrite_scene 时：按 forbidden_claims / evidence_quotes 纠正错误断言，"
-    "不得把证据句当成「必须删掉的重复摘录」；正确状态应写入正文；"
+    "2) expected_actions 含 rewrite_scene 时：按 forbidden_claims 去掉错误断言，"
+    "按 required_facts / evidence_quotes 写入已核正确状态；"
+    "不得把证据句当成「必须删掉的重复摘录」；"
     "3) 多个动作并存时先去重再纠错；不要整场从零重写；"
     "4) 不要为「显得改过」而改写无关段落；不要引入未证实事实；"
     "5) 输出仍是完整本场正文，不是补丁说明。"

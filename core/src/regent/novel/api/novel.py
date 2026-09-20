@@ -856,6 +856,8 @@ async def get_continuation(
         volume_scope=pol.volume_scope,
         version=pol.version,
         budget_grant_note=pol.budget_grant_note,
+        authorized_volume_no=pol.authorized_volume_no,
+        authorized_end_chapter_no=pol.authorized_end_chapter_no,
     )
 
 
@@ -877,6 +879,9 @@ async def put_continuation(
         max_chapters=payload.max_chapters,
         volume_scope=payload.volume_scope,
         budget_grant_note=payload.budget_grant_note,
+        expected_version=payload.expected_version,
+        authorized_volume_no=payload.authorized_volume_no,
+        authorized_end_chapter_no=payload.authorized_end_chapter_no,
     )
     await session.flush()
     return ContinuationPolicyOut(
@@ -886,6 +891,8 @@ async def put_continuation(
         volume_scope=pol.volume_scope,
         version=pol.version,
         budget_grant_note=pol.budget_grant_note,
+        authorized_volume_no=pol.authorized_volume_no,
+        authorized_end_chapter_no=pol.authorized_end_chapter_no,
     )
 
 

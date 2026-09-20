@@ -627,13 +627,19 @@ async def expand_next_volume(
         branch_id=work.branch_id,
     )
 
-    # 若作品级连续创作已授权：自动排队新卷首章。
+    # 若作品级连续创作已授权：扩卷确认后按 scope 刷新钉扎，再排队新卷首章。
     try:
         from regent.novel.application.works_continuation import (
             ensure_next_run,
             get_continuation_policy,
+            refresh_continuation_after_volume_expand,
         )
 
+        refresh_continuation_after_volume_expand(
+            work,
+            new_volume_no=next_vol_no,
+            new_end_chapter_no=int(new_vol.end_chapter_no or 0) or None,
+        )
         if get_continuation_policy(work).enabled and latest_run is not None:
             if latest_run.state == ChapterRunState.CANONIZED.value:
                 await ensure_next_run(session, work=work, completed_run=latest_run)

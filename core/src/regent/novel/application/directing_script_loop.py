@@ -219,6 +219,90 @@ def _script_cards(sp: dict[str, Any]) -> list[Any]:
     return list(plan.get("cards") or [])
 
 
+def _verify_model_location(
+    *,
+    data: dict[str, Any],
+    cards: list[Any],
+    texts: list[str],
+    full_chapter: str,
+) -> tuple[str, ...] | None:
+    """核验模型定位：合法 scene_id + 引文接地 + hash 一致；否则返回 None。
+
+    程序生成/核对正文 hash，逐个校验引用与场景归属。
+    无法证明对应待修问题的定位不得改变目标。
+    """
+    from regent.novel.domain.repair_locate import content_hash as _chash
+    from regent.novel.domain.scene_card import evidence_grounded
+
+    sids = tuple(str(x) for x in (data.get("scene_ids") or []) if str(x))
+    if not sids:
+        return None
+    known = {
+        str((c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", "")) or "")
+        for c in cards
+    }
+    known.discard("")
+    if any(sid not in known for sid in sids):
+        return None
+    # content_hash 若给出，必须与当前完整正文一致
+    model_hash = str(data.get("content_hash") or "").strip()
+    if model_hash and model_hash != _chash(full_chapter):
+        return None
+    quotes = tuple(str(q) for q in (data.get("evidence_quotes") or []) if str(q))
+    if not quotes:
+        # 无引文：仅允许 code 为 beat/miss 类（用卡片映射验证），其余拒绝
+        code = str(data.get("code") or "")
+        if not any(k in code for k in ("beat", "miss", "missing")):
+            return None
+        # beat 类：message 中的 beat_id 必须落在所指场景卡上
+        msg = str(data.get("message") or "")
+        for sid in sids:
+            card = next(
+                (
+                    c
+                    for c in cards
+                    if str(
+                        (c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", ""))
+                    )
+                    == sid
+                ),
+                None,
+            )
+            if card is None:
+                return None
+            beats = (
+                card.get("beats")
+                if isinstance(card, dict)
+                else getattr(card, "beats", []) or []
+            )
+            beat_ids = {
+                str((b.get("beat_id") if isinstance(b, dict) else getattr(b, "beat_id", "")))
+                for b in beats
+            }
+            if beat_ids and not any(bid and bid in msg for bid in beat_ids):
+                return None
+        return sids
+    # 有引文：每条引文必须出现在所指场景正文中
+    for sid in sids:
+        idx = next(
+            (
+                i
+                for i, c in enumerate(cards)
+                if str(
+                    (c.get("scene_id") if isinstance(c, dict) else getattr(c, "scene_id", ""))
+                )
+                == sid
+            ),
+            None,
+        )
+        if idx is None or idx >= len(texts):
+            return None
+        scene_text = texts[idx]
+        if not any(evidence_grounded(q, scene_text) for q in quotes):
+            return None
+    return sids
+
+
 def _begin_located_scene_repair(
     production: dict[str, Any],
     sp: dict[str, Any],
@@ -228,7 +312,10 @@ def _begin_located_scene_repair(
     take: dict[str, Any] | None = None,
     model_located: list[Any] | None = None,
 ) -> None:
-    """按定位结果回退到目标场；无法定位则停机。禁止默认修末场。"""
+    """按定位结果回退到目标场；无法定位则停机。禁止默认修末场。
+
+    模型定位只作核验后的补齐：合法 ID + 引文接地 + hash 一致才能改写目标。
+    """
     from regent.novel.domain.repair_locate import (
         LocatedIssue,
         apply_repair_target_to_script_state,
@@ -238,25 +325,43 @@ def _begin_located_scene_repair(
 
     cards = _script_cards(sp)
     texts = list(sp.get("scene_texts") or [])
-    located = locate_fail_messages(fails, scene_texts=texts, cards=cards)
-    # 模型若已给出 scene_ids，合并进确定性结果（不覆盖已有硬映射）
+    full_chapter = "\n\n".join(t for t in texts if t.strip())
+    located = locate_fail_messages(
+        fails, scene_texts=texts, cards=cards, chapter_content=full_chapter
+    )
+    # 确定性已定位的问题身份（code+message 前缀），模型只补齐缺口
+    deterministic_keys = {
+        (i.code, str(i.message or "")[:60]) for i in located if i.scene_ids
+    }
+    deterministic_codes_located = {i.code for i in located if i.scene_ids}
+    # 模型定位：逐条核验，只在确定性未覆盖时补齐
     for raw in model_located or []:
         try:
             data = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
         except Exception:
             continue
-        sids = tuple(str(x) for x in (data.get("scene_ids") or []) if str(x))
-        if not sids:
+        verified_sids = _verify_model_location(
+            data=data, cards=cards, texts=texts, full_chapter=full_chapter
+        )
+        if not verified_sids:
             continue
         code = str(data.get("code") or "model")
         msg = str(data.get("message") or data.get("issue_id") or code)
+        # 同一问题身份已被确定性定位 → 不重复追加、不覆盖
+        if (code, msg[:60]) in deterministic_keys:
+            continue
+        if code in deterministic_codes_located and any(
+            i.code == code and i.scene_ids for i in located
+        ):
+            # 同 code 已有确定性定位：模型猜测不得改变目标
+            continue
         quotes = tuple(str(q) for q in (data.get("evidence_quotes") or []) if str(q))
         located.append(
             LocatedIssue(
                 issue_id=str(data.get("issue_id") or f"{code}#model"),
                 code=code,
                 severity="hard" if str(data.get("severity") or "hard") == "hard" else "soft",
-                scene_ids=sids,
+                scene_ids=verified_sids,
                 evidence_quotes=quotes,
                 content_hash=str(data.get("content_hash") or ""),
                 expected_action=str(data.get("expected_action") or "rewrite_scene"),
@@ -614,6 +719,7 @@ async def _produce_script_tick(
         sp["working_state"] = confirmed
         sp["scene_state_trail"] = [deepcopy(confirmed)]
         sp["working_summary"] = ""
+        sp["scene_entry_summaries"] = [""]
         production["phase"] = "WRITE_SCENE"
     elif phase == "WRITE_SCENE":
         packet = sp.get("production_packet")
@@ -647,6 +753,16 @@ async def _produce_script_tick(
                     f"修订票据 scene_index 与当前 index={idx} 不一致"
                 )
             prior_draft = texts[idx]
+        # 入口摘要快照：WRITE 前钉住本场 entry_summary，回退时可原样恢复
+        entries = list(sp.get("scene_entry_summaries") or [])
+        while len(entries) <= idx:
+            entries.append("")
+        if not revision_instruction:
+            entries[idx] = str(sp.get("working_summary") or "")
+        elif not str(entries[idx] or "").strip():
+            entries[idx] = str(sp.get("working_summary") or "")
+        sp["scene_entry_summaries"] = entries
+        entry_summary = str(entries[idx] or "")
         # system 保持稳定：目标字数与修订指令放 payload，避免动态前缀打断缓存
         # 行文契约必须进 system：否则分场也会写成穿越者第一人称壳。
         style = production.get("prose_style") or resolve_prose_style(run.generation_context)
@@ -672,7 +788,7 @@ async def _produce_script_tick(
             "cast": production.get("cast") or {},
             "user_guidance": run.user_guidance or {},
             "scene_card": card.model_dump(),
-            "entry_summary": sp.get("working_summary") or "",
+            "entry_summary": entry_summary,
             "working_state": sp.get("working_state") or {},
             "chapter_goal": plan.get("chapter_goal") or "",
             "narrator_memory": _memory_view(memory_payloads, "narrator"),
@@ -691,6 +807,7 @@ async def _produce_script_tick(
                     "must_remove_quotes": list(ticket.get("must_remove_quotes") or [])[:4],
                     "evidence_quotes": list(ticket.get("evidence_quotes") or [])[:4],
                     "forbidden_claims": list(ticket.get("forbidden_claims") or [])[:4],
+                    "required_facts": list(ticket.get("required_facts") or [])[:4],
                     "expected_actions": list(ticket.get("expected_actions") or [])[:4],
                     "verify_rules": list(ticket.get("verify_rules") or [])[:4],
                     "issue_ids": list(ticket.get("issue_ids") or [])[:6],
@@ -723,6 +840,12 @@ async def _produce_script_tick(
                 f"AUDIT目标场 index={idx} 与 scene_texts 长度={len(texts)} 不一致"
             )
         scene_text = texts[idx]
+        _audit_entries = list(sp.get("scene_entry_summaries") or [])
+        _audit_entry = (
+            str(_audit_entries[idx])
+            if idx < len(_audit_entries) and str(_audit_entries[idx] or "").strip()
+            else str(sp.get("working_summary") or "")
+        )
         audit = await call(
             _SceneAudit,
             "你是场记，一次完成：节拍核验（landed 必须有 evidence 原文摘录）、"
@@ -736,7 +859,7 @@ async def _produce_script_tick(
                 "scene_card": card.model_dump(),
                 "scene_text": scene_text,
                 "beat_evidence": sp.get("pending_scene_beat_evidence") or {},
-                "entry_summary": sp.get("working_summary") or "",
+                "entry_summary": _audit_entry,
                 "working_state": sp.get("working_state") or {},
                 "prior_scene_ending": (
                     texts[idx - 1][-300:] if idx > 0 and idx - 1 < len(texts) else ""
@@ -745,6 +868,9 @@ async def _produce_script_tick(
         )
         # 程序门控：补全 must 判定 → 证据接地 → 连续性/硬失败（与实验共用）
         must_ids = {b.beat_id for b in card.beats if b.must_show}
+        _prior_ending = (
+            texts[idx - 1][-300:] if idx > 0 and idx - 1 < len(texts) else ""
+        )
         gate = evaluate_scene_audit(
             must_beat_ids=must_ids,
             verdicts=audit.beat_verdicts,
@@ -755,6 +881,8 @@ async def _produce_script_tick(
             working_state=sp.get("working_state")
             if isinstance(sp.get("working_state"), dict)
             else {},
+            entry_summary=_audit_entry,
+            prior_scene_ending=_prior_ending,
         )
         sp.setdefault("scene_audits", {})[card.scene_id] = audit.model_dump()
 
@@ -812,6 +940,12 @@ async def _produce_script_tick(
             f"上场结尾：{scene_text[-300:]}\n"
             f"累计状态：{json.dumps(sp.get('working_state') or {}, ensure_ascii=False)[:400]}"
         )
+        # 下一场的入口摘要快照：与 working_summary 同步，回退时可恢复
+        entries = list(sp.get("scene_entry_summaries") or [])
+        while len(entries) <= idx + 1:
+            entries.append("")
+        entries[idx + 1] = sp["working_summary"]
+        sp["scene_entry_summaries"] = entries
         sp["scene_index"] = idx + 1
         sp["pending_scene_beat_evidence"] = {}
         sp["scene_revision_instruction"] = ""
@@ -897,12 +1031,18 @@ async def _produce_script_tick(
         packet = sp.get("production_packet") or {}
         if not take or not take.get("content"):
             raise ProductionStopped("核验缺少正文")
+        from regent.novel.domain.repair_locate import build_scene_layout
+
+        _scene_cards = list((sp.get("scene_plan") or {}).get("cards") or [])
+        _scene_texts = list(sp.get("scene_texts") or [])
+        _layout = build_scene_layout(scene_texts=_scene_texts, cards=_scene_cards)
         report = await call(
             ScriptChapterValidation,
             "核验正文是否兑现选定剧本的关键节拍与代价，有无越权新增事实。"
             "突破剧本终点或引入弃选路线记入 hard_fails。"
             "hard_fails 每条尽量带可检索摘录，格式：…摘录「原文片段」…；"
             "若能判断场次，可填 located_issues（scene_ids/evidence_quotes）。"
+            "场次必须对照 payload.scene_layout（scene_index / scene_id / 字符区间），禁止自行猜分场。"
             "抽取有逐字 quote 的事实；你不负责戏剧决策，也不改写正文。",
             {
                 "prose": take["content"],
@@ -911,6 +1051,7 @@ async def _produce_script_tick(
                 "rejected": sp.get("rejected") or {},
                 "canon": run.generation_context.get("canon", []),
                 "scene_hard_fails": sp.get("scene_hard_fails") or [],
+                "scene_layout": _layout,
                 "scene_plan": {
                     "cards": [
                         {
@@ -921,7 +1062,7 @@ async def _produce_script_tick(
                             if isinstance(c, dict)
                             else getattr(c, "purpose", ""),
                         }
-                        for c in ((sp.get("scene_plan") or {}).get("cards") or [])
+                        for c in _scene_cards
                     ]
                 },
             },
@@ -1107,6 +1248,9 @@ async def _produce_script_tick(
                     "scene_revision_instruction",
                     "pending_scene_beat_evidence",
                     "scene_state_trail",
+                    "scene_entry_summaries",
+                    "pending_repair_ticket",
+                    "located_issues",
                 ):
                     sp.pop(k, None)
                 sp["scene_index"] = 0

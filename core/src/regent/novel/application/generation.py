@@ -883,10 +883,19 @@ async def assemble(
     if not principle_lenses:
         principle_lenses = lenses_payload(resolve_lenses(direction_kw))
     bible_payload = bible_ctx.get("world_bible") or story_bible or None
+    # 运行身份字段：执行器 + 调用键版本 + 连续授权来源，必须活过重建
+    pinned = executor_app.carry_over(old_context)
+    # production 里若已写入 call_key_version，根 context 缺失时补回
+    if "call_key_version" not in pinned:
+        old_prod = old_context.get("production")
+        if isinstance(old_prod, dict) and "call_key_version" in old_prod:
+            pinned["call_key_version"] = old_prod["call_key_version"]
+        elif "call_key_version" in old_context:
+            pinned["call_key_version"] = old_context["call_key_version"]
     run.generation_context = {
         # 执行器身份先落位：ASSEMBLE 每次重建上下文，重建丢了它就等于
-        # 「这一章跑的哪个臂」不可举证。
-        **executor_app.carry_over(old_context),
+        # 「这一章跑的哪个臂」不可举证。call_key_version/continuation 同理。
+        **pinned,
         **{
             key: old_context[key]
             for key in ("correction", "replay_reason", "corrections", "dual_dossiers")

@@ -33,7 +33,7 @@ def test_f6_legacy_missing_call_key_defaults_to_v1():
 
 
 def test_f4_set_continuation_policy_validates_scope():
-    work = SimpleNamespace(story_bible={}, version=1)
+    work = SimpleNamespace(story_bible={}, version=1, total_volume_count=1)
     with pytest.raises(ValidationFailed):
         set_continuation_policy(work, enabled=True, volume_scope="nope")
     pol = set_continuation_policy(
@@ -41,7 +41,63 @@ def test_f4_set_continuation_policy_validates_scope():
     )
     assert pol.enabled is True
     assert pol.target_chapter_no == 5
+    assert pol.authorized_volume_no == 1
     assert get_continuation_policy(work).version >= 1
+
+
+def test_f4_continuation_expected_version_conflict():
+    work = SimpleNamespace(story_bible={}, version=1, total_volume_count=2)
+    pol = set_continuation_policy(work, enabled=True, volume_scope="current")
+    with pytest.raises(ValidationFailed, match="version conflict"):
+        set_continuation_policy(
+            work, enabled=False, volume_scope="current", expected_version=0
+        )
+    pol2 = set_continuation_policy(
+        work,
+        enabled=False,
+        volume_scope="current",
+        expected_version=pol.version,
+    )
+    assert pol2.enabled is False
+    assert pol2.version == pol.version + 1
+
+
+def test_f4_authorized_scope_does_not_auto_extend_on_expand():
+    from regent.novel.application.works_continuation import (
+        refresh_continuation_after_volume_expand,
+    )
+
+    work = SimpleNamespace(story_bible={}, version=1, total_volume_count=1)
+    pol = set_continuation_policy(
+        work,
+        enabled=True,
+        volume_scope="authorized",
+        authorized_volume_no=1,
+        authorized_end_chapter_no=30,
+    )
+    after = refresh_continuation_after_volume_expand(
+        work, new_volume_no=2, new_end_chapter_no=60
+    )
+    assert after is not None
+    assert after.authorized_volume_no == 1
+    assert after.authorized_end_chapter_no == 30
+    assert after.version == pol.version
+
+
+def test_f4_current_scope_rebinds_on_expand():
+    from regent.novel.application.works_continuation import (
+        refresh_continuation_after_volume_expand,
+    )
+
+    work = SimpleNamespace(story_bible={}, version=1, total_volume_count=1)
+    pol = set_continuation_policy(work, enabled=True, volume_scope="current")
+    after = refresh_continuation_after_volume_expand(
+        work, new_volume_no=2, new_end_chapter_no=60
+    )
+    assert after is not None
+    assert after.authorized_volume_no == 2
+    assert after.authorized_end_chapter_no == 60
+    assert after.version == pol.version + 1
 
 
 @pytest.mark.asyncio
