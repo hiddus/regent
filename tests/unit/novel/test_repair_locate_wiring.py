@@ -313,6 +313,42 @@ def test_locate_unlocatable_not_default_last():
     assert "无法局部定位" in target.instruction
 
 
+def test_review_scene_references_rewind_both_conflicting_scenes():
+    cards = [_card("s1", "b1"), _card("s2", "b2"), _card("s3", "b3")]
+    texts = ["第一次搜身。", "独处。", "同一搜身再次开始。"]
+    located = locate_fail_messages(
+        ["场景0中搜查已经结束。场景2(s3)却重新搜身。时间线冲突。"],
+        scene_texts=texts, cards=cards,
+    )
+    target = select_repair_target(
+        located, cards=cards, scene_texts=texts, instruction_prefix="修订",
+    )
+    assert target.scene_ids == ("s1", "s3")
+    sp = {"scene_texts": texts, "scene_state_trail": [{}, {}, {}]}
+    apply_repair_target_to_script_state(sp, target)
+    assert sp["scene_index"] == 0
+    assert sp["scene_texts"] == [texts[0]]
+
+
+def test_invalid_review_scene_reference_does_not_default_to_first_scene():
+    located = locate_fail_messages(
+        ["场景99中存在时间线冲突。"], scene_texts=["正文。"], cards=[_card("s1", "b1")],
+    )
+    assert located[0].scene_ids == ()
+
+
+def test_deferred_redundant_uses_fault_code_and_both_scenes():
+    paragraph = "雨水沿着窗棂流下来。桌上的钥匙在灯下泛着冷光。两个人仍旧沉默着没有开口。"
+    located = locate_fail_messages(
+        ["[gate_debt:prose_front][front:redundant] 重复"],
+        scene_texts=[paragraph, "短对白。\n\n" + paragraph],
+        cards=[_card("s1", "b1"), _card("s2", "b2")],
+    )
+    assert located[0].code == "front:redundant"
+    assert located[0].expected_action == "remove_dup"
+    assert located[0].scene_ids == ("s1", "s2")
+
+
 # --- produce_tick：VALIDATE / ACCEPT 接线 ---
 
 

@@ -430,6 +430,34 @@ def test_append_gate_debt_prose_front_no_cont_pollution():
     assert "scene_soft_fails" not in sp
 
 
+def test_repaired_front_debt_is_revalidated_not_reintroduced():
+    from regent.novel.application.chapter_review import _merge_gate_debts_into_issues
+
+    old = "[front:redundant] 旧重复段"
+    sp = {"gate_debts": [
+        {"owner": "review", "kind": "prose_front", "tags": [old]},
+        {"owner": "review", "kind": "continuity", "tags": ["持物冲突"]},
+    ]}
+    issues = _merge_gate_debts_into_issues([], sp, current_front_fails=[])
+    assert issues == ["[gate_debt:cont]持物冲突"]
+    assert sp["gate_debts"][0]["resolved_tags"] == [old]
+    assert sp["gate_debts"][0]["tags"] == [old]  # 留存原始证据
+
+
+def test_current_redundant_still_blocks_after_debt_revalidation():
+    from regent.novel.application.chapter_review import _merge_gate_debts_into_issues
+    from regent.novel.domain.prose_front_gates import review_issues_may_coerce
+
+    current = "[front:redundant] 新正文仍然重复"
+    sp = {"gate_debts": [
+        {"owner": "review", "kind": "prose_front", "tags": ["[front:redundant] 旧摘录"]},
+    ]}
+    issues = _merge_gate_debts_into_issues([current], sp, current_front_fails=[current])
+    assert issues == [current]
+    assert not review_issues_may_coerce(issues)
+    assert sp["gate_debts"][0]["resolved_tags"] == []
+
+
 # --- 失败态投影 ---
 
 

@@ -1535,6 +1535,10 @@ async def _produce_script_tick(
                             take=take,
                             model_located=list(report.located_issues or []),
                         )
+                        # 记录确定性定位完成后的实际结果。不能只记录模型空数组。
+                        sp["repair_history"][-1]["located_issues"] = list(
+                            sp.get("located_issues") or []
+                        )
                         _save(run, production)
                         return False
                     _save(run, production)

@@ -155,6 +155,10 @@ def _extract_snip(message: str) -> str:
 
 
 def _extract_code(message: str) -> str:
+    # 递延前缀仅标记来源。内层标签才是故障类型。
+    front = re.search(r"\[(front:[a-z0-9_]+)\]", message or "")
+    if front:
+        return front.group(1)
     m = _CODE_RE.match((message or "").strip())
     if m:
         return m.group(1)
@@ -234,6 +238,20 @@ def locate_fail_messages(
         if snip:
             quotes.append(snip)
             scene_indices.extend(scenes_containing_quote(texts, snip))
+
+        # ChapterValidation 的场景下标遵守 scene_layout 的零基顺序。
+        # 引用原文常只有「…」而没有“摘录”前缀。只接受实际命中的长引文。
+        for value in re.findall(r"场景\s*(\d+)(?!\d)", msg):
+            index = int(value)
+            if 0 <= index < min(len(cards), len(texts)):
+                scene_indices.append(index)
+        for quote in re.findall(r"「([^」]+)」", msg):
+            if len(quote) < 12 or quote in quotes:
+                continue
+            indices = scenes_containing_quote(texts, quote)
+            if indices:
+                quotes.append(quote)
+                scene_indices.extend(indices)
 
         if _is_redundant_code(code):
             hits = find_near_duplicate_paragraphs(chapter)

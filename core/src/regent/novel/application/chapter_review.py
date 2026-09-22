@@ -61,11 +61,12 @@ from regent.novel.application.directing_scene_loop import (
 _effective_call_cap = _budget_call_cap
 
 # 创作已通过后，整章审校最多回退补拍次数；再遇可 soft 意见直接 coerce。
-_MAX_POST_CREATIVE_REVIEW_REWINDS = 1
+_MAX_POST_CREATIVE_REVIEW_REWINDS = MAX_CHAPTER_REPAIRS
 
 
 def _merge_gate_debts_into_issues(
-    issues: list[str], sp: dict[str, Any] | None
+    issues: list[str], sp: dict[str, Any] | None, *,
+    current_front_fails: list[str] | None = None,
 ) -> list[str]:
     """导演递延的债务进入责编议题；按 kind 加不同前缀便于识别。"""
     out = list(issues)
@@ -81,7 +82,22 @@ def _merge_gate_debts_into_issues(
             prefix = "[gate_debt:prose_front]"
         else:
             continue
-        for tag in debt.get("tags") or []:
+        tags = list(debt.get("tags") or [])
+        if kind == "prose_front" and current_front_fails is not None:
+            # 正文确定性门已在本轮完整重验。旧文案/旧摘录只能留作证据。
+            # 不能重新注入当前 issues。否则已消除的 redundant 永远阻断。
+            checked = ("[front:redundant]", "[front:power_surface]")
+            rechecked = [t for t in tags if str(t).startswith(checked)]
+            debt["resolved_tags"] = [
+                t for t in rechecked
+                if not any(
+                    str(f).split("]", 1)[0] == str(t).split("]", 1)[0]
+                    for f in current_front_fails
+                )
+            ]
+            debt["revalidated_tags"] = list(current_front_fails)
+            tags = [t for t in tags if t not in rechecked]
+        for tag in tags:
             text = str(tag or "").strip()
             if not text:
                 continue
@@ -384,7 +400,9 @@ async def validate_chapter(
     # 导演 AUDIT 递延的连续性债务：责编层接管
     _sp_early = production.get("script_protocol") if isinstance(production, dict) else {}
     if isinstance(_sp_early, dict):
-        issues = _merge_gate_debts_into_issues(issues, _sp_early)
+        issues = _merge_gate_debts_into_issues(
+            issues, _sp_early, current_front_fails=front_fails_effective,
+        )
     # 专职责编：默认抽样，避免每章固定付费却只有 soft 记录
     from regent.novel.application import editor_audit as ea
 

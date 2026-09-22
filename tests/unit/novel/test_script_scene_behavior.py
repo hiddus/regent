@@ -1307,14 +1307,50 @@ async def test_produce_tick_command_id_with_takes_present(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_terminal_review_preserves_actual_unresolved_issues(monkeypatch):
+async def test_review_rechecks_stale_redundant_debt_before_accepting(monkeypatch):
+    from regent.novel.application import chapter_finalize, chapter_review
+
+    old = "[front:redundant] 旧稿中重复的段落"
+    run, work = _base_run(phase="DONE", sp_extra={
+        "creative_accept": {"accept": True},
+        "gate_debts": [{"owner": "review", "kind": "prose_front", "tags": [old]}],
+    })
+    run.generation_context["production"]["accepted"] = [0]
+    run.content = TEXT
+
+    async def capture_call(session, provider, work, run, production, schema,
+                           system, payload, purpose, command_id):
+        return schema(passed=True, issues=[])
+
+    accepted = []
+
+    async def finalize(**kwargs):
+        accepted.append(kwargs["run"].review["passed"])
+
+    monkeypatch.setattr(chapter_review, "_call", capture_call)
+    monkeypatch.setattr(chapter_finalize, "run_editorial_then_accept", finalize)
+    assert await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+    assert accepted == [True]
+    assert run.review["continuity_issues"] == []
+    assert run.generation_context["production"]["script_protocol"]["gate_debts"][0][
+        "resolved_tags"
+    ] == [old]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repairs", [1, 2])
+async def test_terminal_review_preserves_actual_unresolved_issues(monkeypatch, repairs):
     from regent.novel.application import chapter_review
 
-    run, work = _base_run(phase="DONE", sp_extra={"creative_accept": {"accept": True}})
+    run, work = _base_run(phase="DONE", sp_extra={
+        "creative_accept": {"accept": True},
+        "scene_plan": {"cards": [_card().model_dump()]},
+        "scene_texts": [TEXT],
+    })
     prod = run.generation_context["production"]
     prod["accepted"] = [0]
-    prod["post_creative_review_rewinds"] = 1
-    prod["chapter_repairs"] = 1
+    prod["post_creative_review_rewinds"] = repairs
+    prod["chapter_repairs"] = repairs
     run.content = TEXT
     issue = "同一搜查在场景三重新开始，缺少时间及因果衔接"
 
@@ -1325,9 +1361,15 @@ async def test_terminal_review_preserves_actual_unresolved_issues(monkeypatch):
         return schema(passed=True, issues=[])
 
     monkeypatch.setattr(chapter_review, "_call", capture_call)
-    with pytest.raises(ProductionStopped, match="剩余问题.*同一搜查"):
-        await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+    if repairs == 2:
+        with pytest.raises(ProductionStopped, match=r"剩余问题.*同一搜查"):
+            await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+    else:
+        result = await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+        assert result is False
+        assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
+        assert run.generation_context["production"]["chapter_repairs"] == 2
     history = run.generation_context["production"]["review_history"]
     assert history[-1]["passed"] is False
     assert issue in history[-1]["issues"]
-    assert history[-1]["post_creative_review_rewinds"] == 1
+    assert history[-1]["post_creative_review_rewinds"] == repairs
