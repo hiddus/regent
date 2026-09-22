@@ -277,6 +277,7 @@ async def test_downstream_retake_keeps_chapter_dedup_constraint(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_compile_repairs_duplicate_events_before_writing(monkeypatch):
+    from regent.novel.application import directing_calls as dc_module
     from regent.novel.application import directing_script_loop as loop
 
     run, work = _scene_run(phase="COMPILE_SCENES", texts=[])
@@ -286,17 +287,24 @@ async def test_compile_repairs_duplicate_events_before_writing(monkeypatch):
     async def capture_call(session, provider, work, run, production, schema,
                            system, payload, purpose, command_id):
         calls.append(payload)
+        # 事件提取调用返回空事件清单
+        if purpose == "extract_script_events":
+            from regent.novel.domain.script_events import ScriptEventList
+            return ScriptEventList(events=[])
         c1, c2 = _card("s1", "b1"), _card("s2", "b2")
         c1.acceptance_ids = [i["item_id"] for i in payload["acceptance_items"]]
         c1.beats[0].text = duplicate
-        c2.beats[0].text = duplicate if len(calls) == 1 else "夜里主角决定带伤继续前行。"
+        c2.beats[0].text = duplicate if len([c for c in calls if "acceptance_items" in c]) == 1 else "夜里主角决定带伤继续前行。"
         return schema(cards=[c1, c2], chapter_goal="把柄易手", continuity_notes="")
 
     monkeypatch.setattr(loop, "_call", capture_call)
+    monkeypatch.setattr(dc_module, "_call", capture_call)
     await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
-    assert len(calls) == 2
-    assert "duplicate_event" in str(calls[1]["repair_instructions"])
-    assert calls[1]["previous_plan"]["cards"][1]["beats"][0]["text"] == duplicate
+    assert len(calls) == 3  # extract_script_events + 2 plan calls
+    plan_calls = [c for c in calls if "acceptance_items" in c]
+    assert len(plan_calls) == 2
+    assert "duplicate_event" in str(plan_calls[1]["repair_instructions"])
+    assert plan_calls[1]["previous_plan"]["cards"][1]["beats"][0]["text"] == duplicate
     assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
 
 

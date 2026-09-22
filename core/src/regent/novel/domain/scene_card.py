@@ -36,6 +36,23 @@ class StructuredBeat(BaseModel):
     )
 
 
+class EventRef(BaseModel):
+    """场景对剧本事件的引用。"""
+
+    event_id: str = Field(
+        min_length=1,
+        description="引用剧本事件清单中的 event_id",
+    )
+    beat_id: str = Field(
+        min_length=1,
+        description="本场本地 beat ID",
+    )
+    role: str = Field(
+        default="occurrence",
+        description="本场角色：occurrence=发生，consequence=后果，reference=回忆/提及",
+    )
+
+
 class SceneCard(BaseModel):
     """一张可执行的场景卡：导演把剧本拆成的"一场完整的戏"。"""
 
@@ -55,6 +72,10 @@ class SceneCard(BaseModel):
         default_factory=list, description="只需略写的信息"
     )
     beats: list[StructuredBeat] = Field(default_factory=list)
+    event_refs: list[EventRef] = Field(
+        default_factory=list,
+        description="本场引用的剧本事件清单；每个 event_id 必须来自 script_events",
+    )
     acceptance_ids: list[str] = Field(
         default_factory=list,
         description="本场负责兑现的验收义务 item_id；每项 required 只指定一个责任场，承接不重复演绎",

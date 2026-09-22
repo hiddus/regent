@@ -815,6 +815,19 @@ async def _produce_script_tick(
         choice = ScriptChoice.model_validate(packet.get("direction") or {})
         skeleton = compile_scene_plan(selected, choice, chapter_no=int(run.chapter_no))
         acc_items_raw = derive_acceptance_items(selected, choice)
+        
+        # 提取剧本事件清单（LLM 驱动，支持幂等恢复）
+        from regent.novel.domain.script_events import extract_script_events
+        script_events_result = await extract_script_events(
+            session=session,
+            provider=provider,
+            work=work,
+            run=run,
+            production=production,
+            script_dict=selected.model_dump(),
+        )
+        sp["script_events"] = [e.model_dump() for e in script_events_result.events]
+        
         compile_repair: list[str] = []
         plan_draft = None
         plan_issues: list[str] = []
@@ -825,6 +838,7 @@ async def _produce_script_tick(
                 "direction": choice.model_dump(),
                 "skeleton_plan": skeleton.model_dump(),
                 "acceptance_items": [i.model_dump(mode="json") for i in acc_items_raw],
+                "script_events": sp.get("script_events") or [],
                 "max_scenes": 4,
                 "coverage_note": (
                     "节拍正文须嵌入选定剧本 turning_point / cost / end_change 的关键短语，"
@@ -846,7 +860,11 @@ async def _produce_script_tick(
                 "并在该场节拍写出相应行动或认知；后场只承接已成立状态。"
                 "骨架仅供参考，可重新划分边界，禁止机械把未匹配义务塞进末场。"
                 "若有 previous_plan，应修复其重复事件、顺序和责任归属，不能只改 ID。"
-                "节拍文字要能让人看出转折、代价与章末变化，不要只写气氛。",
+                "节拍文字要能让人看出转折、代价与章末变化，不要只写气氛。"
+                "每个场景必须通过 event_refs 引用 script_events 中的事件，"
+                "每个 event_id 必须来自 script_events 清单，禁止自造事件 ID。"
+                "同一 event_id 的 role=occurrence 只能出现在一个场景，"
+                "后续场景只能以 consequence 或 reference 角色引用。",
                 compile_payload,
                 repair_no=repair_no,
             )
@@ -886,10 +904,70 @@ async def _produce_script_tick(
                 for item_id in card.acceptance_ids
                 if item_id not in known_acc_ids
             )
-            hard = structural_plan_issues(plan_issues) + acc_hard
+            # 事件引用硬闸：清单完备 + 唯一所有权
+            from regent.novel.domain.script_events import validate_plan_event_refs
+            event_ref_errors = validate_plan_event_refs(
+                [card.model_dump() for card in plan_draft.cards],
+                sp.get("script_events") or [],
+            )
+            hard = structural_plan_issues(plan_issues) + acc_hard + event_ref_errors
             if not hard:
                 sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
                 break
+            
+            # 如果有事件引用错误，触发 LLM 重分场
+            if event_ref_errors and repair_no == 0:
+                from regent.novel.domain.script_events import repartition_plan
+                repartitioned_cards = await repartition_plan(
+                    session=session,
+                    provider=provider,
+                    work=work,
+                    run=run,
+                    production=production,
+                    plan_cards=[card.model_dump() for card in plan_draft.cards],
+                    event_errors=event_ref_errors,
+                    script_events=sp.get("script_events") or [],
+                )
+                # 用重分场后的计划替换当前计划，继续校验循环
+                plan_draft = plan_draft.model_copy(
+                    update={"cards": [SceneCard.model_validate(c) for c in repartitioned_cards]}
+                )
+                plan = ChapterScenePlan(
+                    chapter_no=int(run.chapter_no),
+                    cards=list(plan_draft.cards),
+                    chapter_goal=plan_draft.chapter_goal or selected.end_change,
+                    continuity_notes=plan_draft.continuity_notes,
+                )
+                # 重新校验
+                plan_issues = validate_scene_plan(plan, selected, choice, max_scenes=4)
+                acc_items, filled_cards = ensure_acceptance_assigned(
+                    acc_items_raw, list(plan_draft.cards)
+                )
+                plan_draft = plan_draft.model_copy(update={"cards": filled_cards})
+                plan = ChapterScenePlan(
+                    chapter_no=int(run.chapter_no),
+                    cards=list(plan_draft.cards),
+                    chapter_goal=plan_draft.chapter_goal or selected.end_change,
+                    continuity_notes=plan_draft.continuity_notes,
+                )
+                plan_issues = validate_scene_plan(plan, selected, choice, max_scenes=4)
+                acc_hard = acceptance_plan_issues(acc_items)
+                known_acc_ids = {i.item_id for i in acc_items_raw}
+                acc_hard.extend(
+                    f"acceptance_unknown:{card.scene_id}:{item_id}"
+                    for card in plan_draft.cards
+                    for item_id in card.acceptance_ids
+                    if item_id not in known_acc_ids
+                )
+                event_ref_errors = validate_plan_event_refs(
+                    [card.model_dump() for card in plan_draft.cards],
+                    sp.get("script_events") or [],
+                )
+                hard = structural_plan_issues(plan_issues) + acc_hard + event_ref_errors
+                if not hard:
+                    sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
+                    break
+            
             compile_repair = [
                 "上一版分场未通过：" + "；".join(hard[:6]) + "。",
                 "修复事件重复和时间顺序；保留唯一 ID，补全空场，"
