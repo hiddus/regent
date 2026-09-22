@@ -28,7 +28,6 @@ from regent.novel.domain.script_protocol import (
 from regent.novel.domain.states import ChapterRunState, StoryWorkState
 from regent.novel.application.chapter_review import (
     _coerce_review_soft,
-    _review_issues_soft_after_creative,
 )
 
 PARA = "雨水沿窗棂流下，两个人仍旧没有开口，钥匙静静躺在桌面正中。"
@@ -181,8 +180,8 @@ def test_review_coerce_structured_only():
     assert review_issues_may_coerce(["[editor-soft:x]"])
     assert not review_issues_may_coerce(["第二场跳场"])
     assert not review_issues_may_coerce("[front:redundant] 复读")
-    assert not _review_issues_soft_after_creative(["第二场跳场"])
-    assert _review_issues_soft_after_creative(["[soft-cont:space] 空间省略"])
+    assert not review_issues_may_coerce(["第二场跳场"])
+    assert review_issues_may_coerce(["[soft-cont:space] 空间省略"])
 
 
 def test_coerce_review_soft_preserves_original():

@@ -343,13 +343,26 @@ async def advance_step(
             if pending.attempt >= 3 or isinstance(exc, ProductionStopped)
             else ChapterRunState.RETRYABLE_FAILED.value
         )
+        # 失败原因落库：进度投影/前端要能直接展示，不能只剩空 reason
+        context = dict(run.generation_context or {})
+        production = dict(context.get("production") or {})
+        err_msg = str(exc) or str(getattr(pending, "error_code", "") or "")
+        production["last_error"] = err_msg[:500]
+        context["last_error"] = production["last_error"]
+        context["production"] = production
+        run.generation_context = context
         run.version += 1
         await session.flush()
         await emit(
             session,
             work_id=work_id,
             event_type="chapter.step_failed",
-            data={"chapter_no": chapter_no, "step": pending.step, "error": pending.error_code},
+            data={
+                "chapter_no": chapter_no,
+                "step": pending.step,
+                "error": pending.error_code,
+                "message": err_msg[:300],
+            },
             branch_id=work.branch_id,
             chapter_no=chapter_no,
         )

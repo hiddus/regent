@@ -31,8 +31,8 @@ from regent.novel.domain.errors import (
     ProductionStopped,
 )
 from regent.novel.domain.prose_front_gates import (
-    REVIEW_COERCE_PREFIXES,
     front_gate_hard_fails,
+    power_surface_fails_review,
     review_issues_may_coerce,
 )
 from regent.novel.domain.script_protocol import (
@@ -64,12 +64,59 @@ _effective_call_cap = _budget_call_cap
 _MAX_POST_CREATIVE_REVIEW_REWINDS = 1
 
 
-def _review_issues_soft_after_creative(issues: list[Any] | None) -> bool:
-    """创作验收已通过后：仅结构化顾问标签可 coerce。
+def _merge_gate_debts_into_issues(
+    issues: list[str], sp: dict[str, Any] | None
+) -> list[str]:
+    """导演递延的债务进入责编议题；按 kind 加不同前缀便于识别。"""
+    out = list(issues)
+    for debt in (sp or {}).get("gate_debts") or []:
+        if not isinstance(debt, dict):
+            continue
+        if str(debt.get("owner") or "") != "review":
+            continue
+        kind = str(debt.get("kind") or "")
+        if kind == "continuity":
+            prefix = "[gate_debt:cont]"
+        elif kind == "prose_front":
+            prefix = "[gate_debt:prose_front]"
+        else:
+            continue
+        for tag in debt.get("tags") or []:
+            text = str(tag or "").strip()
+            if not text:
+                continue
+            marked = (
+                text
+                if text.startswith(prefix)
+                else f"{prefix}{text}"
+            )
+            if marked not in out and text not in out:
+                out.append(marked)
+    return out
 
-    复读、跨段事实「连续」冲突、自然语言「跳场/入场」不得 soft。
-    """
-    return review_issues_may_coerce(issues)
+
+def _only_deferred_issues(issues: list[Any] | None) -> bool:
+    """剩余问题是否全部为导演递延的债务（连续性 + prose_front）。"""
+    rows = [str(x).strip() for x in (issues or []) if str(x).strip()]
+    if not rows:
+        return False
+    return all(
+        r.startswith("[gate_debt:cont]")
+        or r.startswith("[gate_debt:prose_front]")
+        or r.startswith("[soft-cont:")
+        for r in rows
+    )
+
+
+def _deferred_issues_contain_redundant(issues: list[Any] | None) -> bool:
+    """递延债务中是否包含 redundant（真复读不可 coerce）。"""
+    for item in (issues or []):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if "[gate_debt:prose_front]" in text and "redundant" in text:
+            return True
+    return False
 
 
 def _top_review_fix_notes(issues: list[Any] | None, *, limit: int = 3) -> list[str]:
@@ -88,11 +135,6 @@ def _top_review_fix_notes(issues: list[Any] | None, *, limit: int = 3) -> list[s
         if len(out) >= limit:
             break
     return out
-
-
-def _review_unchanged_may_soft(issues: list[Any] | None) -> bool:
-    """创作已过且正文未变时：仅窄 soft 意见可放行。"""
-    return _review_issues_soft_after_creative(issues)
 
 
 def _coerce_review_soft(
@@ -326,14 +368,29 @@ async def validate_chapter(
             )
         ),
     )
-    if front_fails:
-        issues = list(dict.fromkeys([*issues, *front_fails]))
+    # REVIEW 层：power_surface 用弱匹配（特定机制/代价短语），其余门保持严格
+    _content_text = str(run.content or "")
+    front_fails_no_power = [
+        f for f in front_fails if not str(f).startswith("[front:power_surface")
+    ]
+    review_power_fails = power_surface_fails_review(
+        _content_text,
+        production_packet=packet if isinstance(packet, dict) else {},
+        chapter_no=int(run.chapter_no),
+    )
+    front_fails_effective = list(dict.fromkeys([*front_fails_no_power, *review_power_fails]))
+    if front_fails_effective:
+        issues = list(dict.fromkeys([*issues, *front_fails_effective]))
+    # 导演 AUDIT 递延的连续性债务：责编层接管
+    _sp_early = production.get("script_protocol") if isinstance(production, dict) else {}
+    if isinstance(_sp_early, dict):
+        issues = _merge_gate_debts_into_issues(issues, _sp_early)
     # 专职责编：默认抽样，避免每章固定付费却只有 soft 记录
     from regent.novel.application import editor_audit as ea
 
     editor_issues: list[str] = []
     soft_only: list[str] = []
-    if ea.should_run_editor_audit(chapter_no=int(run.chapter_no), front_fails=front_fails):
+    if ea.should_run_editor_audit(chapter_no=int(run.chapter_no), front_fails=front_fails_effective):
         editor = await _call(
             session,
             provider,
@@ -428,13 +485,23 @@ async def validate_chapter(
         "revised": bool(production.get("chapter_repairs"))
         or any(len(take["prose_versions"]) > 1 for take in production["takes"]),
     }
+    # 包括最终停机轮；只记录修订轮无法解释“次数耗尽”时究竟还剩什么。
+    review_snapshot = {
+        "content_hash": hashlib.sha256(run.content.encode()).hexdigest(),
+        "passed": run.review["passed"],
+        "issues": list(issues),
+        "chapter_repairs": int(production.get("chapter_repairs") or 0),
+        "post_creative_review_rewinds": int(production.get("post_creative_review_rewinds") or 0),
+    }
+    history = production.setdefault("review_history", [])
+    if not history or history[-1] != review_snapshot:
+        history.append(review_snapshot)
+    _save(run, production)
     if not run.review["passed"]:
         content_hash = hashlib.sha256(run.content.encode()).hexdigest()
         sp = production.get("script_protocol") or {}
         creative_ok = bool((sp.get("creative_accept") or {}).get("accept"))
-        soft_ok = _review_issues_soft_after_creative(issues) or review_issues_may_coerce(
-            issues
-        )
+        soft_ok = review_issues_may_coerce(issues)
         post_rewinds = int(production.get("post_creative_review_rewinds") or 0)
 
         # 创作已过：可 soft 意见直接放行，禁止再进 WRITE↔AUDIT 空烧。
@@ -460,8 +527,24 @@ async def validate_chapter(
                     _coerce_review_soft(
                         run, production, issues, flag="coerced_after_repairs"
                     )
+                elif (
+                    repairs >= 1
+                    and (run.content or "").strip()
+                    and _only_deferred_issues(issues)
+                    and not _deferred_issues_contain_redundant(issues)
+                ):
+                    # 至少修过一轮：纯递延债务（无 redundant）可 coerce
+                    _coerce_review_soft(
+                        run,
+                        production,
+                        issues,
+                        flag="coerced_deferred_issues",
+                    )
                 else:
-                    raise ProductionStopped("章节修复次数已达上限，保留场景及证据")
+                    raise ProductionStopped(
+                        "章节修复次数已达上限，保留场景及证据；剩余问题："
+                        + "；".join(str(i) for i in issues[:4])
+                    )
             if not run.review.get("passed"):
                 production["chapter_repairs"] = repairs + 1
                 if creative_ok:

@@ -445,6 +445,10 @@ class RunProgressOut(BaseModel):
     budget_pause: dict[str, Any] | None = None
     public_stage: str | None = None
     available_actions: list[str] = Field(default_factory=list)
+    # 用户可读阶段文案（失败时必须能看出章失败，而不是「正在写」）
+    stage_label: str | None = None
+    # 章失败原因：TERMINAL_FAILED/RETRYABLE_FAILED 时供页面直接展示
+    failure_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -29,7 +29,6 @@ _POWER_MARKERS: tuple[str, ...] = (
     "羁绊",
     "浓度",
     "冷却",
-    "金手指",
     "浮名",
     "鱼塘",
 )
@@ -54,7 +53,6 @@ _POWER_ALIASES: dict[str, tuple[str, ...]] = {
     "抽取": ("抽取", "抽到", "抽中"),
     "羁绊": ("羁绊",),
     "浓度": ("浓度",),
-    "金手指": ("金手指", "外挂", "超能"),
     "浮名": ("浮名",),
     "鱼塘": ("鱼塘",),
 }
@@ -181,6 +179,15 @@ def review_issues_may_coerce(issues: list[Any] | None) -> bool:
         return True
     for item in rows:
         if item.startswith("[pov:"):
+            return False
+        # 递延的连续性债务 → 可 coerce
+        if item.startswith("[gate_debt:cont]"):
+            continue
+        # 递延的 power_surface → 可 coerce
+        if item.startswith("[gate_debt:prose_front]") and "power_surface" in item:
+            continue
+        # 递延的 redundant → 不可 coerce（与裸 redundant 同语义）
+        if item.startswith("[gate_debt:prose_front]") and "redundant" in item:
             return False
         if item.startswith(
             ("[front:title", "[front:cast", "[front:banned", "[front:redundant")
@@ -349,6 +356,67 @@ def _power_surface_fails(
     ]
 
 
+# REVIEW 层弱匹配：仅特定机制/代价短语，避免"不能/无法/代价"等泛词误放
+_POWER_SURFACE_WEAK_PHRASES: tuple[str, ...] = (
+    "经脉反噬",
+    "灵力枯竭",
+    "真气溃散",
+    "力竭吐血",
+    "反噬的代价",
+    "透支",
+    "反噬",
+    "枯竭",
+    "溃散",
+)
+
+
+def power_surface_fails_review(
+    text: str,
+    *,
+    production_packet: dict[str, Any] | None,
+    chapter_no: int,
+) -> list[str]:
+    """REVIEW 层 power_surface 检查：严格标记 + 弱匹配（仅特定机制/代价短语）。
+
+    与 VALIDATE 层的 _power_surface_fails 相比，增加弱匹配兜底：
+    若正文出现特定机制/代价短语（如"经脉反噬""灵力枯竭"），视为已外显，不再报错。
+    但弱匹配仅限特定短语，避免"不能/无法/代价"等泛词误放。
+    """
+    packet = production_packet or {}
+    script = packet.get("script") if isinstance(packet.get("script"), dict) else {}
+    power_blob = " ".join(
+        str(script.get(k) or "")
+        for k in (
+            "power_mechanism",
+            "power_limits",
+            "power_payoff",
+            "cost",
+            "cost_type",
+        )
+    )
+    if not power_blob.strip() and int(chapter_no) != 1:
+        return []
+    expected = [m for m in _POWER_MARKERS if m in power_blob]
+    if not expected:
+        return []
+    # 严格标记检查（同 VALIDATE）
+    present: list[str] = []
+    for m in expected:
+        aliases = _POWER_ALIASES.get(m, (m,))
+        if any(a in text for a in aliases):
+            present.append(m)
+    if present:
+        return []
+    # 弱匹配兜底：仅特定机制/代价短语
+    if any(phrase in text for phrase in _POWER_SURFACE_WEAK_PHRASES):
+        return []
+    return [
+        "[front:power_surface] 选定剧本需要金手指外显，但正文完全未出现"
+        f"（缺：{'、'.join(expected[:5])}）；"
+        "须让读者看见机制或代价，不得只留给责编挑黑话。"
+    ]
+
+
 def _near_duplicate_paragraph_fails(text: str) -> list[str]:
     from regent.novel.domain.repair_locate import find_near_duplicate_paragraphs
 
@@ -374,6 +442,7 @@ __all__ = [
     "REVIEW_COERCE_PREFIXES",
     "front_gate_hard_fails",
     "front_gate_writer_hint",
+    "power_surface_fails_review",
     "resolve_prose_style",
     "review_issues_may_coerce",
 ]

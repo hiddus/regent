@@ -163,8 +163,19 @@ def _extract_code(message: str) -> str:
     return "unknown"
 
 
+def _normalize_quote_key(quote: str) -> str:
+    """摘录指纹：去掉空白与常见标点，避免同一重复段因标点微调换 id。"""
+    raw = str(quote or "").strip()
+    if not raw:
+        return ""
+    return re.sub(r"[\s，。！？、；：\"\"''「」『』（）()\[\]…·.,!?;:'\"\-—_]+", "", raw)[:120]
+
+
 def _issue_id(code: str, message: str, quote: str) -> str:
-    digest = hashlib.sha256(f"{code}|{quote}|{message[:80]}".encode()).hexdigest()[:12]
+    """跨轮稳定身份：code + 摘录指纹。不用可变 message[:80]（措辞一改就换 id）。"""
+    del message  # 文案措辞不参与跨轮身份
+    key = _normalize_quote_key(quote) or str(code or "unknown")
+    digest = hashlib.sha256(f"{code}|{key}".encode()).hexdigest()[:12]
     return f"{code}#{digest}"
 
 
@@ -645,6 +656,10 @@ def apply_repair_target_to_script_state(
         for q in i.evidence_quotes
         if q
     ]
+    # 去重约束属于整章：目标场之后的重拍也必须收到，不能只发给旧稿修订。
+    sp["chapter_dedup_quotes"] = list(dict.fromkeys(
+        [*list(sp.get("chapter_dedup_quotes") or []), *must_remove]
+    ))
     evidence_only = [
         q
         for i in target.issues
@@ -653,6 +668,21 @@ def apply_repair_target_to_script_state(
         if q
     ]
     forbidden_claims, required_facts = split_rewrite_claims(target.issues)
+    prev_ticket = sp.get("pending_repair_ticket")
+    if isinstance(prev_ticket, dict) and prev_ticket:
+        trail = list(sp.get("repair_trail") or [])
+        trail.append(
+            {
+                "ticket": {
+                    "scene_id": prev_ticket.get("scene_id"),
+                    "issue_ids": list(prev_ticket.get("issue_ids") or [])[:12],
+                    "codes": list(prev_ticket.get("codes") or [])[:12],
+                    "base_content_hash": prev_ticket.get("base_content_hash"),
+                },
+                "verify": sp.get("repair_verify"),
+            }
+        )
+        sp["repair_trail"] = trail[-20:]
     sp["pending_repair_ticket"] = {
         "scene_index": idx,
         "scene_id": target.scene_id,

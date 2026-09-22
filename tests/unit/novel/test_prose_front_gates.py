@@ -56,6 +56,17 @@ def test_power_surface_missing_on_ch1():
     assert any("power_surface" in x for x in fails)
 
 
+def test_xuanhuan_power_does_not_require_metafiction_label():
+    text = "戒指在胃里随呼吸微动，经脉钝痛减轻，胃壁却传来锐痛。" * 30
+    fails = front_gate_hard_fails(
+        text, chapter_no=3,
+        production_packet={"script": {
+            "power_payoff": "金手指以体内戒指和气感的呼应兑现，代价是胃壁受伤",
+        }},
+    )
+    assert not any("power_surface" in x for x in fails)
+
+
 def test_title_cast_ghost_name():
     text = ("沈栀睁开眼。" + "她听周予安说话，系统弹出抽取面板。" * 40)
     fails = front_gate_hard_fails(

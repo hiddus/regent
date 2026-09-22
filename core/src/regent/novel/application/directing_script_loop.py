@@ -83,12 +83,18 @@ from regent.novel.domain.script_protocol import (
     ChapterScript,
     ScriptAssignmentBoard,
     ScriptChoice,
+    acceptance_plan_issues,
     assemble_production_packet,
     assert_rejected_isolated,
+    assign_acceptance_to_scenes,
+    derive_acceptance_items,
     empty_script_state,
+    ensure_acceptance_assigned,
     normalize_assignment_board,
+    normalize_chapter_validation_fails,
     route_script_hive,
     task_for_slot,
+    validation_system_contract,
 )
 from regent.novel.domain.states import SceneArtifact, SceneRunState
 from regent.novel.domain.world_bible import (
@@ -212,6 +218,46 @@ def _audit_cont_softable(gate: Any, *, working_state: dict[str, Any] | None = No
             continue
         return False
     return True
+
+
+def _audit_cont_deferrable(gate: Any) -> bool:
+    """画面层：仅连续性阻断时可递延到责编，不得卡死后续场。
+
+    缺 must 节拍 / 模型硬失败（改因果、跳场等）仍硬停。
+    """
+    if getattr(gate, "critical_missed", None):
+        return False
+    hard = [str(h) for h in (getattr(gate, "hard_fails", None) or []) if str(h).strip()]
+    if hard:
+        return False
+    return bool(getattr(gate, "continuity_block", False))
+
+
+def _append_gate_debt(
+    sp: dict[str, Any],
+    *,
+    scene_id: str,
+    tags: list[str],
+    kind: str = "continuity",
+    from_phase: str = "AUDIT_SCENE",
+) -> None:
+    """导演层递延债务：责编 REVIEW 合并并尝试修；修满可 coerce 留痕。
+
+    统一写入 gate_debts 列表，由 kind 字段区分 continuity / prose_front。
+    """
+    clean = [str(t) for t in tags if str(t).strip()]
+    if not clean:
+        return
+    debts = sp.setdefault("gate_debts", [])
+    debts.append(
+        {
+            "owner": "review",
+            "kind": kind,
+            "scene_id": scene_id,
+            "tags": clean[:8],
+            "from_phase": from_phase,
+        }
+    )
 
 
 def _script_cards(sp: dict[str, Any]) -> list[Any]:
@@ -768,6 +814,7 @@ async def _produce_script_tick(
         selected = ChapterScript.model_validate(packet.get("script") or {})
         choice = ScriptChoice.model_validate(packet.get("direction") or {})
         skeleton = compile_scene_plan(selected, choice, chapter_no=int(run.chapter_no))
+        acc_items_raw = derive_acceptance_items(selected, choice)
         compile_repair: list[str] = []
         plan_draft = None
         plan_issues: list[str] = []
@@ -777,6 +824,7 @@ async def _produce_script_tick(
                 "selected_script": selected.model_dump(),
                 "direction": choice.model_dump(),
                 "skeleton_plan": skeleton.model_dump(),
+                "acceptance_items": [i.model_dump(mode="json") for i in acc_items_raw],
                 "max_scenes": 4,
                 "coverage_note": (
                     "节拍正文须嵌入选定剧本 turning_point / cost / end_change 的关键短语，"
@@ -785,12 +833,19 @@ async def _produce_script_tick(
             }
             if compile_repair:
                 compile_payload["repair_instructions"] = compile_repair
+                compile_payload["previous_plan"] = plan_draft.model_dump()
             plan_draft = await call(
                 _ScenePlanDraft,
                 "你是总导演，负责分场。把选定剧本拆成 2–4 张场景卡。"
                 "每张卡写清 purpose/entry_state/protagonist_objective/opposition/"
                 "core_choice/emotion_arc/exit_change。每个节拍有唯一 beat_id。"
                 "必须覆盖原剧本的转折与代价。所有 scene_id/beat_id 必须唯一。"
+                "按事件发生顺序分场；同一事件只能展开一次，换 beat_id 不等于新事件。"
+                "不得在首场塞完整章再在后场重演；章末夜间收束应放在白天事件之后。"
+                "每项 required 验收义务通过 acceptance_ids 指定唯一责任场，"
+                "并在该场节拍写出相应行动或认知；后场只承接已成立状态。"
+                "骨架仅供参考，可重新划分边界，禁止机械把未匹配义务塞进末场。"
+                "若有 previous_plan，应修复其重复事件、顺序和责任归属，不能只改 ID。"
                 "节拍文字要能让人看出转折、代价与章末变化，不要只写气氛。",
                 compile_payload,
                 repair_no=repair_no,
@@ -810,21 +865,63 @@ async def _produce_script_tick(
                 continuity_notes=plan_draft.continuity_notes,
             )
             plan_issues = validate_scene_plan(plan, selected, choice, max_scenes=4)
-            hard = structural_plan_issues(plan_issues)
+            # 验收义务必须在开写前落到责任场次：计划软放行 + 整章硬拦 = 期限倒挂
+            # 只映射责任，不由确定性代码把未知义务强塞到末场。
+            acc_items, filled_cards = ensure_acceptance_assigned(
+                acc_items_raw, list(plan_draft.cards)
+            )
+            plan_draft = plan_draft.model_copy(update={"cards": filled_cards})
+            plan = ChapterScenePlan(
+                chapter_no=int(run.chapter_no),
+                cards=list(plan_draft.cards),
+                chapter_goal=plan_draft.chapter_goal or selected.end_change,
+                continuity_notes=plan_draft.continuity_notes,
+            )
+            plan_issues = validate_scene_plan(plan, selected, choice, max_scenes=4)
+            acc_hard = acceptance_plan_issues(acc_items)
+            known_acc_ids = {i.item_id for i in acc_items_raw}
+            acc_hard.extend(
+                f"acceptance_unknown:{card.scene_id}:{item_id}"
+                for card in plan_draft.cards
+                for item_id in card.acceptance_ids
+                if item_id not in known_acc_ids
+            )
+            hard = structural_plan_issues(plan_issues) + acc_hard
             if not hard:
+                sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
                 break
             compile_repair = [
                 "上一版分场未通过：" + "；".join(hard[:6]) + "。",
-                "请保留唯一 scene_id/beat_id，补全空场，并让节拍覆盖转折与代价。",
+                "修复事件重复和时间顺序；保留唯一 ID，补全空场，"
+                "为每项 required 义务指定唯一 acceptance_ids 责任场，并覆盖转折与代价。",
             ]
+            if acc_hard:
+                missing = [
+                    i.text for i in acc_items if i.required and not i.scene_ids
+                ][:4]
+                compile_repair.append(
+                    "以下章末义务必须分配到具体场次的节拍/purpose/exit_change，"
+                    "禁止只写气氛：" + "；".join(missing)
+                )
         else:
-            hard = structural_plan_issues(plan_issues)
+            assert plan_draft is not None
             if hard:
+                sp["compile_hard_issues"] = list(hard)
+                sp["failed_scene_plan"] = plan_draft.model_dump()
+                _save(run, production)
                 raise ProductionStopped("分场覆盖校验失败：" + "；".join(hard[:4]))
+            sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
         soft = [i for i in plan_issues if i not in structural_plan_issues(plan_issues)]
         if soft:
             sp["compile_soft_issues"] = soft
         assert plan_draft is not None
+        if "acceptance_items" not in sp:
+            acc_items, filled_cards = ensure_acceptance_assigned(
+                derive_acceptance_items(selected, choice),
+                list(plan_draft.cards),
+            )
+            plan_draft = plan_draft.model_copy(update={"cards": filled_cards})
+            sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
         sp["scene_plan"] = {
             "cards": [c.model_dump() for c in plan_draft.cards],
             "chapter_goal": plan_draft.chapter_goal or selected.end_change,
@@ -909,6 +1006,10 @@ async def _produce_script_tick(
             "cast": production.get("cast") or {},
             "user_guidance": run.user_guidance or {},
             "scene_card": card.model_dump(),
+            "acceptance_items": [
+                item for item in (sp.get("acceptance_items") or [])
+                if card.scene_id in (item.get("scene_ids") or [])
+            ],
             "entry_summary": entry_summary,
             "working_state": sp.get("working_state") or {},
             "chapter_goal": plan.get("chapter_goal") or "",
@@ -917,6 +1018,13 @@ async def _produce_script_tick(
         }
         if isinstance(style, dict) and style:
             write_payload["prose_style"] = style
+        dedup_quotes = list(sp.get("chapter_dedup_quotes") or [])
+        if dedup_quotes:
+            prior_scenes = "\n\n".join(list(sp.get("scene_texts") or [])[:idx])
+            write_payload["chapter_dedup_constraints"] = [
+                {"quote": q, "present_in_prior_scenes": q in prior_scenes}
+                for q in dedup_quotes
+            ]
         if prior_draft and revision_instruction:
             write_payload["previous_draft"] = prior_draft
             write_payload["revision_instruction"] = revision_instruction
@@ -1029,7 +1137,7 @@ async def _produce_script_tick(
             _save(run, production)
             return False
 
-        # 修满仍阻断：缺拍/改因果硬停；仅跳场/空间连续记 soft 放行。
+        # 修满仍阻断：缺拍/改因果硬停；空入场误报 soft；仅连续性递延责编。
         # 不再对 post_review/creative_done 做「非 critical 全放行」——会把事实错带进成片。
         if gate.blocking:
             cont_softable = (not gate.critical_missed) and _audit_cont_softable(
@@ -1040,8 +1148,17 @@ async def _produce_script_tick(
             )
             if cont_softable:
                 tags = gate.hard_fail_tags(card.scene_id)
-                sp.setdefault("audit_soft_cont", []).extend(tags)
-                sp.setdefault("scene_soft_fails", []).extend(tags)
+                if post_review:
+                    sp["post_review_rewrite"] = False
+            elif _audit_cont_deferrable(gate):
+                tags = gate.hard_fail_tags(card.scene_id)
+                _append_gate_debt(
+                    sp,
+                    scene_id=str(card.scene_id),
+                    tags=tags,
+                    kind="continuity",
+                    from_phase="AUDIT_SCENE",
+                )
                 if post_review:
                     sp["post_review_rewrite"] = False
             else:
@@ -1210,19 +1327,16 @@ async def _produce_script_tick(
         }
         report = await call(
             ScriptChapterValidation,
-            "核验正文是否兑现选定剧本的关键节拍与代价，有无越权新增事实。"
-            "突破剧本终点或引入弃选路线记入 hard_fails。"
-            "hard_fails 每条尽量带可检索摘录，格式：…摘录「原文片段」…；"
-            "若能判断场次，可填 located_issues："
-            "有引文时填 scene_ids + evidence_quotes；"
-            "缺失节拍无引文时必须填 beat_ids（取自 payload.beat_id_to_scene），"
-            "禁止只在 message 里写节拍名代替 beat_ids。"
-            "场次必须对照 payload.scene_layout（scene_index / scene_id / 字符区间），禁止自行猜分场。"
-            "抽取有逐字 quote 的事实；你不负责戏剧决策，也不改写正文。",
+            validation_system_contract(),
             {
                 "prose": take["content"],
                 "selected_script": packet.get("script"),
                 "must_land_beats": packet.get("must_land_beats") or [],
+                "acceptance_items": (
+                    sp.get("acceptance_items")
+                    or packet.get("acceptance_items")
+                    or []
+                ),
                 "rejected": sp.get("rejected") or {},
                 "canon": run.generation_context.get("canon", []),
                 "scene_hard_fails": sp.get("scene_hard_fails") or [],
@@ -1271,7 +1385,24 @@ async def _produce_script_tick(
         )
         # 场记问题与章节核验问题：script 整章修订；script_scene 不整章假返工
         scene_fails = list(sp.get("scene_hard_fails") or [])
-        chapter_fails = list(report.hard_fails)
+        _acc_for_validate = [
+            i
+            for i in (
+                sp.get("acceptance_items")
+                or packet.get("acceptance_items")
+                or []
+            )
+            if isinstance(i, dict)
+        ]
+        from regent.novel.domain.script_protocol import AcceptanceItem
+
+        _acc_models = [
+            AcceptanceItem.model_validate(i) for i in _acc_for_validate if i
+        ]
+        # 契约化核验：按 item 去重 + kind 过滤，禁止复合终点多条误拦
+        chapter_fails = normalize_chapter_validation_fails(
+            list(report.hard_fails), _acc_models
+        )
         from regent.novel.application import commons_audit as ca
 
         commons_rails = list(run.generation_context.get("commons_rails") or [])
@@ -1301,8 +1432,24 @@ async def _produce_script_tick(
                 else None
             ),
         )
-        if front_fails:
-            chapter_fails = list(dict.fromkeys([*chapter_fails, *front_fails]))
+        # 分区：结构门（pov/banned/title/first_person）硬停；文字门（redundant/power_surface）递延到 REVIEW
+        _DEFERRABLE_PROSE_FRONT = ("[front:redundant]", "[front:power_surface]")
+        structural_front = [
+            f for f in front_fails if not str(f).startswith(_DEFERRABLE_PROSE_FRONT)
+        ]
+        deferred_front = [
+            f for f in front_fails if str(f).startswith(_DEFERRABLE_PROSE_FRONT)
+        ]
+        if structural_front:
+            chapter_fails = list(dict.fromkeys([*chapter_fails, *structural_front]))
+        if deferred_front:
+            _append_gate_debt(
+                sp,
+                scene_id="__chapter__",
+                tags=deferred_front,
+                kind="prose_front",
+                from_phase="VALIDATE",
+            )
         all_fails = chapter_fails + scene_fails
         take["validation"] = {
             **report.model_dump(mode="json"),
@@ -1320,22 +1467,13 @@ async def _produce_script_tick(
             if proto == PROTOCOL_SCRIPT_SCENE:
                 commons_only = [x for x in chapter_fails if str(x).startswith("[commons:")]
                 other = [x for x in chapter_fails if not str(x).startswith("[commons:")]
-                # 顾问/金手指字面：可 soft。复读/段重复不得 soft——会把双版本带进 DONE。
+                # 顾问字面可 soft；power_surface/redundant 已递延到 REVIEW，不到此路径
                 softable = [
                     x
                     for x in chapter_fails
-                    if str(x).startswith(("[commons:", "[front:power_surface]"))
+                    if str(x).startswith("[commons:")
                 ]
                 if softable and len(softable) == len(chapter_fails):
-                    if commons_only and not other:
-                        sp.setdefault("validate_soft_commons", []).extend(commons_only)
-                        take["validation"]["soft_commons"] = commons_only
-                    power_hits = [
-                        x for x in softable if str(x).startswith("[front:power_surface]")
-                    ]
-                    if power_hits:
-                        sp.setdefault("validate_soft_power", []).extend(power_hits)
-                        take["validation"]["soft_power_surface"] = power_hits
                     take["validation"]["passed"] = bool(report.facts)
                     production["phase"] = "ACCEPT_CHAPTER"
                 else:
@@ -1370,6 +1508,24 @@ async def _produce_script_tick(
                             )
                     if repairs < 2 and texts:
                         sp["chapter_validate_repairs"] = repairs + 1
+                        # 修订轨迹：每轮问题/定位/正文指纹，供根因复盘
+                        from regent.novel.domain.repair_locate import (
+                            content_hash as _chash_full,
+                        )
+
+                        sp.setdefault("repair_history", []).append(
+                            {
+                                "round": repairs + 1,
+                                "fails": list(other or chapter_fails),
+                                "acceptance_items": _acc_for_validate,
+                                "located_issues": list(
+                                    (take.get("validation") or {}).get("located_issues")
+                                    or report.located_issues
+                                    or []
+                                ),
+                                "content_hash_before": _chash_full(chapter_now),
+                            }
+                        )
                         # 定位到真实失败场；无法定位则停机，禁止默认修末场
                         _begin_located_scene_repair(
                             production,
@@ -1453,7 +1609,16 @@ async def _produce_script_tick(
                     "scene_exit_states",
                     "scene_entry_summaries",
                     "pending_repair_ticket",
+                    "chapter_dedup_quotes",
                     "located_issues",
+                    "acceptance_items",
+                    "repair_history",
+                    "compile_soft_issues",
+                    "gate_debts",
+                    "audit_deferred_cont",
+                    "scene_soft_fails",
+                    "audit_soft_cont",
+                    "validate_soft_commons",
                 ):
                     sp.pop(k, None)
                 sp["scene_index"] = 0

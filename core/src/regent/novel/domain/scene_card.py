@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +55,10 @@ class SceneCard(BaseModel):
         default_factory=list, description="只需略写的信息"
     )
     beats: list[StructuredBeat] = Field(default_factory=list)
+    acceptance_ids: list[str] = Field(
+        default_factory=list,
+        description="本场负责兑现的验收义务 item_id；每项 required 只指定一个责任场，承接不重复演绎",
+    )
     target_chars: int = Field(default=600, ge=200, le=2000)
 
 
@@ -482,6 +487,11 @@ SCENE_WRITE_SYSTEM = (
     "冲突规模匹配当场，禁止小题大做。"
     "禁止同一犹豫动作无进展地连写三遍；禁止把上场已交代的穿越/身体陌生感再开一次头。"
     "每场只增加新的选择、信息或后果；已成立的事实用一句承接，不要整段复读。"
+    "payload.acceptance_items 是本场负责兑现的义务，按 kind 与 min_evidence 理解；"
+    "dilemma 只需建立困境，不要求提前解决。"
+    "chapter_dedup_constraints 对修订和后续重拍都有效：摘录属于整章去重证据，"
+    "不是要求复述的材料；present_in_prior_scenes 为真时本场不得再展开该段，"
+    "为假时全章仍至多保留一次，不得把同一事件换句话重演。"
     "若 payload.is_revision 为真：这是定点修订，不是重写整章。"
     "严格按 revision_instruction 与 repair_ticket 执行："
     "1) expected_actions 含 remove_dup 时：must_remove_quotes 在本场至多保留一处，优先删后出现的复读；"
@@ -525,7 +535,11 @@ def compile_scene_plan(
 
     完整分场（补全 entry_state / core_choice 等）由导演模型完成；
     此函数只做结构拆分，保证节拍有 ID、有归属，不凭空发明情节。
+    验收义务（acceptance items）中的 required 文本若未覆盖，强制落入骨架节拍，
+    避免「计划软放行、整章硬拦」的期限倒挂。
     """
+    from regent.novel.domain.script_protocol import derive_acceptance_items
+
     beats = list(script.beats or [])
     if not beats:
         beats = [script.turning_point or script.end_change or "本章核心变化"]
@@ -537,6 +551,11 @@ def compile_scene_plan(
     ):
         if key and not _text_covers(key, beats, min_frag=8):
             beats.append(key)
+
+    # required 验收义务落入骨架节拍
+    for item in derive_acceptance_items(script, choice):
+        if item.required and item.text and not _text_covers(item.text, beats, min_frag=6):
+            beats.append(item.text)
 
     # 按转折点切成 2–4 场：转折前 / 转折 / 转折后（代价与钩子）。
     turning = (script.turning_point or "").strip()
@@ -703,6 +722,24 @@ def validate_scene_plan(
     beat_ids = [b.beat_id for c in plan.cards for b in c.beats]
     if len(beat_ids) != len(set(beat_ids)):
         issues.append("duplicate_beat_id")
+    # ID 唯一并不代表事件唯一：禁止换 ID 把同一长节拍安排到多个场。
+    # 只拦完整长文本的复制/包含；语义改写仍交由导演和连续性审校判断。
+    seen_beats: list[tuple[str, str, str]] = []
+    for card in plan.cards:
+        for beat in card.beats:
+            normalized = re.sub(r"[\W_]+", "", beat.text)
+            if len(normalized) < 24:
+                continue
+            for sid, bid, prior in seen_beats:
+                if sid != card.scene_id and (
+                    normalized in prior or prior in normalized
+                ):
+                    issues.append(
+                        f"duplicate_event:{sid}/{bid}->{card.scene_id}/{beat.beat_id}:"
+                        f"{beat.text[:48]}"
+                    )
+                    break
+            seen_beats.append((card.scene_id, beat.beat_id, normalized))
     if not all_beats:
         issues.append("no_beats")
     beat_texts = [b.text for b in all_beats]

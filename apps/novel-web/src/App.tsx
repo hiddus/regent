@@ -65,6 +65,8 @@ type Progress = {
   budget_pause?:{kind?:string;message?:string;call_count?:number;committed_minor?:number;phase?:string;scene_index?:number}|null
   public_stage?:string|null
   available_actions?:string[]
+  stage_label?:string|null
+  failure_reason?:string|null
 }
 type Chapter = {title:string;content:string;word_count:number;ai_disclosure:string}
 type ChapterSummary = {chapter_no:number;title:string;word_count:number;state:string;attempt:number;version_count:number}
@@ -1351,10 +1353,19 @@ export default function App() {
           <span className="eyebrow">{
             progress && BUDGET_PAUSED.has(progress.work_state || '')
               ? (progress.public_stage === 'paused_cost' ? '成本达上限，已暂停' : '额度用完，已暂停')
+              : progress && (progress.state === 'TERMINAL_FAILED' || progress.public_stage === 'chapter_failed')
+                ? (progress.stage_label || '本章生成失败')
+              : progress && progress.state === 'CANONIZED'
+                ? '本章已定稿'
               : progress ? '正在创作' : '等待开工'
           }</span>
           <b>第 {progress?.chapter_no || 1} 章 · {workTitle || '故事'}</b>
         </div>
+        {progress && (progress.state === 'TERMINAL_FAILED' || progress.public_stage === 'chapter_failed') && !!progress.failure_reason && (
+          <p className="muted" role="status" style={{margin:'8px 0 0'}}>
+            {String(progress.failure_reason).slice(0, 180)}
+          </p>
+        )}
         <div className="step-progress" aria-hidden="true">
           {(progress?.steps && 'PRODUCE' in progress.steps ? DIRECTOR_STEP_ORDER : STEP_ORDER).map(s => <i key={s} className={stepState(s)} />)}
         </div>
@@ -1375,7 +1386,7 @@ export default function App() {
             </button>
           </div>
         </div>}
-        {!!progress?.scene_count && !BUDGET_PAUSED.has(progress.work_state || '') && <p role="status" aria-live="polite">
+        {!!progress?.scene_count && !BUDGET_PAUSED.has(progress.work_state || '') && progress.state !== 'TERMINAL_FAILED' && progress.public_stage !== 'chapter_failed' && <p role="status" aria-live="polite">
           导演正在创作第 {progress.scene_no} 场 · 已完成 {progress.completed_scenes || 0}/{progress.scene_count} 场
         </p>}
         {!progress && <div className="empty-hint">

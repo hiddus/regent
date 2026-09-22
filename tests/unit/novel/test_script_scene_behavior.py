@@ -279,6 +279,58 @@ async def test_real_audit_exhausted_stops_without_advancing_scene():
 
 
 @pytest.mark.asyncio
+async def test_real_audit_exhausted_continuity_defers_to_review():
+    """修满后仅连续性：递延责编，推进下一场，不 ProductionStopped。"""
+    card = _card("s1", "b1")
+    card2 = _card("s2", "b2")
+    run, work = _base_run(
+        phase="AUDIT_SCENE",
+        sp_extra={
+            "scene_plan": {
+                "cards": [card.model_dump(mode="json"), card2.model_dump(mode="json")],
+                "chapter_goal": "把柄易手",
+            },
+            "scene_index": 0,
+            "scene_texts": [TEXT],
+            "scene_repairs:s1": 2,
+            "pending_scene_beat_evidence": {"b1": "他把钥匙放在桌上。"},
+            "working_state": {"before": "ok"},
+            "working_summary": "上场",
+        },
+    )
+    provider = Provider(
+        [
+            d._SceneAudit(
+                scene_id="s1",
+                beat_verdicts=[
+                    BeatVerdict(
+                        beat_id="b1",
+                        landed=True,
+                        evidence="他把钥匙放在桌上。",
+                        note="",
+                    )
+                ],
+                continuity_ok=False,
+                continuity_issues=["与入场状态矛盾：黑纹位置不一致"],
+                hard_fails=[],
+                facts=[],
+                state_changes={"after_s1": "done"},
+            )
+        ]
+    )
+    await d.produce_tick(Session(), provider=provider, work=work, run=run)
+    production = run.generation_context["production"]
+    sp = production["script_protocol"]
+    assert production["phase"] == "WRITE_SCENE"
+    assert sp["scene_index"] == 1
+    debts = sp.get("gate_debts") or []
+    assert debts and debts[0]["kind"] == "continuity"
+    assert debts[0]["owner"] == "review"
+    assert any("cont:" in t for t in debts[0]["tags"])
+    assert "after_s1" in (sp.get("working_state") or {})
+
+
+@pytest.mark.asyncio
 async def test_real_plan_pins_script_scene_protocol():
     """DIRECT 规划：architecture=script_scene 时 production.protocol 必须钉死 script_scene。"""
     from regent.novel.application.generation import execute_step
@@ -1252,3 +1304,30 @@ async def test_produce_tick_command_id_with_takes_present(monkeypatch):
     assert "WRITE_SCENE" in cid
     # 不得退化成 take 维度标识
     assert ":turn" not in cid
+
+
+@pytest.mark.asyncio
+async def test_terminal_review_preserves_actual_unresolved_issues(monkeypatch):
+    from regent.novel.application import chapter_review
+
+    run, work = _base_run(phase="DONE", sp_extra={"creative_accept": {"accept": True}})
+    prod = run.generation_context["production"]
+    prod["accepted"] = [0]
+    prod["post_creative_review_rewinds"] = 1
+    prod["chapter_repairs"] = 1
+    run.content = TEXT
+    issue = "同一搜查在场景三重新开始，缺少时间及因果衔接"
+
+    async def capture_call(session, provider, work, run, production, schema,
+                           system, payload, purpose, command_id):
+        if schema is d.ChapterValidation:
+            return schema(passed=False, issues=[issue], failed_scene_index=0)
+        return schema(passed=True, issues=[])
+
+    monkeypatch.setattr(chapter_review, "_call", capture_call)
+    with pytest.raises(ProductionStopped, match="剩余问题.*同一搜查"):
+        await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+    history = run.generation_context["production"]["review_history"]
+    assert history[-1]["passed"] is False
+    assert issue in history[-1]["issues"]
+    assert history[-1]["post_creative_review_rewinds"] == 1

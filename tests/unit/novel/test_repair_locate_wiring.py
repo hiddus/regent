@@ -245,6 +245,61 @@ def test_locate_cross_scene_duplicate_earliest():
     assert "s1" in target.scene_ids
 
 
+@pytest.mark.asyncio
+async def test_downstream_retake_keeps_chapter_dedup_constraint(monkeypatch):
+    from regent.novel.application import directing_script_loop as loop
+
+    run, work = _scene_run(phase="WRITE_SCENE", texts=[PARA, PARA, "尾声"], scene_index=0)
+    sp = run.generation_context["production"]["script_protocol"]
+    located = locate_fail_messages(
+        [f"[front:redundant] 摘录「{PARA}」"],
+        scene_texts=sp["scene_texts"], cards=sp["scene_plan"]["cards"],
+    )
+    target = select_repair_target(located, cards=sp["scene_plan"]["cards"],
+                                  scene_texts=sp["scene_texts"], instruction_prefix="修订")
+    apply_repair_target_to_script_state(sp, target)
+    # 首场修好后进入后场：没有 previous_draft/is_revision，仍须保持整章约束。
+    sp["scene_texts"] = [PARA]
+    sp["scene_index"] = 1
+    sp["scene_revision_instruction"] = ""
+    captured = []
+
+    async def capture_call(session, provider, work, run, production, schema,
+                           system, payload, purpose, command_id):
+        captured.append(payload)
+        return schema(content="主角起身离开，门外的雨已经停了。" * 5, beat_evidence={})
+
+    monkeypatch.setattr(loop, "_call", capture_call)
+    await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
+    assert not captured[0].get("is_revision")
+    assert {"quote": PARA, "present_in_prior_scenes": True} in captured[0]["chapter_dedup_constraints"]
+
+
+@pytest.mark.asyncio
+async def test_compile_repairs_duplicate_events_before_writing(monkeypatch):
+    from regent.novel.application import directing_script_loop as loop
+
+    run, work = _scene_run(phase="COMPILE_SCENES", texts=[])
+    duplicate = "搜查结束后，告密者当众接过稠粥和咸肉，监工收起鞭子带着手下离开矿场。"
+    calls = []
+
+    async def capture_call(session, provider, work, run, production, schema,
+                           system, payload, purpose, command_id):
+        calls.append(payload)
+        c1, c2 = _card("s1", "b1"), _card("s2", "b2")
+        c1.acceptance_ids = [i["item_id"] for i in payload["acceptance_items"]]
+        c1.beats[0].text = duplicate
+        c2.beats[0].text = duplicate if len(calls) == 1 else "夜里主角决定带伤继续前行。"
+        return schema(cards=[c1, c2], chapter_goal="把柄易手", continuity_notes="")
+
+    monkeypatch.setattr(loop, "_call", capture_call)
+    await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
+    assert len(calls) == 2
+    assert "duplicate_event" in str(calls[1]["repair_instructions"])
+    assert calls[1]["previous_plan"]["cards"][1]["beats"][0]["text"] == duplicate
+    assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
+
+
 def test_locate_unlocatable_not_default_last():
     texts = ["独有甲。" * 40, "独有乙。" * 40]
     cards = [_card("s0", "b0"), _card("s1", "b1")]
@@ -470,6 +525,17 @@ def test_verify_repair_progress_by_code_not_issue_id_wording():
         remaining_fails=[],
     )
     assert done["progress"] is True
+
+
+def test_issue_id_stable_across_message_wording():
+    from regent.novel.domain.repair_locate import _issue_id
+
+    q = "陆沉把后脑勺抵在岩壁上"
+    a = _issue_id("front:redundant", "同章重复段落，须去重", q)
+    b = _issue_id("front:redundant", "另一句完全不同的表述，仍然是重复", q)
+    assert a == b
+    c = _issue_id("front:redundant", "同章重复", "完全不同的摘录内容啊啊啊")
+    assert a != c
 
 
 def test_format_revision_instruction_includes_action_and_quotes():

@@ -41,14 +41,18 @@ def _api(
     # 每次调用独立临时文件，避免并发/重启时互相覆盖 /tmp/_ch1_call.py 读到脏响应。
     tag = secrets.token_hex(4)
     remote_py = f"/tmp/_novel_api_{tag}.py"
+    # body 必须经 JSON 字符串再 !r 嵌入：直接 json.dumps 会把 true/null 写进
+    # Python 源码导致 SyntaxError（continuation 的 enabled=True 曾因此 status=-1）。
+    body_lit = "None" if body is None else repr(json.dumps(body, ensure_ascii=False))
     script = "\n".join(
         [
             "import urllib.request, urllib.error, json",
             f"url = {url!r}",
             f"method = {method!r}",
-            f"body = {json.dumps(body) if body else 'None'}",
+            f"body_json = {body_lit}",
             f"token = {token!r}",
             f"timeout = {timeout!r}",
+            "body = json.loads(body_json) if body_json is not None else None",
             "req = urllib.request.Request(url, method=method)",
             "if body is not None:",
             "    req.data = json.dumps(body).encode()",

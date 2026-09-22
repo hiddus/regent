@@ -62,6 +62,36 @@ async def _progress_for_run(
     if not isinstance(budget_pause, dict):
         budget_pause = None
     projection = _projection_for(work_state, chapter_no=int(run.chapter_no)) if work_state else None
+    # 章失败而作品仍 RUNNING：必须投影失败态，否则页面永远显示「正在写」
+    if run.state in (
+        ChapterRunState.TERMINAL_FAILED.value,
+        ChapterRunState.RETRYABLE_FAILED.value,
+    ):
+        from regent.novel.domain.models import UXProjection
+
+        failed_label = (
+            "本章生成失败，可查看原因后重试"
+            if run.state == ChapterRunState.TERMINAL_FAILED.value
+            else "本章暂时失败，系统将重试"
+        )
+        projection = UXProjection(
+            public_stage="chapter_failed",
+            stage_label=failed_label,
+            last_completed_artifact=(
+                f"第 {int(run.chapter_no)} 章" if run.chapter_no else None
+            ),
+            next_milestone=None,
+            safe_to_leave=True,
+            action_required=True,
+            available_actions=(
+                ["view_failure", "retry_chapter", "pause"]
+                if run.state == ChapterRunState.TERMINAL_FAILED.value
+                else ["view_failure", "leave_safely"]
+            ),
+        )
+    failure_reason = str(
+        (production.get("last_error") or context.get("last_error") or "")
+    ).strip()
     return RunProgressOut(
         work_id=str(run.work_id),
         chapter_no=int(run.chapter_no),
@@ -81,6 +111,8 @@ async def _progress_for_run(
         budget_pause=budget_pause,
         public_stage=projection.public_stage if projection else None,
         available_actions=list(projection.available_actions) if projection else [],
+        stage_label=getattr(projection, "stage_label", None) if projection else None,
+        failure_reason=failure_reason or None,
     )
 
 
