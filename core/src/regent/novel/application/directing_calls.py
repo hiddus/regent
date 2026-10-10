@@ -76,14 +76,15 @@ def _script_scene_command_id(
     plan = sp.get("scene_plan") or {}
     cards = plan.get("cards") or []
     scene_tag = ""
-    if phase in ("WRITE_SCENE", "AUDIT_SCENE"):
+    if phase in ("WRITE_SCENE", "AUDIT_SCENE", "SELF_WRITE", "SELF_AUDIT"):
         scene_id = ""
         if scene_idx < len(cards):
             scene_id = str((cards[scene_idx] or {}).get("scene_id") or f"i{scene_idx}")
         else:
             scene_id = f"i{scene_idx}"
         srep = int(sp.get(f"scene_repairs:{scene_id}") or 0)
-        scene_tag = f":sc{scene_idx}:{scene_id}:srep{srep}"
+        self_n = int(sp.get(f"self_repairs:{scene_id}") or 0)
+        scene_tag = f":sc{scene_idx}:{scene_id}:srep{srep}:self{self_n}"
     vrep = int(sp.get("chapter_validate_repairs") or 0)
     # F6：缺省为 1（旧格式）；新运行须显式写入 2
     ckv = resolve_call_key_version(production, run)

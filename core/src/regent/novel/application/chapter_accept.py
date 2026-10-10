@@ -100,14 +100,28 @@ def finalize_chapter_acceptance(
 
     Call only after review (and any future editorial repair) has finished.
     """
+    from regent.novel.domain.chapter_handoff import build_chapter_handoff
+
     passed = bool(run.review.get("passed")) if review_passed is None else bool(review_passed)
     facts = collect_accepted_facts(production)
+    history = production.get("review_history") or []
+    review_hash = ""
+    if history and isinstance(history[-1], dict):
+        review_hash = str(history[-1].get("content_hash") or "")
+    state = production.get("working_state")
+    handoff = build_chapter_handoff(
+        chapter_no=int(getattr(run, "chapter_no", 0) or 0),
+        content=str(run.content or ""),
+        actual_state=state if isinstance(state, dict) else {},
+        review_content_hash=review_hash,
+    )
     run.generation_context = {
         **run.generation_context,
         "verified_facts": facts,
-        "actual_state": production.get("working_state"),
+        "actual_state": state,
         "node_completed": node_completed,
         "validated_content_hash": content_hash(str(run.content or "")),
+        "chapter_handoff": handoff,
     }
     if passed:
         commit_run_story_ledger(run, production=production, facts=facts)

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -21,8 +21,8 @@ from regent.novel.domain.script_protocol import ChapterScript, ScriptChoice
 class StructuredBeat(BaseModel):
     """带稳定 ID 的结构化节拍。执笔与验收共用同一 ID。"""
 
-    beat_id: str = Field(min_length=1, description="稳定 ID，如 b1/b2；整章内唯一")
-    text: str = Field(min_length=1, description="节拍内容：谁做什么、结果如何")
+    beat_id: str = Field(default="", description="稳定 ID，如 b1/b2；整章内唯一")
+    text: str = Field(default="", description="节拍内容：谁做什么、结果如何")
     scene_slot: int = Field(default=0, ge=0, description="归属场景序号（0-based）")
     actor: str = Field(default="", description="推动本节拍的人物名")
     precondition: str = Field(default="", description="本节拍成立的前提")
@@ -37,19 +37,23 @@ class StructuredBeat(BaseModel):
 
 
 class EventRef(BaseModel):
-    """场景对剧本事件的引用。"""
+    """场景对剧本事件的引用。
+
+    role 封死三值：occurrence 唯一所有权；同一事件后续场只能 reference。
+    consequence/new_round 必须是独立 event_id，禁止用 role 洗白重演。
+    """
 
     event_id: str = Field(
-        min_length=1,
+        default="",
         description="引用剧本事件清单中的 event_id",
     )
     beat_id: str = Field(
-        min_length=1,
+        default="",
         description="本场本地 beat ID",
     )
-    role: str = Field(
+    role: Literal["occurrence", "consequence", "reference"] = Field(
         default="occurrence",
-        description="本场角色：occurrence=发生，consequence=后果，reference=回忆/提及",
+        description="本场角色：occurrence=发生，consequence=后果事件（须独立 event_id），reference=回忆/提及",
     )
 
 
@@ -57,7 +61,7 @@ class SceneCard(BaseModel):
     """一张可执行的场景卡：导演把剧本拆成的"一场完整的戏"。"""
 
     scene_id: str = Field(min_length=1)
-    purpose: str = Field(min_length=1, description="本场必须改变什么")
+    purpose: str = Field(default="", description="本场必须改变什么；空串由计划校验报 empty_purpose，不在 schema 层炸掉整章")
     setting: str = Field(default="", description="地点/时间/氛围一句话")
     entry_state: str = Field(default="", description="入场：谁知道什么、关系、资源")
     protagonist_objective: str = Field(default="", description="主角想得到什么")
@@ -74,7 +78,7 @@ class SceneCard(BaseModel):
     beats: list[StructuredBeat] = Field(default_factory=list)
     event_refs: list[EventRef] = Field(
         default_factory=list,
-        description="本场引用的剧本事件清单；每个 event_id 必须来自 script_events",
+        description="本场引用的剧本事件清单；生产 COMPILE 由 validate_plan_event_refs 要求非空；event_id 必须来自 script_events",
     )
     acceptance_ids: list[str] = Field(
         default_factory=list,
@@ -796,6 +800,8 @@ def validate_scene_plan(
     for card in plan.cards:
         if not card.beats:
             issues.append(f"empty_scene:{card.scene_id}")
+        if not str(card.purpose or "").strip():
+            issues.append(f"empty_purpose:{card.scene_id}")
     return issues
 
 

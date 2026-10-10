@@ -185,8 +185,12 @@ def test_invalidate_dependent_scenes():
 
 def test_assemble_chapter_merges_texts():
     cards = [
-        SceneCard(scene_id="s1", purpose="a", beats=[]),
-        SceneCard(scene_id="s2", purpose="b", beats=[]),
+        SceneCard(scene_id="s1", purpose="a", beats=[],
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
+    ),
+        SceneCard(scene_id="s2", purpose="b", beats=[],
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
+    ),
     ]
     assembled = assemble_chapter([(cards[0], "第一场正文。"), (cards[1], "第二场正文。")])
     assert "第一场正文。" in assembled.content

@@ -80,6 +80,7 @@ def _card(scene_id: str = "s1", beat_id: str = "b1") -> SceneCard:
             )
         ],
         target_chars=500,
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
     )
 
 
@@ -263,7 +264,8 @@ async def test_real_audit_exhausted_stops_without_advancing_scene():
                 hard_fails=["改因果终点"],
                 facts=[],
                 state_changes={"poison": "should_not_merge"},
-            )
+            ),
+            d.RoleSelfReview(passed=True),
         ]
     )
     with pytest.raises(ProductionStopped, match="拒绝继续拍后续场") as ei:
@@ -315,7 +317,8 @@ async def test_real_audit_exhausted_continuity_defers_to_review():
                 hard_fails=[],
                 facts=[],
                 state_changes={"after_s1": "done"},
-            )
+            ),
+            d.RoleSelfReview(passed=True),
         ]
     )
     await d.produce_tick(Session(), provider=provider, work=work, run=run)
@@ -532,7 +535,8 @@ async def test_real_audit_continuity_fail_blocks_and_rewrites():
                 continuity_issues=["与入场状态矛盾"],
                 hard_fails=[],
                 state_changes={"poison": "nope"},
-            )
+            ),
+            d.RoleSelfReview(passed=True),
         ]
     )
     await d.produce_tick(Session(), provider=provider, work=work, run=run)
@@ -577,7 +581,8 @@ async def test_real_audit_rejects_ungrounded_evidence():
                 ],
                 continuity_ok=True,
                 hard_fails=[],
-            )
+            ),
+            d.RoleSelfReview(passed=True),
         ]
     )
     with pytest.raises(ProductionStopped, match="拒绝继续拍后续场"):
@@ -1011,12 +1016,14 @@ def test_normalize_opening_must_show_caps_first_scene():
                     StructuredBeat(beat_id="b3", text="兑现", must_show=True),
                     StructuredBeat(beat_id="b4", text="代价", must_show=True),
                 ],
-            ),
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
+    ),
             SceneCard(
                 scene_id="s2",
                 purpose="兑现",
                 beats=[StructuredBeat(beat_id="b5", text="钩子", must_show=True)],
-            ),
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
+    ),
         ],
     )
     out = normalize_opening_must_show(plan, first_scene_must_cap=2)
@@ -1273,6 +1280,8 @@ async def test_produce_tick_command_id_with_takes_present(monkeypatch):
                 content=TEXT,
                 beat_evidence={"b1": "他把钥匙放在桌上。"},
             )
+        if schema is d.RoleSelfReview:
+            return d.RoleSelfReview(passed=True)
         raise AssertionError(schema)
 
     from regent.novel.application import directing_script_loop
@@ -1373,3 +1382,170 @@ async def test_terminal_review_preserves_actual_unresolved_issues(monkeypatch, r
     assert history[-1]["passed"] is False
     assert issue in history[-1]["issues"]
     assert history[-1]["post_creative_review_rewinds"] == repairs
+
+
+@pytest.mark.asyncio
+async def test_writer_self_review_revises_once_then_hands_off(monkeypatch):
+    """执笔交稿后自审一次；不通过只改一稿，改稿不再自审。"""
+    from regent.novel.application import directing_script_loop
+
+    schemas: list[type] = []
+
+    async def capture_call(
+        session, provider, work, run, production, schema, system, payload, purpose, command_id
+    ):
+        schemas.append(schema)
+        if schema is d._SceneProseWithBeats:
+            return d._SceneProseWithBeats(
+                content=TEXT,
+                beat_evidence={"b1": "他把钥匙放在桌上。"},
+            )
+        if schema is d.RoleSelfReview:
+            return d.RoleSelfReview(
+                passed=False,
+                issues=["重演了入场已经完成的动作"],
+                revision_note="删掉重复开门",
+            )
+        raise AssertionError(schema)
+
+    monkeypatch.setattr(directing_script_loop, "_call", capture_call)
+    card = _card("s1", "b1")
+    run, work = _base_run(
+        phase="WRITE_SCENE",
+        sp_extra={
+            "scene_plan": {"cards": [card.model_dump(mode="json")], "chapter_goal": "x"},
+            "scene_index": 0,
+        },
+    )
+    await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
+    sp = run.generation_context["production"]["script_protocol"]
+    assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
+    assert int(sp.get("self_repairs:s1") or 0) == 1
+    assert "删掉重复开门" in (sp.get("scene_revision_instruction") or "")
+    assert schemas == [d._SceneProseWithBeats, d.RoleSelfReview]
+
+    await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
+    assert schemas == [d._SceneProseWithBeats, d.RoleSelfReview, d._SceneProseWithBeats]
+    assert run.generation_context["production"]["phase"] == "AUDIT_SCENE"
+    assert sp.get("writer_self_reviewed:s1", {}).get("passed") is False
+
+
+@pytest.mark.asyncio
+async def test_chapter_review_self_review_fills_missing_scene_index():
+    """整章审校没标场次时，自审补上下标，再回到那场。"""
+    card = _card("s1", "b1")
+    card2 = _card("s2", "b2")
+    run, work = _base_run(phase="DONE", take_content=TEXT)
+    production = run.generation_context["production"]
+    sp = production["script_protocol"]
+    sp.update(
+        {
+            "scene_plan": {
+                "cards": [card.model_dump(mode="json"), card2.model_dump(mode="json")],
+                "chapter_goal": "x",
+            },
+            "scene_texts": [TEXT, TEXT],
+            "working_state": {"after_s1": "1", "after_s2": "2"},
+            "scene_state_trail": [{}, {"after_s1": "1"}, {"after_s1": "1", "after_s2": "2"}],
+            "scene_index": 2,
+        }
+    )
+    production["accepted"] = [0, 1]
+    run.content = TEXT
+    provider = Provider(
+        [
+            d.ChapterValidation(
+                passed=False,
+                issues=["第二场因果断裂"],
+                node_completed=False,
+                completion_quote="",
+            ),
+            d.RoleSelfReview(passed=False, failed_scene_index=1, issues=["意见缺场次"]),
+            EditorAuditResult(passed=True, issues=[]),
+        ]
+    )
+    ok = await d.validate_chapter(Session(), provider=provider, work=work, run=run)
+    assert ok is False
+    prod = run.generation_context["production"]
+    assert prod["phase"] == "WRITE_SCENE"
+    assert prod["script_protocol"]["scene_index"] == 1
+    assert prod["script_protocol"]["chapter_self_review"]["failed_scene_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_chapter_review_self_review_prior_chapter_stops():
+    """自审认定是前章事实时，停住，不把本章某一场重写掉。"""
+    card = _card("s1", "b1")
+    run, work = _base_run(phase="DONE", take_content=TEXT)
+    production = run.generation_context["production"]
+    production["script_protocol"].update(
+        {
+            "scene_plan": {"cards": [card.model_dump(mode="json")], "chapter_goal": "x"},
+            "scene_texts": [TEXT],
+            "scene_index": 1,
+        }
+    )
+    production["accepted"] = [0]
+    run.content = TEXT
+    provider = Provider(
+        [
+            d.ChapterValidation(
+                passed=False,
+                issues=["伤势与已接受章节冲突"],
+                node_completed=False,
+                completion_quote="",
+            ),
+            d.RoleSelfReview(passed=False, prior_chapter=True, issues=["前章已经包扎"]),
+            EditorAuditResult(passed=True, issues=[]),
+        ]
+    )
+    with pytest.raises(ProductionStopped, match="前章事实"):
+        await d.validate_chapter(Session(), provider=provider, work=work, run=run)
+
+
+@pytest.mark.asyncio
+async def test_auditor_self_review_rerecords_once():
+    """场记自审不通过时，只重记一次，门禁用订正后的记录。"""
+    card = _card("s1", "b1")
+    run, work = _base_run(
+        phase="AUDIT_SCENE",
+        sp_extra={
+            "scene_plan": {"cards": [card.model_dump(mode="json")], "chapter_goal": "x"},
+            "scene_index": 0,
+            "scene_texts": [TEXT],
+            "pending_scene_beat_evidence": {"b1": "他把钥匙放在桌上。"},
+            "working_state": {},
+            "working_summary": "",
+            "scene_repairs:s1": 2,
+        },
+    )
+    bad = d._SceneAudit(
+        scene_id="s1",
+        beat_verdicts=[
+            BeatVerdict(beat_id="b1", landed=True, evidence="正文里没有这句", note="")
+        ],
+        continuity_ok=True,
+        hard_fails=[],
+    )
+    fixed = d._SceneAudit(
+        scene_id="s1",
+        beat_verdicts=[
+            BeatVerdict(beat_id="b1", landed=True, evidence="他把钥匙放在桌上。", note="")
+        ],
+        continuity_ok=True,
+        hard_fails=[],
+    )
+    provider = Provider(
+        [
+            bad,
+            d.RoleSelfReview(passed=False, issues=["摘录不在正文"], revision_note="改成逐字摘录"),
+            fixed,
+        ]
+    )
+    await d.produce_tick(Session(), provider=provider, work=work, run=run)
+    sp = run.generation_context["production"]["script_protocol"]
+    assert sp["auditor_self_reviewed:s1"]["passed"] is False
+    assert int(sp.get("auditor_self_repairs:s1") or 0) == 1
+    stored = sp["scene_audits"]["s1"]["beat_verdicts"][0]["evidence"]
+    assert stored == "他把钥匙放在桌上。"
+    assert run.generation_context["production"]["phase"] != "AUDIT_SCENE"

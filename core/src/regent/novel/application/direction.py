@@ -214,6 +214,7 @@ from regent.novel.application.directing_contracts import (
     ParagraphReplacement,
     ProseDirection,
     RequirementVerdict,
+    RoleSelfReview,
     SceneBrief,
     SceneEvent,
     SceneResolution,

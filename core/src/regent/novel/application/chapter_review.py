@@ -50,6 +50,7 @@ from regent.novel.application.directing_calls import (
 )
 from regent.novel.application.directing_contracts import (
     ChapterValidation,
+    RoleSelfReview,
 )
 from regent.novel.application.directing_runtime import (
     _RUNTIME,
@@ -62,6 +63,7 @@ _effective_call_cap = _budget_call_cap
 
 # 创作已通过后，整章审校最多回退补拍次数；再遇可 soft 意见直接 coerce。
 _MAX_POST_CREATIVE_REVIEW_REWINDS = MAX_CHAPTER_REPAIRS
+_MAX_REVIEW_PLAN_REWINDS = 2
 
 
 def _merge_gate_debts_into_issues(
@@ -175,6 +177,54 @@ def _coerce_review_soft(
     _save(run, production)
 
 
+def _rewind_script_to_compile(
+    run: Any,
+    production: dict[str, Any],
+    *,
+    issues: list[str],
+    note: str,
+) -> bool:
+    """计划层或章节目标失败时回到分场，旧场正文与旧通过标记一并失效。"""
+    sp = production.setdefault("script_protocol", empty_script_state())
+    rewinds = int(sp.get("review_plan_rewinds") or 0) + 1
+    sp["review_plan_rewinds"] = rewinds
+    if rewinds > _MAX_REVIEW_PLAN_REWINDS:
+        raise ProductionStopped("分场返工次数已达上限：" + note)
+    sp["review_plan_repair"] = [str(item) for item in issues if str(item).strip()][:6]
+    sp["scene_texts"] = []
+    sp["scene_index"] = 0
+    sp["scene_audits"] = {}
+    sp["scene_exit_states"] = []
+    sp["scene_state_trail"] = []
+    sp["working_summary"] = ""
+    sp["scene_entry_summaries"] = []
+    sp["scene_plan"] = {}
+    sp["pending_repair_ticket"] = {}
+    sp["scene_revision_instruction"] = ""
+    sp["post_review_rewrite"] = False
+    sp["compile_self_review_done"] = False
+    sp.pop("compile_self_review", None)
+    for key in list(sp):
+        if key.startswith((
+            "writer_self_reviewed:",
+            "auditor_self_reviewed:",
+            "self_repairs:",
+            "auditor_self_repairs:",
+        )):
+            sp.pop(key, None)
+    for take in production.get("takes") or []:
+        if isinstance(take, dict):
+            take["status"] = "SUPERSEDED"
+    production["accepted"] = []
+    production["phase"] = "COMPILE_SCENES"
+    review = getattr(run, "review", None)
+    if isinstance(review, dict):
+        review["passed"] = False
+        review["invalidated_reason"] = "plan_rewind"
+    _save(run, production)
+    return False
+
+
 def _rewind_script_after_review(
     run: Any,
     production: dict[str, Any],
@@ -199,6 +249,25 @@ def _rewind_script_after_review(
     top = _top_review_fix_notes(issues, limit=3)
     note = "；".join(top) if top else "整章未通过独立审校"
     if proto == PROTOCOL_SCRIPT_SCENE:
+        from regent.novel.domain.chapter_handoff import (
+            FAULT_CHAPTER_GOAL,
+            FAULT_PRIOR_CHAPTER,
+            FAULT_SCENE_PLAN,
+            review_repair_layer,
+        )
+
+        layer = review_repair_layer(list(issues or []))
+        if layer == FAULT_PRIOR_CHAPTER:
+            raise ProductionStopped(
+                "审校指向已接受的前章事实，不能靠改当前章一场解决：" + note
+            )
+        if layer in {FAULT_SCENE_PLAN, FAULT_CHAPTER_GOAL}:
+            return _rewind_script_to_compile(
+                run,
+                production,
+                issues=list(issues or []),
+                note=note,
+            )
         plan = sp.get("scene_plan") or {}
         cards = list(plan.get("cards") or [])
         texts = list(sp.get("scene_texts") or [])
@@ -309,6 +378,44 @@ async def validate_chapter(
         not result.completion_quote.strip() or result.completion_quote not in run.content
     ):
         issues.append("节点完成缺少正文证据")
+    # 审校意见缺场次时，由同一审校再核一遍自己的结论，只补定位，不把失败改成通过。
+    if (not result.passed) and result.failed_scene_index is None and list(result.issues):
+        self_rev = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            RoleSelfReview,
+            "你是刚才做整章审校的人，只审核自己刚写的审校意见，不改正文。"
+            "本章内的问题必须给出 failed_scene_index（从0开始，对照 scene_layout）。"
+            "若冲突属于前章已成立事实、不能靠改本章某一场解决，prior_chapter=true，不要猜场次。"
+            "passed=false 只表示审校意见不完整，不表示整章因此通过。"
+            "不要把已成立的失败改成通过。",
+            {
+                "issues": list(result.issues),
+                "scene_layout": _scene_layout,
+                "failed_scene_index": result.failed_scene_index,
+            },
+            "chapter_self_review",
+            f"v{_input_version(run)}:chapter_validation:"
+            f"{hashlib.sha256(run.content.encode()).hexdigest()[:12]}:selfreview",
+        )
+        if isinstance(production, dict):
+            sp_self = production.setdefault("script_protocol", {})
+            if isinstance(sp_self, dict):
+                sp_self["chapter_self_review"] = self_rev.model_dump()
+        if self_rev.failed_scene_index is not None:
+            result = result.model_copy(
+                update={"failed_scene_index": self_rev.failed_scene_index}
+            )
+        if self_rev.prior_chapter:
+            issues = [
+                item
+                if any(marker in item for marker in ("[prior_canon]", "旧章", "前章"))
+                else f"[prior_canon] {item}"
+                for item in issues
+            ]
     # 章级常识审校（装备 commons_rails 时）
     from regent.novel.application import commons_audit as ca
     from regent.novel.domain.genre_packs import active_rule_ids

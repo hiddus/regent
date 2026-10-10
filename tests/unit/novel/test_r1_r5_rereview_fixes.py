@@ -55,6 +55,7 @@ def _card(sid: str, beat_id: str = "b1") -> SceneCard:
         exit_change="x",
         beats=[StructuredBeat(beat_id=beat_id, text="当场表态", must_show=True)],
         target_chars=400,
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
     )
 
 

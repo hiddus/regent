@@ -21,6 +21,7 @@ from regent.novel.application.directing_calls import (
     hydrate_call_key_version,
 )
 from regent.novel.application.directing_contracts import (
+    RoleSelfReview,
     SceneText,
     ScriptChapterValidation,
     _SceneAudit,
@@ -593,11 +594,17 @@ async def _produce_script_tick(
     memory_payloads = list(run.generation_context.get("memory", []) or [])
 
     async def call[T: BaseModel](
-        schema: type[T], system: str, payload: dict[str, Any], *, repair_no: int = 0
+        schema: type[T],
+        system: str,
+        payload: dict[str, Any],
+        *,
+        repair_no: int = 0,
+        phase_name: str | None = None,
     ) -> T:
         # 剧本臂始终用场景感知标识：审校回退后 takes 非空，若仍走 take 维度
         # _command_id，会忽略 scene_id/srep，第二场与重写撞幂等键。
-        command_id = _script_scene_command_id(run, production, sp, phase)
+        used_phase = phase_name or phase
+        command_id = _script_scene_command_id(run, production, sp, used_phase)
         if repair_no:
             command_id = f"{command_id}:r{repair_no}"
         return await _call(
@@ -609,7 +616,7 @@ async def _produce_script_tick(
             schema,
             system,
             payload,
-            prefix,
+            f"script:{used_phase}",
             command_id,
         )
 
@@ -622,6 +629,7 @@ async def _produce_script_tick(
         "story_ledger_block",
         "open_hooks",
         "recent_chapters",
+        "previous_handoff",
         "target_node",
         "chapter_brief",
         "verified_facts",
@@ -827,10 +835,73 @@ async def _produce_script_tick(
             script_dict=selected.model_dump(),
         )
         sp["script_events"] = [e.model_dump() for e in script_events_result.events]
+        from regent.novel.domain.script_events import validate_script_events
+
+        _se_errs = validate_script_events(script_events_result.events)
+        if _se_errs:
+            raise ProductionStopped("剧本事件清单不合法：" + "；".join(_se_errs[:4]))
         
+        from regent.novel.domain.chapter_handoff import (
+            initial_entry_from_previous,
+            merge_continuation_gaps,
+        )
+
+        prev_handoff = run.generation_context.get("previous_handoff")
+        has_previous_handoff = isinstance(prev_handoff, dict) and bool(
+            str(prev_handoff.get("content_hash") or "")
+        )
+        review_seed = [
+            str(item)
+            for item in (sp.get("review_plan_repair") or [])
+            if str(item).strip()
+        ]
         compile_repair: list[str] = []
+        if review_seed:
+            compile_repair.append(
+                "整章审校指出计划层问题，必须重分场而不是只改正文："
+                + "；".join(review_seed[:4])
+            )
         plan_draft = None
         plan_issues: list[str] = []
+
+        async def _compile_self_issues(plan_obj: Any) -> list[str]:
+            if sp.get("compile_self_review_done"):
+                return []
+            review = await call(
+                RoleSelfReview,
+                "你是刚才分场的总导演，只审核自己刚交出的分场，不重写正文。"
+                "对照 previous_handoff 与本章已排事件："
+                "后场不得把已经发生过的事件再排成 occurrence；"
+                "时间或地点跳跃必须有 transition_note；"
+                "有 previous_handoff 时 continuation_mode 必须是 direct、time_jump 或 pov_switch。"
+                "能改计划就 passed=false，并在 revision_note 写清要改的场次。"
+                "passed=true 只表示这份分场可以交给执笔。",
+                {
+                    "scene_plan": plan_obj.model_dump(),
+                    "previous_handoff": prev_handoff if has_previous_handoff else None,
+                    "script_events": sp.get("script_events") or [],
+                    "chapter_goal": getattr(plan_obj, "chapter_goal", "") or "",
+                },
+                phase_name="SELF_COMPILE",
+            )
+            sp["compile_self_review_done"] = True
+            sp["compile_self_review"] = review.model_dump()
+            if review.passed:
+                return []
+            note = (review.revision_note or "").strip()
+            issues = [str(item).strip() for item in review.issues if str(item).strip()]
+            if note:
+                issues.append(note)
+            return issues or ["分场自审未通过"]
+
+        def _with_continuation(plan_obj: Any, hard_issues: list[str]) -> list[str]:
+            return merge_continuation_gaps(
+                hard_issues,
+                mode=str(getattr(plan_obj, "continuation_mode", "") or ""),
+                note=str(getattr(plan_obj, "transition_note", "") or ""),
+                has_previous=has_previous_handoff,
+            )
+
         for repair_no in range(MAX_PLAN_REPAIRS + 1):
             compile_payload: dict[str, Any] = {
                 **base_payload,
@@ -839,6 +910,7 @@ async def _produce_script_tick(
                 "skeleton_plan": skeleton.model_dump(),
                 "acceptance_items": [i.model_dump(mode="json") for i in acc_items_raw],
                 "script_events": sp.get("script_events") or [],
+                "previous_handoff": prev_handoff if has_previous_handoff else None,
                 "max_scenes": 4,
                 "coverage_note": (
                     "节拍正文须嵌入选定剧本 turning_point / cost / end_change 的关键短语，"
@@ -859,7 +931,10 @@ async def _produce_script_tick(
                 "每项 required 验收义务通过 acceptance_ids 指定唯一责任场，"
                 "并在该场节拍写出相应行动或认知；后场只承接已成立状态。"
                 "骨架仅供参考，可重新划分边界，禁止机械把未匹配义务塞进末场。"
-                "若有 previous_plan，应修复其重复事件、顺序和责任归属，不能只改 ID。"
+                "若有 previous_plan 或 repair_instructions，应修复其重复事件、顺序和责任归属，不能只改 ID。"
+                "若 payload 含 previous_handoff，continuation_mode 必须是 direct、time_jump 或 pov_switch。"
+                "time_jump 与 pov_switch 必须写 transition_note，说明合法转换，不得添加前章正文没有的事实。"
+                "direct 表示直接承接前章出口。没有 previous_handoff 时 continuation_mode 可留空或填 opening。"
                 "节拍文字要能让人看出转折、代价与章末变化，不要只写气氛。"
                 "每个场景必须通过 event_refs 引用 script_events 中的事件，"
                 "每个 event_id 必须来自 script_events 清单，禁止自造事件 ID。"
@@ -904,16 +979,24 @@ async def _produce_script_tick(
                 for item_id in card.acceptance_ids
                 if item_id not in known_acc_ids
             )
-            # 事件引用硬闸：清单完备 + 唯一所有权
+            # 事件引用硬闸：清单完备 + 唯一所有权 + 义务落场
             from regent.novel.domain.script_events import validate_plan_event_refs
             event_ref_errors = validate_plan_event_refs(
                 [card.model_dump() for card in plan_draft.cards],
                 sp.get("script_events") or [],
+                acceptance_items=[i.model_dump(mode="json") for i in acc_items],
             )
-            hard = structural_plan_issues(plan_issues) + acc_hard + event_ref_errors
+            hard = _with_continuation(
+                plan_draft,
+                structural_plan_issues(plan_issues) + acc_hard + event_ref_errors,
+            )
             if not hard:
-                sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
-                break
+                self_issues = await _compile_self_issues(plan_draft)
+                if self_issues:
+                    hard = self_issues
+                else:
+                    sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
+                    break
             
             # 如果有事件引用错误，触发 LLM 重分场
             if event_ref_errors and repair_no == 0:
@@ -962,11 +1045,19 @@ async def _produce_script_tick(
                 event_ref_errors = validate_plan_event_refs(
                     [card.model_dump() for card in plan_draft.cards],
                     sp.get("script_events") or [],
+                    acceptance_items=[i.model_dump(mode="json") for i in acc_items],
                 )
-                hard = structural_plan_issues(plan_issues) + acc_hard + event_ref_errors
+                hard = _with_continuation(
+                plan_draft,
+                structural_plan_issues(plan_issues) + acc_hard + event_ref_errors,
+            )
                 if not hard:
-                    sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
-                    break
+                    self_issues = await _compile_self_issues(plan_draft)
+                    if self_issues:
+                        hard = self_issues
+                    else:
+                        sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
+                        break
             
             compile_repair = [
                 "上一版分场未通过：" + "；".join(hard[:6]) + "。",
@@ -1000,10 +1091,27 @@ async def _produce_script_tick(
             )
             plan_draft = plan_draft.model_copy(update={"cards": filled_cards})
             sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
+        # 空 purpose 兜底：LLM 偶发空串，不再 ValidationError 炸掉整章
+        for _c in plan_draft.cards:
+            if not str(getattr(_c, "purpose", "") or "").strip():
+                _c.purpose = (
+                    plan_draft.chapter_goal
+                    or selected.end_change
+                    or "推进本场"
+                )
+        continuation_mode = str(getattr(plan_draft, "continuation_mode", "") or "")
+        transition_note = str(getattr(plan_draft, "transition_note", "") or "")
+        sp.pop("review_plan_repair", None)
         sp["scene_plan"] = {
             "cards": [c.model_dump() for c in plan_draft.cards],
             "chapter_goal": plan_draft.chapter_goal or selected.end_change,
             "continuity_notes": plan_draft.continuity_notes,
+            "continuation_mode": continuation_mode,
+            "transition_note": transition_note,
+        }
+        sp["continuation"] = {
+            "mode": continuation_mode,
+            "transition_note": transition_note,
         }
         sp["scene_index"] = 0
         sp["scene_texts"] = []
@@ -1014,8 +1122,11 @@ async def _produce_script_tick(
         sp["working_state"] = confirmed
         sp["scene_state_trail"] = [deepcopy(confirmed)]
         sp["scene_exit_states"] = []
-        sp["working_summary"] = ""
-        sp["scene_entry_summaries"] = [""]
+        opening, opening_entries = initial_entry_from_previous(
+            prev_handoff if has_previous_handoff else None
+        )
+        sp["working_summary"] = opening
+        sp["scene_entry_summaries"] = opening_entries
         production["phase"] = "WRITE_SCENE"
     elif phase == "WRITE_SCENE":
         packet = sp.get("production_packet")
@@ -1091,6 +1202,10 @@ async def _produce_script_tick(
             "entry_summary": entry_summary,
             "working_state": sp.get("working_state") or {},
             "chapter_goal": plan.get("chapter_goal") or "",
+            "continuation": {
+                "mode": plan.get("continuation_mode") or "",
+                "transition_note": plan.get("transition_note") or "",
+            },
             "narrator_memory": _memory_view(memory_payloads, "narrator"),
             "target_chars": target,
         }
@@ -1125,6 +1240,41 @@ async def _produce_script_tick(
             write_payload,
         )
         scene_text = written.content.strip()
+        sid = str(card.scene_id)
+        if not sp.get(f"writer_self_reviewed:{sid}"):
+            review = await call(
+                RoleSelfReview,
+                "你是刚才写这场的执笔，只审核自己刚交的正文，不重写别的场。"
+                "对照 entry_summary、working_state 与本场节拍："
+                "不得重演入场摘要里已经完成的动作；"
+                "伤势、器物、地点必须接上入场状态；"
+                "没有动机的时间或地点跳跃要指出来；"
+                "beat_evidence 的摘录必须是正文逐字，不能只在说明里出现。"
+                "能改就 passed=false，revision_note 只写要改的句子。"
+                "passed=true 只表示这场可以交给场记。",
+                {
+                    **write_payload,
+                    "draft": scene_text,
+                    "beat_evidence": written.beat_evidence,
+                },
+                phase_name="SELF_WRITE",
+            )
+            sp[f"writer_self_reviewed:{sid}"] = review.model_dump()
+            if not review.passed and int(sp.get(f"self_repairs:{sid}") or 0) < 1:
+                sp[f"self_repairs:{sid}"] = 1
+                texts = list(sp.get("scene_texts") or [])
+                while len(texts) <= idx:
+                    texts.append("")
+                texts[idx] = scene_text
+                sp["scene_texts"] = texts
+                note = (review.revision_note or "").strip() or "；".join(
+                    str(item) for item in review.issues[:3] if str(item).strip()
+                )
+                sp["scene_revision_instruction"] = f"自审未通过，只改这些问题：{note}"[:400]
+                sp["pending_scene_beat_evidence"] = written.beat_evidence
+                production["phase"] = "WRITE_SCENE"
+                _save(run, production)
+                return False
         if prior_draft and revision_instruction and sp.get("scene_texts"):
             sp["scene_texts"][idx] = scene_text
         else:
@@ -1153,26 +1303,57 @@ async def _produce_script_tick(
             if idx < len(_audit_entries) and str(_audit_entries[idx] or "").strip()
             else str(sp.get("working_summary") or "")
         )
-        audit = await call(
-            _SceneAudit,
+        audit_system = (
             "你是场记，一次完成：节拍核验（landed 必须有 evidence 原文摘录）、"
             "连续性（与入场状态/上场结尾矛盾）、实际变化（计划中但正文未呈现的不算）。"
             "hard_fails 列出跳场、改因果终点、核心节拍完全缺失；每条尽量带摘录「…」。"
             "仅当问题是表述衔接、空状态误报或可软化的空间省略时，"
             "用前缀 [soft-cont:…] 写入 continuity_issues；真实事实矛盾不得 soft。"
             "注意：空入场状态只表示尚无已确认事实，不要把本场节拍要求的「发现/取出」"
-            "写成 continuity 硬伤；真正矛盾须对照非空 working_state 或上场结尾。",
-            {
-                "scene_card": card.model_dump(),
-                "scene_text": scene_text,
-                "beat_evidence": sp.get("pending_scene_beat_evidence") or {},
-                "entry_summary": _audit_entry,
-                "working_state": sp.get("working_state") or {},
-                "prior_scene_ending": (
-                    texts[idx - 1][-300:] if idx > 0 and idx - 1 < len(texts) else ""
-                ),
-            },
+            "写成 continuity 硬伤；真正矛盾须对照非空 working_state 或上场结尾。"
         )
+        audit_payload = {
+            "scene_card": card.model_dump(),
+            "scene_text": scene_text,
+            "beat_evidence": sp.get("pending_scene_beat_evidence") or {},
+            "entry_summary": _audit_entry,
+            "working_state": sp.get("working_state") or {},
+            "prior_scene_ending": (
+                texts[idx - 1][-300:] if idx > 0 and idx - 1 < len(texts) else ""
+            ),
+        }
+        audit = await call(_SceneAudit, audit_system, audit_payload)
+        if not sp.get(f"auditor_self_reviewed:{card.scene_id}"):
+            review = await call(
+                RoleSelfReview,
+                "你是刚才做场记的人，只审核自己刚写的场记记录，不改正文。"
+                "landed 的 evidence 必须是本场正文的逐字摘录；"
+                "state_changes 只能记录本场正文确实发生的事，"
+                "不得把计划里还没写出的事、或前场已经完成的动作记成这场的新变化。"
+                "记录不合格就 passed=false，revision_note 写清要改的判定。",
+                {
+                    "scene_card": card.model_dump(),
+                    "scene_text": scene_text,
+                    "entry_summary": _audit_entry,
+                    "audit": audit.model_dump(),
+                },
+                phase_name="SELF_AUDIT",
+            )
+            sp[f"auditor_self_reviewed:{card.scene_id}"] = review.model_dump()
+            if (
+                not review.passed
+                and int(sp.get(f"auditor_self_repairs:{card.scene_id}") or 0) < 1
+            ):
+                sp[f"auditor_self_repairs:{card.scene_id}"] = 1
+                note = (review.revision_note or "").strip() or "；".join(
+                    str(item) for item in review.issues[:3] if str(item).strip()
+                )
+                audit = await call(
+                    _SceneAudit,
+                    audit_system + " 这是自审后的一次订正，按 self_review_note 改记录。",
+                    {**audit_payload, "self_review_note": note},
+                    repair_no=1,
+                )
         # 程序门控：补全 must 判定 → 证据接地 → 连续性/硬失败（与实验共用）
         must_ids = {b.beat_id for b in card.beats if b.must_show}
         _prior_ending = (
@@ -1270,7 +1451,9 @@ async def _produce_script_tick(
         else:
             trail[idx + 1] = deepcopy(next_state)
         sp["working_summary"] = (
-            f"上场结尾：{scene_text[-300:]}\n"
+            f"上场结尾（已完成，禁止重演）：{scene_text[-300:]}\n"
+            f"硬约束：本场不得再次「醒来/睁眼」重写上场已写完的瞬间；"
+            f"上场结尾动作与发现已是既成事实，只可承接，不可当新发现重述。\n"
             f"累计状态：{json.dumps(sp.get('working_state') or {}, ensure_ascii=False)[:400]}"
         )
         # 下一场的入口摘要快照：与 working_summary 同步，回退时可恢复

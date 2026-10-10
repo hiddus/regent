@@ -794,6 +794,11 @@ async def assemble(
             ChapterRunModel.state == ChapterRunState.CANONIZED.value,
         ).order_by(ChapterRunModel.chapter_no.desc(), ChapterRunModel.attempt.desc()).limit(30)
     )).all())
+    from regent.novel.domain.chapter_handoff import (
+        annotate_chapter_handoff,
+        select_previous_handoff,
+    )
+
     recent_chapters: list[dict[str, Any]] = []
     seen_chapters: set[int] = set()
     for row in recent_rows:
@@ -803,6 +808,7 @@ async def assemble(
         seen_chapters.add(number)
         content = row.content or ""
         previous_context = row.generation_context or {}
+        bound_handoff, handoff_status = annotate_chapter_handoff(content, previous_context)
         recent_chapters.append({
             "chapter_no": number, "title": row.title,
             "summary": content[:500], "ending": content[-800:], "content": content,
@@ -810,6 +816,8 @@ async def assemble(
             "actual_state": previous_context.get("actual_state", {}),
             "target_node": previous_context.get("target_node", {}),
             "node_completed": previous_context.get("node_completed", False),
+            "chapter_handoff": bound_handoff,
+            "handoff_status": handoff_status,
         })
         if len(recent_chapters) >= 3:
             break
@@ -851,6 +859,7 @@ async def assemble(
     # replay_reason / corrections 若在重建那一刻被清掉，重演拿到的就是一次
     # 「不知道要改什么」的普通重跑——纠错内容只躺在事件里，永远到不了导演请求。
     old_context = run.generation_context or {}
+    previous_handoff, previous_handoff_status = select_previous_handoff(recent_chapters)
     story_ledger_payload, story_ledger_block, open_hooks = _story_ledger_for_chapter(
         old_context=old_context,
         previous_rows=recent_rows,
@@ -954,6 +963,8 @@ async def assemble(
         ),
         "actual_state": recent_chapters[0].get("actual_state", {}) if recent_chapters else {},
         "recent_chapters": recent_chapters,
+        "previous_handoff": previous_handoff,
+        "previous_handoff_status": previous_handoff_status,
         "canon": canon,
         "memory": recalled.as_payload(),
         "memory_source_hash": recalled.source_hash,

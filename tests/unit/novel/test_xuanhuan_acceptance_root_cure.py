@@ -55,6 +55,7 @@ def _card(sid: str, purpose: str, beats: list[str]) -> SceneCard:
             for i, t in enumerate(beats)
         ],
         target_chars=500,
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
     )
 
 

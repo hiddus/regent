@@ -234,6 +234,24 @@ class ScenePlanDraft(BaseModel):
     cards: list[SceneCard] = Field(min_length=1, max_length=6)
     chapter_goal: str = ""
     continuity_notes: str = ""
+    continuation_mode: str = Field(
+        default="",
+        description="direct、time_jump、pov_switch 或 opening；有前章交接时不得留空",
+    )
+    transition_note: str = Field(
+        default="",
+        description="时间跳跃或视角切换时说明合法转换；不得添加前章正文没有的事实",
+    )
+
+
+class RoleSelfReview(BaseModel):
+    """角色交活前的一次自审。passed 只表示这份成果可以交出，不表示整章通过。"""
+
+    passed: bool = True
+    issues: list[str] = Field(default_factory=list)
+    revision_note: str = ""
+    failed_scene_index: int | None = Field(default=None, ge=0)
+    prior_chapter: bool = False
 
 
 class SceneProseWithBeats(BaseModel):

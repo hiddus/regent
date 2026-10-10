@@ -80,6 +80,7 @@ def _card(scene_id: str, beat_id: str) -> SceneCard:
         exit_change="把柄易手",
         beats=[StructuredBeat(beat_id=beat_id, text="当场表态", must_show=True)],
         target_chars=500,
+        event_refs=[{"event_id": "evt_test", "beat_id": "b", "role": "occurrence"}],
     )
 
 
@@ -267,6 +268,8 @@ async def test_downstream_retake_keeps_chapter_dedup_constraint(monkeypatch):
     async def capture_call(session, provider, work, run, production, schema,
                            system, payload, purpose, command_id):
         captured.append(payload)
+        if getattr(schema, "__name__", "") == "RoleSelfReview":
+            return schema(passed=True)
         return schema(content="主角起身离开，门外的雨已经停了。" * 5, beat_evidence={})
 
     monkeypatch.setattr(loop, "_call", capture_call)
@@ -287,11 +290,23 @@ async def test_compile_repairs_duplicate_events_before_writing(monkeypatch):
     async def capture_call(session, provider, work, run, production, schema,
                            system, payload, purpose, command_id):
         calls.append(payload)
+        if getattr(schema, "__name__", "") == "RoleSelfReview":
+            return schema(passed=True)
         # 事件提取调用返回空事件清单
         if purpose == "extract_script_events":
-            from regent.novel.domain.script_events import ScriptEventList
-            return ScriptEventList(events=[])
+            from regent.novel.domain.script_events import ScriptEvent, ScriptEventList
+            return ScriptEventList(events=[
+                ScriptEvent(event_id="evt_dup", description="duplicate", event_type="occurrence"),
+                ScriptEvent(event_id="evt_night", description="night", event_type="occurrence"),
+            ])
+        if purpose == "repartition_plan":
+            c1, c2 = _card("s1", "b1"), _card("s2", "b2")
+            c1.event_refs = [{"event_id": "evt_dup", "beat_id": "b1", "role": "occurrence"}]
+            c2.event_refs = [{"event_id": "evt_night", "beat_id": "b2", "role": "occurrence"}]
+            return schema(cards=[c1, c2], chapter_goal="g", continuity_notes="")
         c1, c2 = _card("s1", "b1"), _card("s2", "b2")
+        c1.event_refs = [{"event_id": "evt_dup", "beat_id": "b1", "role": "occurrence"}]
+        c2.event_refs = [{"event_id": "evt_night", "beat_id": "b2", "role": "occurrence"}]
         c1.acceptance_ids = [i["item_id"] for i in payload["acceptance_items"]]
         c1.beats[0].text = duplicate
         c2.beats[0].text = duplicate if len([c for c in calls if "acceptance_items" in c]) == 1 else "夜里主角决定带伤继续前行。"
@@ -300,7 +315,7 @@ async def test_compile_repairs_duplicate_events_before_writing(monkeypatch):
     monkeypatch.setattr(loop, "_call", capture_call)
     monkeypatch.setattr(dc_module, "_call", capture_call)
     await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
-    assert len(calls) == 3  # extract_script_events + 2 plan calls
+    assert len(calls) == 4  # extract_script_events + 2 plan calls + 分场自审
     plan_calls = [c for c in calls if "acceptance_items" in c]
     assert len(plan_calls) == 2
     assert "duplicate_event" in str(plan_calls[1]["repair_instructions"])

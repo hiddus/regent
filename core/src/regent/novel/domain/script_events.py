@@ -27,6 +27,10 @@ class ScriptEvent(BaseModel):
     event_type: Literal["occurrence", "consequence", "reference", "new_round"] = Field(
         description="事件类型：occurrence=发生，consequence=后果，reference=回忆/提及，new_round=新一轮"
     )
+    new_reason: str = Field(
+        default="",
+        description="event_type=new_round 时必填：与上一轮的区别（新原因/新目标）",
+    )
     participants: list[str] = Field(
         default_factory=list,
         description="参与者列表，如['老瘸子', '赵铁头']",
@@ -78,6 +82,7 @@ def _build_event_extraction_prompt(script_dict: dict[str, Any]) -> str:
       "event_id": "evt_xxx",
       "description": "事件核心描述",
       "event_type": "occurrence|consequence|reference|new_round",
+      "new_reason": "仅 new_round 填写：与上一轮的区别",
       "participants": ["角色1", "角色2"],
       "location": "地点",
       "time_marker": "时间",
@@ -162,10 +167,9 @@ def validate_script_events(events: list[ScriptEvent]) -> list[str]:
     
     # 检查 new_round 必须有明确原因
     for event in events:
-        if event.event_type == "new_round" and not event.aliases:
-            # new_round 应该有 aliases 说明与上一轮的区别
+        if event.event_type == "new_round" and not (event.new_reason or "").strip():
             errors.append(
-                f"new_round 事件 {event.event_id} 缺少与上一轮的区别说明"
+                f"new_round 事件 {event.event_id} 缺少 new_reason（与上一轮的区别）"
             )
     
     return errors
@@ -215,34 +219,77 @@ async def extract_script_events(
     return result
 
 
+def _fold(text: str) -> str:
+    return re.sub(r"[\s\W_]+", "", str(text or "").lower())
+
+
+def _event_text_blobs(event: dict[str, Any]) -> list[str]:
+    blobs = [str(event.get("description") or "")]
+    blobs.extend(str(a or "") for a in (event.get("aliases") or []))
+    return [b for b in (_fold(x) for x in blobs) if b]
+
+
+def _events_look_synonymous(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """同义启发式：描述/别名互相包含即视为同一故事事件。
+
+    覆盖「老瘸子受刑」vs「老瘸子被抽了七鞭」这类换名重演；
+    完全不同的措辞仍靠抽取阶段 LLM 合并 aliases。
+    """
+    blobs_a = _event_text_blobs(a)
+    blobs_b = _event_text_blobs(b)
+    for x in blobs_a:
+        for y in blobs_b:
+            if x in y or y in x:
+                return True
+    return False
+
+
 def validate_plan_event_refs(
     plan_cards: list[dict[str, Any]],
     script_events: list[dict[str, Any]],
+    acceptance_items: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    """三条硬闸校验：清单完备、唯一所有权、义务落场。
-    
+    """三条硬闸：清单完备、唯一所有权、义务落场。外加角色封死与同义 ID。
+
     返回错误列表，空列表表示通过。
     """
     errors = []
-    
+
     # 构建 script_events 的 event_id 集合
-    valid_event_ids = {
-        _normalize_event_id(e.get("event_id", ""))
-        for e in script_events
-        if e.get("event_id")
-    }
-    
+    events_by_id: dict[str, dict[str, Any]] = {}
+    for e in script_events:
+        eid = _normalize_event_id(e.get("event_id", ""))
+        if eid:
+            events_by_id[eid] = e
+
+    valid_event_ids = set(events_by_id)
+
     # 跟踪每个 event_id 的 occurrence 场景
     occurrence_owners: dict[str, str] = {}
-    
+    # scene_id -> 是否有 occurrence
+    scenes_with_occurrence: dict[str, bool] = {}
+    # 角色封死：非 occurrence 只能是 reference，且须在 occurrence 场之后
+    scene_order: list[str] = []
+    ref_uses: list[tuple[str, str, str]] = []  # (scene_id, event_id, role)
+
     for card in plan_cards:
-        scene_id = card.get("scene_id", "")
+        scene_id = str(card.get("scene_id") or "")
+        scene_order.append(scene_id)
         event_refs = card.get("event_refs") or []
-        
+        scenes_with_occurrence.setdefault(scene_id, False)
+
+        # 硬闸 0：禁止空引用
+        if not event_refs:
+            errors.append(
+                f"场景 {scene_id} 未引用任何剧本事件（event_refs 为空），"
+                f"每场至少绑定 1 条 script_events"
+            )
+            continue
+
         for ref in event_refs:
             event_id = _normalize_event_id(ref.get("event_id", ""))
-            role = ref.get("role", "occurrence")
-            
+            role = str(ref.get("role") or "occurrence")
+
             # 硬闸 1：清单完备
             if event_id not in valid_event_ids:
                 errors.append(
@@ -250,9 +297,41 @@ def validate_plan_event_refs(
                     f"必须来自 script_events 清单"
                 )
                 continue
-            
+
+            # 角色封死：禁止用非标准 role 洗白（含 new_round 自由串）
+            if role not in ("occurrence", "consequence", "reference"):
+                errors.append(
+                    f"场景 {scene_id} 事件 {event_id} 的 role={role} 非法；"
+                    f"只允许 occurrence/consequence/reference"
+                )
+                continue
+
+            # reference 类事件不得标成 occurrence（会把回忆写成重演）
+            _etype = str(events_by_id[event_id].get("event_type") or "")
+            if role == "occurrence" and _etype in ("reference",):
+                errors.append(
+                    f"场景 {scene_id} 将 reference 事件 {event_id} 标为 occurrence；"
+                    f"回忆/提及只能 reference，不得在正文重演"
+                )
+                continue
+
+            # consequence/new_round 必须是独立 event_id，不能挂在同一事件上洗白重演
+            if role != "occurrence" and events_by_id[event_id].get(
+                "event_type"
+            ) not in ("consequence", "reference", "new_round", None, ""):
+                # 同一事件的后续场只能 reference（提及/回忆），不能标成 consequence 重演
+                if role == "consequence":
+                    errors.append(
+                        f"场景 {scene_id} 将事件 {event_id} 标为 consequence，"
+                        f"但 consequence 须是独立 event_id；同一事件后续场只能 reference"
+                    )
+                    continue
+
+            ref_uses.append((scene_id, event_id, role))
+
             # 硬闸 2：唯一所有权
             if role == "occurrence":
+                scenes_with_occurrence[scene_id] = True
                 if event_id in occurrence_owners:
                     errors.append(
                         f"事件 {event_id} 在场景 {occurrence_owners[event_id]} "
@@ -261,7 +340,58 @@ def validate_plan_event_refs(
                     )
                 else:
                     occurrence_owners[event_id] = scene_id
-    
+
+    # 角色封死：reference/consequence 只能出现在 occurrence 场之后
+    order_index = {sid: i for i, sid in enumerate(scene_order)}
+    for scene_id, event_id, role in ref_uses:
+        if role == "occurrence":
+            continue
+        owner = occurrence_owners.get(event_id)
+        if owner is None:
+            # 剧本 reference 事件是既往/画外事实，本章提及不需 occurrence。
+            # 仅 occurrence 类事件才要求「本章有一场真正发生」。
+            _t = str((events_by_id.get(event_id) or {}).get("event_type") or "")
+            if event_id in valid_event_ids and _t != "reference" and role != "reference":
+                errors.append(
+                    f"场景 {scene_id} 以 {role} 引用事件 {event_id}，"
+                    f"但本章尚无任何场景作为 occurrence 发生该事件"
+                )
+            continue
+        if order_index.get(scene_id, 0) <= order_index.get(owner, 0):
+            errors.append(
+                f"场景 {scene_id} 以 {role} 引用事件 {event_id}，"
+                f"但 occurrence 场是 {owner}；引用只能出现在其后"
+            )
+
+    # 同义 ID：不同 event_id 都作为 occurrence 且描述/别名互相包含 → 换名重演
+    occ_items = [
+        (event_id, owner) for event_id, owner in occurrence_owners.items()
+    ]
+    for i, (id_a, owner_a) in enumerate(occ_items):
+        for id_b, owner_b in occ_items[i + 1 :]:
+            if owner_a == owner_b:
+                continue
+            if _events_look_synonymous(events_by_id[id_a], events_by_id[id_b]):
+                errors.append(
+                    f"事件 {id_a}（{owner_a}）与 {id_b}（{owner_b}）描述同义，"
+                    f"疑似同一故事事件换名重演；请合并为同一 event_id"
+                )
+
+    # 硬闸 3：义务落场 — required 义务的责任场必须有 occurrence 事件
+    for item in acceptance_items or []:
+        if not item.get("required"):
+            continue
+        owners = [str(s) for s in (item.get("scene_ids") or []) if s]
+        if len(owners) != 1:
+            # 多责任场/未分配由 acceptance_plan_issues 报
+            continue
+        owner = owners[0]
+        if not scenes_with_occurrence.get(owner):
+            errors.append(
+                f"义务 {item.get('item_id')} 责任场 {owner} 没有 occurrence 事件，"
+                f"义务无法落场；请把该义务绑定到事件实际发生的场景"
+            )
+
     return errors
 
 
