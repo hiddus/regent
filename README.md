@@ -1,53 +1,38 @@
-# Regent Novel Engine
+# Regent 短剧剧本引擎
 
-> 面向中国大陆非头部兼职网文作者的导演式长篇小说创作系统；经验证后扩展为创作与阅读双环。
+> 面向短剧创作者，以全剧规划、分集交付、人工改稿和制作约束为核心的剧本创作工具。
 
-用户说出故事目标、调整关键路径，并在少数重大剧情节点作出选择；目标架构由持续 AI 导演组织场景、指导人物演绎、控制小说呈现并决定重演；独立审校保障一致性，Regent Core 承载预算、恢复和持久化。
+当前目标是从构思持续产出有完整结局、可修改、可供制作讨论的短剧剧本。首版默认验证低成本真人原创短剧；产品假设与支持范围需经客户和真实项目验证。Regent Core 继续提供预算、权限、恢复和持久化基础设施。
 
-本仓库由两部分组成：
-
-- **Novel Engine 产品层**：当前唯一对外产品方向；目标能力包括 C 端 Web/PWA、小说领域模型、剧本展开、角色演绎、阅读与后续内容分发，尚不表示这些能力已经实现。
-- **Regent Core 内核层**：内部基础设施，提供多 Agent 编排、持久化任务、预算、权限、审计、恢复和运行时监测；不再作为独立经营产品对外定义。
-
-私有项目 [`hiddus/novelMaker`](https://github.com/hiddus/novelMaker) 是小说推演链路的正式迁移基线：保留其持续 Agent loop、人机互动修正和状态推进能力，再逐项接入 Regent Core 与 Novel Engine 领域模型；它不构成第三套产品定义。
+本次为产品转向与规范更新，尚未实现或认证短剧交付链路。现有 novel 包、novel-web 及内部 script 协议是待适配基础，不等于完整短剧能力。目录和主文档保留原文件名以兼容既有链接。
 
 ## 权威文档
 
 | 文档 | 权威范围 |
 |---|---|
-| [Novel-Engine-PRD.md](./Novel-Engine-PRD.md) | 唯一产品需求源、用户、商业模式与验收标准 |
-| [Novel-Engine-Tech-Spec.md](./Novel-Engine-Tech-Spec.md) | 产品技术架构、领域模型与内核复用边界 |
-| [Novel-Engine-Plan.md](./Novel-Engine-Plan.md) | 唯一开发顺序、里程碑和出口检查 |
-| [Novel-Engine-Implementation-Requirements-v3.11.md](./Novel-Engine-Implementation-Requirements-v3.11.md) | v3.12 落地审查历史快照；已由 v4.0/v5.0 主文档吸收，不再作为独立权威源 |
-| [Regent-PRD.md](./Regent-PRD.md) | Regent Core 内核职责与产品边界兼容入口 |
-| [Regent-Technical-Spec.md](./Regent-Technical-Spec.md) | 现有内核实现说明与迁移约束 |
-| [Regent-Plan.md](./Regent-Plan.md) | 内核保留、复用和退役清单 |
+| [短剧产品需求](./Novel-Engine-PRD.md) | 客户、完整剧本、编辑/锁定、交付与质量验收 |
+| [短剧技术说明书](./Novel-Engine-Tech-Spec.md) | 结构化剧本、版本、依赖修订、运行与迁移 |
+| [修改开发计划](./Novel-Engine-Plan.md) | SD-M0～SD-M5、首批任务与阶段出口 |
+| [Regent Core 职责](./Regent-PRD.md) | 内核职责与产品边界 |
+| [Core 技术兼容说明](./Regent-Technical-Spec.md) | 内核复用端口 |
+| [Core 保留清单](./Regent-Plan.md) | 共享底座保留与退役 |
 
-冲突处理顺序：产品语义以 Novel Engine PRD 为准，技术实现以 Novel Engine Tech Spec 为准，执行顺序以 Novel Engine Plan 为准。旧 Regent 产品材料仅供历史追溯，不得作为当前需求依据。
+产品语义以 PRD 为准，技术设计以技术说明书为准，实施顺序以开发计划为准。旧小说方向的三动作禁改稿、公共阅读、广告分成和长篇认证路线已被替代。[转向前快照](./docs/archive/novel-before-short-drama-2026-09-22/README.md)仅用于历史追溯。
 
 ## 当前产品契约
 
-用户主路径只有三类动作：
-
-1. 用自然语言设定故事目标。
-2. 调整 10–20 个主线关键节点。
-3. 在死亡、背叛、揭露、开战等重大节点拍板。
-
-要求用户维护结构化设定、逐章审核剧本、维护关系图或逐章改文，均视为产品退化。
-
-当前产品阶段：
-
-- 阶段一服务中国大陆非头部兼职网文作者，以 Web/PWA 验证原创导演式创作。
-- MVP 只做私有作品与定向试读；锚点仿写、公共池、广告分成和原生 App 后移。
-- 终局仍是原创创作与阅读双环，但必须先通过导演式交互、带 AI 标识持续阅读和单位经济三道闸门。
-- 当前已有 Regent Core、小说领域 API 和 novel-web；新章节已接入持续导演场景循环，在途旧章节保留原流程。长期记忆与生产验收边界见 Tech Spec §14，不能将当前实现视为长篇质量认证。
+1. 确认制作规格、完整结局与分集大纲，按集或按批持续交付正文。
+2. 创作者可直接编辑、局部改写、比较版本；修改影响确认后在修订分支处理。
+3. 定稿显式解锁，已拍摄版本不可覆盖；历史事实、人工稿与费用可追溯。
+4. 完整交付包含全剧设计、全部分集正文、人物/场景/道具表及 TXT/DOCX 导出。
+5. 首先验证单场、单集、连续三集和完整 12 集样本，再进行客户封测。
 
 ## 仓库结构
 
 | 路径 | 说明 |
 |---|---|
 | `core/` | Regent Core 后端内核（FastAPI、Worker、状态机与基础设施） |
-| `apps/novel-web/` | 小说用户端；按 Novel Engine Plan 演进 |
+| `apps/novel-web/` | 现有用户端；按短剧开发计划适配 |
 | `apps/regent-console/` | 内部运维控制台 |
 | `apps/regent-desktop/` | 历史探索性桌面壳，不是阶段一验收入口 |
 | `capabilities/` | 可复用能力声明与运行器 |
@@ -66,7 +51,7 @@ regent-worker
 pytest
 ```
 
-部署与环境说明见 [docs/deployment.md](./docs/deployment.md)，开发说明见 [docs/development.md](./docs/development.md)。小说产品包尚未完成迁入时，不得将旧控制台的可运行性等同于 Novel Engine 产品验收通过。
+部署与环境说明见 [docs/deployment.md](./docs/deployment.md)，开发说明见 [docs/development.md](./docs/development.md)。不得将旧控制台或小说链路可运行等同于短剧产品验收通过。
 
 ## 文档状态
 

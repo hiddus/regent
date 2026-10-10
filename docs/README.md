@@ -4,9 +4,9 @@
 
 ## 当前权威源
 
-- [Novel Engine PRD](../Novel-Engine-PRD.md)
-- [Novel Engine Tech Spec](../Novel-Engine-Tech-Spec.md)
-- [Novel Engine Plan](../Novel-Engine-Plan.md)
+- [短剧产品需求](../Novel-Engine-PRD.md)
+- [短剧技术说明书](../Novel-Engine-Tech-Spec.md)
+- [短剧开发计划](../Novel-Engine-Plan.md)
 - [Regent Core 内核职责](../Regent-PRD.md)
 - [Regent Core 技术兼容说明](../Regent-Technical-Spec.md)
 - [Regent Core 保留与退役清单](../Regent-Plan.md)
@@ -21,6 +21,8 @@
 - [架构附录](./appendices/README.md)
 
 ## 历史资料
+
+- [2026-09-22 转向前小说主文档快照](./archive/novel-before-short-drama-2026-09-22/README.md)
 
 - [旧 Regent 产品路线归档](./archive/legacy-regent-2026/README.md)
 - [更早版本归档](./archive/README.md)
