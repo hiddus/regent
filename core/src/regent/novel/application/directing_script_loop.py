@@ -166,6 +166,37 @@ def _longest_common_substring(a: str, b: str, *, min_len: int = 80) -> str:
     return best
 
 
+def _is_legitimate_repetition(text: str, ledger: dict[str, Any] | None = None) -> bool:
+    """判断重复文本是否属于合法复用（引用、固定铭文、短对白）。
+
+    工作包3.3：区分引用、固定铭文、短对白与 problematic 照抄。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # 1. 引用：包含中文或英文引号
+    if any(q in stripped for q in ('"', '"', '"', "'", "'", "「", "」", "『", "』")):
+        return True
+    # 2. 短对白：包含对话标记（said-book-ids 的中文等价）
+    dialogue_markers = ("道", "说", "问", "答", "喊", "叫", "笑", "叹", "低声", "高声")
+    if any(marker in stripped for marker in dialogue_markers):
+        # 对白通常较短，如果超过200字且无引号，可能不是合法对白
+        if len(stripped) < 200 or any(q in stripped for q in ('"', '"', '"')):
+            return True
+    # 3. 固定铭文：检查台账中的 props 分区文字
+    if ledger and isinstance(ledger, dict):
+        props = ledger.get("props") or {}
+        for prop in props.values():
+            if isinstance(prop, dict):
+                partitions = prop.get("partitions") or {}
+                for partition_text in partitions.values():
+                    if isinstance(partition_text, str) and partition_text.strip():
+                        # 如果重复文本包含台账中的固定铭文
+                        if partition_text.strip() in stripped or stripped in partition_text.strip():
+                            return True
+    return False
+
+
 def _script_writer_system(prose_style: dict[str, Any] | None = None, *, chapter_no: int = 1) -> str:
     base = (
         "你是小说执笔者。按选定剧本与导演执导要求，完成整章文学演绎。"
@@ -1430,12 +1461,13 @@ async def _produce_script_tick(
         repetition_warnings: list[str] = []
         for i, prior in enumerate(prior_texts):
             common = _longest_common_substring(scene_text, prior, min_len=80)
-            if common:
+            if common and not _is_legitimate_repetition(common, ledger):
                 repetition_warnings.append(f"scene_{i}:len={len(common)}")
         if prev_tail:
             common = _longest_common_substring(scene_text, prev_tail, min_len=80)
-            if common:
+            if common and not _is_legitimate_repetition(common, ledger):
                 repetition_warnings.append(f"prev_chapter_tail:len={len(common)}")
+
         if repetition_warnings:
             sp.setdefault("repetition_warnings", []).append(
                 {"scene_id": card.scene_id, "warnings": repetition_warnings}

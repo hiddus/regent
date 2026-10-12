@@ -47,15 +47,26 @@ def commit_run_story_ledger(
 
 
 def collect_accepted_facts(production: dict[str, Any]) -> list[Any]:
-    """收集已接纳 take 的事实，按 statement 去重（工作包4）。
+    """收集已接纳 take 的事实，按 statement 去重并附加来源追踪（工作包4）。
 
     同一事实可能在多个 take 中出现（修订后保留），只取首次出现的版本。
     同主体不同时间的事实不得错误合并——按完整 statement 判重，不按摘要。
+    每条事实附加 source_tracking：take_id 和 source_hash。
     """
     seen: set[str] = []
     result: list[Any] = []
+    takes = production.get("takes") or []
     for i in production.get("accepted") or []:
-        for fact in (production["takes"][i].get("validation") or {}).get("facts") or []:
+        if i >= len(takes):
+            continue
+        take = takes[i]
+        take_id = f"scene{take.get('scene_index', '?')}:take{take.get('take_no', '?')}"
+        # 计算 source_hash：取最新 prose_version 的哈希
+        prose_versions = take.get("prose_versions") or []
+        source_hash = ""
+        if prose_versions:
+            source_hash = content_hash(str(prose_versions[-1]))
+        for fact in (take.get("validation") or {}).get("facts") or []:
             if isinstance(fact, dict):
                 statement = str(fact.get("statement") or "").strip()
             else:
@@ -65,7 +76,17 @@ def collect_accepted_facts(production: dict[str, Any]) -> list[Any]:
                 continue
             if statement not in seen:
                 seen.append(statement)
-                result.append(fact)
+                # 附加来源追踪信息
+                if isinstance(fact, dict):
+                    fact_with_source = dict(fact)
+                    fact_with_source["source_tracking"] = {
+                        "take_id": take_id,
+                        "source_hash": source_hash,
+                        "accepted_index": i,
+                    }
+                    result.append(fact_with_source)
+                else:
+                    result.append(fact)
     return result
 
 

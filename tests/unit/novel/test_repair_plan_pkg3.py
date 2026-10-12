@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from regent.novel.application.directing_script_loop import (
+    _is_legitimate_repetition,
     _longest_common_substring,
     _trim_context_for_writer,
 )
@@ -60,3 +61,30 @@ def test_longest_common_substring_empty():
     assert _longest_common_substring("", "abc", min_len=10) == ""
     assert _longest_common_substring("abc", "", min_len=10) == ""
     assert _longest_common_substring("abc", "def", min_len=10) == ""
+
+
+def test_is_legitimate_repetition_detects_quote():
+    text = "「他把钥匙放在桌上」这句话在前场出现过，本场再次引用。" * 3
+    assert _is_legitimate_repetition(text) is True
+
+
+def test_is_legitimate_repetition_detects_dialogue():
+    text = "他说道：「我们必须尽快离开这里。」她回答说：「同意。」" * 3
+    assert _is_legitimate_repetition(text) is True
+
+
+def test_is_legitimate_repetition_detects_inscription_from_ledger():
+    ledger = {
+        "props": {
+            "watch": {
+                "partitions": {"back": "拾光钟表行，创立于二〇一〇年"}
+            }
+        }
+    }
+    text = "他翻转怀表，背面刻着「拾光钟表行，创立于二〇一〇年」。" * 3
+    assert _is_legitimate_repetition(text, ledger) is True
+
+
+def test_is_legitimate_repetition_rejects_plain_copy():
+    text = "他靠在门后，左臂还在渗血，追兵的脚步停在门外。呼吸急促，心跳如鼓。" * 3
+    assert _is_legitimate_repetition(text) is False

@@ -69,3 +69,28 @@ def test_collect_accepted_facts_skips_empty_statements():
     facts = collect_accepted_facts(production)
     assert len(facts) == 1
     assert facts[0]["statement"] == "valid"
+
+
+def test_collect_accepted_facts_attaches_source_tracking():
+    production = {
+        "accepted": [0],
+        "takes": [
+            {
+                "scene_index": 2,
+                "take_no": 1,
+                "prose_versions": ["他靠在门后，左臂还在渗血。"],
+                "validation": {
+                    "facts": [
+                        {"statement": "他靠在门后"},
+                    ]
+                },
+            }
+        ],
+    }
+    facts = collect_accepted_facts(production)
+    assert len(facts) == 1
+    assert facts[0]["statement"] == "他靠在门后"
+    source = facts[0]["source_tracking"]
+    assert source["take_id"] == "scene2:take1"
+    assert source["accepted_index"] == 0
+    assert len(source["source_hash"]) == 64  # SHA-256 hex digest
