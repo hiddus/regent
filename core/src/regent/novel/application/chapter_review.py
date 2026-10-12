@@ -71,53 +71,6 @@ _MAX_POST_CREATIVE_REVIEW_REWINDS = MAX_CHAPTER_REPAIRS
 _MAX_REVIEW_PLAN_REWINDS = 2
 
 
-def _merge_gate_debts_into_issues(
-    issues: list[str], sp: dict[str, Any] | None, *,
-    current_front_fails: list[str] | None = None,
-) -> list[str]:
-    """导演递延的债务进入责编议题；按 kind 加不同前缀便于识别。"""
-    out = list(issues)
-    for debt in (sp or {}).get("gate_debts") or []:
-        if not isinstance(debt, dict):
-            continue
-        if str(debt.get("owner") or "") != "review":
-            continue
-        kind = str(debt.get("kind") or "")
-        if kind == "continuity":
-            prefix = "[gate_debt:cont]"
-        elif kind == "prose_front":
-            prefix = "[gate_debt:prose_front]"
-        else:
-            continue
-        tags = list(debt.get("tags") or [])
-        if kind == "prose_front" and current_front_fails is not None:
-            # 正文确定性门已在本轮完整重验。旧文案/旧摘录只能留作证据。
-            # 不能重新注入当前 issues。否则已消除的 redundant 永远阻断。
-            checked = ("[front:redundant]", "[front:power_surface]")
-            rechecked = [t for t in tags if str(t).startswith(checked)]
-            debt["resolved_tags"] = [
-                t for t in rechecked
-                if not any(
-                    str(f).split("]", 1)[0] == str(t).split("]", 1)[0]
-                    for f in current_front_fails
-                )
-            ]
-            debt["revalidated_tags"] = list(current_front_fails)
-            tags = [t for t in tags if t not in rechecked]
-        for tag in tags:
-            text = str(tag or "").strip()
-            if not text:
-                continue
-            marked = (
-                text
-                if text.startswith(prefix)
-                else f"{prefix}{text}"
-            )
-            if marked not in out and text not in out:
-                out.append(marked)
-    return out
-
-
 def _top_review_fix_notes(issues: list[Any] | None, *, limit: int = 3) -> list[str]:
     """回退补拍只带少量互不雷同的事实点，避免几十条意见淹没模型。"""
     out: list[str] = []
@@ -552,12 +505,6 @@ async def validate_chapter(
     front_fails_effective = list(dict.fromkeys([*front_fails_no_power, *review_power_fails]))
     if front_fails_effective:
         issues = list(dict.fromkeys([*issues, *front_fails_effective]))
-    # 导演 AUDIT 递延的连续性债务：责编层接管
-    _sp_early = production.get("script_protocol") if isinstance(production, dict) else {}
-    if isinstance(_sp_early, dict):
-        issues = _merge_gate_debts_into_issues(
-            issues, _sp_early, current_front_fails=front_fails_effective,
-        )
     # 专职责编：默认抽样，避免每章固定付费却只有 soft 记录
     from regent.novel.application import editor_audit as ea
 

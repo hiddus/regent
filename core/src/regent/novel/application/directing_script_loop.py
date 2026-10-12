@@ -314,46 +314,6 @@ def _audit_cont_softable(gate: Any, *, working_state: dict[str, Any] | None = No
     return True
 
 
-def _audit_cont_deferrable(gate: Any) -> bool:
-    """画面层：仅连续性阻断时可递延到责编，不得卡死后续场。
-
-    缺 must 节拍 / 模型硬失败（改因果、跳场等）仍硬停。
-    """
-    if getattr(gate, "critical_missed", None):
-        return False
-    hard = [str(h) for h in (getattr(gate, "hard_fails", None) or []) if str(h).strip()]
-    if hard:
-        return False
-    return bool(getattr(gate, "continuity_block", False))
-
-
-def _append_gate_debt(
-    sp: dict[str, Any],
-    *,
-    scene_id: str,
-    tags: list[str],
-    kind: str = "continuity",
-    from_phase: str = "AUDIT_SCENE",
-) -> None:
-    """导演层递延债务：责编 REVIEW 合并并尝试修；修满可 coerce 留痕。
-
-    统一写入 gate_debts 列表，由 kind 字段区分 continuity / prose_front。
-    """
-    clean = [str(t) for t in tags if str(t).strip()]
-    if not clean:
-        return
-    debts = sp.setdefault("gate_debts", [])
-    debts.append(
-        {
-            "owner": "review",
-            "kind": kind,
-            "scene_id": scene_id,
-            "tags": clean[:8],
-            "from_phase": from_phase,
-        }
-    )
-
-
 def _script_cards(sp: dict[str, Any]) -> list[Any]:
     plan = sp.get("scene_plan") or {}
     return list(plan.get("cards") or [])
@@ -1611,6 +1571,29 @@ async def _produce_script_tick(
             sp.setdefault("boundary_violations", []).extend(
                 [{"scene_id": card.scene_id, "v": v} for v in boundary_violations]
             )
+            # 工作包3.2：越界立即拒绝接纳，触发重写或停机。
+            violation_summary = "；".join(boundary_violations[:3])
+            repair_key = f"scene_repairs:{card.scene_id}"
+            repairs = int(sp.get(repair_key) or 0)
+            post_review = bool(sp.get("post_review_rewrite"))
+            creative_done = bool((sp.get("creative_accept") or {}).get("accept"))
+            max_repairs = 1 if (post_review or creative_done) else 2
+            if repairs < max_repairs:
+                sp[repair_key] = repairs + 1
+                sp["scene_revision_instruction"] = (
+                    f"本场正文越界：{violation_summary}。"
+                    "删除不属于本场的事件描写，只保留本场责任范围内的情节。"
+                )
+                production["phase"] = "WRITE_SCENE"
+                _save(run, production)
+                return False
+            sp.setdefault("scene_hard_fails", []).extend(
+                [f"boundary_violation:{card.scene_id}"]
+            )
+            _save(run, production)
+            raise ProductionStopped(
+                f"场景越界未清（本场修满）：{violation_summary}"
+            )
 
         scene_repair_key = f"scene_repairs:{card.scene_id}"
         scene_repairs = int(sp.get(scene_repair_key) or 0)
@@ -1639,18 +1622,8 @@ async def _produce_script_tick(
                 tags = gate.hard_fail_tags(card.scene_id)
                 if post_review:
                     sp["post_review_rewrite"] = False
-            elif _audit_cont_deferrable(gate):
-                tags = gate.hard_fail_tags(card.scene_id)
-                _append_gate_debt(
-                    sp,
-                    scene_id=str(card.scene_id),
-                    tags=tags,
-                    kind="continuity",
-                    from_phase="AUDIT_SCENE",
-                )
-                if post_review:
-                    sp["post_review_rewrite"] = False
             else:
+                # 工作包1.1：移除递延路径，连续性硬问题一律阻断。
                 sp.setdefault("scene_hard_fails", []).extend(gate.hard_fail_tags(card.scene_id))
                 lingering = list(sp.get("scene_hard_fails") or [])
                 _save(run, production)
@@ -1944,24 +1917,8 @@ async def _produce_script_tick(
                 else None
             ),
         )
-        # 分区：结构门（pov/banned/title/first_person）硬停；文字门（redundant/power_surface）递延到 REVIEW
-        _DEFERRABLE_PROSE_FRONT = ("[front:redundant]", "[front:power_surface]")
-        structural_front = [
-            f for f in front_fails if not str(f).startswith(_DEFERRABLE_PROSE_FRONT)
-        ]
-        deferred_front = [
-            f for f in front_fails if str(f).startswith(_DEFERRABLE_PROSE_FRONT)
-        ]
-        if structural_front:
-            chapter_fails = list(dict.fromkeys([*chapter_fails, *structural_front]))
-        if deferred_front:
-            _append_gate_debt(
-                sp,
-                scene_id="__chapter__",
-                tags=deferred_front,
-                kind="prose_front",
-                from_phase="VALIDATE",
-            )
+        # 工作包1.1：所有文字门失败一律计入 chapter_fails，不再递延。
+        chapter_fails = list(dict.fromkeys([*chapter_fails, *front_fails]))
         all_fails = chapter_fails + scene_fails
         take["validation"] = {
             **report.model_dump(mode="json"),

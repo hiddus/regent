@@ -281,8 +281,8 @@ async def test_real_audit_exhausted_stops_without_advancing_scene():
 
 
 @pytest.mark.asyncio
-async def test_real_audit_exhausted_continuity_defers_to_review():
-    """修满后仅连续性：递延责编，推进下一场，不 ProductionStopped。"""
+async def test_real_audit_exhausted_continuity_stops():
+    """工作包1.1：修满后连续性硬问题一律阻断，不再递延。"""
     card = _card("s1", "b1")
     card2 = _card("s2", "b2")
     run, work = _base_run(
@@ -321,16 +321,10 @@ async def test_real_audit_exhausted_continuity_defers_to_review():
             d.RoleSelfReview(passed=True),
         ]
     )
-    await d.produce_tick(Session(), provider=provider, work=work, run=run)
-    production = run.generation_context["production"]
-    sp = production["script_protocol"]
-    assert production["phase"] == "WRITE_SCENE"
-    assert sp["scene_index"] == 1
-    debts = sp.get("gate_debts") or []
-    assert debts and debts[0]["kind"] == "continuity"
-    assert debts[0]["owner"] == "review"
-    assert any("cont:" in t for t in debts[0]["tags"])
-    assert "after_s1" in (sp.get("working_state") or {})
+    from regent.novel.application.directing_runtime import ProductionStopped
+    import pytest
+    with pytest.raises(ProductionStopped, match="场记硬问题未清"):
+        await d.produce_tick(Session(), provider=provider, work=work, run=run)
 
 
 @pytest.mark.asyncio
@@ -1313,37 +1307,6 @@ async def test_produce_tick_command_id_with_takes_present(monkeypatch):
     assert "WRITE_SCENE" in cid
     # 不得退化成 take 维度标识
     assert ":turn" not in cid
-
-
-@pytest.mark.asyncio
-async def test_review_rechecks_stale_redundant_debt_before_accepting(monkeypatch):
-    from regent.novel.application import chapter_finalize, chapter_review
-
-    old = "[front:redundant] 旧稿中重复的段落"
-    run, work = _base_run(phase="DONE", sp_extra={
-        "creative_accept": {"accept": True},
-        "gate_debts": [{"owner": "review", "kind": "prose_front", "tags": [old]}],
-    })
-    run.generation_context["production"]["accepted"] = [0]
-    run.content = TEXT
-
-    async def capture_call(session, provider, work, run, production, schema,
-                           system, payload, purpose, command_id):
-        return schema(passed=True, issues=[])
-
-    accepted = []
-
-    async def finalize(**kwargs):
-        accepted.append(kwargs["run"].review["passed"])
-
-    monkeypatch.setattr(chapter_review, "_call", capture_call)
-    monkeypatch.setattr(chapter_finalize, "run_editorial_then_accept", finalize)
-    assert await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
-    assert accepted == [True]
-    assert run.review["continuity_issues"] == []
-    assert run.generation_context["production"]["script_protocol"]["gate_debts"][0][
-        "resolved_tags"
-    ] == [old]
 
 
 @pytest.mark.asyncio
