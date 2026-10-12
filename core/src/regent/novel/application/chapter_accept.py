@@ -97,7 +97,8 @@ def chapter_canon_blockers(run: Any, production: dict[str, Any]) -> list[str]:
     非空即禁止写入正史/正式记忆。只校验可确定性核对的项：
     - 没有未结硬问题（含证据缺陷）；
     - 正文版本与最近一次审校证据一致；
-    - accepted 下标唯一、有效且非失效 take。
+    - accepted 下标唯一、有效且非失效 take；
+    - 台账出口来自已通过场次（工作包1.2补充）。
     """
     from regent.novel.domain.review_issues import partition_issues
 
@@ -131,6 +132,18 @@ def chapter_canon_blockers(run: Any, production: dict[str, Any]) -> list[str]:
         if str((takes[i] or {}).get("status") or "") in {"SUPERSEDED", "REJECTED"}:
             blockers.append("accepted_take_invalidated")
             break
+
+    # 工作包1.2：台账出口一致性校验（仅当台账存在时检查）。
+    sp = production.get("script_protocol") or {}
+    ledger = sp.get("continuity_ledger")
+    if ledger and isinstance(ledger, dict):
+        ledger_violations = sp.get("ledger_violations") or []
+        if ledger_violations:
+            blockers.append(f"ledger_violations:{len(ledger_violations)}")
+        boundary_violations = sp.get("boundary_violations") or []
+        if boundary_violations:
+            blockers.append(f"boundary_violations:{len(boundary_violations)}")
+
     return blockers
 
 

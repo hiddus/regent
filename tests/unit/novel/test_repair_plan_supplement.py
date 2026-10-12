@@ -104,6 +104,46 @@ def test_check_scene_boundary_wrong_responsibility():
     assert any("boundary_violation" in v for v in violations)
 
 
+def test_chapter_canon_blockers_checks_ledger_consistency():
+    """工作包1.2：chapter_canon_blockers 须校验台账一致性（仅当台账存在时）。"""
+    from types import SimpleNamespace
+    from regent.novel.application.chapter_accept import chapter_canon_blockers
+
+    # 无台账时不阻断（兼容旧作品）
+    run = SimpleNamespace(review={}, content="正文")
+    production = {
+        "accepted": [0],
+        "takes": [{"status": "ACCEPTED"}],
+        "script_protocol": {},
+    }
+    blockers = chapter_canon_blockers(run, production)
+    assert "missing_continuity_ledger" not in blockers
+
+    # 有台账违规时阻断
+    production["script_protocol"] = {
+        "continuity_ledger": {"time_marker": "day1"},
+        "ledger_violations": [{"scene_id": "s1", "v": "prop_mismatch"}],
+    }
+    blockers = chapter_canon_blockers(run, production)
+    assert "ledger_violations:1" in blockers
+
+    # 有边界违规时阻断
+    production["script_protocol"] = {
+        "continuity_ledger": {"time_marker": "day1"},
+        "boundary_violations": [{"scene_id": "s1", "v": "premature"}],
+    }
+    blockers = chapter_canon_blockers(run, production)
+    assert "boundary_violations:1" in blockers
+
+    # 台账正常时不阻断
+    production["script_protocol"] = {
+        "continuity_ledger": {"time_marker": "day1"},
+    }
+    blockers = chapter_canon_blockers(run, production)
+    assert "ledger_violations" not in str(blockers)
+    assert "boundary_violations" not in str(blockers)
+
+
 def test_check_scene_boundary_recall_not_violation():
     scene_plan = {
         "cards": [
