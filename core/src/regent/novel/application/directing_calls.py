@@ -89,10 +89,12 @@ def _script_scene_command_id(
     # F6：缺省为 1（旧格式）；新运行须显式写入 2
     ckv = resolve_call_key_version(production, run)
     vrep_tag = f":vrep{vrep}" if ckv != 1 or vrep > 0 else ""
+    epoch = int(sp.get("compile_epoch") or 0)
+    epoch_tag = f":cep{epoch}" if epoch else ""
     return (
         f"v{_input_version(run)}:script:{phase}{scene_tag}"
         f":rep{int(sp.get('creative_repairs') or 0)}"
-        f"{vrep_tag}"
+        f"{vrep_tag}{epoch_tag}"
         f":dec{len(production.get('decisions', []))}"
     )
 

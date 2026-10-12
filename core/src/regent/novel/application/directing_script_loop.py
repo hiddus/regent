@@ -1450,6 +1450,9 @@ async def _produce_script_tick(
                 if idx == 0 and rejects < 1:
                     sp[reject_key] = rejects + 1
                     sp["review_plan_repair"] = pre_scene_violations[:6]
+                    sp["compile_epoch"] = int(sp.get("compile_epoch") or 0) + 1
+                    sp.pop("compile_self_review_done", None)
+                    sp.pop("compile_self_review", None)
                     production["phase"] = "COMPILE_SCENES"
                     _save(run, production)
                     return False

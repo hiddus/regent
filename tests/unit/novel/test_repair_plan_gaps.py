@@ -412,6 +412,24 @@ def test_replay_consequence_becomes_reference():
     assert cards[1]["event_refs"][0]["role"] == "reference"
 
 
+def test_compile_epoch_changes_command_id():
+    from types import SimpleNamespace
+
+    from regent.novel.application.directing_calls import _script_scene_command_id
+
+    run = SimpleNamespace(generation_context={"call_key_version": 2}, input_version=1)
+    production = {"call_key_version": 2, "decisions": []}
+    first = _script_scene_command_id(
+        run, production, {"compile_epoch": 0}, "COMPILE_SCENES"
+    )
+    second = _script_scene_command_id(
+        run, production, {"compile_epoch": 1}, "COMPILE_SCENES"
+    )
+    assert first != second
+    assert ":cep1" in second
+    assert ":cep" not in first
+
+
 def test_reference_event_cannot_stay_occurrence():
     from regent.novel.domain.script_events import demote_reference_occurrences
 

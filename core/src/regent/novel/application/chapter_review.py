@@ -173,6 +173,9 @@ def _rewind_script_to_compile(
     if rewinds > _MAX_REVIEW_PLAN_REWINDS:
         raise ProductionStopped("分场返工次数已达上限：" + note)
     sp["review_plan_repair"] = [str(item) for item in issues if str(item).strip()][:6]
+    sp["compile_epoch"] = int(sp.get("compile_epoch") or 0) + 1
+    sp.pop("compile_self_review_done", None)
+    sp.pop("compile_self_review", None)
     sp["scene_texts"] = []
     sp["scene_index"] = 0
     sp["scene_audits"] = {}
