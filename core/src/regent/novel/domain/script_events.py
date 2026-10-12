@@ -320,6 +320,59 @@ def collapse_duplicate_occurrences(cards: list[dict[str, Any]]) -> list[dict[str
     return out
 
 
+def _shared_run(left: str, right: str, limit: int = 12) -> int:
+    """两段文字的最长公共子串长度。够用即停。"""
+    if not left or not right:
+        return 0
+    best = 0
+    prev = [0] * (len(right) + 1)
+    for char in left:
+        cur = [0] * (len(right) + 1)
+        for index, other in enumerate(right, 1):
+            if char == other:
+                cur[index] = prev[index - 1] + 1
+                if cur[index] > best:
+                    best = cur[index]
+                    if best >= limit:
+                        return best
+        prev = cur
+    return best
+
+
+def _plans_action_outside_catalog(
+    card: dict[str, Any] | None,
+    script_events: list[dict[str, Any]],
+) -> bool:
+    """责任场没有 occurrence，但节拍写了清单里没有的新行动。
+
+    章末决定、记下名字这类行动经常没有独立 event_id。
+    整段复述已有事件描述的，不算新行动。
+    """
+    if not isinstance(card, dict):
+        return False
+    passages = [
+        str(card.get("purpose") or ""),
+        str(card.get("exit_change") or ""),
+        str(card.get("core_choice") or ""),
+    ]
+    for beat in card.get("beats") or []:
+        if isinstance(beat, dict):
+            passages.append(str(beat.get("text") or ""))
+    catalog: list[str] = []
+    for event in script_events:
+        catalog.append(str(event.get("description") or ""))
+        catalog.extend(str(alias) for alias in (event.get("aliases") or []))
+    catalog = [item.strip() for item in catalog if str(item).strip()]
+    for passage in passages:
+        text = passage.strip()
+        if len(text) < 24:
+            continue
+        if any(_shared_run(text, item) >= 12 for item in catalog):
+            continue
+        return True
+    return False
+
+
 def validate_plan_event_refs(
     plan_cards: list[dict[str, Any]],
     script_events: list[dict[str, Any]],
@@ -453,6 +506,8 @@ def validate_plan_event_refs(
                     f"疑似同一故事事件换名重演；请合并为同一 event_id"
                 )
 
+    cards_by_id = {str(card.get("scene_id") or ""): card for card in plan_cards}
+
     # 硬闸 3：义务落场 — required 义务的责任场必须有 occurrence 事件
     for item in acceptance_items or []:
         if not item.get("required"):
@@ -462,11 +517,14 @@ def validate_plan_event_refs(
             # 多责任场/未分配由 acceptance_plan_issues 报
             continue
         owner = owners[0]
-        if not scenes_with_occurrence.get(owner):
-            errors.append(
-                f"义务 {item.get('item_id')} 责任场 {owner} 没有 occurrence 事件，"
-                f"义务无法落场；请把该义务绑定到事件实际发生的场景"
-            )
+        if scenes_with_occurrence.get(owner):
+            continue
+        if _plans_action_outside_catalog(cards_by_id.get(owner), script_events):
+            continue
+        errors.append(
+            f"义务 {item.get('item_id')} 责任场 {owner} 没有 occurrence 事件，"
+            f"义务无法落场；请把该义务绑定到事件实际发生的场景"
+        )
 
     return errors
 

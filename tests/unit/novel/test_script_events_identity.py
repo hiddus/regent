@@ -162,6 +162,26 @@ def test_g_acceptance_owner_without_occurrence_blocked():
     assert any("义务无法落场" in e for e in errs)
 
 
+def test_coda_with_unlisted_action_can_hold_acceptance():
+    cards = [
+        _card("s1", [_occ("evt_search", "b1")]),
+        {
+            "scene_id": "s2",
+            "acceptance_ids": ["a3"],
+            "purpose": "记下名字并决定明天去找她",
+            "event_refs": [_occ("evt_search", "b2", role="reference")],
+            "beats": [
+                {
+                    "text": "他在笔记本新的一页写下榕城大学，决定明天一早就去找这个人。",
+                }
+            ],
+        },
+    ]
+    acc = [{"item_id": "a3", "required": True, "scene_ids": ["s2"]}]
+    errs = validate_plan_event_refs(cards, SEARCH_EVENTS, acceptance_items=acc)
+    assert not any("义务无法落场" in e for e in errs)
+
+
 def test_valid_plan_passes():
     events = [
         {"event_id": "evt_search", "description": "搜身", "event_type": "occurrence", "aliases": []},
