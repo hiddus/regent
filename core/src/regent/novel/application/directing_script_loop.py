@@ -109,6 +109,53 @@ from regent.novel.domain.world_bible import (
 from regent.novel.infrastructure.models import ChapterRunModel, StoryWorkModel
 
 
+def _trim_context_for_writer(ctx: dict[str, Any]) -> dict[str, Any]:
+    """执笔白名单（工作包3.4）：移除大段全文入口，只保留摘要与元数据。
+
+    移除：recent_chapters[*].content、previous_handoff.tail_excerpt 以外的大段内容。
+    保留：structural metadata、summaries、ledger、facts。
+    """
+    import copy
+
+    trimmed = copy.deepcopy(ctx)
+    for ch in trimmed.get("recent_chapters") or []:
+        if isinstance(ch, dict):
+            ch.pop("content", None)
+            ch.pop("body", None)
+    handoff = trimmed.get("previous_handoff")
+    if isinstance(handoff, dict):
+        for key in list(handoff):
+            if key not in (
+                "chapter_no",
+                "content_hash",
+                "tail_excerpt",
+                "actual_state",
+                "continuity_ledger",
+                "review_matches_final",
+            ):
+                handoff.pop(key, None)
+    return trimmed
+
+
+def _longest_common_substring(a: str, b: str, *, min_len: int = 80) -> str:
+    """找两个字符串的最长公共子串（>=min_len 才返回）。
+
+    用于工作包3.3 文本重复检测：识别长连续复用（照抄/近似段落）。
+    """
+    if not a or not b or min_len < 1:
+        return ""
+    la, lb = len(a), len(b)
+    best = ""
+    for i in range(la):
+        for j in range(lb):
+            k = 0
+            while i + k < la and j + k < lb and a[i + k] == b[j + k]:
+                k += 1
+            if k >= min_len and k > len(best):
+                best = a[i : i + k]
+    return best
+
+
 def _script_writer_system(prose_style: dict[str, Any] | None = None, *, chapter_no: int = 1) -> str:
     base = (
         "你是小说执笔者。按选定剧本与导演执导要求，完成整章文学演绎。"
@@ -1175,6 +1222,22 @@ async def _produce_script_tick(
             _save(run, production)
             return production["phase"] == "DONE"
         card = SceneCard.model_validate(cards[idx])
+        # 工作包3.1：分场前检——校验本场计划事件是否违反台账约束。
+        ledger = sp.get("continuity_ledger") or empty_ledger()
+        pre_scene_violations: list[str] = []
+        for eref in card.event_refs:
+            eid = str(eref.event_id or "")
+            role = str(eref.role or "")
+            if role == "occurrence" and "读取" in eid:
+                from regent.novel.domain.continuity_ledger import check_prop_readable
+
+                for pid in (ledger.get("props") or {}):
+                    if pid in eid or eid in pid:
+                        pre_scene_violations.extend(check_prop_readable(ledger, pid))
+        if pre_scene_violations:
+            sp.setdefault("ledger_violations", []).append(
+                {"scene_id": card.scene_id, "phase": "pre_scene", "v": pre_scene_violations}
+            )
         _ensure_validate_call_reserve(production, action="RENDER_SCENE")
         target = max(400, min(1500, card.target_chars or 700))
         revision_instruction = str(sp.get("scene_revision_instruction") or "").strip()
@@ -1227,8 +1290,9 @@ async def _produce_script_tick(
         )
         writer_system = SCENE_WRITE_SYSTEM + ((" " + style_hint) if style_hint else "")
         # 执笔只带叙述者记忆与本场材料；不重复塞 director_memory / 外层 canon
+        # 工作包3.4：移除大段全文入口，只保留摘要与元数据。
         write_payload: dict[str, Any] = {
-            "context": ordered_ctx,
+            "context": _trim_context_for_writer(ordered_ctx),
             "cast": production.get("cast") or {},
             "user_guidance": run.user_guidance or {},
             "scene_card": card.model_dump(),
@@ -1319,6 +1383,26 @@ async def _produce_script_tick(
             sp["scene_texts"][idx] = scene_text
         else:
             sp.setdefault("scene_texts", []).append(scene_text)
+        # 工作包3.3：文本重复检测——本场与前场/前章尾段比较，检测长连续复用。
+        prior_texts = list(sp.get("scene_texts") or [])[:-1]
+        prev_tail = ""
+        for prev in reversed(run.generation_context.get("recent_chapters") or []):
+            if isinstance(prev, dict):
+                prev_tail = str(prev.get("tail_excerpt") or "")
+                break
+        repetition_warnings: list[str] = []
+        for i, prior in enumerate(prior_texts):
+            common = _longest_common_substring(scene_text, prior, min_len=80)
+            if common:
+                repetition_warnings.append(f"scene_{i}:len={len(common)}")
+        if prev_tail:
+            common = _longest_common_substring(scene_text, prev_tail, min_len=80)
+            if common:
+                repetition_warnings.append(f"prev_chapter_tail:len={len(common)}")
+        if repetition_warnings:
+            sp.setdefault("repetition_warnings", []).append(
+                {"scene_id": card.scene_id, "warnings": repetition_warnings}
+            )
         sp["pending_scene_beat_evidence"] = written.beat_evidence
         sp["scene_revision_instruction"] = ""
         production["phase"] = "AUDIT_SCENE"
