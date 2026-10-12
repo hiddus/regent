@@ -29,6 +29,8 @@ _QUOTE_RE = re.compile(r"「(.+?)」", re.DOTALL)
 
 
 # --- 结构化议题协议（工作包1.1） ---
+# StructuredIssue 和 parse_issue_text 是计划定义的统一议题协议。
+# 当前生产链路仍用字符串流转；这两个接口为未来结构化迁移预留，已有测试覆盖。
 
 IssueStatus = Literal["OPEN", "EVIDENCE_DEFECT", "RESOLVED", "WITHDRAWN"]
 IssueSeverity = Literal["hard", "soft"]
@@ -89,19 +91,15 @@ def parse_issue_text(text: str, *, origin: IssueOrigin = "reviewer") -> Structur
 def is_hard_issue(issue: Any) -> bool:
     """单条议题是否为硬问题。
 
-    硬问题会阻断正史；软问题只记录。递延的连续性债务（[gate_debt:cont]）代表真实
-    时序/物件冲突，按硬处理，不再一概可 coerce。
+    硬问题会阻断正史；软问题只记录。
     """
     text = str(issue or "").strip()
     if not text:
         return False
     if text.startswith(SOFT_ISSUE_PREFIXES):
         return False
-    # 递延 prose_front：power_surface 为软，redundant（真复读）为硬。
-    if text.startswith("[gate_debt:prose_front]"):
-        return "redundant" in text
     # 其余（[front:title/cast/banned/redundant]、[pov:]、[prior_canon]、[editor:]、
-    # [gate_debt:cont]、无结构化前缀的自然语言冲突）一律为硬。
+    # 无结构化前缀的自然语言冲突）一律为硬。
     return True
 
 

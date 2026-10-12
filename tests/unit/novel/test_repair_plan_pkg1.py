@@ -45,11 +45,11 @@ def test_real_conflicts_are_hard():
         assert is_hard_issue(hard) is True, hard
 
 
-def test_deferred_continuity_debt_is_hard_not_soft():
-    """递延连续性债务代表真实冲突，按硬处理；prose_front 按内容分级。"""
+def test_unknown_prefix_is_hard():
+    """无已知软前缀的议题一律按硬处理。"""
     assert is_hard_issue("[gate_debt:cont]滴答声矛盾") is True
     assert is_hard_issue("[gate_debt:prose_front] redundant 复读") is True
-    assert is_hard_issue("[gate_debt:prose_front] power_surface 外显") is False
+    assert is_hard_issue("[gate_debt:prose_front] power_surface 外显") is True
 
 
 def test_partition_splits_and_dedups():

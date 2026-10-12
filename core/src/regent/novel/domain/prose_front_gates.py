@@ -180,15 +180,6 @@ def review_issues_may_coerce(issues: list[Any] | None) -> bool:
     for item in rows:
         if item.startswith("[pov:"):
             return False
-        # 递延的连续性债务代表真实时序/物件冲突，不得 coerce（工作包1.1）。
-        if item.startswith("[gate_debt:cont]"):
-            return False
-        # 递延的 power_surface → 可 coerce
-        if item.startswith("[gate_debt:prose_front]") and "power_surface" in item:
-            continue
-        # 递延的 redundant → 不可 coerce（与裸 redundant 同语义）
-        if item.startswith("[gate_debt:prose_front]") and "redundant" in item:
-            return False
         if item.startswith(
             ("[front:title", "[front:cast", "[front:banned", "[front:redundant")
         ):
