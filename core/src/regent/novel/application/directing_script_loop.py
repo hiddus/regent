@@ -1345,7 +1345,17 @@ async def _produce_script_tick(
         )
         scene_text = written.content.strip()
         sid = str(card.scene_id)
-        if not sp.get(f"writer_self_reviewed:{sid}"):
+        # 工作包4：自审结果绑定正文哈希，内容变化时自审失效。
+        from regent.novel.domain.chapter_handoff import content_hash
+
+        current_hash = content_hash(scene_text)
+        stored_review = sp.get(f"writer_self_reviewed:{sid}")
+        stored_hash = sp.get(f"writer_self_reviewed_hash:{sid}")
+        if stored_review and stored_hash != current_hash:
+            sp.pop(f"writer_self_reviewed:{sid}", None)
+            sp.pop(f"writer_self_reviewed_hash:{sid}", None)
+            stored_review = None
+        if not stored_review:
             review = await call(
                 RoleSelfReview,
                 "你是刚才写这场的执笔，只审核自己刚交的正文，不重写别的场。"
@@ -1364,6 +1374,7 @@ async def _produce_script_tick(
                 phase_name="SELF_WRITE",
             )
             sp[f"writer_self_reviewed:{sid}"] = review.model_dump()
+            sp[f"writer_self_reviewed_hash:{sid}"] = current_hash
             if not review.passed and int(sp.get(f"self_repairs:{sid}") or 0) < 1:
                 sp[f"self_repairs:{sid}"] = 1
                 texts = list(sp.get("scene_texts") or [])
@@ -1447,7 +1458,17 @@ async def _produce_script_tick(
             ),
         }
         audit = await call(_SceneAudit, audit_system, audit_payload)
-        if not sp.get(f"auditor_self_reviewed:{card.scene_id}"):
+        # 工作包4：场记自审绑定正文+场记哈希，任一变化时自审失效。
+        from regent.novel.domain.chapter_handoff import content_hash
+
+        audit_hash = content_hash(scene_text + "|" + json.dumps(audit.model_dump(), ensure_ascii=False, sort_keys=True))
+        stored_audit_review = sp.get(f"auditor_self_reviewed:{card.scene_id}")
+        stored_audit_hash = sp.get(f"auditor_self_reviewed_hash:{card.scene_id}")
+        if stored_audit_review and stored_audit_hash != audit_hash:
+            sp.pop(f"auditor_self_reviewed:{card.scene_id}", None)
+            sp.pop(f"auditor_self_reviewed_hash:{card.scene_id}", None)
+            stored_audit_review = None
+        if not stored_audit_review:
             review = await call(
                 RoleSelfReview,
                 "你是刚才做场记的人，只审核自己刚写的场记记录，不改正文。"
@@ -1464,6 +1485,7 @@ async def _produce_script_tick(
                 phase_name="SELF_AUDIT",
             )
             sp[f"auditor_self_reviewed:{card.scene_id}"] = review.model_dump()
+            sp[f"auditor_self_reviewed_hash:{card.scene_id}"] = audit_hash
             if (
                 not review.passed
                 and int(sp.get(f"auditor_self_repairs:{card.scene_id}") or 0) < 1

@@ -47,11 +47,26 @@ def commit_run_story_ledger(
 
 
 def collect_accepted_facts(production: dict[str, Any]) -> list[Any]:
-    return [
-        fact
-        for i in production.get("accepted") or []
-        for fact in (production["takes"][i].get("validation") or {}).get("facts") or []
-    ]
+    """收集已接纳 take 的事实，按 statement 去重（工作包4）。
+
+    同一事实可能在多个 take 中出现（修订后保留），只取首次出现的版本。
+    同主体不同时间的事实不得错误合并——按完整 statement 判重，不按摘要。
+    """
+    seen: set[str] = []
+    result: list[Any] = []
+    for i in production.get("accepted") or []:
+        for fact in (production["takes"][i].get("validation") or {}).get("facts") or []:
+            if isinstance(fact, dict):
+                statement = str(fact.get("statement") or "").strip()
+            else:
+                stmt = getattr(fact, "statement", None)
+                statement = str(stmt if stmt is not None else fact).strip()
+            if not statement:
+                continue
+            if statement not in seen:
+                seen.append(statement)
+                result.append(fact)
+    return result
 
 
 def chapter_canon_blockers(run: Any, production: dict[str, Any]) -> list[str]:
