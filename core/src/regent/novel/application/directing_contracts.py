@@ -254,6 +254,26 @@ class RoleSelfReview(BaseModel):
     prior_chapter: bool = False
 
 
+class EvidenceRecheckItem(BaseModel):
+    """证据复核：对一条无法接地的审校硬问题给出可接地证据或明确撤回。"""
+
+    issue_id: str = Field(min_length=1)
+    verdict: Literal["grounded", "withdrawn"] = Field(
+        description="grounded=补出当前正文逐字证据；withdrawn=撤回该问题（计误报）"
+    )
+    grounded_quote: str = Field(
+        default="",
+        description="verdict=grounded 时必填，须是当前正文中的逐字片段",
+    )
+    note: str = ""
+
+
+class EvidenceRecheck(BaseModel):
+    """一次有界证据复核的结论；同一轮审校最多复核一次。"""
+
+    items: list[EvidenceRecheckItem] = Field(default_factory=list)
+
+
 class SceneProseWithBeats(BaseModel):
     content: str = Field(min_length=50)
     beat_evidence: dict[str, str] = Field(default_factory=dict)

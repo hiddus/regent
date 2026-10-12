@@ -346,11 +346,11 @@ def test_audit_cont_deferrable_only_continuity():
     assert "s2:cont:黑纹位置不一致" in sp["gate_debts"][0]["tags"]
 
 
-def test_review_merge_and_coerce_deferred_continuity_only():
-    from regent.novel.application.chapter_review import (
-        _merge_gate_debts_into_issues,
-        _only_deferred_issues,
-    )
+def test_review_merge_deferred_continuity_is_hard_not_coercible():
+    """工作包1.1：递延连续性债务合并进议题后按硬问题处理，不再一概可 coerce。"""
+    from regent.novel.application.chapter_review import _merge_gate_debts_into_issues
+    from regent.novel.domain.prose_front_gates import review_issues_may_coerce
+    from regent.novel.domain.review_issues import is_hard_issue, partition_issues
 
     sp = {
         "gate_debts": [
@@ -364,21 +364,19 @@ def test_review_merge_and_coerce_deferred_continuity_only():
         ]
     }
     merged = _merge_gate_debts_into_issues(["其它问题"], sp)
-    assert any(x.startswith("[gate_debt:cont]") for x in merged)
-    assert _only_deferred_issues(
-        [x for x in merged if x.startswith("[gate_debt:cont]")]
-    )
-    assert _only_deferred_issues(["[front:redundant] 复读"]) is False
+    cont = [x for x in merged if x.startswith("[gate_debt:cont]")]
+    assert cont
+    assert all(is_hard_issue(x) for x in cont)
+    hard, _soft = partition_issues(merged)
+    assert any(x.startswith("[gate_debt:cont]") for x in hard)
+    assert review_issues_may_coerce(merged) is False
 
 
-def test_prose_front_debt_merge_and_coerce_semantics():
-    """prose_front 债务合并 + coerce 语义拆分：power_surface 可 coerce，redundant 不可。"""
-    from regent.novel.application.chapter_review import (
-        _merge_gate_debts_into_issues,
-        _only_deferred_issues,
-        _deferred_issues_contain_redundant,
-    )
+def test_prose_front_debt_merge_and_severity_semantics():
+    """prose_front 债务合并 + 严重性拆分：power_surface 为软，redundant 为硬。"""
+    from regent.novel.application.chapter_review import _merge_gate_debts_into_issues
     from regent.novel.domain.prose_front_gates import review_issues_may_coerce
+    from regent.novel.domain.review_issues import is_hard_issue
 
     sp = {
         "gate_debts": [
@@ -393,8 +391,7 @@ def test_prose_front_debt_merge_and_coerce_semantics():
     }
     merged = _merge_gate_debts_into_issues([], sp)
     assert any("[gate_debt:prose_front]" in x and "power_surface" in x for x in merged)
-    assert _only_deferred_issues(merged) is True
-    assert _deferred_issues_contain_redundant(merged) is False
+    assert all(not is_hard_issue(x) for x in merged)
     assert review_issues_may_coerce(merged) is True
 
     sp_redundant = {
@@ -409,8 +406,7 @@ def test_prose_front_debt_merge_and_coerce_semantics():
         ]
     }
     merged_r = _merge_gate_debts_into_issues([], sp_redundant)
-    assert _only_deferred_issues(merged_r) is True
-    assert _deferred_issues_contain_redundant(merged_r) is True
+    assert any(is_hard_issue(x) for x in merged_r)
     assert review_issues_may_coerce(merged_r) is False
 
 

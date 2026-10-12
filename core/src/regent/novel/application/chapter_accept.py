@@ -54,6 +54,50 @@ def collect_accepted_facts(production: dict[str, Any]) -> list[Any]:
     ]
 
 
+def chapter_canon_blockers(run: Any, production: dict[str, Any]) -> list[str]:
+    """正史提交前的确定性硬门（工作包1.2）。
+
+    review.passed 与 creative_accept 都不能单独替代本校验。返回阻断原因列表；
+    非空即禁止写入正史/正式记忆。只校验可确定性核对的项：
+    - 没有未结硬问题（含证据缺陷）；
+    - 正文版本与最近一次审校证据一致；
+    - accepted 下标唯一、有效且非失效 take。
+    """
+    from regent.novel.domain.review_issues import partition_issues
+
+    blockers: list[str] = []
+    review = getattr(run, "review", None)
+    review = review if isinstance(review, dict) else {}
+    content = str(getattr(run, "content", "") or "")
+
+    if "hard_issues" in review:
+        hard = [str(x) for x in (review.get("hard_issues") or []) if str(x).strip()]
+    else:
+        hard, _ = partition_issues(review.get("continuity_issues") or [])
+    if hard:
+        blockers.append(f"unresolved_hard_issues:{len(hard)}")
+
+    history = production.get("review_history") or []
+    if history and isinstance(history[-1], dict):
+        review_hash = str(history[-1].get("content_hash") or "")
+        if review_hash and review_hash != content_hash(content):
+            blockers.append("review_hash_mismatch")
+
+    accepted = production.get("accepted") or []
+    takes = production.get("takes") or []
+    idxs = [int(i) for i in accepted]
+    if len(set(idxs)) != len(idxs):
+        blockers.append("duplicate_accepted_index")
+    for i in idxs:
+        if not (0 <= i < len(takes)):
+            blockers.append("accepted_index_out_of_range")
+            break
+        if str((takes[i] or {}).get("status") or "") in {"SUPERSEDED", "REJECTED"}:
+            blockers.append("accepted_take_invalidated")
+            break
+    return blockers
+
+
 def fact_quotes_missing(content: str, facts: Sequence[Any]) -> list[str]:
     """Return fact quotes that no longer appear verbatim in content."""
     missing: list[str] = []
@@ -115,6 +159,7 @@ def finalize_chapter_acceptance(
         actual_state=state if isinstance(state, dict) else {},
         review_content_hash=review_hash,
     )
+    blockers = chapter_canon_blockers(run, production)
     run.generation_context = {
         **run.generation_context,
         "verified_facts": facts,
@@ -122,6 +167,8 @@ def finalize_chapter_acceptance(
         "node_completed": node_completed,
         "validated_content_hash": content_hash(str(run.content or "")),
         "chapter_handoff": handoff,
+        "canon_blockers": blockers,
     }
-    if passed:
+    # 硬门优先于 review.passed：有未结硬问题/版本不符/take 失效时不写正史与正式记忆。
+    if passed and not blockers:
         commit_run_story_ledger(run, production=production, facts=facts)

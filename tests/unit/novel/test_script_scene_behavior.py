@@ -1371,7 +1371,7 @@ async def test_terminal_review_preserves_actual_unresolved_issues(monkeypatch, r
 
     monkeypatch.setattr(chapter_review, "_call", capture_call)
     if repairs == 2:
-        with pytest.raises(ProductionStopped, match=r"剩余问题.*同一搜查"):
+        with pytest.raises(ProductionStopped, match=r"剩余.*问题.*同一搜查"):
             await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
     else:
         result = await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
@@ -1549,3 +1549,108 @@ async def test_auditor_self_review_rerecords_once():
     stored = sp["scene_audits"]["s1"]["beat_verdicts"][0]["evidence"]
     assert stored == "他把钥匙放在桌上。"
     assert run.generation_context["production"]["phase"] != "AUDIT_SCENE"
+
+
+# --- 工作包1.1：审校硬问题证据接地 + 有界复核 ---
+
+_QUOTED_IN_TEXT = "雨水沿窗棂流下"
+
+
+def _evidence_recheck_run(monkeypatch, recheck_result):
+    """构造一个 DONE 态、含证据缺陷硬问题的 run，并接管复核/接受边界调用。"""
+    from regent.novel.application import chapter_review
+    from regent.novel.application.directing_contracts import EvidenceRecheck
+
+    run, work = _base_run(
+        phase="DONE",
+        sp_extra={
+            "creative_accept": {"accept": True},
+            "scene_plan": {"cards": [_card().model_dump()]},
+            "scene_texts": [TEXT],
+        },
+    )
+    prod = run.generation_context["production"]
+    prod["accepted"] = [0]
+    run.content = TEXT
+    # 引用了对不上正文的摘录 → 证据缺陷，须复核而非直接重写
+    issue = "持物冲突；摘录「他掏出手枪顶住对方太阳穴」"
+    recheck_calls: list = []
+
+    async def capture_call(session, provider, work, run, production, schema,
+                           system, payload, purpose, command_id):
+        if schema is d.ChapterValidation:
+            return schema(passed=False, issues=[issue], failed_scene_index=0)
+        if schema is EvidenceRecheck:
+            recheck_calls.append(payload)
+            return recheck_result(issue)
+        return schema(passed=True, issues=[])
+
+    monkeypatch.setattr(chapter_review, "_call", capture_call)
+    return run, work, issue, recheck_calls
+
+
+@pytest.mark.asyncio
+async def test_evidence_defect_withdrawn_clears_false_positive(monkeypatch):
+    """复核撤回误报 → 无未结硬问题 → 通过，且只复核一次。"""
+    from regent.novel.application import chapter_finalize
+    from regent.novel.application.directing_contracts import EvidenceRecheckItem
+
+    accepted: list = []
+
+    async def fake_accept(**kwargs):
+        accepted.append(kwargs)
+
+    monkeypatch.setattr(chapter_finalize, "run_editorial_then_accept", fake_accept)
+    run, work, issue, recheck_calls = _evidence_recheck_run(
+        monkeypatch,
+        lambda iss: _mk_recheck(
+            [EvidenceRecheckItem(issue_id="evd0", verdict="withdrawn", note="合法重读")]
+        ),
+    )
+    result = await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+    assert result is True
+    assert len(recheck_calls) == 1
+    assert run.review["passed"] is True
+    assert run.review["hard_issues"] == []
+    assert run.review["withdrawn_issues"] == [issue]
+    assert accepted  # 进入了接受边界
+
+
+def _mk_recheck(items):
+    from regent.novel.application.directing_contracts import EvidenceRecheck
+
+    return EvidenceRecheck(items=items)
+
+
+@pytest.mark.asyncio
+async def test_evidence_defect_grounded_goes_to_repair(monkeypatch):
+    """复核补出正文逐字证据 → 转硬问题 → 额度内回退补拍，不放行。"""
+    from regent.novel.application.directing_contracts import EvidenceRecheckItem
+
+    run, work, issue, recheck_calls = _evidence_recheck_run(
+        monkeypatch,
+        lambda iss: _mk_recheck(
+            [
+                EvidenceRecheckItem(
+                    issue_id="evd0", verdict="grounded", grounded_quote=_QUOTED_IN_TEXT
+                )
+            ]
+        ),
+    )
+    result = await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+    assert result is False
+    assert len(recheck_calls) == 1
+    assert run.review["passed"] is False
+    assert run.review["hard_issues"] == [issue]
+    assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
+
+
+@pytest.mark.asyncio
+async def test_evidence_defect_unresolved_stops(monkeypatch):
+    """复核仍无法接地 → 结构化停机，禁止入正史。"""
+    run, work, issue, recheck_calls = _evidence_recheck_run(
+        monkeypatch, lambda iss: _mk_recheck([])
+    )
+    with pytest.raises(ProductionStopped, match=r"无法接地"):
+        await d.validate_chapter(Session(), provider=Provider([]), work=work, run=run)
+    assert len(recheck_calls) == 1

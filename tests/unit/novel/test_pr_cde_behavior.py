@@ -26,9 +26,6 @@ from regent.novel.domain.script_protocol import (
     empty_script_state,
 )
 from regent.novel.domain.states import ChapterRunState, StoryWorkState
-from regent.novel.application.chapter_review import (
-    _coerce_review_soft,
-)
 
 PARA = "雨水沿窗棂流下，两个人仍旧没有开口，钥匙静静躺在桌面正中。"
 
@@ -183,17 +180,8 @@ def test_review_coerce_structured_only():
     assert not review_issues_may_coerce("[front:redundant] 复读")
     assert not review_issues_may_coerce(["第二场跳场"])
     assert review_issues_may_coerce(["[soft-cont:space] 空间省略"])
-
-
-def test_coerce_review_soft_preserves_original():
-    run = SimpleNamespace(
-        review={"passed": False, "continuity_issues": ["跳场"]},
-        generation_context={"production": {}},
-    )
-    _coerce_review_soft(run, {}, ["[editor-soft:x]"], flag="coerced_after_creative")
-    assert run.review["passed"] is True
-    assert run.review["verdict_original"]["passed"] is False
-    assert run.review["accept_decision"] == "coerced_soft"
+    # 工作包1.1：递延连续性债务代表真实冲突，不再可 coerce。
+    assert not review_issues_may_coerce(["[gate_debt:cont]滴答声矛盾"])
 
 
 @pytest.mark.asyncio

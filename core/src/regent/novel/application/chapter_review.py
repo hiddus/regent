@@ -33,7 +33,11 @@ from regent.novel.domain.errors import (
 from regent.novel.domain.prose_front_gates import (
     front_gate_hard_fails,
     power_surface_fails_review,
-    review_issues_may_coerce,
+)
+from regent.novel.domain.review_issues import (
+    partition_hard_by_grounding,
+    partition_issues,
+    quote_in_content,
 )
 from regent.novel.domain.script_protocol import (
     empty_script_state,
@@ -50,6 +54,7 @@ from regent.novel.application.directing_calls import (
 )
 from regent.novel.application.directing_contracts import (
     ChapterValidation,
+    EvidenceRecheck,
     RoleSelfReview,
 )
 from regent.novel.application.directing_runtime import (
@@ -113,30 +118,6 @@ def _merge_gate_debts_into_issues(
     return out
 
 
-def _only_deferred_issues(issues: list[Any] | None) -> bool:
-    """剩余问题是否全部为导演递延的债务（连续性 + prose_front）。"""
-    rows = [str(x).strip() for x in (issues or []) if str(x).strip()]
-    if not rows:
-        return False
-    return all(
-        r.startswith("[gate_debt:cont]")
-        or r.startswith("[gate_debt:prose_front]")
-        or r.startswith("[soft-cont:")
-        for r in rows
-    )
-
-
-def _deferred_issues_contain_redundant(issues: list[Any] | None) -> bool:
-    """递延债务中是否包含 redundant（真复读不可 coerce）。"""
-    for item in (issues or []):
-        text = str(item or "").strip()
-        if not text:
-            continue
-        if "[gate_debt:prose_front]" in text and "redundant" in text:
-            return True
-    return False
-
-
 def _top_review_fix_notes(issues: list[Any] | None, *, limit: int = 3) -> list[str]:
     """回退补拍只带少量互不雷同的事实点，避免几十条意见淹没模型。"""
     out: list[str] = []
@@ -155,26 +136,74 @@ def _top_review_fix_notes(issues: list[Any] | None, *, limit: int = 3) -> list[s
     return out
 
 
-def _coerce_review_soft(
+async def _resolve_evidence_defects(
+    session: Any,
+    provider: Any,
+    work: Any,
     run: Any,
     production: dict[str, Any],
-    issues: list[Any],
     *,
-    flag: str,
-) -> None:
-    prior = dict(run.review or {})
-    run.review["passed"] = True
-    run.review[flag] = True
-    run.review["soft_continuity"] = list(issues)
-    run.review["verdict_original"] = {
-        "passed": prior.get("passed"),
-        "continuity_issues": prior.get("continuity_issues") or [],
-        "coerce_flag": flag,
-        "coerce_reason": "creative_accept_or_advisory_only",
-    }
-    run.review["accept_decision"] = "coerced_soft"
-    run.review["coerce_reason"] = flag
-    _save(run, production)
+    defects: list[str],
+    content: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """对无法接地的审校硬问题做一次有界证据复核。
+
+    返回 (grounded, withdrawn, unresolved)：
+    - grounded：复核补出当前正文逐字证据，转回正常修复路径（硬问题）。
+    - withdrawn：复核撤回，计入误报，不阻断。
+    - unresolved：仍无法接地，须结构化停机，禁止入正史。
+
+    同一正文版本最多复核一次；该调用计入失败路径预算，不占重写/修复/返工额度。
+    """
+    sp = production.setdefault("script_protocol", {})
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    if sp.get("evidence_recheck_hash") == chash:
+        # 本轮已复核过仍无法接地：不再开新一轮，全部视为未解决。
+        return [], [], list(defects)
+    ids = [f"evd{i}" for i in range(len(defects))]
+    result = await _call(
+        session,
+        provider,
+        work,
+        run,
+        production,
+        EvidenceRecheck,
+        "你刚才提出了若干审校硬问题，但程序在当前正文里找不到你引用的证据。"
+        "只复核这些问题的证据，不改正文。对每条：若确是正文中的真实冲突，"
+        "给出当前正文里的逐字片段 grounded_quote 并 verdict=grounded；"
+        "若引用内容不在当前正文、或属于合法重读/引用/维修，verdict=withdrawn。"
+        "不得臆造证据，不得提出新问题。",
+        {
+            "content": content,
+            "defects": [
+                {"issue_id": i, "issue": t}
+                for i, t in zip(ids, defects, strict=True)
+            ],
+        },
+        "chapter_evidence_recheck",
+        f"v{_input_version(run)}:evidence_recheck:{chash[:12]}",
+    )
+    sp["evidence_recheck_hash"] = chash
+    by_id = {str(item.issue_id): item for item in (result.items or [])}
+    grounded: list[str] = []
+    withdrawn: list[str] = []
+    unresolved: list[str] = []
+    for iid, text in zip(ids, defects, strict=True):
+        item = by_id.get(iid)
+        if item is None:
+            unresolved.append(text)
+        elif item.verdict == "withdrawn":
+            withdrawn.append(text)
+        elif (
+            item.verdict == "grounded"
+            and quote_in_content(item.grounded_quote, content)
+        ):
+            grounded.append(text)
+        else:
+            # 声称接地但片段对不上正文 → 视同无法接地。
+            unresolved.append(text)
+    return grounded, withdrawn, unresolved
+
 
 
 def _rewind_script_to_compile(
@@ -604,9 +633,39 @@ async def validate_chapter(
         cleaned_issues.append(item)
     issues = cleaned_issues
     front_only = [x for x in issues if str(x).startswith(("[front:", "[pov:"))]
+    # 严重性与递延分离：软问题只记录不阻断；硬问题必须消除才能入正史（工作包1.1）。
+    hard_issues, soft_issues = partition_issues(issues)
+    content_text = str(run.content or "")
+    # 审校硬问题须证据接地；无法接地的走一次有界复核，不直接触发重写、不自动降软。
+    grounded_hard, evidence_defects = partition_hard_by_grounding(hard_issues, content_text)
+    withdrawn: list[str] = []
+    if evidence_defects:
+        recheck_grounded, withdrawn, unresolved = await _resolve_evidence_defects(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            defects=evidence_defects,
+            content=content_text,
+        )
+        if unresolved:
+            raise ProductionStopped(
+                "审校硬问题无法接地，证据复核后仍缺证据，禁止入正史："
+                + "；".join(str(i) for i in unresolved[:4])
+            )
+        grounded_hard = [*grounded_hard, *recheck_grounded]
+    hard_final = list(grounded_hard)
+    # 有未结硬问题即不通过；硬问题全部被复核撤回（误报）时，审校的 passed=False 被解释掉。
+    # 审校判负却无可核对硬问题、也无撤回记录时，保守不放行。
+    passed = False if hard_final else (bool(result.passed) or bool(withdrawn))
     run.review = {
-        "passed": result.passed and not issues,
+        "passed": passed,
         "continuity_issues": issues,
+        "hard_issues": hard_final,
+        "soft_issues": [*soft_issues, *withdrawn],
+        "evidence_defects": evidence_defects,
+        "withdrawn_issues": withdrawn,
         "prose_issues": [],
         "leakage_issues": [],
         "commons_issues": commons_only,
@@ -621,6 +680,7 @@ async def validate_chapter(
         "content_hash": hashlib.sha256(run.content.encode()).hexdigest(),
         "passed": run.review["passed"],
         "issues": list(issues),
+        "hard_issues": list(hard_final),
         "chapter_repairs": int(production.get("chapter_repairs") or 0),
         "post_creative_review_rewinds": int(production.get("post_creative_review_rewinds") or 0),
     }
@@ -629,114 +689,85 @@ async def validate_chapter(
         history.append(review_snapshot)
     _save(run, production)
     if not run.review["passed"]:
+        # 硬问题不再有强制放行兜底：额度内回退修复，否则结构化停机（工作包1.1）。
         content_hash = hashlib.sha256(run.content.encode()).hexdigest()
         sp = production.get("script_protocol") or {}
         creative_ok = bool((sp.get("creative_accept") or {}).get("accept"))
-        soft_ok = review_issues_may_coerce(issues)
         post_rewinds = int(production.get("post_creative_review_rewinds") or 0)
-
-        # 创作已过：可 soft 意见直接放行，禁止再进 WRITE↔AUDIT 空烧。
-        if creative_ok and (run.content or "").strip() and soft_ok:
-            _coerce_review_soft(
-                run, production, issues, flag="coerced_after_creative"
+        if production.get("last_failed_hash") == content_hash:
+            raise ProductionStopped(
+                "修复没有改变正文，仍有硬问题，停止重试："
+                + "；".join(str(i) for i in hard_final[:4])
             )
-        elif production.get("last_failed_hash") == content_hash:
-            # 正文未变：可 coerce 则放行，否则停机（再烧只会重复）。
-            if creative_ok and (run.content or "").strip() and soft_ok:
-                _coerce_review_soft(
-                    run, production, issues, flag="coerced_unchanged"
-                )
-            else:
-                raise ProductionStopped("修复没有改变正文，停止重试")
-        else:
-            production["last_failed_hash"] = content_hash
-            repairs = production.get("chapter_repairs", 0)
-            if repairs >= MAX_CHAPTER_REPAIRS or (
-                creative_ok and post_rewinds >= _MAX_POST_CREATIVE_REVIEW_REWINDS
-            ):
-                if creative_ok and (run.content or "").strip() and soft_ok:
-                    _coerce_review_soft(
-                        run, production, issues, flag="coerced_after_repairs"
+        production["last_failed_hash"] = content_hash
+        repairs = production.get("chapter_repairs", 0)
+        if repairs >= MAX_CHAPTER_REPAIRS or (
+            creative_ok and post_rewinds >= _MAX_POST_CREATIVE_REVIEW_REWINDS
+        ):
+            raise ProductionStopped(
+                "章节修复次数已达上限，保留场景及证据；剩余硬问题："
+                + "；".join(str(i) for i in hard_final[:4])
+            )
+        production["chapter_repairs"] = repairs + 1
+        if creative_ok:
+            production["post_creative_review_rewinds"] = post_rewinds + 1
+        index = result.failed_scene_index
+        # 保留 None：不得夹成 0 制造伪定位
+        proto = production_protocol(production)
+        if proto in {PROTOCOL_SCRIPT, PROTOCOL_SCRIPT_SCENE}:
+            # script_scene：failed_scene_index 相对分场 cards，不是整章 take 的 accepted。
+            return _rewind_script_after_review(
+                run,
+                production,
+                issues=hard_final or ["整章未通过独立审校"],
+                failed_scene_index=index,
+                proto=proto,
+            )
+        if index is None or index < 0 or index >= len(production["accepted"]):
+            raise ProductionStopped("审校返回无效的场景下标")
+        old = production["takes"][production["accepted"][index]]
+        # 回退该场及之后的全部 take（含从未接受的 REJECTED），避免旧 take 占满重演预算。
+        for take in production["takes"]:
+            if int(take.get("scene_index", -1)) >= index:
+                take["status"] = "SUPERSEDED"
+        production["accepted"] = production["accepted"][:index]
+        production["scene_index"] = index
+        production["working_state"] = deepcopy(old["state_before"])
+        _new_take(
+            production,
+            old["brief"],
+            SceneRunState.DIRECTOR_VIEW.value,
+            SceneArtifact.PROSE.value,
+        )
+        current = production["takes"][-1]
+        editor_notes = [x for x in (issues or []) if "[editor:" in str(x)]
+        repair_note = "；".join(
+            (hard_final or issues or ["整章未通过独立审校"])[:6]
+        )[:400]
+        current.update(
+            {
+                "events": deepcopy(old["events"]),
+                "content": old["content"],
+                "prose_versions": [old["content"]],
+                "validation": {
+                    "passed": False,
+                    "issues": hard_final or issues or ["整章未通过独立审校"],
+                },
+                "revision_instruction": (
+                    "整章责编/审校未通过，必须改稿消掉下列问题后再提交："
+                    + (
+                        "；".join(editor_notes[:5])
+                        if editor_notes
+                        else repair_note
                     )
-                elif (
-                    repairs >= 1
-                    and (run.content or "").strip()
-                    and _only_deferred_issues(issues)
-                    and not _deferred_issues_contain_redundant(issues)
-                ):
-                    # 至少修过一轮：纯递延债务（无 redundant）可 coerce
-                    _coerce_review_soft(
-                        run,
-                        production,
-                        issues,
-                        flag="coerced_deferred_issues",
-                    )
-                else:
-                    raise ProductionStopped(
-                        "章节修复次数已达上限，保留场景及证据；剩余问题："
-                        + "；".join(str(i) for i in issues[:4])
-                    )
-            if not run.review.get("passed"):
-                production["chapter_repairs"] = repairs + 1
-                if creative_ok:
-                    production["post_creative_review_rewinds"] = post_rewinds + 1
-                index = result.failed_scene_index
-                # 保留 None：不得夹成 0 制造伪定位
-                proto = production_protocol(production)
-                if proto in {PROTOCOL_SCRIPT, PROTOCOL_SCRIPT_SCENE}:
-                    # script_scene：failed_scene_index 相对分场 cards，不是整章 take 的 accepted。
-                    return _rewind_script_after_review(
-                        run,
-                        production,
-                        issues=issues or ["整章未通过独立审校"],
-                        failed_scene_index=index,
-                        proto=proto,
-                    )
-                if index is None or index < 0 or index >= len(production["accepted"]):
-                    raise ProductionStopped("审校返回无效的场景下标")
-                old = production["takes"][production["accepted"][index]]
-                # 回退该场及之后的全部 take（含从未接受的 REJECTED），避免旧 take 占满重演预算。
-                for take in production["takes"]:
-                    if int(take.get("scene_index", -1)) >= index:
-                        take["status"] = "SUPERSEDED"
-                production["accepted"] = production["accepted"][:index]
-                production["scene_index"] = index
-                production["working_state"] = deepcopy(old["state_before"])
-                _new_take(
-                    production,
-                    old["brief"],
-                    SceneRunState.DIRECTOR_VIEW.value,
-                    SceneArtifact.PROSE.value,
-                )
-                current = production["takes"][-1]
-                editor_notes = [x for x in (issues or []) if "[editor:" in str(x)]
-                repair_note = "；".join(
-                    (issues or ["整章未通过独立审校"])[:6]
-                )[:400]
-                current.update(
-                    {
-                        "events": deepcopy(old["events"]),
-                        "content": old["content"],
-                        "prose_versions": [old["content"]],
-                        "validation": {
-                            "passed": False,
-                            "issues": issues or ["整章未通过独立审校"],
-                        },
-                        "revision_instruction": (
-                            "整章责编/审校未通过，必须改稿消掉下列问题后再提交："
-                            + (
-                                "；".join(editor_notes[:5])
-                                if editor_notes
-                                else repair_note
-                            )
-                        )[:500],
-                        "revisions": 0,
-                        "revision_mode": "full",
-                    }
-                )
-                production["phase"] = "WATCH_PROSE"
-                _save(run, production)
-                return False
+                )[:500],
+                "revisions": 0,
+                "revision_mode": "full",
+            }
+        )
+        production["phase"] = "WATCH_PROSE"
+        _save(run, production)
+        return False
     # 完成也是一条命令：只在整章通过独立审校后才允许（P1-1）
     if run.review.get("passed"):
         from regent.novel.application.chapter_finalize import run_editorial_then_accept

@@ -1134,6 +1134,13 @@ async def canon(
     if is_directed(run):
         if not run.review.get("passed") or run.generation_context.get("validated_content_hash") != source_hash:
             raise RuntimeError("UNVALIDATED_CHAPTER")
+        # 正史硬门（工作包1.2）：review.passed 不能单独替代确定性校验。
+        from regent.novel.application.chapter_accept import chapter_canon_blockers
+        from regent.novel.domain.errors import ProductionStopped
+
+        blockers = chapter_canon_blockers(run, run.generation_context.get("production") or {})
+        if blockers:
+            raise ProductionStopped("正史提交被硬门阻断：" + "；".join(blockers))
         # Serialise chapter acceptance per work, including the empty-Canon case.
         await session.scalar(select(StoryWorkModel.id).where(StoryWorkModel.id == work.id).with_for_update())
     existing = await session.scalar(
