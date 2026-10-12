@@ -153,11 +153,13 @@ def finalize_chapter_acceptance(
     if history and isinstance(history[-1], dict):
         review_hash = str(history[-1].get("content_hash") or "")
     state = production.get("working_state")
+    ledger = production.get("continuity_ledger")
     handoff = build_chapter_handoff(
         chapter_no=int(getattr(run, "chapter_no", 0) or 0),
         content=str(run.content or ""),
         actual_state=state if isinstance(state, dict) else {},
         review_content_hash=review_hash,
+        continuity_ledger=ledger if isinstance(ledger, dict) else None,
     )
     blockers = chapter_canon_blockers(run, production)
     run.generation_context = {

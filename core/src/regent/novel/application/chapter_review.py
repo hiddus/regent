@@ -239,6 +239,19 @@ def _rewind_script_to_compile(
     if isinstance(entry, dict):
         sp["working_state"] = deepcopy(entry)
         production["working_state"] = deepcopy(entry)
+    # 台账也回退到本章入口（前章 handoff 或空台账）。
+    from regent.novel.domain.continuity_ledger import empty_ledger
+
+    prev_ledger = None
+    for prev in reversed(run.generation_context.get("recent_chapters") or []):
+        if isinstance(prev, dict) and isinstance(prev.get("continuity_ledger"), dict):
+            prev_ledger = prev["continuity_ledger"]
+            break
+    sp["continuity_ledger"] = (
+        deepcopy(prev_ledger) if prev_ledger else empty_ledger()
+    )
+    sp["continuity_ledger_trail"] = [deepcopy(sp["continuity_ledger"])]
+    sp.pop("ledger_violations", None)
     for key in list(sp):
         if key.startswith((
             "writer_self_reviewed:",

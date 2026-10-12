@@ -97,6 +97,11 @@ from regent.novel.domain.script_protocol import (
     task_for_slot,
     validation_system_contract,
 )
+from regent.novel.domain.continuity_ledger import (
+    apply_delta as apply_ledger_delta,
+)
+from regent.novel.domain.continuity_ledger import empty_ledger
+from regent.novel.domain.continuity_ledger import ledger_to_text_summary
 from regent.novel.domain.states import SceneArtifact, SceneRunState
 from regent.novel.domain.world_bible import (
     resolve_prose_style,
@@ -1148,6 +1153,12 @@ async def _produce_script_tick(
         sp["working_state"] = confirmed
         sp["scene_state_trail"] = [deepcopy(confirmed)]
         sp["scene_exit_states"] = []
+        # 连续性台账（工作包2）：与前章 handoff 恢复，或空台账。
+        prev_ledger = (prev_handoff or {}).get("continuity_ledger")
+        sp["continuity_ledger"] = (
+            deepcopy(prev_ledger) if isinstance(prev_ledger, dict) else empty_ledger()
+        )
+        sp["continuity_ledger_trail"] = [deepcopy(sp["continuity_ledger"])]
         opening, opening_entries = initial_entry_from_previous(
             prev_handoff if has_previous_handoff else None
         )
@@ -1227,6 +1238,9 @@ async def _produce_script_tick(
             ],
             "entry_summary": entry_summary,
             "working_state": sp.get("working_state") or {},
+            "continuity_ledger_summary": ledger_to_text_summary(
+                sp.get("continuity_ledger") or {}
+            ),
             "chapter_goal": plan.get("chapter_goal") or "",
             "continuation": {
                 "mode": plan.get("continuation_mode") or "",
@@ -1457,6 +1471,25 @@ async def _produce_script_tick(
         next_state = deepcopy(sp.get("working_state") or {})
         next_state.update(audit.state_changes)
         sp["working_state"] = next_state
+        # 台账增量（工作包2）：原子应用，违规时记录但不阻断（首轮并行，不替代旧链路）。
+        ledger = sp.get("continuity_ledger") or empty_ledger()
+        if audit.ledger_delta is not None:
+            delta_dict = audit.ledger_delta.model_dump(mode="json")
+            new_ledger, violations = apply_ledger_delta(
+                ledger,
+                delta_dict,
+                scene_id=audit.scene_id,
+                prose_hash="",
+                event_id="",
+            )
+            if violations:
+                sp.setdefault("ledger_violations", []).extend(
+                    [{"scene_id": audit.scene_id, "v": v} for v in violations]
+                )
+            else:
+                ledger = new_ledger
+        sp["continuity_ledger"] = ledger
+        sp.setdefault("continuity_ledger_trail", []).append(deepcopy(ledger))
         # 结构化场出口：供后场证明「已接受新值」而非「旧值未出现」
         exits = list(sp.get("scene_exit_states") or [])
         while len(exits) < idx:
@@ -1512,6 +1545,8 @@ async def _produce_script_tick(
         # 组装时同步核验后的临时状态，避免 production/sp 两套 working_state 分叉
         if sp.get("working_state") is not None:
             production["working_state"] = deepcopy(sp["working_state"])
+        if sp.get("continuity_ledger") is not None:
+            production["continuity_ledger"] = deepcopy(sp["continuity_ledger"])
         production["phase"] = "VALIDATE"
     elif phase == "WRITE_CHAPTER":
         packet = sp.get("production_packet")
@@ -1925,6 +1960,17 @@ async def _produce_script_tick(
                     )
                 )
                 sp["working_state"] = confirmed
+                # 重生轮台账也回退到本章入口（前章 handoff 或空台账）。
+                prev_ledger = None
+                for prev in reversed(run.generation_context.get("recent_chapters") or []):
+                    if isinstance(prev, dict) and isinstance(prev.get("continuity_ledger"), dict):
+                        prev_ledger = prev["continuity_ledger"]
+                        break
+                sp["continuity_ledger"] = (
+                    deepcopy(prev_ledger) if prev_ledger else empty_ledger()
+                )
+                sp["continuity_ledger_trail"] = [deepcopy(sp["continuity_ledger"])]
+                sp.pop("ledger_violations", None)
                 production["takes"] = []
                 production["accepted"] = []
                 production["phase"] = "BRIEF"
@@ -1981,6 +2027,8 @@ async def _produce_script_tick(
             # 全章通过：提交同一份核验后状态，不再维护两份工作状态
             if proto == PROTOCOL_SCRIPT_SCENE and sp.get("working_state") is not None:
                 production["working_state"] = deepcopy(sp["working_state"])
+            if sp.get("continuity_ledger") is not None:
+                production["continuity_ledger"] = deepcopy(sp["continuity_ledger"])
             _RUNTIME.validate(
                 director_command(
                     CommandKind.ASSEMBLE_CHAPTER,

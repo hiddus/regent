@@ -279,6 +279,57 @@ class SceneProseWithBeats(BaseModel):
     beat_evidence: dict[str, str] = Field(default_factory=dict)
 
 
+class LedgerPropRegistration(BaseModel):
+    prop_id: str = Field(min_length=1)
+    name: str = ""
+    position: str = "unknown"
+    holder: str = ""
+
+
+class LedgerPropUpdate(BaseModel):
+    prop_id: str = Field(min_length=1)
+    position: str | None = None
+    holder: str | None = None
+    lifecycle: str | None = None
+    partition_updates: dict[str, str] = Field(default_factory=dict)
+
+
+class LedgerResourceRegistration(BaseModel):
+    resource_id: str = Field(min_length=1)
+    name: str = ""
+
+
+class LedgerResourceConsumption(BaseModel):
+    resource_id: str = Field(min_length=1)
+    entry: str = Field(min_length=1)
+    cause_event_id: str = ""
+
+
+class LedgerOneTimeEvent(BaseModel):
+    scope_key: str = ""
+    event_type: str = ""
+    object_id: str = ""
+    actor_id: str = ""
+
+
+class LedgerActorPositionUpdate(BaseModel):
+    actor_id: str = Field(min_length=1)
+    location: str = Field(min_length=1)
+    enter_new_visit: bool = False
+
+
+class LedgerDelta(BaseModel):
+    """台账增量（工作包2）。场记在 SceneAudit 中可选输出，程序校验后原子应用。"""
+
+    prop_registrations: list[LedgerPropRegistration] = Field(default_factory=list)
+    prop_updates: list[LedgerPropUpdate] = Field(default_factory=list)
+    resource_registrations: list[LedgerResourceRegistration] = Field(default_factory=list)
+    resource_consumptions: list[LedgerResourceConsumption] = Field(default_factory=list)
+    one_time_events: list[LedgerOneTimeEvent] = Field(default_factory=list)
+    actor_position_updates: list[LedgerActorPositionUpdate] = Field(default_factory=list)
+    time_marker: str = ""
+
+
 class SceneAudit(BaseModel):
     scene_id: str = Field(min_length=1)
     beat_verdicts: list[BeatVerdict] = Field(default_factory=list)
@@ -290,6 +341,7 @@ class SceneAudit(BaseModel):
     character_shifts: list[str] = Field(default_factory=list)
     hooks_opened: list[str] = Field(default_factory=list)
     hooks_closed: list[str] = Field(default_factory=list)
+    ledger_delta: LedgerDelta | None = None
 
 
 # Private compatibility names used by existing tests/checkpoints.

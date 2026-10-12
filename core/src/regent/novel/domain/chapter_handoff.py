@@ -60,6 +60,7 @@ def build_chapter_handoff(
     content: str,
     actual_state: dict[str, Any] | None = None,
     review_content_hash: str = "",
+    continuity_ledger: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从最终正文生成交接。尾段必须是正文后缀，摘要不得另造事实。"""
     text = content or ""
@@ -67,7 +68,7 @@ def build_chapter_handoff(
     digest = content_hash(text)
     reviewed = str(review_content_hash or "")
     state = dict(actual_state) if isinstance(actual_state, dict) else {}
-    return {
+    result = {
         "schema": SCHEMA,
         "chapter_no": int(chapter_no),
         "content_hash": digest,
@@ -76,6 +77,9 @@ def build_chapter_handoff(
         "review_content_hash": reviewed,
         "review_matches_final": bool(reviewed) and reviewed == digest,
     }
+    if isinstance(continuity_ledger, dict) and continuity_ledger:
+        result["continuity_ledger"] = dict(continuity_ledger)
+    return result
 
 
 def handoff_bound(handoff: dict[str, Any] | None, content: str) -> bool:
