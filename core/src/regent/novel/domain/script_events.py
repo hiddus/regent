@@ -230,18 +230,68 @@ def _event_text_blobs(event: dict[str, Any]) -> list[str]:
 
 
 def _events_look_synonymous(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """同义启发式：描述/别名互相包含即视为同一故事事件。
+    """同义启发式：较短文本被较长文本包含，且长度接近，才视为同一事件。
 
-    覆盖「老瘸子受刑」vs「老瘸子被抽了七鞭」这类换名重演；
-    完全不同的措辞仍靠抽取阶段 LLM 合并 aliases。
+    覆盖「老瘸子受刑」vs「老瘸子受刑之后」这类换名。
+    新一轮说明里顺带复述上一场，不能因为包含短句就判成重演。
     """
     blobs_a = _event_text_blobs(a)
     blobs_b = _event_text_blobs(b)
-    for x in blobs_a:
-        for y in blobs_b:
-            if x in y or y in x:
+    for left in blobs_a:
+        for right in blobs_b:
+            if not left or not right:
+                continue
+            short, long = (left, right) if len(left) <= len(right) else (right, left)
+            if len(short) < 4:
+                continue
+            if short in long and len(short) / len(long) >= 0.5:
                 return True
     return False
+
+
+def ground_orphan_event_roles(
+    plan_cards: list[dict[str, Any]],
+    script_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """没有任何 occurrence 时，把最早一场的 consequence 改成 occurrence。
+
+    清单里的事件常被标成 consequence，分场又只写 role=consequence。
+    硬闸要求同 ID 另有一场真正发生，返工就会在「只标后果」上打转并停章。
+    回忆类事件保持 reference，不在这里升成发生。
+    """
+    events_by_id: dict[str, dict[str, Any]] = {}
+    for event in script_events:
+        event_id = _normalize_event_id(event.get("event_id", ""))
+        if event_id:
+            events_by_id[event_id] = event
+
+    cards: list[dict[str, Any]] = []
+    for card in plan_cards:
+        copied = dict(card)
+        copied["event_refs"] = [dict(ref) for ref in (card.get("event_refs") or [])]
+        cards.append(copied)
+
+    owners: set[str] = set()
+    for card in cards:
+        for ref in card["event_refs"]:
+            event_id = _normalize_event_id(ref.get("event_id", ""))
+            if event_id and str(ref.get("role") or "occurrence") == "occurrence":
+                owners.add(event_id)
+
+    promoted: set[str] = set()
+    for card in cards:
+        for ref in card["event_refs"]:
+            event_id = _normalize_event_id(ref.get("event_id", ""))
+            if not event_id or event_id in owners or event_id in promoted:
+                continue
+            event_type = str((events_by_id.get(event_id) or {}).get("event_type") or "")
+            if event_type == "reference":
+                continue
+            if str(ref.get("role") or "occurrence") != "consequence":
+                continue
+            ref["role"] = "occurrence"
+            promoted.add(event_id)
+    return cards
 
 
 def validate_plan_event_refs(
@@ -421,8 +471,8 @@ def _build_repartition_prompt(
 
 ## 修复要求
 
-1. 识别重复事件：如果同一事件在多个场景作为 occurrence 出现，决定保留哪个场景的版本
-2. 调整受影响场景：将重复事件的 role 改为 consequence 或 reference，或从该场景删除
+1. 识别重复事件：如果同一事件在多个场景作为 occurrence 出现，决定保留哪个场景的版本，其后改成 reference
+2. 若错误是「尚无任何场景作为 occurrence」：在最早引用该事件的场把 role 改成 occurrence。不要把唯一的发生场改成 consequence
 3. 保持故事连贯性：确保修改后的计划仍然能讲通故事
 4. 禁止自造事件：所有 event_id 必须来自剧本事件清单
 5. 输出完整的重分场后计划（JSON 格式）

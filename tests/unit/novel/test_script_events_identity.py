@@ -12,6 +12,7 @@ from regent.novel.domain.scene_card import EventRef, SceneCard
 from regent.novel.domain.script_events import (
     ScriptEvent,
     _events_look_synonymous,
+    ground_orphan_event_roles,
     validate_plan_event_refs,
     validate_script_events,
 )
@@ -63,6 +64,38 @@ def test_a_same_id_two_occurrence_blocked():
     ]
     errs = validate_plan_event_refs(cards, SEARCH_EVENTS)
     assert any("同一事件只能在一个场景发生" in e for e in errs)
+
+
+def test_orphan_consequence_becomes_the_occurrence():
+    """真机停章：s2 只把决定标成后果，清单里也没有另一场 occurrence。"""
+    events = [
+        {"event_id": "evt_other", "description": "其他", "event_type": "occurrence", "aliases": []},
+        {
+            "event_id": "evt_decision_to_find_watch",
+            "description": "决定去找表",
+            "event_type": "consequence",
+            "aliases": [],
+        },
+    ]
+    cards = [
+        _card("s1", [_occ("evt_other", "b1")]),
+        _card("s2", [_occ("evt_decision_to_find_watch", "b2", role="consequence")]),
+    ]
+    grounded = ground_orphan_event_roles(cards, events)
+    assert grounded[0]["event_refs"][0]["role"] == "occurrence"
+    assert grounded[1]["event_refs"][0]["role"] == "occurrence"
+    assert validate_plan_event_refs(grounded, events) == []
+
+
+def test_existing_occurrence_is_not_rewritten_by_grounding():
+    cards = [
+        _card("s1", [_occ("evt_search", "b1")]),
+        _card("s3", [_occ("evt_search", "b14", role="consequence")]),
+    ]
+    grounded = ground_orphan_event_roles(cards, SEARCH_EVENTS)
+    assert grounded[1]["event_refs"][0]["role"] == "consequence"
+    errs = validate_plan_event_refs(grounded, SEARCH_EVENTS)
+    assert any("consequence 须是独立 event_id" in e for e in errs)
 
 
 def test_b_role_launder_consequence_blocked():
@@ -173,3 +206,22 @@ def test_synonym_helper_contains_match():
     b = {"description": "鞭打", "aliases": ["老瘸子受刑之后"]}
     assert _events_look_synonymous(a, b) is True
     assert _events_look_synonymous(a, {"description": "王虎得赏", "aliases": []}) is False
+
+
+def test_recap_inside_new_round_is_not_synonym():
+    """第2章真机：打电话的短句被写进第二格的长说明，不能判成同一事件。"""
+    call = {
+        "description": "林默给苏晚打电话",
+        "aliases": ["苏晚说父亲也这么说"],
+        "event_type": "occurrence",
+    }
+    second = {
+        "description": (
+            "林默从回避夺取转为追查，进入第二格。"
+            "林默给苏晚打电话只是前情，随后灰色大衣女人在小区门口出现，"
+            "父亲纸条指向旧货店，林默决定带上怀表出门。"
+        ),
+        "aliases": [],
+        "event_type": "new_round",
+    }
+    assert _events_look_synonymous(call, second) is False

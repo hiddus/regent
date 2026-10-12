@@ -204,6 +204,12 @@ def _rewind_script_to_compile(
     sp["post_review_rewrite"] = False
     sp["compile_self_review_done"] = False
     sp.pop("compile_self_review", None)
+    # 入口只能来自 chapter_entry_state：ASSEMBLE 把失败草稿出口写进了 working_state，
+    # 若不重置，重分场会从失败稿的出口起算，带污染进正史。
+    entry = production.get("chapter_entry_state")
+    if isinstance(entry, dict):
+        sp["working_state"] = deepcopy(entry)
+        production["working_state"] = deepcopy(entry)
     for key in list(sp):
         if key.startswith((
             "writer_self_reviewed:",

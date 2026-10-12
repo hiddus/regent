@@ -323,6 +323,50 @@ async def test_compile_repairs_duplicate_events_before_writing(monkeypatch):
     assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
 
 
+@pytest.mark.asyncio
+async def test_compile_after_review_rewind_has_no_previous_plan(monkeypatch):
+    """审校打回重分场时旧计划已清空，第一轮不得对 None 调用 model_dump。"""
+    from regent.novel.application import directing_calls as dc_module
+    from regent.novel.application import directing_script_loop as loop
+
+    run, work = _scene_run(phase="COMPILE_SCENES", texts=[])
+    sp = run.generation_context["production"]["script_protocol"]
+    sp["review_plan_repair"] = ["后场把已经发生的搜查又排成一次"]
+    sp["scene_plan"] = {}
+    calls = []
+
+    async def capture_call(session, provider, work, run, production, schema,
+                           system, payload, purpose, command_id):
+        calls.append((purpose, payload))
+        if getattr(schema, "__name__", "") == "RoleSelfReview":
+            return schema(passed=True)
+        if purpose == "extract_script_events":
+            from regent.novel.domain.script_events import ScriptEvent, ScriptEventList
+            return ScriptEventList(events=[
+                ScriptEvent(event_id="evt_dup", description="duplicate", event_type="occurrence"),
+            ])
+        if purpose == "repartition_plan":
+            c1 = _card("s1", "b1")
+            c1.event_refs = [{"event_id": "evt_dup", "beat_id": "b1", "role": "occurrence"}]
+            c1.acceptance_ids = [i["item_id"] for i in payload.get("acceptance_items") or []]
+            return schema(cards=[c1], chapter_goal="g", continuity_notes="")
+        c1 = _card("s1", "b1")
+        c1.event_refs = [{"event_id": "evt_dup", "beat_id": "b1", "role": "occurrence"}]
+        items = payload.get("acceptance_items") or []
+        c1.acceptance_ids = [i["item_id"] for i in items]
+        c1.beats[0].text = "搜查结束后，告密者当众接过稠粥和咸肉，监工收起鞭子带着手下离开矿场。"
+        return schema(cards=[c1], chapter_goal="把柄易手", continuity_notes="")
+
+    monkeypatch.setattr(loop, "_call", capture_call)
+    monkeypatch.setattr(dc_module, "_call", capture_call)
+    await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
+    plan_calls = [payload for purpose, payload in calls if "acceptance_items" in payload]
+    assert plan_calls
+    assert "repair_instructions" in plan_calls[0]
+    assert "previous_plan" not in plan_calls[0]
+    assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
+
+
 def test_locate_unlocatable_not_default_last():
     texts = ["独有甲。" * 40, "独有乙。" * 40]
     cards = [_card("s0", "b0"), _card("s1", "b1")]
@@ -670,3 +714,75 @@ def test_review_rewind_uses_locate_not_default_last():
     assert sp["scene_index"] == 0
     assert sp.get("pending_repair_ticket", {}).get("scene_id") == "s0"
     assert len(sp["scene_texts"]) == 1
+
+
+def test_rewind_to_compile_restores_chapter_entry_state():
+    """回分场必须恢复本章入口，不继承失败草稿写进 working_state 的出口。"""
+    from regent.novel.application.chapter_review import _rewind_script_to_compile
+
+    entry = {"watch": "口袋", "location": "修理铺"}
+    polluted = {"watch": "碎裂", "location": "矿场", "leaked": True}
+    sp = empty_script_state()
+    sp.update(
+        {
+            "scene_texts": ["旧稿一", "旧稿二"],
+            "scene_index": 2,
+            "working_state": dict(polluted),
+            "scene_plan": {"cards": [], "chapter_goal": "x"},
+        }
+    )
+    production = {
+        "protocol": PROTOCOL_SCRIPT_SCENE,
+        "phase": "REVIEW",
+        "takes": [{"status": "ACCEPTED", "content": "旧稿"}],
+        "accepted": [0],
+        "script_protocol": sp,
+        "working_state": dict(polluted),
+        "chapter_entry_state": dict(entry),
+    }
+    run = SimpleNamespace(content="旧稿", review={"passed": False}, generation_context={})
+    ok = _rewind_script_to_compile(
+        run, production, issues=["后场把已发生的搜查又排了一次"], note="重分场"
+    )
+    assert ok is False
+    assert production["phase"] == "COMPILE_SCENES"
+    assert production["working_state"] == entry
+    assert sp["working_state"] == entry
+    assert "leaked" not in sp["working_state"]
+    assert sp["scene_texts"] == []
+
+
+@pytest.mark.asyncio
+async def test_compile_scenes_seeds_from_chapter_entry_state_not_polluted(monkeypatch):
+    """COMPILE 入口只能来自 chapter_entry_state，忽略被失败草稿出口污染的 working_state。"""
+    from regent.novel.application import directing_calls as dc_module
+    from regent.novel.application import directing_script_loop as loop
+
+    run, work = _scene_run(phase="COMPILE_SCENES", texts=[])
+    production = run.generation_context["production"]
+    production["chapter_entry_state"] = {"watch": "口袋"}
+    production["working_state"] = {"watch": "碎裂", "leaked": True}
+    production["script_protocol"]["working_state"] = {"watch": "碎裂", "leaked": True}
+
+    async def capture_call(session, provider, work, run, production, schema,
+                           system, payload, purpose, command_id):
+        if getattr(schema, "__name__", "") == "RoleSelfReview":
+            return schema(passed=True)
+        if purpose == "extract_script_events":
+            from regent.novel.domain.script_events import ScriptEvent, ScriptEventList
+            return ScriptEventList(events=[
+                ScriptEvent(event_id="evt_dup", description="duplicate", event_type="occurrence"),
+            ])
+        c1 = _card("s1", "b1")
+        c1.event_refs = [{"event_id": "evt_dup", "beat_id": "b1", "role": "occurrence"}]
+        items = payload.get("acceptance_items") or []
+        c1.acceptance_ids = [i["item_id"] for i in items]
+        return schema(cards=[c1], chapter_goal="把柄易手", continuity_notes="")
+
+    monkeypatch.setattr(loop, "_call", capture_call)
+    monkeypatch.setattr(dc_module, "_call", capture_call)
+    await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
+    sp = run.generation_context["production"]["script_protocol"]
+    assert sp["working_state"] == {"watch": "口袋"}
+    assert "leaked" not in sp["working_state"]
+    assert sp["scene_state_trail"][0] == {"watch": "口袋"}

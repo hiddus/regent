@@ -919,7 +919,9 @@ async def _produce_script_tick(
             }
             if compile_repair:
                 compile_payload["repair_instructions"] = compile_repair
-                compile_payload["previous_plan"] = plan_draft.model_dump()
+                # 审校打回重分场时旧计划已清空，第一轮还没有 previous_plan。
+                if plan_draft is not None:
+                    compile_payload["previous_plan"] = plan_draft.model_dump()
             plan_draft = await call(
                 _ScenePlanDraft,
                 "你是总导演，负责分场。把选定剧本拆成 2–4 张场景卡。"
@@ -980,7 +982,21 @@ async def _produce_script_tick(
                 if item_id not in known_acc_ids
             )
             # 事件引用硬闸：清单完备 + 唯一所有权 + 义务落场
-            from regent.novel.domain.script_events import validate_plan_event_refs
+            from regent.novel.domain.script_events import (
+                ground_orphan_event_roles,
+                validate_plan_event_refs,
+            )
+
+            def _ground_plan(plan_obj: Any) -> Any:
+                grounded = ground_orphan_event_roles(
+                    [card.model_dump() for card in plan_obj.cards],
+                    sp.get("script_events") or [],
+                )
+                return plan_obj.model_copy(
+                    update={"cards": [SceneCard.model_validate(c) for c in grounded]}
+                )
+
+            plan_draft = _ground_plan(plan_draft)
             event_ref_errors = validate_plan_event_refs(
                 [card.model_dump() for card in plan_draft.cards],
                 sp.get("script_events") or [],
@@ -1042,6 +1058,7 @@ async def _produce_script_tick(
                     for item_id in card.acceptance_ids
                     if item_id not in known_acc_ids
                 )
+                plan_draft = _ground_plan(plan_draft)
                 event_ref_errors = validate_plan_event_refs(
                     [card.model_dump() for card in plan_draft.cards],
                     sp.get("script_events") or [],
@@ -1063,6 +1080,8 @@ async def _produce_script_tick(
                 "上一版分场未通过：" + "；".join(hard[:6]) + "。",
                 "修复事件重复和时间顺序；保留唯一 ID，补全空场，"
                 "为每项 required 义务指定唯一 acceptance_ids 责任场，并覆盖转折与代价。",
+                "若某事件只有 consequence、没有任何 occurrence，"
+                "在最早引用它的场改成 occurrence，不要只标后果。",
             ]
             if acc_hard:
                 missing = [
@@ -1115,10 +1134,17 @@ async def _produce_script_tick(
         }
         sp["scene_index"] = 0
         sp["scene_texts"] = []
-        # 从已确认状态初始化，不另起空字典；全章通过后提交同一份。
-        confirmed = deepcopy(
-            production.get("working_state") or run.generation_context.get("actual_state") or {}
-        )
+        # 本章入口只在首次分场快照一次；回退/重生都从这里恢复。
+        # 绝不用失败草稿的出口（ASSEMBLE 写入 production.working_state）当新入口。
+        entry = production.get("chapter_entry_state")
+        if not isinstance(entry, dict):
+            entry = deepcopy(
+                production.get("working_state")
+                or run.generation_context.get("actual_state")
+                or {}
+            )
+            production["chapter_entry_state"] = deepcopy(entry)
+        confirmed = deepcopy(entry)
         sp["working_state"] = confirmed
         sp["scene_state_trail"] = [deepcopy(confirmed)]
         sp["scene_exit_states"] = []
@@ -1887,11 +1913,16 @@ async def _produce_script_tick(
                 ):
                     sp.pop(k, None)
                 sp["scene_index"] = 0
-                # 重生轮从已确认状态重开，不另起空字典
-                confirmed = deepcopy(
-                    production.get("working_state")
-                    or run.generation_context.get("actual_state")
-                    or {}
+                # 重生轮从本章入口重开，不继承失败草稿的出口。
+                entry = production.get("chapter_entry_state")
+                confirmed = (
+                    deepcopy(entry)
+                    if isinstance(entry, dict)
+                    else deepcopy(
+                        production.get("working_state")
+                        or run.generation_context.get("actual_state")
+                        or {}
+                    )
                 )
                 sp["working_state"] = confirmed
                 production["takes"] = []
