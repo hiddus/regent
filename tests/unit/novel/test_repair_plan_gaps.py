@@ -459,3 +459,19 @@ def test_whole_beat_delete_becomes_semantic_short_phrase_stays():
     )
     assert kept[0]["category"] == "structural"
     assert kept[0]["text_must_exclude"] == "开门时手还在抖"
+
+
+def test_short_exclude_is_stripped_from_revised_plan():
+    from regent.novel.domain.self_review_check import strip_excluded_phrases
+
+    issues = [
+        {
+            "category": "structural",
+            "text_must_exclude": "他甚至没注意到是什么时候丢的",
+            "text_must_include": "突然想不起父亲教他调游丝时手指的温度",
+        }
+    ]
+    text = "他突然想不起父亲教他调游丝时手指的温度，他甚至没注意到是什么时候丢的。"
+    stripped = strip_excluded_phrases(text, issues)
+    assert "他甚至没注意到是什么时候丢的" not in stripped
+    assert "突然想不起父亲教他调游丝时手指的温度" in stripped

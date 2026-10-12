@@ -168,6 +168,29 @@ def demote_sole_passage_deletes(
     return out
 
 
+def strip_excluded_phrases(text: str, issues: list[Any] | None) -> str:
+    """从改后的计划里删掉自审点名的短句。整段删除已改记语义，不会进到这里。"""
+    body = str(text or "")
+    includes = [
+        str(issue.get("text_must_include") or "").strip()
+        for issue in issues or []
+        if isinstance(issue, dict) and str(issue.get("category") or "") == "structural"
+    ]
+    includes = [item for item in includes if item]
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            continue
+        if str(issue.get("category") or "") != "structural":
+            continue
+        exclude = str(issue.get("text_must_exclude") or "").strip()
+        if len(exclude) < 4:
+            continue
+        if any(exclude in include for include in includes):
+            continue
+        body = body.replace(exclude, "")
+    return body
+
+
 def explain_plan_constraint(code: str) -> str:
     """把程序约束码写成重分场能执行的句子。"""
     if code.startswith("constraint_present:"):
@@ -233,6 +256,7 @@ __all__ = [
     "ground_structural_quotes",
     "remember_semantic_issues",
     "should_trigger_self_review",
+    "strip_excluded_phrases",
     "unclassified_opinions",
     "verify_structural_constraints",
 ]

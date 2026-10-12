@@ -1034,13 +1034,36 @@ async def _produce_script_tick(
 
         async def _compile_self_issues(plan_obj: Any) -> list[str]:
             if sp.get("compile_self_review_done"):
-                from regent.novel.domain.self_review_check import verify_structural_constraints
+                from regent.novel.domain.self_review_check import (
+                    strip_excluded_phrases,
+                    verify_structural_constraints,
+                )
 
                 stored = sp.get("compile_self_review") or {}
-                blob = json.dumps(plan_obj.model_dump(), ensure_ascii=False)
-                return verify_structural_constraints(
-                    blob, stored.get("classified_issues") if isinstance(stored, dict) else []
+                classified = (
+                    stored.get("classified_issues") if isinstance(stored, dict) else []
                 )
+                for card in plan_obj.cards:
+                    for name in (
+                        "purpose",
+                        "setting",
+                        "entry_state",
+                        "protagonist_objective",
+                        "opposition",
+                        "core_choice",
+                        "emotion_arc",
+                        "exit_change",
+                    ):
+                        current = str(getattr(card, name, "") or "")
+                        setattr(card, name, strip_excluded_phrases(current, classified))
+                    for beat in card.beats:
+                        beat.text = strip_excluded_phrases(str(beat.text or ""), classified)
+                    card.must_expand = [
+                        strip_excluded_phrases(str(item), classified)
+                        for item in (card.must_expand or [])
+                    ]
+                blob = json.dumps(plan_obj.model_dump(), ensure_ascii=False)
+                return verify_structural_constraints(blob, classified)
             review = await call(
                 RoleSelfReview,
                 "你是刚才分场的总导演，只审核自己刚交出的分场，不重写正文。"
