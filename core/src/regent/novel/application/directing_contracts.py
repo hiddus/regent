@@ -244,11 +244,26 @@ class ScenePlanDraft(BaseModel):
     )
 
 
+class SelfReviewIssue(BaseModel):
+    """自审意见分类（工作包4）。
+
+    - structural：可程序检查的结构化约束（字段缺失、事件归属、文字须出现/不得出现、台账字段）
+    - semantic：语义问题（如"这句虚构了前章事实"），须由下游场记/审校关闭
+    """
+
+    category: Literal["structural", "semantic"] = "semantic"
+    description: str = Field(min_length=1)
+    involves_prior_chapter: bool = False
+    text_constraint: str = ""
+    programmatic_check: str = ""
+
+
 class RoleSelfReview(BaseModel):
     """角色交活前的一次自审。passed 只表示这份成果可以交出，不表示整章通过。"""
 
     passed: bool = True
     issues: list[str] = Field(default_factory=list)
+    classified_issues: list[SelfReviewIssue] = Field(default_factory=list)
     revision_note: str = ""
     failed_scene_index: int | None = Field(default=None, ge=0)
     prior_chapter: bool = False

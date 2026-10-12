@@ -1415,6 +1415,8 @@ async def test_writer_self_review_revises_once_then_hands_off(monkeypatch):
         sp_extra={
             "scene_plan": {"cards": [card.model_dump(mode="json")], "chapter_goal": "x"},
             "scene_index": 0,
+            # 工作包4：添加重复警告以触发条件自审
+            "repetition_warnings": [{"scene_id": "s1", "warnings": ["prev_chapter_tail:len=100"]}],
         },
     )
     await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
@@ -1517,6 +1519,8 @@ async def test_auditor_self_review_rerecords_once():
             "working_state": {},
             "working_summary": "",
             "scene_repairs:s1": 2,
+            # 工作包4：添加边界违规以触发条件自审
+            "boundary_violations": [{"scene_id": "s1", "v": "boundary_violation:s1:event_in_s2:test"}],
         },
     )
     bad = d._SceneAudit(

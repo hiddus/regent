@@ -114,6 +114,7 @@ def _trim_context_for_writer(ctx: dict[str, Any]) -> dict[str, Any]:
 
     移除：recent_chapters[*].content、previous_handoff.tail_excerpt 以外的大段内容。
     保留：structural metadata、summaries、ledger、facts。
+    字数预算：总上下文不超过 8000 字（工作包3.4）。
     """
     import copy
 
@@ -134,6 +135,15 @@ def _trim_context_for_writer(ctx: dict[str, Any]) -> dict[str, Any]:
                 "review_matches_final",
             ):
                 handoff.pop(key, None)
+    # 字数预算：截断过长的字段。
+    MAX_CONTEXT_CHARS = 8000
+    total = sum(len(str(v)) for v in trimmed.values())
+    if total > MAX_CONTEXT_CHARS:
+        for key in ("story_ledger_block", "canon", "verified_facts"):
+            if key in trimmed:
+                val = str(trimmed[key])
+                if len(val) > 2000:
+                    trimmed[key] = val[:2000] + "..."
     return trimmed
 
 
@@ -1347,6 +1357,7 @@ async def _produce_script_tick(
         sid = str(card.scene_id)
         # 工作包4：自审结果绑定正文哈希，内容变化时自审失效。
         from regent.novel.domain.chapter_handoff import content_hash
+        from regent.novel.domain.self_review_check import should_trigger_self_review
 
         current_hash = content_hash(scene_text)
         stored_review = sp.get(f"writer_self_reviewed:{sid}")
@@ -1355,7 +1366,20 @@ async def _produce_script_tick(
             sp.pop(f"writer_self_reviewed:{sid}", None)
             sp.pop(f"writer_self_reviewed_hash:{sid}", None)
             stored_review = None
-        if not stored_review:
+        # 工作包4：自审条件触发——只在程序检查报出问题时触发。
+        repetition_warnings = [
+            w for w in (sp.get("repetition_warnings") or [])
+            if isinstance(w, dict) and w.get("scene_id") == sid
+        ]
+        should_review = should_trigger_self_review(
+            scene_text=scene_text,
+            scene_card=card.model_dump(),
+            entry_summary=entry_summary,
+            working_state=sp.get("working_state") or {},
+            ledger=sp.get("continuity_ledger") or {},
+            repetition_warnings=repetition_warnings,
+        )
+        if not stored_review and should_review:
             review = await call(
                 RoleSelfReview,
                 "你是刚才写这场的执笔，只审核自己刚交的正文，不重写别的场。"
@@ -1365,7 +1389,9 @@ async def _produce_script_tick(
                 "没有动机的时间或地点跳跃要指出来；"
                 "beat_evidence 的摘录必须是正文逐字，不能只在说明里出现。"
                 "能改就 passed=false，revision_note 只写要改的句子。"
-                "passed=true 只表示这场可以交给场记。",
+                "passed=true 只表示这场可以交给场记。"
+                "issues 分两类：classified_issues 中 category=structural 为程序可查约束，"
+                "category=semantic 为语义问题（须下游场记/审校关闭）。",
                 {
                     **write_payload,
                     "draft": scene_text,
@@ -1468,14 +1494,26 @@ async def _produce_script_tick(
             sp.pop(f"auditor_self_reviewed:{card.scene_id}", None)
             sp.pop(f"auditor_self_reviewed_hash:{card.scene_id}", None)
             stored_audit_review = None
-        if not stored_audit_review:
+        # 工作包4：场记自审条件触发——只在有边界违规或台账冲突时触发。
+        boundary_violations = [
+            v for v in (sp.get("boundary_violations") or [])
+            if isinstance(v, dict) and v.get("scene_id") == card.scene_id
+        ]
+        ledger_violations = [
+            v for v in (sp.get("ledger_violations") or [])
+            if isinstance(v, dict) and v.get("scene_id") == card.scene_id
+        ]
+        should_audit_review = bool(boundary_violations or ledger_violations)
+        if not stored_audit_review and should_audit_review:
             review = await call(
                 RoleSelfReview,
                 "你是刚才做场记的人，只审核自己刚写的场记记录，不改正文。"
                 "landed 的 evidence 必须是本场正文的逐字摘录；"
                 "state_changes 只能记录本场正文确实发生的事，"
                 "不得把计划里还没写出的事、或前场已经完成的动作记成这场的新变化。"
-                "记录不合格就 passed=false，revision_note 写清要改的判定。",
+                "记录不合格就 passed=false，revision_note 写清要改的判定。"
+                "issues 分两类：classified_issues 中 category=structural 为程序可查约束，"
+                "category=semantic 为语义问题（须下游审校关闭）。",
                 {
                     "scene_card": card.model_dump(),
                     "scene_text": scene_text,
