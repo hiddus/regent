@@ -412,6 +412,29 @@ def test_replay_consequence_becomes_reference():
     assert cards[1]["event_refs"][0]["role"] == "reference"
 
 
+def test_reference_event_cannot_stay_occurrence():
+    from regent.novel.domain.script_events import demote_reference_occurrences
+
+    cards = demote_reference_occurrences(
+        [
+            {
+                "scene_id": "s2",
+                "event_refs": [
+                    {"event_id": "evt_memory_fragment_father", "role": "occurrence"}
+                ],
+            }
+        ],
+        [
+            {
+                "event_id": "evt_memory_fragment_father",
+                "event_type": "reference",
+                "description": "父亲留下的记忆碎片",
+            }
+        ],
+    )
+    assert cards[0]["event_refs"][0]["role"] == "reference"
+
+
 def test_structural_quote_must_already_be_in_the_plan():
     from regent.novel.domain.self_review_check import (
         explain_plan_constraint,

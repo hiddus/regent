@@ -370,6 +370,36 @@ def demote_replay_consequences(
     return out
 
 
+def demote_reference_occurrences(
+    cards: list[dict[str, Any]],
+    script_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """清单里的回忆事件不能标成 occurrence，改回 reference。"""
+    reference_ids: set[str] = set()
+    for event in script_events:
+        event_id = _normalize_event_id(event.get("event_id", ""))
+        if event_id and str(event.get("event_type") or "") == "reference":
+            reference_ids.add(event_id)
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        row = dict(card)
+        refs: list[Any] = []
+        for ref in card.get("event_refs") or []:
+            if not isinstance(ref, dict):
+                refs.append(ref)
+                continue
+            item = dict(ref)
+            event_id = _normalize_event_id(item.get("event_id", ""))
+            if event_id in reference_ids and str(item.get("role") or "") == "occurrence":
+                item["role"] = "reference"
+            refs.append(item)
+        row["event_refs"] = refs
+        out.append(row)
+    return out
+
+
 def _shared_run(left: str, right: str, limit: int = 12) -> int:
     """两段文字的最长公共子串长度。够用即停。"""
     if not left or not right:
