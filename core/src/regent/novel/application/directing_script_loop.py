@@ -1475,6 +1475,17 @@ async def _produce_script_tick(
                 texts[idx - 1][-300:] if idx > 0 and idx - 1 < len(texts) else ""
             ),
         }
+        # 工作包4：将执笔自审中的语义问题转发给场记，由场记在现有调用中逐条给出结论。
+        writer_review_data = sp.get(f"writer_self_reviewed:{card.scene_id}")
+        if isinstance(writer_review_data, dict):
+            semantic_issues = [
+                issue.get("description", "")
+                for issue in (writer_review_data.get("classified_issues") or [])
+                if isinstance(issue, dict) and issue.get("category") == "semantic"
+                and str(issue.get("description") or "").strip()
+            ]
+            if semantic_issues:
+                audit_payload["semantic_issues_from_writer"] = semantic_issues
         audit = await call(_SceneAudit, audit_system, audit_payload)
         # 工作包4：场记自审绑定正文+场记哈希，任一变化时自审失效。
         from regent.novel.domain.chapter_handoff import content_hash
@@ -1630,12 +1641,9 @@ async def _produce_script_tick(
                 raise ProductionStopped(
                     "场记硬问题未清（本场修满），拒绝继续拍后续场：" + "；".join(lingering[-4:])
                 )
-        # 状态承接（只在本场定稿后写入）
-        next_state = deepcopy(sp.get("working_state") or {})
-        next_state.update(audit.state_changes)
-        sp["working_state"] = next_state
-        # 台账增量（工作包2）：原子应用，违规时记录但不阻断（首轮并行，不替代旧链路）。
+        # 工作包2.2：台账为正式入口状态，state_changes 仅保留诊断用途。
         ledger = sp.get("continuity_ledger") or empty_ledger()
+        ledger_applied = False
         if audit.ledger_delta is not None:
             delta_dict = audit.ledger_delta.model_dump(mode="json")
             new_ledger, violations = apply_ledger_delta(
@@ -1651,8 +1659,20 @@ async def _produce_script_tick(
                 )
             else:
                 ledger = new_ledger
+                ledger_applied = True
         sp["continuity_ledger"] = ledger
         sp.setdefault("continuity_ledger_trail", []).append(deepcopy(ledger))
+        # 工作包2.2：working_state 从台账派生，不再从 state_changes 更新。
+        # state_changes 仅保留诊断用途（记录场记原始输出）。
+        from regent.novel.domain.continuity_ledger import ledger_to_working_state
+
+        if ledger_applied or (ledger and any(ledger.get(k) for k in ("props", "resources", "actor_positions"))):
+            next_state = ledger_to_working_state(ledger)
+        else:
+            # 无台账或台账为空时回退到旧链路（兼容旧作品）
+            next_state = deepcopy(sp.get("working_state") or {})
+            next_state.update(audit.state_changes)
+        sp["working_state"] = next_state
         # 结构化场出口：供后场证明「已接受新值」而非「旧值未出现」
         exits = list(sp.get("scene_exit_states") or [])
         while len(exits) < idx:

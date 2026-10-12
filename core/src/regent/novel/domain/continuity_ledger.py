@@ -420,6 +420,40 @@ def ledger_to_text_summary(ledger: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def ledger_to_working_state(ledger: dict[str, Any]) -> dict[str, str]:
+    """将台账投影为 working_state 字典格式（工作包2.2）。
+
+    替代自由文本 state_changes 作为正式入口状态。
+    键格式：prop:{id}.{field}、resource:{id}.consumed、actor:{id}.location、time_marker。
+    """
+    state: dict[str, str] = {}
+    if not ledger or not isinstance(ledger, dict):
+        return state
+    for pid, p in (ledger.get("props") or {}).items():
+        if not isinstance(p, dict):
+            continue
+        if p.get("position"):
+            state[f"prop:{pid}.position"] = str(p["position"])
+        if p.get("holder"):
+            state[f"prop:{pid}.holder"] = str(p["holder"])
+        if p.get("lifecycle"):
+            state[f"prop:{pid}.lifecycle"] = str(p["lifecycle"])
+    for rid, r in (ledger.get("resources") or {}).items():
+        if not isinstance(r, dict):
+            continue
+        consumed = r.get("consumed") or []
+        if consumed:
+            entries = [str(c.get("entry", "")) for c in consumed if isinstance(c, dict)]
+            state[f"resource:{rid}.consumed"] = ",".join(entries)
+    for aid, pos in (ledger.get("actor_positions") or {}).items():
+        if isinstance(pos, dict) and pos.get("location"):
+            state[f"actor:{aid}.location"] = str(pos["location"])
+    tm = ledger.get("time_marker") or ""
+    if tm:
+        state["time_marker"] = str(tm)
+    return state
+
+
 __all__ = [
     "EVENT_ABILITY_READ",
     "EVENT_DAMAGE",
@@ -441,6 +475,7 @@ __all__ = [
     "check_resource_not_double_consumed",
     "empty_ledger",
     "ledger_to_text_summary",
+    "ledger_to_working_state",
     "record_ability_read",
     "scope_key_ability_read",
     "scope_key_damage",

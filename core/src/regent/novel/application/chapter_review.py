@@ -347,6 +347,21 @@ async def validate_chapter(
         scene_texts=list(_sp.get("scene_texts") or []),
         cards=list((_sp.get("scene_plan") or {}).get("cards") or []),
     )
+    # 工作包4：收集所有场次自审中的语义问题，转发给整章审校逐条给出结论。
+    semantic_issues_from_self_reviews: list[str] = []
+    for key, value in _sp.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        if not key.endswith(("_self_reviewed:", "_self_reviewed")):
+            # 兼容 writer_self_reviewed:s1 和 auditor_self_reviewed:s1 格式
+            if "self_reviewed" not in key:
+                continue
+        for issue in (value.get("classified_issues") or []):
+            if isinstance(issue, dict) and issue.get("category") == "semantic":
+                desc = str(issue.get("description") or "").strip()
+                if desc:
+                    semantic_issues_from_self_reviews.append(desc)
+
     result = await _call(
         session,
         provider,
@@ -359,13 +374,21 @@ async def validate_chapter(
         "失败时：issues 每条尽量带可检索摘录（用「摘录「…」」格式）；"
         "failed_scene_index 填最早受影响场景下标（从0开始，相对 payload.scene_layout 分场顺序）。"
         "必须对照 scene_layout 的 scene_index/scene_id/字符区间定位，禁止自行猜分场。"
-        "判断目标节点是否真正完成；完成必须给出正文逐字completion_quote。",
+        "判断目标节点是否真正完成；完成必须给出正文逐字completion_quote。"
+        + (
+            "\n\n以下语义问题来自分场自审，须逐条给出结论（带证据关闭或保持未结）："
+            + "\n".join(f"- {s}" for s in semantic_issues_from_self_reviews[:10])
+            if semantic_issues_from_self_reviews
+            else ""
+        ),
         {
             "chapter": run.content,
             "recent_chapters": run.generation_context.get("recent_chapters", []),
             "target_node": run.generation_context.get("target_node", {}),
             "canon": run.generation_context.get("canon", []),
             "scene_layout": _scene_layout,
+            **({"semantic_issues_from_self_reviews": semantic_issues_from_self_reviews}
+               if semantic_issues_from_self_reviews else {}),
         },
         "chapter_validation",
         # 正文变了就是一次新的核验；正文未变时复用上次结论，不重复付费（G-09）

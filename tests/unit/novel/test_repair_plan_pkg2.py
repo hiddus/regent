@@ -14,6 +14,8 @@ from regent.novel.domain.continuity_ledger import (
     check_resource_not_double_consumed,
     empty_ledger,
     ledger_to_text_summary,
+    ledger_to_working_state,
+    ledger_to_text_summary,
     record_ability_read,
     scope_key_ability_read,
     scope_key_leave,
@@ -231,3 +233,32 @@ def test_ledger_to_text_summary():
 def test_ledger_to_text_summary_empty():
     assert ledger_to_text_summary(empty_ledger()) == ""
     assert ledger_to_text_summary({}) == ""
+
+
+def test_ledger_to_working_state_projects_to_dict():
+    """工作包2.2：台账投影为 working_state 字典，替代自由文本 state_changes。"""
+    from regent.novel.domain.continuity_ledger import ledger_to_working_state
+
+    ledger = empty_ledger()
+    delta = {
+        "prop_registrations": [
+            {"prop_id": "watch", "name": "怀表", "position": "钟表行", "holder": "沈寻"},
+        ],
+        "actor_position_updates": [
+            {"actor_id": "沈寻", "location": "钟表行"},
+        ],
+        "time_marker": "第一天下午",
+    }
+    ledger, _ = apply_delta(ledger, delta)
+    state = ledger_to_working_state(ledger)
+    assert state["prop:watch.position"] == "钟表行"
+    assert state["prop:watch.holder"] == "沈寻"
+    assert state["actor:沈寻.location"] == "钟表行"
+    assert state["time_marker"] == "第一天下午"
+
+
+def test_ledger_to_working_state_empty():
+    from regent.novel.domain.continuity_ledger import ledger_to_working_state
+
+    assert ledger_to_working_state(empty_ledger()) == {}
+    assert ledger_to_working_state({}) == {}
