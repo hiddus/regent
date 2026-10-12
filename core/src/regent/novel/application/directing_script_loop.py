@@ -1050,7 +1050,9 @@ async def _produce_script_tick(
                 "有 previous_handoff 时 continuation_mode 必须是 direct、time_jump 或 pov_switch。"
                 "每条意见写入 classified_issues："
                 "能用分场原文判定的，category=structural，"
-                "text_must_include 或 text_must_exclude 必须是本分场里的逐字片段；"
+                "text_must_exclude 是要从本分场删掉的逐字原文，"
+                "text_must_include 是本分场里必须留下的逐字原文；"
+                "要删的句子不要写进 text_must_include。"
                 "不能用原文包含或排除判定的，category=semantic，并标明是否涉及前章。"
                 "能改计划就 passed=false，并在 revision_note 写清要改的场次。"
                 "passed=true 只表示这份分场可以交给执笔。",
@@ -1067,27 +1069,29 @@ async def _produce_script_tick(
                 plan_obj.model_dump(),
                 "SELF_COMPILE",
             )
-            sp["compile_self_review_done"] = True
-            sp["compile_self_review"] = dump
             from regent.novel.domain.self_review_check import (
+                ground_structural_quotes,
                 remember_semantic_issues,
-                verify_structural_constraints,
             )
 
+            blob = json.dumps(plan_obj.model_dump(), ensure_ascii=False)
+            dump["classified_issues"] = ground_structural_quotes(
+                blob, dump.get("classified_issues") or []
+            )
+            sp["compile_self_review_done"] = True
+            sp["compile_self_review"] = dump
             sp["open_semantic_issues"] = remember_semantic_issues(
                 list(sp.get("open_semantic_issues") or []),
                 dump.get("classified_issues") or [],
                 origin="compile_self_review",
             )
-            blob = json.dumps(plan_obj.model_dump(), ensure_ascii=False)
-            structural = verify_structural_constraints(blob, dump.get("classified_issues") or [])
-            if review.passed and not structural:
+            # 正在审的这一版必然还含着待删原文。约束留给改完的下一版，由程序复验。
+            if review.passed:
                 return []
             note = (review.revision_note or "").strip()
             issues = [str(item).strip() for item in review.issues if str(item).strip()]
             if note:
                 issues.append(note)
-            issues.extend(structural)
             return issues or ["分场自审未通过"]
 
         def _with_continuation(plan_obj: Any, hard_issues: list[str]) -> list[str]:
@@ -1272,8 +1276,12 @@ async def _produce_script_tick(
                         sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
                         break
             
+            from regent.novel.domain.self_review_check import explain_plan_constraint
+
             compile_repair = [
-                "上一版分场未通过：" + "；".join(hard[:6]) + "。",
+                "上一版分场未通过："
+                + "；".join(explain_plan_constraint(str(item)) for item in hard[:6])
+                + "。",
                 "修复事件重复和时间顺序；保留唯一 ID，补全空场，"
                 "为每项 required 义务指定唯一 acceptance_ids 责任场，并覆盖转折与代价。",
                 "若某事件只有 consequence、没有任何 occurrence，"

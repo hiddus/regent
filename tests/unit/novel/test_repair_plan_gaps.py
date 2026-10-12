@@ -368,7 +368,30 @@ def test_alias_binding_requires_both_sources():
     assert "沈望舒" not in accepted["personas"][0]["aliases"]
 
 
-def test_unclassified_opinion_becomes_semantic_issue():
+def test_structural_quote_must_already_be_in_the_plan():
+    from regent.novel.domain.self_review_check import (
+        explain_plan_constraint,
+        ground_structural_quotes,
+    )
+
+    plan = "开门时手还在抖。章末停在门口。"
+    grounded = ground_structural_quotes(
+        plan,
+        [
+            {
+                "category": "structural",
+                "description": "删掉手抖",
+                "text_must_exclude": "开门时手还在抖",
+                "text_must_include": "一句计划里没有的新句子",
+            }
+        ],
+    )
+    assert grounded[0]["category"] == "structural"
+    assert grounded[0]["text_must_exclude"] == "开门时手还在抖"
+    assert grounded[0]["text_must_include"] == ""
+    assert explain_plan_constraint("constraint_present:开门时手还在抖") == (
+        "分场原文不得再出现「开门时手还在抖」"
+    )
     from regent.novel.domain.self_review_check import (
         fill_unclassified_as_semantic,
         unclassified_opinions,

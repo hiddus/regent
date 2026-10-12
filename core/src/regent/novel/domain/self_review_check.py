@@ -103,6 +103,42 @@ def apply_semantic_resolutions(
     return out
 
 
+def ground_structural_quotes(text: str, issues: list[Any] | None) -> list[dict[str, Any]]:
+    """结构约束必须是当前成果里的逐字原文。对不上的改记为语义问题，避免逼计划写进一句新句子。"""
+    body = str(text or "")
+    out: list[dict[str, Any]] = []
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            continue
+        row = dict(issue)
+        if str(row.get("category") or "") != "structural":
+            out.append(row)
+            continue
+        include = str(row.get("text_must_include") or "").strip()
+        exclude = str(row.get("text_must_exclude") or "").strip()
+        if include and include not in body:
+            include = ""
+        if exclude and exclude not in body:
+            exclude = ""
+        row["text_must_include"] = include
+        row["text_must_exclude"] = exclude
+        if not include and not exclude:
+            row["category"] = "semantic"
+        out.append(row)
+    return out
+
+
+def explain_plan_constraint(code: str) -> str:
+    """把程序约束码写成重分场能执行的句子。"""
+    if code.startswith("constraint_present:"):
+        quote = code.split(":", 1)[1]
+        return f"分场原文不得再出现「{quote}」"
+    if code.startswith("constraint_missing:"):
+        quote = code.split(":", 1)[1]
+        return f"分场原文必须保留「{quote}」"
+    return code
+
+
 def unclassified_opinions(review: dict[str, Any] | None) -> list[str]:
     """自审只写了自然语言、没有分类时，返回这些原文。已有 classified_issues 则不再追问。"""
     if not isinstance(review, dict) or review.get("classified_issues"):
@@ -151,7 +187,9 @@ def should_trigger_self_review(
 
 __all__ = [
     "apply_semantic_resolutions",
+    "explain_plan_constraint",
     "fill_unclassified_as_semantic",
+    "ground_structural_quotes",
     "remember_semantic_issues",
     "should_trigger_self_review",
     "unclassified_opinions",
