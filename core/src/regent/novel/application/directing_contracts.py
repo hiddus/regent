@@ -192,12 +192,21 @@ class SceneValidation(BaseModel):
     state_changes: list[VerifiedStateChange] = Field(default_factory=list)
 
 
+class SemanticResolution(BaseModel):
+    """下游对一条语义问题的结论。closed 的 evidence 必须是当前正文逐字片段。"""
+
+    description: str = ""
+    verdict: Literal["closed", "open", "withdrawn"] = "open"
+    evidence: str = ""
+
+
 class ChapterValidation(BaseModel):
     passed: bool
     issues: list[str] = Field(default_factory=list)
     node_completed: bool = False
     completion_quote: str = ""
     failed_scene_index: int | None = Field(default=None, ge=0)
+    semantic_resolutions: list[SemanticResolution] = Field(default_factory=list)
 
 
 class EndingVerdict(BaseModel):
@@ -247,15 +256,15 @@ class ScenePlanDraft(BaseModel):
 class SelfReviewIssue(BaseModel):
     """自审意见分类（工作包4）。
 
-    - structural：可程序检查的结构化约束（字段缺失、事件归属、文字须出现/不得出现、台账字段）
+    - structural：可程序检查的结构化约束
     - semantic：语义问题（如"这句虚构了前章事实"），须由下游场记/审校关闭
     """
 
     category: Literal["structural", "semantic"] = "semantic"
     description: str = Field(min_length=1)
     involves_prior_chapter: bool = False
-    text_constraint: str = ""
-    programmatic_check: str = ""
+    text_must_include: str = ""
+    text_must_exclude: str = ""
 
 
 class RoleSelfReview(BaseModel):
@@ -267,6 +276,21 @@ class RoleSelfReview(BaseModel):
     revision_note: str = ""
     failed_scene_index: int | None = Field(default=None, ge=0)
     prior_chapter: bool = False
+
+
+class AliasBinding(BaseModel):
+    """大纲用名与世界书规范名是否同一实体。证据必须同时写出两边的原词。"""
+
+    alias: str = ""
+    canon_name: str = ""
+    same_entity: bool = False
+    evidence: str = ""
+
+
+class AliasMapReview(BaseModel):
+    """开写前一次别名核对。没有把握就留空，不按字形相近猜测。"""
+
+    bindings: list[AliasBinding] = Field(default_factory=list)
 
 
 class EvidenceRecheckItem(BaseModel):
@@ -306,6 +330,7 @@ class LedgerPropUpdate(BaseModel):
     position: str | None = None
     holder: str | None = None
     lifecycle: str | None = None
+    repair_quote: str = ""
     partition_updates: dict[str, str] = Field(default_factory=dict)
 
 
@@ -321,16 +346,17 @@ class LedgerResourceConsumption(BaseModel):
 
 
 class LedgerOneTimeEvent(BaseModel):
-    scope_key: str = ""
     event_type: str = ""
     object_id: str = ""
     actor_id: str = ""
+    location: str = ""
+    read_type: str = ""
+    entry: str = ""
 
 
 class LedgerActorPositionUpdate(BaseModel):
     actor_id: str = Field(min_length=1)
     location: str = Field(min_length=1)
-    enter_new_visit: bool = False
 
 
 class LedgerDelta(BaseModel):
@@ -375,7 +401,7 @@ class SceneAudit(BaseModel):
     hooks_closed: list[str] = Field(default_factory=list)
     ledger_delta: LedgerDelta | None = None
     actual_events: list[ActualEvent] = Field(default_factory=list)
-    unlisted_changes: list[str] = Field(default_factory=list)
+    semantic_resolutions: list[SemanticResolution] = Field(default_factory=list)
 
 
 # Private compatibility names used by existing tests/checkpoints.

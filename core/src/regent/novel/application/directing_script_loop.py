@@ -21,6 +21,7 @@ from regent.novel.application.directing_calls import (
     hydrate_call_key_version,
 )
 from regent.novel.application.directing_contracts import (
+    AliasMapReview,
     RoleSelfReview,
     SceneText,
     ScriptChapterValidation,
@@ -101,6 +102,7 @@ from regent.novel.domain.continuity_ledger import (
     apply_delta as apply_ledger_delta,
 )
 from regent.novel.domain.continuity_ledger import empty_ledger
+from regent.novel.domain.continuity_ledger import ledger_delta_is_blank
 from regent.novel.domain.continuity_ledger import ledger_to_text_summary
 from regent.novel.domain.states import SceneArtifact, SceneRunState
 from regent.novel.domain.world_bible import (
@@ -135,15 +137,25 @@ def _trim_context_for_writer(ctx: dict[str, Any]) -> dict[str, Any]:
                 "review_matches_final",
             ):
                 handoff.pop(key, None)
-    # 字数预算：截断过长的字段。
-    MAX_CONTEXT_CHARS = 8000
-    total = sum(len(str(v)) for v in trimmed.values())
-    if total > MAX_CONTEXT_CHARS:
-        for key in ("story_ledger_block", "canon", "verified_facts"):
-            if key in trimmed:
-                val = str(trimmed[key])
-                if len(val) > 2000:
-                    trimmed[key] = val[:2000] + "..."
+    # 字数预算：超限时先丢掉背景大块，再把交接尾段收到最后 400 字。
+    max_context_chars = 8000
+
+    def _total() -> int:
+        return sum(len(str(v)) for v in trimmed.values())
+
+    if _total() > max_context_chars:
+        for key in ("story_ledger_block", "canon", "verified_facts", "world_rules", "open_hooks"):
+            if key in trimmed and len(str(trimmed[key])) > 2000:
+                trimmed[key] = str(trimmed[key])[:2000] + "..."
+        for key in ("world_rules", "open_hooks", "verified_facts", "canon", "story_ledger_block"):
+            if _total() <= max_context_chars:
+                break
+            trimmed.pop(key, None)
+    handoff_budget = trimmed.get("previous_handoff")
+    if isinstance(handoff_budget, dict) and _total() > max_context_chars:
+        tail = str(handoff_budget.get("tail_excerpt") or "")
+        if len(tail) > 400:
+            handoff_budget["tail_excerpt"] = tail[-400:]
     return trimmed
 
 
@@ -167,34 +179,32 @@ def _longest_common_substring(a: str, b: str, *, min_len: int = 80) -> str:
 
 
 def _is_legitimate_repetition(text: str, ledger: dict[str, Any] | None = None) -> bool:
-    """判断重复文本是否属于合法复用（引用、固定铭文、短对白）。
+    """长重复只在整段就是固定铭文，或不足 40 字的引语时放行。
 
-    工作包3.3：区分引用、固定铭文、短对白与 problematic 照抄。
+    片段里出现引号或「说」「道」不能把整段照抄算成引用。
     """
     stripped = text.strip()
     if not stripped:
         return False
-    # 1. 引用：包含中文或英文引号
-    if any(q in stripped for q in ('"', '"', '"', "'", "'", "「", "」", "『", "』")):
-        return True
-    # 2. 短对白：包含对话标记（said-book-ids 的中文等价）
-    dialogue_markers = ("道", "说", "问", "答", "喊", "叫", "笑", "叹", "低声", "高声")
-    if any(marker in stripped for marker in dialogue_markers):
-        # 对白通常较短，如果超过200字且无引号，可能不是合法对白
-        if len(stripped) < 200 or any(q in stripped for q in ('"', '"', '"')):
-            return True
-    # 3. 固定铭文：检查台账中的 props 分区文字
     if ledger and isinstance(ledger, dict):
-        props = ledger.get("props") or {}
-        for prop in props.values():
-            if isinstance(prop, dict):
-                partitions = prop.get("partitions") or {}
-                for partition_text in partitions.values():
-                    if isinstance(partition_text, str) and partition_text.strip():
-                        # 如果重复文本包含台账中的固定铭文
-                        if partition_text.strip() in stripped or stripped in partition_text.strip():
-                            return True
+        for prop in (ledger.get("props") or {}).values():
+            if not isinstance(prop, dict):
+                continue
+            for partition_text in (prop.get("partitions") or {}).values():
+                inscription = str(partition_text or "").strip()
+                if inscription and stripped == inscription:
+                    return True
+    if len(stripped) <= 40 and stripped[0] in "「『\"'":
+        return True
     return False
+
+
+def _ledger_protocol(work: Any, production: dict[str, Any]) -> bool:
+    """新数据协议只对锁定世界书时打上 ledger_v1 的作品生效。"""
+    bible = getattr(work, "story_bible", None) or {}
+    if isinstance(bible, dict) and bible.get("continuity_protocol") == "ledger_v1":
+        return True
+    return production.get("continuity_protocol") == "ledger_v1"
 
 
 def _script_writer_system(prose_style: dict[str, Any] | None = None, *, chapter_no: int = 1) -> str:
@@ -673,6 +683,103 @@ async def _produce_script_tick(
             command_id,
         )
 
+    async def _classify_unclassified(
+        review_dump: dict[str, Any],
+        subject: Any,
+        phase_name: str,
+    ) -> dict[str, Any]:
+        """自审只交了自然语言时，再请同一角色把意见分成可复验约束和语义问题。"""
+        from regent.novel.domain.self_review_check import (
+            fill_unclassified_as_semantic,
+            unclassified_opinions,
+        )
+
+        if not unclassified_opinions(review_dump):
+            return review_dump
+        classified = await call(
+            RoleSelfReview,
+            "你是刚才交活的人。只把已写出的意见分类，不要新增意见，也不要重写成果。"
+            "能用成果里的连续原文判定的，category=structural，"
+            "text_must_include 或 text_must_exclude 必须是成果中的逐字片段。"
+            "不能靠原文包含或排除判定的，category=semantic；涉及前章则 involves_prior_chapter=true。",
+            {
+                "opinions": unclassified_opinions(review_dump),
+                "subject": subject,
+            },
+            repair_no=1,
+            phase_name=phase_name,
+        )
+        merged = dict(review_dump)
+        merged["classified_issues"] = [item.model_dump() for item in classified.classified_issues]
+        if merged["classified_issues"]:
+            return merged
+        return fill_unclassified_as_semantic(merged)
+
+    async def _bind_outline_aliases() -> None:
+        """大纲没有出现世界书规范名时，请模型做一次显式配对。对不上原文的配对丢弃。"""
+        from regent.novel.domain.name_aliases import (
+            accept_alias_bindings,
+            bible_alias_text,
+            outline_mentions_canon,
+        )
+
+        bible = getattr(work, "story_bible", None)
+        if not isinstance(bible, dict):
+            ctx_bible = run.generation_context.get("world_bible")
+            bible = ctx_bible if isinstance(ctx_bible, dict) else None
+        if not isinstance(bible, dict):
+            sp["alias_review_done"] = True
+            return
+        node_bits = [
+            json.dumps(run.generation_context.get(key) or {}, ensure_ascii=False)
+            for key in ("target_node", "prev_node", "next_node")
+        ]
+        outline_text = "\n".join(node_bits)
+        reviewed = [str(item) for item in (bible.get("alias_review_sources") or [])]
+        source = outline_text[:500]
+        if outline_mentions_canon(bible, node_bits) or (source and source in reviewed):
+            sp["alias_review_done"] = True
+            return
+        bible_text = bible_alias_text(bible)
+        review = await call(
+            AliasMapReview,
+            "你在核对大纲用名和世界书规范名是否同一人物或同一地点。"
+            "只有大纲原文和世界书原文都写明、且你能确定是同一实体时，same_entity=true。"
+            "evidence 必须同时逐字包含别名和规范名。没有把握就不要输出该条。"
+            "禁止按字形相近猜测合并。",
+            {
+                "outline": outline_text[:4000],
+                "canon_text": bible_text[:4000],
+                "personas": [
+                    {"name": p.get("name"), "aliases": p.get("aliases") or []}
+                    for p in (bible.get("personas") or [])
+                    if isinstance(p, dict)
+                ],
+                "places": [
+                    {"name": p.get("name"), "aliases": p.get("aliases") or []}
+                    for p in (bible.get("places") or [])
+                    if isinstance(p, dict)
+                ],
+            },
+            phase_name="SELF_ALIAS",
+        )
+        updated = accept_alias_bindings(
+            bible,
+            [item.model_dump() for item in review.bindings],
+            outline_text=outline_text,
+            bible_text=bible_text,
+        )
+        sources = [*reviewed, source] if source else reviewed
+        updated["alias_review_sources"] = sources[-8:]
+        if "continuity_protocol" in bible:
+            updated["continuity_protocol"] = bible["continuity_protocol"]
+        work.story_bible = updated
+        run.generation_context["world_bible"] = deepcopy(updated)
+        sp["alias_review_done"] = True
+
+    if phase in {"BRIEF", "COMPILE_SCENES", "WRITE_CHAPTER"} and not sp.get("alias_review_done"):
+        await _bind_outline_aliases()
+
     # 请求分层：固定规则 → 作品资料 → 章节材料 → 本次任务。同层稳定序列化，
     # 不用全局字母序代替内容分层。
     _ctx_order = (
@@ -699,6 +806,14 @@ async def _produce_script_tick(
     for key in sorted(raw_ctx):
         if key not in ordered_ctx:
             ordered_ctx[key] = raw_ctx[key]
+    from regent.novel.domain.name_aliases import alias_map_from_bible, apply_alias_map
+
+    bible_for_alias = run.generation_context.get("world_bible")
+    if not isinstance(bible_for_alias, dict):
+        bible_for_alias = getattr(work, "story_bible", None)
+    alias_map = alias_map_from_bible(bible_for_alias if isinstance(bible_for_alias, dict) else {})
+    if alias_map:
+        ordered_ctx = apply_alias_map(ordered_ctx, alias_map)
     base_payload = {
         "context": ordered_ctx,
         "cast": production.get("cast") or {},
@@ -919,7 +1034,13 @@ async def _produce_script_tick(
 
         async def _compile_self_issues(plan_obj: Any) -> list[str]:
             if sp.get("compile_self_review_done"):
-                return []
+                from regent.novel.domain.self_review_check import verify_structural_constraints
+
+                stored = sp.get("compile_self_review") or {}
+                blob = json.dumps(plan_obj.model_dump(), ensure_ascii=False)
+                return verify_structural_constraints(
+                    blob, stored.get("classified_issues") if isinstance(stored, dict) else []
+                )
             review = await call(
                 RoleSelfReview,
                 "你是刚才分场的总导演，只审核自己刚交出的分场，不重写正文。"
@@ -927,6 +1048,10 @@ async def _produce_script_tick(
                 "后场不得把已经发生过的事件再排成 occurrence；"
                 "时间或地点跳跃必须有 transition_note；"
                 "有 previous_handoff 时 continuation_mode 必须是 direct、time_jump 或 pov_switch。"
+                "每条意见写入 classified_issues："
+                "能用分场原文判定的，category=structural，"
+                "text_must_include 或 text_must_exclude 必须是本分场里的逐字片段；"
+                "不能用原文包含或排除判定的，category=semantic，并标明是否涉及前章。"
                 "能改计划就 passed=false，并在 revision_note 写清要改的场次。"
                 "passed=true 只表示这份分场可以交给执笔。",
                 {
@@ -937,14 +1062,32 @@ async def _produce_script_tick(
                 },
                 phase_name="SELF_COMPILE",
             )
+            dump = await _classify_unclassified(
+                review.model_dump(),
+                plan_obj.model_dump(),
+                "SELF_COMPILE",
+            )
             sp["compile_self_review_done"] = True
-            sp["compile_self_review"] = review.model_dump()
-            if review.passed:
+            sp["compile_self_review"] = dump
+            from regent.novel.domain.self_review_check import (
+                remember_semantic_issues,
+                verify_structural_constraints,
+            )
+
+            sp["open_semantic_issues"] = remember_semantic_issues(
+                list(sp.get("open_semantic_issues") or []),
+                dump.get("classified_issues") or [],
+                origin="compile_self_review",
+            )
+            blob = json.dumps(plan_obj.model_dump(), ensure_ascii=False)
+            structural = verify_structural_constraints(blob, dump.get("classified_issues") or [])
+            if review.passed and not structural:
                 return []
             note = (review.revision_note or "").strip()
             issues = [str(item).strip() for item in review.issues if str(item).strip()]
             if note:
                 issues.append(note)
+            issues.extend(structural)
             return issues or ["分场自审未通过"]
 
         def _with_continuation(plan_obj: Any, hard_issues: list[str]) -> list[str]:
@@ -1223,22 +1366,33 @@ async def _produce_script_tick(
             _save(run, production)
             return production["phase"] == "DONE"
         card = SceneCard.model_validate(cards[idx])
-        # 工作包3.1：分场前检——校验本场计划事件是否违反台账约束。
+        # 工作包3.1：分场前检。新协议下未过不写这场。
         ledger = sp.get("continuity_ledger") or empty_ledger()
-        pre_scene_violations: list[str] = []
-        for eref in card.event_refs:
-            eid = str(eref.event_id or "")
-            role = str(eref.role or "")
-            if role == "occurrence" and "读取" in eid:
-                from regent.novel.domain.continuity_ledger import check_prop_readable
+        if _ledger_protocol(work, production):
+            from regent.novel.domain.continuity_ledger import preview_plan_conflicts
 
-                for pid in (ledger.get("props") or {}):
-                    if pid in eid or eid in pid:
-                        pre_scene_violations.extend(check_prop_readable(ledger, pid))
-        if pre_scene_violations:
-            sp.setdefault("ledger_violations", []).append(
-                {"scene_id": card.scene_id, "phase": "pre_scene", "v": pre_scene_violations}
+            plan_cards = [item for item in cards if isinstance(item, dict)]
+            preview_input = plan_cards if idx == 0 else plan_cards[idx : idx + 1]
+            pre_scene_violations = preview_plan_conflicts(
+                ledger,
+                preview_input,
+                sp.get("script_events") or [],
             )
+            if pre_scene_violations:
+                sp.setdefault("ledger_violations", []).append(
+                    {"scene_id": card.scene_id, "phase": "pre_scene", "v": pre_scene_violations}
+                )
+                reject_key = f"pre_scene_rejects:{card.scene_id}"
+                rejects = int(sp.get(reject_key) or 0)
+                summary = "；".join(pre_scene_violations[:4])
+                if idx == 0 and rejects < 1:
+                    sp[reject_key] = rejects + 1
+                    sp["review_plan_repair"] = pre_scene_violations[:6]
+                    production["phase"] = "COMPILE_SCENES"
+                    _save(run, production)
+                    return False
+                _save(run, production)
+                raise ProductionStopped(f"分场前检未过，停止写作：{summary}")
         _ensure_validate_call_reserve(production, action="RENDER_SCENE")
         target = max(400, min(1500, card.target_chars or 700))
         revision_instruction = str(sp.get("scene_revision_instruction") or "").strip()
@@ -1346,9 +1500,12 @@ async def _produce_script_tick(
         )
         scene_text = written.content.strip()
         sid = str(card.scene_id)
-        # 工作包4：自审结果绑定正文哈希，内容变化时自审失效。
         from regent.novel.domain.chapter_handoff import content_hash
-        from regent.novel.domain.self_review_check import should_trigger_self_review
+        from regent.novel.domain.self_review_check import (
+            remember_semantic_issues,
+            should_trigger_self_review,
+            verify_structural_constraints,
+        )
 
         current_hash = content_hash(scene_text)
         stored_review = sp.get(f"writer_self_reviewed:{sid}")
@@ -1357,81 +1514,129 @@ async def _produce_script_tick(
             sp.pop(f"writer_self_reviewed:{sid}", None)
             sp.pop(f"writer_self_reviewed_hash:{sid}", None)
             stored_review = None
-        # 工作包4：自审条件触发——只在程序检查报出问题时触发。
-        repetition_warnings = [
-            w for w in (sp.get("repetition_warnings") or [])
-            if isinstance(w, dict) and w.get("scene_id") == sid
+        held_texts = list(sp.get("scene_texts") or [])
+        compare_texts = [text for i, text in enumerate(held_texts) if i != idx]
+        prev_body = ""
+        for prev in reversed(run.generation_context.get("recent_chapters") or []):
+            if isinstance(prev, dict):
+                prev_body = str(prev.get("content") or prev.get("tail_excerpt") or "")
+                break
+        copy_hits: list[str] = []
+        for i, prior in enumerate(compare_texts):
+            common = _longest_common_substring(scene_text, prior, min_len=80)
+            if common and not _is_legitimate_repetition(common, ledger):
+                copy_hits.append(f"scene_{i}:len={len(common)}")
+        if prev_body:
+            common = _longest_common_substring(scene_text, prev_body, min_len=80)
+            if common and not _is_legitimate_repetition(common, ledger):
+                copy_hits.append(f"prev_chapter:len={len(common)}")
+        structural_fails = verify_structural_constraints(
+            scene_text,
+            (stored_review or {}).get("classified_issues") if isinstance(stored_review, dict) else [],
+        )
+        ledger_hits = [
+            item for item in (sp.get("ledger_violations") or [])
+            if isinstance(item, dict) and item.get("scene_id") == sid
         ]
+        stored_copy_flags: list[str] = []
+        for item in sp.get("repetition_warnings") or []:
+            if isinstance(item, dict) and item.get("scene_id") == sid:
+                stored_copy_flags.extend(str(flag) for flag in (item.get("warnings") or []))
         should_review = should_trigger_self_review(
             scene_text=scene_text,
             scene_card=card.model_dump(),
             entry_summary=entry_summary,
             working_state=sp.get("working_state") or {},
-            ledger=sp.get("continuity_ledger") or {},
-            repetition_warnings=repetition_warnings,
+            ledger=ledger,
+            repetition_warnings=[*copy_hits, *stored_copy_flags],
+            ledger_violations=ledger_hits,
         )
         if not stored_review and should_review:
             review = await call(
                 RoleSelfReview,
                 "你是刚才写这场的执笔，只审核自己刚交的正文，不重写别的场。"
-                "对照 entry_summary、working_state 与本场节拍："
-                "不得重演入场摘要里已经完成的动作；"
-                "伤势、器物、地点必须接上入场状态；"
-                "没有动机的时间或地点跳跃要指出来；"
-                "beat_evidence 的摘录必须是正文逐字，不能只在说明里出现。"
-                "能改就 passed=false，revision_note 只写要改的句子。"
-                "passed=true 只表示这场可以交给场记。"
-                "issues 分两类：classified_issues 中 category=structural 为程序可查约束，"
-                "category=semantic 为语义问题（须下游场记/审校关闭）。",
+                "程序已经标出照抄或台账冲突，对照这些证据。"
+                "classified_issues 中 category=structural 必须给出 text_must_include 或 text_must_exclude，"
+                "供程序复验；category=semantic 留给场记或整章审校带证据关闭。"
+                "passed=false 时 revision_note 只写要改的句子。",
                 {
                     **write_payload,
                     "draft": scene_text,
                     "beat_evidence": written.beat_evidence,
+                    "program_flags": {
+                        "copy": copy_hits,
+                        "structural": structural_fails,
+                        "ledger": ledger_hits,
+                    },
                 },
                 phase_name="SELF_WRITE",
             )
-            sp[f"writer_self_reviewed:{sid}"] = review.model_dump()
+            stored_review = await _classify_unclassified(
+                review.model_dump(),
+                scene_text,
+                "SELF_WRITE",
+            )
+            sp[f"writer_self_reviewed:{sid}"] = stored_review
             sp[f"writer_self_reviewed_hash:{sid}"] = current_hash
-            if not review.passed and int(sp.get(f"self_repairs:{sid}") or 0) < 1:
-                sp[f"self_repairs:{sid}"] = 1
+            sp["open_semantic_issues"] = remember_semantic_issues(
+                list(sp.get("open_semantic_issues") or []),
+                stored_review.get("classified_issues") or [],
+                origin="writer_self_review",
+            )
+            structural_fails = verify_structural_constraints(
+                scene_text, stored_review.get("classified_issues") or []
+            )
+        if (
+            isinstance(stored_review, dict)
+            and not stored_review.get("passed")
+            and int(sp.get(f"self_repairs:{sid}") or 0) < 1
+        ):
+            sp[f"self_repairs:{sid}"] = 1
+            texts = list(sp.get("scene_texts") or [])
+            while len(texts) <= idx:
+                texts.append("")
+            texts[idx] = scene_text
+            sp["scene_texts"] = texts
+            note = str(stored_review.get("revision_note") or "").strip() or "；".join(
+                str(item) for item in (stored_review.get("issues") or [])[:3] if str(item).strip()
+            )
+            sp["scene_revision_instruction"] = f"自审未通过，只改这些问题：{note}"[:400]
+            sp["pending_scene_beat_evidence"] = written.beat_evidence
+            production["phase"] = "WRITE_SCENE"
+            _save(run, production)
+            return False
+        program_fails = [*copy_hits, *structural_fails]
+        if program_fails:
+            sp.setdefault("repetition_warnings", []).append(
+                {"scene_id": sid, "warnings": program_fails}
+            )
+            rep_repair_key = f"repetition_repairs:{sid}"
+            rep_repairs = int(sp.get(rep_repair_key) or 0)
+            summary = "；".join(program_fails[:3])
+            if rep_repairs < 1:
+                sp[rep_repair_key] = rep_repairs + 1
                 texts = list(sp.get("scene_texts") or [])
                 while len(texts) <= idx:
                     texts.append("")
                 texts[idx] = scene_text
                 sp["scene_texts"] = texts
-                note = (review.revision_note or "").strip() or "；".join(
-                    str(item) for item in review.issues[:3] if str(item).strip()
-                )
-                sp["scene_revision_instruction"] = f"自审未通过，只改这些问题：{note}"[:400]
+                note = ""
+                if isinstance(stored_review, dict):
+                    note = str(stored_review.get("revision_note") or "").strip()
+                sp["scene_revision_instruction"] = (
+                    f"程序拦截：{summary}。" + (f"自审：{note}" if note else "重写重复或越界的句子。")
+                )[:400]
                 sp["pending_scene_beat_evidence"] = written.beat_evidence
                 production["phase"] = "WRITE_SCENE"
                 _save(run, production)
                 return False
+            sp.setdefault("scene_hard_fails", []).append(f"repetition:{sid}")
+            _save(run, production)
+            raise ProductionStopped(f"文本照抄或约束未清（本场修满）：{summary}")
         if prior_draft and revision_instruction and sp.get("scene_texts"):
             sp["scene_texts"][idx] = scene_text
         else:
             sp.setdefault("scene_texts", []).append(scene_text)
-        # 工作包3.3：文本重复检测——本场与前场/前章尾段比较，检测长连续复用。
-        prior_texts = list(sp.get("scene_texts") or [])[:-1]
-        prev_tail = ""
-        for prev in reversed(run.generation_context.get("recent_chapters") or []):
-            if isinstance(prev, dict):
-                prev_tail = str(prev.get("tail_excerpt") or "")
-                break
-        repetition_warnings: list[str] = []
-        for i, prior in enumerate(prior_texts):
-            common = _longest_common_substring(scene_text, prior, min_len=80)
-            if common and not _is_legitimate_repetition(common, ledger):
-                repetition_warnings.append(f"scene_{i}:len={len(common)}")
-        if prev_tail:
-            common = _longest_common_substring(scene_text, prev_tail, min_len=80)
-            if common and not _is_legitimate_repetition(common, ledger):
-                repetition_warnings.append(f"prev_chapter_tail:len={len(common)}")
-
-        if repetition_warnings:
-            sp.setdefault("repetition_warnings", []).append(
-                {"scene_id": card.scene_id, "warnings": repetition_warnings}
-            )
         sp["pending_scene_beat_evidence"] = written.beat_evidence
         sp["scene_revision_instruction"] = ""
         production["phase"] = "AUDIT_SCENE"
@@ -1475,72 +1680,128 @@ async def _produce_script_tick(
                 texts[idx - 1][-300:] if idx > 0 and idx - 1 < len(texts) else ""
             ),
         }
-        # 工作包4：将执笔自审中的语义问题转发给场记，由场记在现有调用中逐条给出结论。
-        writer_review_data = sp.get(f"writer_self_reviewed:{card.scene_id}")
-        if isinstance(writer_review_data, dict):
-            semantic_issues = [
-                issue.get("description", "")
-                for issue in (writer_review_data.get("classified_issues") or [])
-                if isinstance(issue, dict) and issue.get("category") == "semantic"
-                and str(issue.get("description") or "").strip()
-            ]
-            if semantic_issues:
-                audit_payload["semantic_issues_from_writer"] = semantic_issues
+        open_semantic = [
+            item
+            for item in (sp.get("open_semantic_issues") or [])
+            if isinstance(item, dict) and item.get("status") == "OPEN"
+        ]
+        if open_semantic:
+            audit_payload["open_semantic_issues"] = open_semantic
+            audit_system += (
+                " payload.open_semantic_issues 中每条未结问题，必须在 semantic_resolutions 给出结论："
+                "closed 要附当前正文逐字 evidence，withdrawn 表示撤回，不能把原句再写进 continuity_issues 当作已关闭。"
+            )
         audit = await call(_SceneAudit, audit_system, audit_payload)
-        # 工作包4：场记自审绑定正文+场记哈希，任一变化时自审失效。
-        from regent.novel.domain.chapter_handoff import content_hash
+        from regent.novel.domain.self_review_check import (
+            apply_semantic_resolutions,
+            fill_unclassified_as_semantic,
+            remember_semantic_issues,
+        )
 
-        audit_hash = content_hash(scene_text + "|" + json.dumps(audit.model_dump(), ensure_ascii=False, sort_keys=True))
+        writer_review_dump = sp.get(f"writer_self_reviewed:{card.scene_id}")
+        if isinstance(writer_review_dump, dict):
+            sp["open_semantic_issues"] = remember_semantic_issues(
+                list(sp.get("open_semantic_issues") or []),
+                writer_review_dump.get("classified_issues") or [],
+                origin="writer_self_review",
+            )
+        sp["open_semantic_issues"] = apply_semantic_resolutions(
+            list(sp.get("open_semantic_issues") or []),
+            [item.model_dump() for item in audit.semantic_resolutions],
+            scene_text,
+        )
+        from regent.novel.domain.chapter_handoff import content_hash
+        from regent.novel.domain.scene_boundary import (
+            audit_cooperation_gaps,
+            check_scene_boundary,
+        )
+
+        def _assess_audit(audit_obj: Any) -> tuple[list[str], list[str]]:
+            delta = (
+                audit_obj.ledger_delta.model_dump(mode="json")
+                if audit_obj.ledger_delta is not None
+                else None
+            )
+            events = [e.model_dump() for e in audit_obj.actual_events]
+            boundary = check_scene_boundary(
+                scene_id=card.scene_id,
+                actual_events=events,
+                scene_plan=plan,
+                ledger=sp.get("continuity_ledger") or {},
+                ledger_delta=delta,
+                require_events=_ledger_protocol(work, production),
+                script_events=sp.get("script_events") or [],
+            )
+            gaps = audit_cooperation_gaps(
+                card.scene_id,
+                events,
+                plan,
+                delta,
+                require_events=_ledger_protocol(work, production),
+                state_changes=dict(audit_obj.state_changes or {}),
+            )
+            return boundary, gaps
+
+        boundary_violations, cooperation_gaps = _assess_audit(audit)
+        audit_hash = content_hash(
+            scene_text + "|" + json.dumps(audit.model_dump(), ensure_ascii=False, sort_keys=True)
+        )
         stored_audit_review = sp.get(f"auditor_self_reviewed:{card.scene_id}")
         stored_audit_hash = sp.get(f"auditor_self_reviewed_hash:{card.scene_id}")
         if stored_audit_review and stored_audit_hash != audit_hash:
             sp.pop(f"auditor_self_reviewed:{card.scene_id}", None)
             sp.pop(f"auditor_self_reviewed_hash:{card.scene_id}", None)
             stored_audit_review = None
-        # 工作包4：场记自审条件触发——只在有边界违规或台账冲突时触发。
-        boundary_violations = [
-            v for v in (sp.get("boundary_violations") or [])
-            if isinstance(v, dict) and v.get("scene_id") == card.scene_id
-        ]
-        ledger_violations = [
-            v for v in (sp.get("ledger_violations") or [])
-            if isinstance(v, dict) and v.get("scene_id") == card.scene_id
-        ]
-        should_audit_review = bool(boundary_violations or ledger_violations)
-        if not stored_audit_review and should_audit_review:
+        flagged = bool(boundary_violations or cooperation_gaps) or any(
+            isinstance(item, dict) and item.get("scene_id") == card.scene_id
+            for item in [*(sp.get("boundary_violations") or []), *(sp.get("ledger_violations") or [])]
+        )
+        if not stored_audit_review and flagged:
             review = await call(
                 RoleSelfReview,
-                "你是刚才做场记的人，只审核自己刚写的场记记录，不改正文。"
-                "landed 的 evidence 必须是本场正文的逐字摘录；"
-                "state_changes 只能记录本场正文确实发生的事，"
-                "不得把计划里还没写出的事、或前场已经完成的动作记成这场的新变化。"
-                "记录不合格就 passed=false，revision_note 写清要改的判定。"
-                "issues 分两类：classified_issues 中 category=structural 为程序可查约束，"
-                "category=semantic 为语义问题（须下游审校关闭）。",
+                "你是刚才做场记的人。程序已经标出越界、空台账或能力读取没入账。"
+                "核对摘录是否逐字来自本场正文；实际事件编号必须来自剧本事件清单。"
+                "若本场发生了状态变化，ledger_delta 不能交空对象。"
+                "能力读取必须用 event_type=ability_read，不能改标成普通阅读。"
+                "不合格就 passed=false，revision_note 写清要改的判定。"
+                "分类意见写入 classified_issues：能用原文约束的给 text_must_exclude，其余作 semantic。",
                 {
                     "scene_card": card.model_dump(),
                     "scene_text": scene_text,
-                    "entry_summary": _audit_entry,
                     "audit": audit.model_dump(),
+                    "program_flags": {
+                        "boundary": boundary_violations,
+                        "gaps": cooperation_gaps,
+                    },
                 },
                 phase_name="SELF_AUDIT",
             )
-            sp[f"auditor_self_reviewed:{card.scene_id}"] = review.model_dump()
+            audit_review_dump = fill_unclassified_as_semantic(review.model_dump())
+            sp[f"auditor_self_reviewed:{card.scene_id}"] = audit_review_dump
             sp[f"auditor_self_reviewed_hash:{card.scene_id}"] = audit_hash
-            if (
-                not review.passed
-                and int(sp.get(f"auditor_self_repairs:{card.scene_id}") or 0) < 1
-            ):
+            sp["open_semantic_issues"] = remember_semantic_issues(
+                list(sp.get("open_semantic_issues") or []),
+                audit_review_dump.get("classified_issues") or [],
+                origin="auditor_self_review",
+            )
+            need_rerecord = (not review.passed) or bool(cooperation_gaps)
+            if need_rerecord and int(sp.get(f"auditor_self_repairs:{card.scene_id}") or 0) < 1:
                 sp[f"auditor_self_repairs:{card.scene_id}"] = 1
                 note = (review.revision_note or "").strip() or "；".join(
                     str(item) for item in review.issues[:3] if str(item).strip()
                 )
                 audit = await call(
                     _SceneAudit,
-                    audit_system + " 这是自审后的一次订正，按 self_review_note 改记录。",
-                    {**audit_payload, "self_review_note": note},
+                    audit_system + " 这是自审后的一次订正，按 self_review_note 改记录，补全实际事件和台账增量。",
+                    {**audit_payload, "self_review_note": note, "program_flags": cooperation_gaps},
                     repair_no=1,
                 )
+                sp["open_semantic_issues"] = apply_semantic_resolutions(
+                    list(sp.get("open_semantic_issues") or []),
+                    [item.model_dump() for item in audit.semantic_resolutions],
+                    scene_text,
+                )
+                boundary_violations, cooperation_gaps = _assess_audit(audit)
         # 程序门控：补全 must 判定 → 证据接地 → 连续性/硬失败（与实验共用）
         must_ids = {b.beat_id for b in card.beats if b.must_show}
         _prior_ending = (
@@ -1569,15 +1830,6 @@ async def _produce_script_tick(
         )
         sp.setdefault("scene_audits", {})[card.scene_id] = audit.model_dump()
 
-        # 工作包3.2：正文后检——校验实际事件是否越界。
-        from regent.novel.domain.scene_boundary import check_scene_boundary
-
-        boundary_violations = check_scene_boundary(
-            scene_id=card.scene_id,
-            actual_events=[e.model_dump() for e in audit.actual_events],
-            scene_plan=plan,
-            ledger=sp.get("continuity_ledger") or {},
-        )
         if boundary_violations:
             sp.setdefault("boundary_violations", []).extend(
                 [{"scene_id": card.scene_id, "v": v} for v in boundary_violations]
@@ -1641,38 +1893,63 @@ async def _produce_script_tick(
                 raise ProductionStopped(
                     "场记硬问题未清（本场修满），拒绝继续拍后续场：" + "；".join(lingering[-4:])
                 )
-        # 工作包2.2：台账为正式入口状态，state_changes 仅保留诊断用途。
-        ledger = sp.get("continuity_ledger") or empty_ledger()
-        ledger_applied = False
-        if audit.ledger_delta is not None:
-            delta_dict = audit.ledger_delta.model_dump(mode="json")
-            new_ledger, violations = apply_ledger_delta(
-                ledger,
-                delta_dict,
-                scene_id=audit.scene_id,
-                prose_hash="",
-                event_id="",
-            )
-            if violations:
-                sp.setdefault("ledger_violations", []).extend(
-                    [{"scene_id": audit.scene_id, "v": v} for v in violations]
-                )
-            else:
-                ledger = new_ledger
-                ledger_applied = True
-        sp["continuity_ledger"] = ledger
-        sp.setdefault("continuity_ledger_trail", []).append(deepcopy(ledger))
-        # 工作包2.2：working_state 从台账派生，不再从 state_changes 更新。
-        # state_changes 仅保留诊断用途（记录场记原始输出）。
+        # 工作包2.2：新协议以台账为正式入口。不合格增量不改变状态，并拒绝接纳本场。
+        # 旧协议仍用 state_changes，避免空台账把已有入口清掉。
+        from regent.novel.domain.chapter_handoff import content_hash as _scene_hash
         from regent.novel.domain.continuity_ledger import ledger_to_working_state
 
-        if ledger_applied or (ledger and any(ledger.get(k) for k in ("props", "resources", "actor_positions"))):
-            next_state = ledger_to_working_state(ledger)
+        ledger = sp.get("continuity_ledger") or empty_ledger()
+        ledger_violations: list[str] = []
+        if _ledger_protocol(work, production):
+            delta_dump = (
+                audit.ledger_delta.model_dump(mode="json")
+                if audit.ledger_delta is not None
+                else None
+            )
+            claims_change = bool(audit.state_changes) or any(
+                str(evt.modality or "") == "occurrence" for evt in audit.actual_events
+            )
+            if claims_change and ledger_delta_is_blank(delta_dump):
+                ledger_violations.append("missing_ledger_delta")
+            if "ability_read_unrecorded" in cooperation_gaps:
+                ledger_violations.append("ability_read_unrecorded")
+            if delta_dump is not None and not ledger_delta_is_blank(delta_dump) and not ledger_violations:
+                new_ledger, apply_errs = apply_ledger_delta(
+                    ledger,
+                    delta_dump,
+                    scene_id=audit.scene_id,
+                    prose_hash=_scene_hash(scene_text),
+                    prose=scene_text,
+                )
+                ledger_violations.extend(apply_errs)
+                if not apply_errs:
+                    ledger = new_ledger
+            if ledger_violations:
+                sp.setdefault("ledger_violations", []).extend(
+                    [{"scene_id": audit.scene_id, "v": v} for v in ledger_violations]
+                )
+                repair_key = f"scene_repairs:{card.scene_id}"
+                repairs = int(sp.get(repair_key) or 0)
+                summary = "；".join(ledger_violations[:4])
+                if repairs < 2:
+                    sp[repair_key] = repairs + 1
+                    sp["scene_revision_instruction"] = (
+                        f"台账拒绝本场增量：{summary}。按已有道具和轮次改写，不要重复已发生的事。"
+                    )
+                    production["phase"] = "WRITE_SCENE"
+                    _save(run, production)
+                    return False
+                _save(run, production)
+                raise ProductionStopped(f"台账冲突未清（本场修满）：{summary}")
+            projected = ledger_to_working_state(ledger)
+            sp["working_state"] = projected or deepcopy(sp.get("working_state") or {})
         else:
-            # 无台账或台账为空时回退到旧链路（兼容旧作品）
             next_state = deepcopy(sp.get("working_state") or {})
             next_state.update(audit.state_changes)
-        sp["working_state"] = next_state
+            sp["working_state"] = next_state
+        sp["continuity_ledger"] = ledger
+        sp.setdefault("continuity_ledger_trail", []).append(deepcopy(ledger))
+        next_state = deepcopy(sp.get("working_state") or {})
         # 结构化场出口：供后场证明「已接受新值」而非「旧值未出现」
         exits = list(sp.get("scene_exit_states") or [])
         while len(exits) < idx:
@@ -2107,8 +2384,6 @@ async def _produce_script_tick(
                     "acceptance_items",
                     "repair_history",
                     "compile_soft_issues",
-                    "gate_debts",
-                    "audit_deferred_cont",
                     "scene_soft_fails",
                     "audit_soft_cont",
                     "validate_soft_commons",

@@ -494,6 +494,15 @@ class StoryLedger:
         use/deplete 事实会写入 AbilityUse（稳定 resource_id）。
         """
         fact_texts = [str(f or "").strip() for f in (facts or []) if str(f or "").strip()]
+        seen_facts = {
+            (int(event.chapter_no), event.kind, event.summary)
+            for event in self.events.events
+        }
+        fact_texts = [
+            text
+            for text in fact_texts
+            if (int(chapter_no), "committed_fact", text[:80]) not in seen_facts
+        ]
         if self.ability:
             for text in fact_texts:
                 rid = self.ability.fact_reuses_exhausted(text)
@@ -515,6 +524,14 @@ class StoryLedger:
                 if action not in {"use", "deplete"} or not rid:
                     continue
                 res = self.ability.rule.resource_by_id(rid)
+                already = any(
+                    int(use.chapter_no) == int(chapter_no)
+                    and use.resource_id == rid
+                    and use.what == text[:120]
+                    for use in self.ability.uses
+                )
+                if already:
+                    continue
                 self.ability.record(
                     AbilityUse(
                         chapter_no=int(chapter_no),

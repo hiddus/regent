@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 # 结构化顾问标签：只提示、不阻断正史。
 SOFT_ISSUE_PREFIXES: tuple[str, ...] = (
@@ -26,66 +25,6 @@ SOFT_ISSUE_PREFIXES: tuple[str, ...] = (
 
 # 摘录格式：审校被要求用「摘录「…」」给出可核对的正文范围。
 _QUOTE_RE = re.compile(r"「(.+?)」", re.DOTALL)
-
-
-# --- 结构化议题协议（工作包1.1） ---
-# StructuredIssue 和 parse_issue_text 是计划定义的统一议题协议。
-# 当前生产链路仍用字符串流转；这两个接口为未来结构化迁移预留，已有测试覆盖。
-
-IssueStatus = Literal["OPEN", "EVIDENCE_DEFECT", "RESOLVED", "WITHDRAWN"]
-IssueSeverity = Literal["hard", "soft"]
-IssueOrigin = Literal["compile_self_review", "writer_self_review", "auditor", "reviewer", "program_check"]
-
-
-@dataclass
-class StructuredIssue:
-    """统一议题结构（工作包1.1）。
-
-    字段对齐计划：issue_id, code, severity, origin, origin_scene_id,
-    affected_scene_ids, evidence_spans, source_hash, status, verify_rule。
-    """
-
-    issue_id: str
-    code: str
-    severity: IssueSeverity
-    origin: IssueOrigin
-    description: str
-    origin_scene_id: str = ""
-    affected_scene_ids: list[str] = field(default_factory=list)
-    evidence_spans: list[str] = field(default_factory=list)
-    source_hash: str = ""
-    status: IssueStatus = "OPEN"
-    verify_rule: str = ""
-    resolved_version: str = ""
-    resolved_evidence: str = ""
-
-    def to_text(self) -> str:
-        """转为文本格式（向后兼容字符串列表）。"""
-        prefix = f"[{self.code}]" if self.code else ""
-        return f"{prefix} {self.description}".strip()
-
-
-def parse_issue_text(text: str, *, origin: IssueOrigin = "reviewer") -> StructuredIssue:
-    """从文本解析议题（向后兼容）。"""
-    import hashlib
-
-    text = str(text or "").strip()
-    code = ""
-    match = re.match(r"^\[([^\]]+)\]\s*(.*)$", text, re.DOTALL)
-    if match:
-        code = match.group(1)
-        description = match.group(2).strip()
-    else:
-        description = text
-    severity: IssueSeverity = "soft" if any(text.startswith(p) for p in SOFT_ISSUE_PREFIXES) else "hard"
-    return StructuredIssue(
-        issue_id=hashlib.sha256(text.encode()).hexdigest()[:12],
-        code=code,
-        severity=severity,
-        origin=origin,
-        description=description,
-        evidence_spans=[q.strip() for q in _QUOTE_RE.findall(text) if q.strip()],
-    )
 
 
 def is_hard_issue(issue: Any) -> bool:
@@ -148,21 +87,40 @@ def quote_in_content(quote: str, content: str) -> bool:
     return q in _normalize_for_grounding(content)
 
 
+# 程序自己产生的硬问题不要求模型摘录。审校写出的硬问题必须带「…」正文范围。
+_PROGRAM_ISSUE_PREFIXES: tuple[str, ...] = (
+    "整章正文不足",
+    "节点完成缺少",
+    "[front:",
+    "[pov:",
+    "[semantic]",
+    "boundary_",
+    "ledger_",
+    "repetition:",
+    "constraint_",
+)
+
+
+def _program_authored(text: str) -> bool:
+    return text.startswith(_PROGRAM_ISSUE_PREFIXES)
+
+
 def partition_hard_by_grounding(
     hard_issues: list[str], content: str
 ) -> tuple[list[str], list[str]]:
     """把硬问题拆成 (grounded, evidence_defect)。
 
-    - evidence_defect：问题引用了「…」正文摘录，但摘录对不上当前正文——可能是误报
-      （如把合法重读判成冲突），须走有界证据复核，不直接触发重写、不自动关闭。
-    - grounded：其余硬问题。包含摘录命中正文的，以及不带摘录的确定性/结构性问题
-      （前置硬门、字数不足、自然语言连续性冲突）——它们本就无需正文接地。
+    - evidence_defect：摘录对不上当前正文，或审校硬问题没有可核对摘录。
+      须走有界证据复核，不直接触发重写、不自动关闭。
+    - grounded：摘录命中正文，或程序自己产生的确定性硬问题。
     """
     grounded: list[str] = []
     defect: list[str] = []
     for text in hard_issues:
         quotes = extract_quotes(text)
         if quotes and not any(quote_in_content(q, content) for q in quotes):
+            defect.append(text)
+        elif not quotes and not _program_authored(text):
             defect.append(text)
         else:
             grounded.append(text)
@@ -171,10 +129,8 @@ def partition_hard_by_grounding(
 
 __all__ = [
     "SOFT_ISSUE_PREFIXES",
-    "StructuredIssue",
     "extract_quotes",
     "is_hard_issue",
-    "parse_issue_text",
     "partition_hard_by_grounding",
     "partition_issues",
     "quote_in_content",

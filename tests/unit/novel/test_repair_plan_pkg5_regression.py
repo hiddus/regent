@@ -273,4 +273,5 @@ def test_repetition_detection_with_legitimate_filter():
     quote = "「他靠在门后，左臂还在渗血，追兵的脚步停在门外。呼吸急促，心跳如鼓。」" * 3
     common_quote = _longest_common_substring(quote, prior, min_len=80)
     if common_quote:
-        assert _is_legitimate_repetition(common_quote)
+        assert not _is_legitimate_repetition(common_quote)
+    assert _is_legitimate_repetition("「短引语」")

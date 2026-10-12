@@ -66,7 +66,6 @@ from regent.novel.application.directing_scene_loop import (
 
 _effective_call_cap = _budget_call_cap
 
-# 创作已通过后，整章审校最多回退补拍次数；再遇可 soft 意见直接 coerce。
 _MAX_POST_CREATIVE_REVIEW_REWINDS = MAX_CHAPTER_REPAIRS
 _MAX_REVIEW_PLAN_REWINDS = 2
 
@@ -132,6 +131,7 @@ async def _resolve_evidence_defects(
                 {"issue_id": i, "issue": t}
                 for i, t in zip(ids, defects, strict=True)
             ],
+            "continuity_ledger": sp.get("continuity_ledger") or {},
         },
         "chapter_evidence_recheck",
         f"v{_input_version(run)}:evidence_recheck:{chash[:12]}",
@@ -362,6 +362,16 @@ async def validate_chapter(
                 if desc:
                     semantic_issues_from_self_reviews.append(desc)
 
+    from regent.novel.domain.name_aliases import alias_map_from_bible, apply_alias_map
+
+    review_bible = run.generation_context.get("world_bible")
+    if not isinstance(review_bible, dict):
+        story_bible = getattr(work, "story_bible", None)
+        review_bible = story_bible if isinstance(story_bible, dict) else None
+    target_node = apply_alias_map(
+        run.generation_context.get("target_node", {}),
+        alias_map_from_bible(review_bible),
+    )
     result = await _call(
         session,
         provider,
@@ -371,7 +381,9 @@ async def validate_chapter(
         ChapterValidation,
         "核验组章后的连续性、因果、重复事件及角色知识。确认所有场景衔接成立。"
         "只要存在事实冲突就不通过。不要按两个状态字段或每章冲突升级来判断。"
-        "失败时：issues 每条尽量带可检索摘录（用「摘录「…」」格式）；"
+        "失败时：issues 每条必须带可检索摘录（用「摘录「…」」格式），没有摘录的硬问题不会直接触发重写。"
+        "若 payload 含未结语义问题，在 semantic_resolutions 里逐条给 verdict："
+        "closed 必须附当前正文逐字 evidence；withdrawn 表示撤回；不要把原句再抄进 issues 当作已经关闭。"
         "failed_scene_index 填最早受影响场景下标（从0开始，相对 payload.scene_layout 分场顺序）。"
         "必须对照 scene_layout 的 scene_index/scene_id/字符区间定位，禁止自行猜分场。"
         "判断目标节点是否真正完成；完成必须给出正文逐字completion_quote。"
@@ -384,11 +396,16 @@ async def validate_chapter(
         {
             "chapter": run.content,
             "recent_chapters": run.generation_context.get("recent_chapters", []),
-            "target_node": run.generation_context.get("target_node", {}),
+            "target_node": target_node,
             "canon": run.generation_context.get("canon", []),
             "scene_layout": _scene_layout,
             **({"semantic_issues_from_self_reviews": semantic_issues_from_self_reviews}
                if semantic_issues_from_self_reviews else {}),
+            "open_semantic_issues": [
+                item for item in (_sp.get("open_semantic_issues") or [])
+                if isinstance(item, dict) and item.get("status") == "OPEN"
+            ],
+            "continuity_ledger": _sp.get("continuity_ledger") or {},
         },
         "chapter_validation",
         # 正文变了就是一次新的核验；正文未变时复用上次结论，不重复付费（G-09）
@@ -638,6 +655,17 @@ async def validate_chapter(
                 + "；".join(str(i) for i in unresolved[:4])
             )
         grounded_hard = [*grounded_hard, *recheck_grounded]
+    from regent.novel.domain.self_review_check import apply_semantic_resolutions
+
+    sp_sem = production.setdefault("script_protocol", {})
+    sp_sem["open_semantic_issues"] = apply_semantic_resolutions(
+        list(sp_sem.get("open_semantic_issues") or []),
+        [item.model_dump() for item in (result.semantic_resolutions or [])],
+        content_text,
+    )
+    for item in sp_sem.get("open_semantic_issues") or []:
+        if isinstance(item, dict) and str(item.get("status") or "") == "OPEN":
+            grounded_hard.append(f"[semantic]{str(item.get('description') or '')[:80]}")
     hard_final = list(grounded_hard)
     # 有未结硬问题即不通过；硬问题全部被复核撤回（误报）时，审校的 passed=False 被解释掉。
     # 审校判负却无可核对硬问题、也无撤回记录时，保守不放行。

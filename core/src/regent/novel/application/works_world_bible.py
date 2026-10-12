@@ -166,6 +166,8 @@ async def lock_world_bible(
     bible = WorldBible.model_validate(draft)
     now = datetime.now(UTC)
     dumped = bible.model_dump(mode="json")
+    # 新锁定的作品走台账协议。已锁定的旧作品不会进入这里。
+    dumped["continuity_protocol"] = "ledger_v1"
     work.story_bible = dumped
     work.story_bible_locked_at = now
     onboarding.world_bible = dumped

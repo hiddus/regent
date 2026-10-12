@@ -395,7 +395,11 @@ async def test_worker_reloads_each_checkpoint_and_commits_only_verified_facts(
     outputs = successful_scene_outputs()
     if repair:
         outputs[-1:] = [
-            d.ChapterValidation(passed=False, issues=["场景衔接冲突"], failed_scene_index=0),
+            d.ChapterValidation(
+                passed=False,
+                issues=["场景衔接冲突「他把钥匙放在桌上。」"],
+                failed_scene_index=0,
+            ),
             prose_decision("REWRITE", revision_mode="full"),
             prose_patch(TEXT, TEXT + "门外响起雨声。"),
             prose_decision(),

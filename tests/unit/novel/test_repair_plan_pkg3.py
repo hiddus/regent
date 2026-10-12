@@ -64,13 +64,14 @@ def test_longest_common_substring_empty():
 
 
 def test_is_legitimate_repetition_detects_quote():
-    text = "「他把钥匙放在桌上」这句话在前场出现过，本场再次引用。" * 3
-    assert _is_legitimate_repetition(text) is True
+    assert _is_legitimate_repetition("「他把钥匙放在桌上」") is True
+    long_copy = "「他把钥匙放在桌上」这句话在前场出现过，本场再次引用。" * 3
+    assert _is_legitimate_repetition(long_copy) is False
 
 
 def test_is_legitimate_repetition_detects_dialogue():
     text = "他说道：「我们必须尽快离开这里。」她回答说：「同意。」" * 3
-    assert _is_legitimate_repetition(text) is True
+    assert _is_legitimate_repetition(text) is False
 
 
 def test_is_legitimate_repetition_detects_inscription_from_ledger():
@@ -81,8 +82,9 @@ def test_is_legitimate_repetition_detects_inscription_from_ledger():
             }
         }
     }
-    text = "他翻转怀表，背面刻着「拾光钟表行，创立于二〇一〇年」。" * 3
-    assert _is_legitimate_repetition(text, ledger) is True
+    assert _is_legitimate_repetition("拾光钟表行，创立于二〇一〇年", ledger) is True
+    wrapped = "他翻转怀表，背面刻着「拾光钟表行，创立于二〇一〇年」。" * 3
+    assert _is_legitimate_repetition(wrapped, ledger) is False
 
 
 def test_is_legitimate_repetition_rejects_plain_copy():

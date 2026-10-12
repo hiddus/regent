@@ -144,6 +144,15 @@ def chapter_canon_blockers(run: Any, production: dict[str, Any]) -> list[str]:
         if boundary_violations:
             blockers.append(f"boundary_violations:{len(boundary_violations)}")
 
+    # 工作包4：语义问题只有带证据关闭或撤回后才能入正史。
+    # 描述出现在审校问题列表里仍是未结，不能据此放行。
+    for issue in sp.get("open_semantic_issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        if str(issue.get("status") or "OPEN") == "OPEN":
+            desc = str(issue.get("description") or "").strip()
+            blockers.append(f"unresolved_semantic_issue:{desc[:40]}")
+
     return blockers
 
 

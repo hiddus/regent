@@ -1,7 +1,7 @@
-"""自审程序预检（工作包4）。
+"""自审约束的程序复验与语义问题关闭（工作包4）。
 
-程序检查结构化约束，通过即关闭；不通过即为硬问题，触发角色自审。
-语义问题不在此检查，由下游场记/审校关闭。
+程序只关闭带 text_must_include / text_must_exclude 的结构化约束。
+语义问题保持 OPEN，直到下游给出可接地证据或明确撤回。
 """
 
 from __future__ import annotations
@@ -9,46 +9,129 @@ from __future__ import annotations
 from typing import Any
 
 
-def check_structural_constraints(
-    scene_text: str,
-    scene_card: dict[str, Any],
-    entry_summary: str,
-    working_state: dict[str, Any],
-    ledger: dict[str, Any],
-) -> list[str]:
-    """程序预检结构化约束，返回违规列表。
-
-    检查：
-    - 入场摘要中已完成的动作不得重演
-    - 伤势、器物、地点必须接上入场状态
-    - beat_evidence 的摘录必须是正文逐字
-    """
-    violations: list[str] = []
-
-    if entry_summary:
-        for line in entry_summary.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            # 提取"已完成：XXX"或"已XXX"格式的动作
-            if "已完成：" in line:
-                action = line.split("已完成：")[-1].strip()
-                if action and action in scene_text:
-                    violations.append(f"repeated_action:{action[:40]}")
-            elif line.startswith("已"):
-                action = line[1:].strip()
-                if action and action in scene_text:
-                    violations.append(f"repeated_action:{action[:40]}")
-
-    for key, value in working_state.items():
-        if not value:
+def verify_structural_constraints(text: str, issues: list[Any] | None) -> list[str]:
+    """复验自审给出的文字约束。通过才算这条结构性意见关闭。"""
+    fails: list[str] = []
+    body = str(text or "")
+    for issue in issues or []:
+        if not isinstance(issue, dict):
             continue
-        value_str = str(value)
-        if "伤" in key or "器" in key or "地点" in key:
-            if value_str and value_str not in scene_text:
-                violations.append(f"state_mismatch:{key}={value_str[:20]}")
+        if str(issue.get("category") or "") != "structural":
+            continue
+        include = str(issue.get("text_must_include") or "").strip()
+        exclude = str(issue.get("text_must_exclude") or "").strip()
+        if include and include not in body:
+            fails.append(f"constraint_missing:{include[:40]}")
+        if exclude and exclude in body:
+            fails.append(f"constraint_present:{exclude[:40]}")
+    return fails
 
-    return violations
+
+def remember_semantic_issues(
+    open_issues: list[dict[str, Any]] | None,
+    classified: list[Any] | None,
+    *,
+    origin: str,
+) -> list[dict[str, Any]]:
+    """把新的语义意见登记为 OPEN。已存在的描述不重复添加。"""
+    out = [dict(item) for item in (open_issues or []) if isinstance(item, dict)]
+    known = {str(item.get("description") or "").strip() for item in out}
+    for issue in classified or []:
+        if not isinstance(issue, dict):
+            continue
+        if str(issue.get("category") or "") != "semantic":
+            continue
+        desc = str(issue.get("description") or "").strip()
+        if not desc or desc in known:
+            continue
+        known.add(desc)
+        out.append(
+            {
+                "description": desc,
+                "origin": origin,
+                "status": "OPEN",
+                "involves_prior_chapter": bool(issue.get("involves_prior_chapter")),
+            }
+        )
+    return out
+
+
+def apply_semantic_resolutions(
+    open_issues: list[dict[str, Any]] | None,
+    resolutions: list[Any] | None,
+    content: str,
+) -> list[dict[str, Any]]:
+    """按描述匹配关闭语义问题。
+
+    closed 必须带当前正文里的逐字证据。withdrawn 记为撤回。
+    描述出现在审校问题列表里不算关闭。
+    """
+    from regent.novel.domain.review_issues import quote_in_content
+
+    by_desc: dict[str, dict[str, Any]] = {}
+    for item in resolutions or []:
+        if not isinstance(item, dict):
+            continue
+        desc = str(item.get("description") or "").strip()
+        if desc:
+            by_desc[desc] = item
+    out: list[dict[str, Any]] = []
+    for issue in open_issues or []:
+        if not isinstance(issue, dict):
+            continue
+        row = dict(issue)
+        if row.get("status") in {"RESOLVED", "WITHDRAWN"}:
+            out.append(row)
+            continue
+        desc = str(row.get("description") or "").strip()
+        res = by_desc.get(desc)
+        if res is None:
+            row["status"] = "OPEN"
+            out.append(row)
+            continue
+        verdict = str(res.get("verdict") or "open")
+        evidence = str(res.get("evidence") or "").strip()
+        if verdict == "withdrawn":
+            row["status"] = "WITHDRAWN"
+            row["evidence"] = evidence
+        elif verdict == "closed" and evidence and quote_in_content(evidence, content):
+            row["status"] = "RESOLVED"
+            row["evidence"] = evidence
+        else:
+            row["status"] = "OPEN"
+        out.append(row)
+    return out
+
+
+def unclassified_opinions(review: dict[str, Any] | None) -> list[str]:
+    """自审只写了自然语言、没有分类时，返回这些原文。已有 classified_issues 则不再追问。"""
+    if not isinstance(review, dict) or review.get("classified_issues"):
+        return []
+    opinions = [str(item).strip() for item in (review.get("issues") or []) if str(item).strip()]
+    note = str(review.get("revision_note") or "").strip()
+    if note and note not in opinions:
+        opinions.append(note)
+    return opinions
+
+
+def fill_unclassified_as_semantic(review: dict[str, Any] | None) -> dict[str, Any]:
+    """分类自审仍没有结构化结果时，把原意见登记为语义问题，避免静默丢失。"""
+    base = dict(review or {})
+    opinions = unclassified_opinions(base)
+    if not opinions:
+        return base
+    prior = bool(base.get("prior_chapter"))
+    base["classified_issues"] = [
+        {
+            "category": "semantic",
+            "description": text[:200],
+            "involves_prior_chapter": prior,
+            "text_must_include": "",
+            "text_must_exclude": "",
+        }
+        for text in opinions
+    ]
+    return base
 
 
 def should_trigger_self_review(
@@ -59,21 +142,18 @@ def should_trigger_self_review(
     ledger: dict[str, Any],
     repetition_warnings: list[str] | None = None,
     boundary_violations: list[str] | None = None,
+    ledger_violations: list[str] | None = None,
 ) -> bool:
-    """判断是否应触发自审（工作包4）。
-
-    条件触发：只在程序检查报出越界、照抄或台账冲突时触发。
-    """
-    structural = check_structural_constraints(
-        scene_text, scene_card, entry_summary, working_state, ledger
-    )
-    if structural:
-        return True
-    if repetition_warnings:
-        return True
-    if boundary_violations:
-        return True
-    return False
+    """条件触发：只在程序检查报出越界、照抄或台账冲突时触发。"""
+    del scene_text, scene_card, entry_summary, working_state, ledger
+    return bool(repetition_warnings or boundary_violations or ledger_violations)
 
 
-__all__ = ["check_structural_constraints", "should_trigger_self_review"]
+__all__ = [
+    "apply_semantic_resolutions",
+    "fill_unclassified_as_semantic",
+    "remember_semantic_issues",
+    "should_trigger_self_review",
+    "unclassified_opinions",
+    "verify_structural_constraints",
+]

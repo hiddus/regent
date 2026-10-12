@@ -650,7 +650,7 @@ async def test_validate_chapter_script_scene_rewinds_write_scene_not_watch_prose
         [
             d.ChapterValidation(
                 passed=False,
-                issues=["第二场因果断裂"],
+                issues=["第二场因果断裂「他把钥匙放在桌上。」"],
                 failed_scene_index=1,
                 node_completed=False,
                 completion_quote="",
@@ -721,7 +721,7 @@ async def test_validate_chapter_script_scene_scene_index_not_bound_to_accepted()
         [
             d.ChapterValidation(
                 passed=False,
-                issues=["第二场因果断裂"],
+                issues=["第二场因果断裂「他把钥匙放在桌上。」"],
                 failed_scene_index=1,
                 node_completed=False,
                 completion_quote="",
@@ -1324,7 +1324,7 @@ async def test_terminal_review_preserves_actual_unresolved_issues(monkeypatch, r
     prod["post_creative_review_rewinds"] = repairs
     prod["chapter_repairs"] = repairs
     run.content = TEXT
-    issue = "同一搜查在场景三重新开始，缺少时间及因果衔接"
+    issue = "同一搜查在场景三重新开始，缺少时间及因果衔接「他把钥匙放在桌上。」"
 
     async def capture_call(session, provider, work, run, production, schema,
                            system, payload, purpose, command_id):
@@ -1387,10 +1387,15 @@ async def test_writer_self_review_revises_once_then_hands_off(monkeypatch):
     assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
     assert int(sp.get("self_repairs:s1") or 0) == 1
     assert "删掉重复开门" in (sp.get("scene_revision_instruction") or "")
-    assert schemas == [d._SceneProseWithBeats, d.RoleSelfReview]
+    assert schemas == [d._SceneProseWithBeats, d.RoleSelfReview, d.RoleSelfReview]
 
     await d.produce_tick(Session(), provider=Provider([]), work=work, run=run)
-    assert schemas == [d._SceneProseWithBeats, d.RoleSelfReview, d._SceneProseWithBeats]
+    assert schemas == [
+        d._SceneProseWithBeats,
+        d.RoleSelfReview,
+        d.RoleSelfReview,
+        d._SceneProseWithBeats,
+    ]
     assert run.generation_context["production"]["phase"] == "AUDIT_SCENE"
     assert sp.get("writer_self_reviewed:s1", {}).get("passed") is False
 
@@ -1421,7 +1426,7 @@ async def test_chapter_review_self_review_fills_missing_scene_index():
         [
             d.ChapterValidation(
                 passed=False,
-                issues=["第二场因果断裂"],
+                issues=["第二场因果断裂「他把钥匙放在桌上。」"],
                 node_completed=False,
                 completion_quote="",
             ),
@@ -1456,7 +1461,7 @@ async def test_chapter_review_self_review_prior_chapter_stops():
         [
             d.ChapterValidation(
                 passed=False,
-                issues=["伤势与已接受章节冲突"],
+                issues=["伤势与已接受章节冲突「他把钥匙放在桌上。」"],
                 node_completed=False,
                 completion_quote="",
             ),

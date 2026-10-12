@@ -201,10 +201,21 @@ def test_apply_delta_destroyed_cannot_restore():
     }
     delta = {"prop_updates": [{"prop_id": "gear", "lifecycle": LIFECYCLE_INTACT}]}
     _, violations = apply_delta(ledger, delta)
-    assert any("destroyed_cannot_restore" in v for v in violations)
+    assert any("repair_requires_evidence" in v for v in violations)
     delta2 = {"prop_updates": [{"prop_id": "gear", "lifecycle": LIFECYCLE_DAMAGED}]}
-    new_ledger, violations2 = apply_delta(ledger, delta2)
-    assert not violations2
+    _, violations2 = apply_delta(ledger, delta2)
+    assert any("repair_requires_evidence" in v for v in violations2)
+    delta3 = {
+        "prop_updates": [
+            {
+                "prop_id": "gear",
+                "lifecycle": LIFECYCLE_DAMAGED,
+                "repair_quote": "齿轮被重新铆上",
+            }
+        ]
+    }
+    new_ledger, violations3 = apply_delta(ledger, delta3, prose="他把齿轮被重新铆上，表才又走了。")
+    assert not violations3
     assert new_ledger["props"]["gear"]["lifecycle"] == LIFECYCLE_DAMAGED
 
 

@@ -25,6 +25,10 @@ class WorldPersona(BaseModel):
     bio: str = Field(min_length=20, description="可演小传 ≥20 字")
     voice: str = Field(min_length=1, description="声纹")
     drives: str = Field(default="", description="核心欲望")
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="大纲或旧稿中的别名；只按此显式列表替换，不按相似名合并",
+    )
 
 
 class DramaticEngine(BaseModel):
@@ -78,6 +82,13 @@ class ProseStyle(BaseModel):
     )
 
 
+class WorldPlace(BaseModel):
+    """地点规范名。别名只来自显式列表，不按字形相近自动合并。"""
+
+    name: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list)
+
+
 class WorldBible(BaseModel):
     """编剧故事圣经：开章前须锁定；导演/执笔只读引用。"""
 
@@ -93,6 +104,7 @@ class WorldBible(BaseModel):
         description="外挂/金手指机制；无外挂可空",
     )
     personas: list[WorldPersona] = Field(min_length=2, max_length=8)
+    places: list[WorldPlace] = Field(default_factory=list, max_length=12)
     dramatic_engine: DramaticEngine = Field(
         description="核心矛盾的可执行戏剧引擎（源自方向卡）",
     )
