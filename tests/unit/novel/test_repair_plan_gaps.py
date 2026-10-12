@@ -368,7 +368,17 @@ def test_alias_binding_requires_both_sources():
     assert "沈望舒" not in accepted["personas"][0]["aliases"]
 
 
-def test_structural_quote_must_already_be_in_the_plan():
+def test_later_duplicate_occurrence_becomes_reference():
+    from regent.novel.domain.script_events import collapse_duplicate_occurrences
+
+    cards = collapse_duplicate_occurrences(
+        [
+            {"scene_id": "s1", "event_refs": [{"event_id": "evt_a", "role": "occurrence"}]},
+            {"scene_id": "s2", "event_refs": [{"event_id": "evt_a", "role": "occurrence"}]},
+        ]
+    )
+    assert cards[0]["event_refs"][0]["role"] == "occurrence"
+    assert cards[1]["event_refs"][0]["role"] == "reference"
     from regent.novel.domain.self_review_check import (
         explain_plan_constraint,
         ground_structural_quotes,

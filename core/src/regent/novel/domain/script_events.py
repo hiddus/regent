@@ -294,6 +294,32 @@ def ground_orphan_event_roles(
     return cards
 
 
+def collapse_duplicate_occurrences(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同一 event_id 只保留最先出现的 occurrence，后面的改成 reference。"""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        row = dict(card)
+        refs: list[Any] = []
+        for ref in card.get("event_refs") or []:
+            if not isinstance(ref, dict):
+                refs.append(ref)
+                continue
+            item = dict(ref)
+            eid = str(item.get("event_id") or "").strip()
+            if str(item.get("role") or "") == "occurrence" and eid:
+                if eid in seen:
+                    item["role"] = "reference"
+                else:
+                    seen.add(eid)
+            refs.append(item)
+        row["event_refs"] = refs
+        out.append(row)
+    return out
+
+
 def validate_plan_event_refs(
     plan_cards: list[dict[str, Any]],
     script_events: list[dict[str, Any]],
