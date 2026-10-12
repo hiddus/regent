@@ -379,6 +379,9 @@ def test_later_duplicate_occurrence_becomes_reference():
     )
     assert cards[0]["event_refs"][0]["role"] == "occurrence"
     assert cards[1]["event_refs"][0]["role"] == "reference"
+
+
+def test_structural_quote_must_already_be_in_the_plan():
     from regent.novel.domain.self_review_check import (
         explain_plan_constraint,
         ground_structural_quotes,
@@ -402,6 +405,9 @@ def test_later_duplicate_occurrence_becomes_reference():
     assert explain_plan_constraint("constraint_present:开门时手还在抖") == (
         "分场原文不得再出现「开门时手还在抖」"
     )
+
+
+def test_unclassified_opinions_become_semantic():
     from regent.novel.domain.self_review_check import (
         fill_unclassified_as_semantic,
         unclassified_opinions,
@@ -417,3 +423,39 @@ def test_later_duplicate_occurrence_becomes_reference():
     filled = fill_unclassified_as_semantic(review)
     assert filled["classified_issues"][0]["category"] == "semantic"
     assert unclassified_opinions({"classified_issues": [{"description": "已分类"}]}) == []
+
+
+def test_whole_beat_delete_becomes_semantic_short_phrase_stays():
+    from regent.novel.domain.self_review_check import demote_sole_passage_deletes
+
+    beat = "周悬推门进来，手里拿着沈鹤年失踪案的补充材料。他注意到沈迟右手皮肤异样地年轻。"
+    demoted = demote_sole_passage_deletes(
+        beat,
+        [
+            {
+                "category": "structural",
+                "description": "这一场要拆开",
+                "text_must_exclude": beat,
+                "text_must_include": "",
+            }
+        ],
+        [beat],
+    )
+    assert demoted[0]["category"] == "semantic"
+    assert demoted[0]["text_must_exclude"] == ""
+
+    longer = "他开门时手还在抖，把怀表放回绒布。"
+    kept = demote_sole_passage_deletes(
+        longer,
+        [
+            {
+                "category": "structural",
+                "description": "删掉手抖",
+                "text_must_exclude": "开门时手还在抖",
+                "text_must_include": "",
+            }
+        ],
+        [longer],
+    )
+    assert kept[0]["category"] == "structural"
+    assert kept[0]["text_must_exclude"] == "开门时手还在抖"

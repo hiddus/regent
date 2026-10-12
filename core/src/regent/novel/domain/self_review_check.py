@@ -128,6 +128,46 @@ def ground_structural_quotes(text: str, issues: list[Any] | None) -> list[dict[s
     return out
 
 
+_WHOLE_PASSAGE_MIN = 24
+
+
+def demote_sole_passage_deletes(
+    text: str,
+    issues: list[Any] | None,
+    passages: list[str],
+) -> list[dict[str, Any]]:
+    """整段情节只出现一次、又被标成整段删除时，改记语义。
+
+    拆场或改顺序不能靠删掉唯一一次发生。短句（如重复的动作短语）仍保持删除约束。
+    """
+    body = str(text or "")
+    kept = [p for p in passages if str(p or "").strip()]
+    out: list[dict[str, Any]] = []
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            continue
+        row = dict(issue)
+        if str(row.get("category") or "") != "structural":
+            out.append(row)
+            continue
+        exclude = str(row.get("text_must_exclude") or "").strip()
+        include = str(row.get("text_must_include") or "").strip()
+        covers_one = any(
+            exclude in passage and len(exclude) >= 0.6 * len(passage)
+            for passage in kept
+        )
+        if (
+            len(exclude) >= _WHOLE_PASSAGE_MIN
+            and body.count(exclude) == 1
+            and covers_one
+        ):
+            row["text_must_exclude"] = ""
+            if not include:
+                row["category"] = "semantic"
+        out.append(row)
+    return out
+
+
 def explain_plan_constraint(code: str) -> str:
     """把程序约束码写成重分场能执行的句子。"""
     if code.startswith("constraint_present:"):
@@ -187,6 +227,7 @@ def should_trigger_self_review(
 
 __all__ = [
     "apply_semantic_resolutions",
+    "demote_sole_passage_deletes",
     "explain_plan_constraint",
     "fill_unclassified_as_semantic",
     "ground_structural_quotes",

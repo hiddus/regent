@@ -1070,13 +1070,32 @@ async def _produce_script_tick(
                 "SELF_COMPILE",
             )
             from regent.novel.domain.self_review_check import (
+                demote_sole_passage_deletes,
                 ground_structural_quotes,
                 remember_semantic_issues,
             )
 
             blob = json.dumps(plan_obj.model_dump(), ensure_ascii=False)
-            dump["classified_issues"] = ground_structural_quotes(
-                blob, dump.get("classified_issues") or []
+            passages = [
+                str(getattr(card, name, "") or "")
+                for card in plan_obj.cards
+                for name in (
+                    "purpose",
+                    "core_choice",
+                    "exit_change",
+                    "entry_state",
+                    "emotion_arc",
+                )
+            ]
+            passages.extend(
+                str(getattr(beat, "text", "") or "")
+                for card in plan_obj.cards
+                for beat in card.beats
+            )
+            dump["classified_issues"] = demote_sole_passage_deletes(
+                blob,
+                ground_structural_quotes(blob, dump.get("classified_issues") or []),
+                passages,
             )
             sp["compile_self_review_done"] = True
             sp["compile_self_review"] = dump
