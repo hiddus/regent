@@ -1528,6 +1528,20 @@ async def _produce_script_tick(
         )
         sp.setdefault("scene_audits", {})[card.scene_id] = audit.model_dump()
 
+        # 工作包3.2：正文后检——校验实际事件是否越界。
+        from regent.novel.domain.scene_boundary import check_scene_boundary
+
+        boundary_violations = check_scene_boundary(
+            scene_id=card.scene_id,
+            actual_events=[e.model_dump() for e in audit.actual_events],
+            scene_plan=plan,
+            ledger=sp.get("continuity_ledger") or {},
+        )
+        if boundary_violations:
+            sp.setdefault("boundary_violations", []).extend(
+                [{"scene_id": card.scene_id, "v": v} for v in boundary_violations]
+            )
+
         scene_repair_key = f"scene_repairs:{card.scene_id}"
         scene_repairs = int(sp.get(scene_repair_key) or 0)
         # 审校回退补拍 / 创作已过：最多再写 1 次，随后 soft 连续类，避免 WRITE↔AUDIT 空烧。

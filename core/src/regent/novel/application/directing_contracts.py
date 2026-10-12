@@ -330,6 +330,23 @@ class LedgerDelta(BaseModel):
     time_marker: str = ""
 
 
+class ActualEvent(BaseModel):
+    """场记报告的实际事件（工作包3.2）。
+
+    模态：
+    - occurrence：本场实际发生
+    - recall：回忆/重读前场事件
+    - plan：计划/预期（未发生）
+    - negation：否定/未发生
+    """
+
+    event_id: str = ""
+    statement: str = Field(min_length=1)
+    modality: Literal["occurrence", "recall", "plan", "negation"] = "occurrence"
+    evidence: str = ""
+    responsibility_scene_id: str = ""
+
+
 class SceneAudit(BaseModel):
     scene_id: str = Field(min_length=1)
     beat_verdicts: list[BeatVerdict] = Field(default_factory=list)
@@ -342,6 +359,8 @@ class SceneAudit(BaseModel):
     hooks_opened: list[str] = Field(default_factory=list)
     hooks_closed: list[str] = Field(default_factory=list)
     ledger_delta: LedgerDelta | None = None
+    actual_events: list[ActualEvent] = Field(default_factory=list)
+    unlisted_changes: list[str] = Field(default_factory=list)
 
 
 # Private compatibility names used by existing tests/checkpoints.

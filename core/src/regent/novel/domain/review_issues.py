@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 # 结构化顾问标签：只提示、不阻断正史。
 SOFT_ISSUE_PREFIXES: tuple[str, ...] = (
@@ -25,6 +26,64 @@ SOFT_ISSUE_PREFIXES: tuple[str, ...] = (
 
 # 摘录格式：审校被要求用「摘录「…」」给出可核对的正文范围。
 _QUOTE_RE = re.compile(r"「(.+?)」", re.DOTALL)
+
+
+# --- 结构化议题协议（工作包1.1） ---
+
+IssueStatus = Literal["OPEN", "EVIDENCE_DEFECT", "RESOLVED", "WITHDRAWN"]
+IssueSeverity = Literal["hard", "soft"]
+IssueOrigin = Literal["compile_self_review", "writer_self_review", "auditor", "reviewer", "program_check"]
+
+
+@dataclass
+class StructuredIssue:
+    """统一议题结构（工作包1.1）。
+
+    字段对齐计划：issue_id, code, severity, origin, origin_scene_id,
+    affected_scene_ids, evidence_spans, source_hash, status, verify_rule。
+    """
+
+    issue_id: str
+    code: str
+    severity: IssueSeverity
+    origin: IssueOrigin
+    description: str
+    origin_scene_id: str = ""
+    affected_scene_ids: list[str] = field(default_factory=list)
+    evidence_spans: list[str] = field(default_factory=list)
+    source_hash: str = ""
+    status: IssueStatus = "OPEN"
+    verify_rule: str = ""
+    resolved_version: str = ""
+    resolved_evidence: str = ""
+
+    def to_text(self) -> str:
+        """转为文本格式（向后兼容字符串列表）。"""
+        prefix = f"[{self.code}]" if self.code else ""
+        return f"{prefix} {self.description}".strip()
+
+
+def parse_issue_text(text: str, *, origin: IssueOrigin = "reviewer") -> StructuredIssue:
+    """从文本解析议题（向后兼容）。"""
+    import hashlib
+
+    text = str(text or "").strip()
+    code = ""
+    match = re.match(r"^\[([^\]]+)\]\s*(.*)$", text, re.DOTALL)
+    if match:
+        code = match.group(1)
+        description = match.group(2).strip()
+    else:
+        description = text
+    severity: IssueSeverity = "soft" if any(text.startswith(p) for p in SOFT_ISSUE_PREFIXES) else "hard"
+    return StructuredIssue(
+        issue_id=hashlib.sha256(text.encode()).hexdigest()[:12],
+        code=code,
+        severity=severity,
+        origin=origin,
+        description=description,
+        evidence_spans=[q.strip() for q in _QUOTE_RE.findall(text) if q.strip()],
+    )
 
 
 def is_hard_issue(issue: Any) -> bool:
@@ -114,8 +173,10 @@ def partition_hard_by_grounding(
 
 __all__ = [
     "SOFT_ISSUE_PREFIXES",
+    "StructuredIssue",
     "extract_quotes",
     "is_hard_issue",
+    "parse_issue_text",
     "partition_hard_by_grounding",
     "partition_issues",
     "quote_in_content",
