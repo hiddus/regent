@@ -1226,16 +1226,21 @@ async def _produce_script_tick(
             # 事件引用硬闸：清单完备 + 唯一所有权 + 义务落场
             from regent.novel.domain.script_events import (
                 collapse_duplicate_occurrences,
+                demote_replay_consequences,
                 ground_orphan_event_roles,
                 validate_plan_event_refs,
             )
 
             def _ground_plan(plan_obj: Any) -> Any:
-                grounded = collapse_duplicate_occurrences(
-                    ground_orphan_event_roles(
-                        [card.model_dump() for card in plan_obj.cards],
-                        sp.get("script_events") or [],
-                    )
+                events = sp.get("script_events") or []
+                grounded = demote_replay_consequences(
+                    collapse_duplicate_occurrences(
+                        ground_orphan_event_roles(
+                            [card.model_dump() for card in plan_obj.cards],
+                            events,
+                        )
+                    ),
+                    events,
                 )
                 return plan_obj.model_copy(
                     update={"cards": [SceneCard.model_validate(c) for c in grounded]}

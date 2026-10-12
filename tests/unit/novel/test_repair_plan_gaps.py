@@ -381,6 +381,37 @@ def test_later_duplicate_occurrence_becomes_reference():
     assert cards[1]["event_refs"][0]["role"] == "reference"
 
 
+def test_replay_consequence_becomes_reference():
+    from regent.novel.domain.script_events import demote_replay_consequences
+
+    events = [
+        {
+            "event_id": "evt_shenchi_chooses_to_continue",
+            "event_type": "occurrence",
+            "description": "沈迟选择继续",
+        }
+    ]
+    cards = demote_replay_consequences(
+        [
+            {
+                "scene_id": "s1",
+                "event_refs": [
+                    {"event_id": "evt_shenchi_chooses_to_continue", "role": "occurrence"}
+                ],
+            },
+            {
+                "scene_id": "s2",
+                "event_refs": [
+                    {"event_id": "evt_shenchi_chooses_to_continue", "role": "consequence"}
+                ],
+            },
+        ],
+        events,
+    )
+    assert cards[0]["event_refs"][0]["role"] == "occurrence"
+    assert cards[1]["event_refs"][0]["role"] == "reference"
+
+
 def test_structural_quote_must_already_be_in_the_plan():
     from regent.novel.domain.self_review_check import (
         explain_plan_constraint,

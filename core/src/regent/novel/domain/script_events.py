@@ -320,6 +320,56 @@ def collapse_duplicate_occurrences(cards: list[dict[str, Any]]) -> list[dict[str
     return out
 
 
+def demote_replay_consequences(
+    cards: list[dict[str, Any]],
+    script_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """发生类事件已经有一场 occurrence 时，后场的 consequence 改成 reference。
+
+    consequence 只留给清单里单独列出的后果事件。挂在同一发生事件上会停章。
+    """
+    independent = {"consequence", "reference", "new_round"}
+    event_type: dict[str, str] = {}
+    for event in script_events:
+        event_id = _normalize_event_id(event.get("event_id", ""))
+        if event_id:
+            event_type[event_id] = str(event.get("event_type") or "")
+    owners: set[str] = set()
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        for ref in card.get("event_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            event_id = _normalize_event_id(ref.get("event_id", ""))
+            if event_id and str(ref.get("role") or "") == "occurrence":
+                owners.add(event_id)
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        row = dict(card)
+        refs: list[Any] = []
+        for ref in card.get("event_refs") or []:
+            if not isinstance(ref, dict):
+                refs.append(ref)
+                continue
+            item = dict(ref)
+            event_id = _normalize_event_id(item.get("event_id", ""))
+            role = str(item.get("role") or "")
+            kind = event_type.get(event_id, "")
+            if (
+                role == "consequence"
+                and event_id in owners
+                and kind not in independent
+            ):
+                item["role"] = "reference"
+            refs.append(item)
+        row["event_refs"] = refs
+        out.append(row)
+    return out
+
+
 def _shared_run(left: str, right: str, limit: int = 12) -> int:
     """两段文字的最长公共子串长度。够用即停。"""
     if not left or not right:
