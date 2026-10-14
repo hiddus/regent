@@ -184,6 +184,7 @@ def main() -> int:
                 "raw_intent": INTENT,
                 "client_nonce": f"r3p-{secrets.token_hex(4)}",
             },
+            timeout=180,
         )
         work_id = (work.get("body") or {}).get("work_id") or ""
         if not work_id:

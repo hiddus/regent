@@ -68,7 +68,11 @@ from regent.novel.domain.scene_card import (
     ChapterScenePlan,
     SceneCard,
     assemble_chapter,
+    cap_scenes_and_merge,
     compile_scene_plan,
+    deduplicate_cross_scene_beats,
+    ensure_unique_beat_ids,
+    ensure_unique_scene_ids,
     evaluate_scene_audit,
     structural_plan_issues,
     validate_scene_plan,
@@ -222,6 +226,8 @@ def _script_writer_system(prose_style: dict[str, Any] | None = None, *, chapter_
 def _script_system() -> str:
     return (
         "你是网文章节编剧，不是导演，也不是小说执笔者。"
+        "若 payload 含 story_mainline，剧本必须推进 current 节点，"
+        "承接 previous 的后果，朝 following 留入口；不得新开一条主线。"
         "导演只给了宽松选题（writer_task）：请自行发明戏核、代价与转折；不要把选题扩写成死步骤。"
         "产出一份紧凑可演的章节剧本：写清行动、回应、关键选择、转折原因、代价、结尾变化，"
         "并带少量关键对白与主角权衡。"
@@ -822,14 +828,128 @@ async def _produce_script_tick(
         # canon 只放在 context 分层里，避免外层再传一份重复计费
     }
 
+    async def _ensure_story_mainline() -> dict[str, Any]:
+        """编剧动笔前主线必须已审定。用到三分之二时先续一截再审。"""
+        from regent.novel.application.generation import StoryOutline
+        from regent.novel.application.story_mainline import (
+            load_mainline,
+            mark_mainline_reviewed,
+            outline_prompt_nodes,
+            replace_mainline_from,
+            reviewed_node_count,
+        )
+        from regent.novel.domain.story_mainline import (
+            mainline_extension_due,
+            mainline_for_chapter,
+        )
+
+        path, nodes = await load_mainline(session, work.id)
+        chapter_no = int(run.chapter_no)
+        reviewed = reviewed_node_count(work)
+        keep = max(0, (chapter_no - 1) // 3)
+
+        async def _write_outline(prompt: str, payload: dict[str, Any], repair_no: int) -> Any:
+            return await call(
+                StoryOutline,
+                prompt,
+                payload,
+                repair_no=repair_no,
+                phase_name="MAINLINE",
+            )
+
+        async def _review(stable_keep: int, review_no: int, rewrite_no: int) -> None:
+            nonlocal path, nodes
+            review = await call(
+                RoleSelfReview,
+                "你是刚才写主线的架构师，只审核这份主线，不写剧本。"
+                "节点必须具体到人、地、不可逆变化，并且前后有因果。"
+                "后段不得把已经发生的节点再排一遍。"
+                "能交给编剧就 passed=true；要改就 passed=false，并在 revision_note 写清改哪一段。",
+                {"story_mainline": mainline_for_chapter(nodes, chapter_no)},
+                repair_no=review_no,
+                phase_name="MAINLINE_REVIEW",
+            )
+            if review.passed:
+                return
+            note = review.revision_note or "；".join(str(item) for item in review.issues[:4])
+            revised = await _write_outline(
+                "按审核意见重写尚未演完的主线节点。已走过的节点保持不动。" + note,
+                {
+                    "kept_nodes": outline_prompt_nodes(nodes)[:stable_keep],
+                    "revision_note": review.revision_note,
+                    "issues": list(review.issues),
+                },
+                rewrite_no,
+            )
+            path, nodes = await replace_mainline_from(
+                session,
+                work,
+                path,
+                nodes,
+                list(revised.nodes),
+                keep=stable_keep,
+            )
+            await call(
+                RoleSelfReview,
+                "再审一次改后的主线。通过就交给编剧；仍有意见写入 issues，不要重写正文。",
+                {"story_mainline": mainline_for_chapter(nodes, chapter_no)},
+                repair_no=review_no + 1,
+                phase_name="MAINLINE_REVIEW",
+            )
+
+        if not nodes:
+            outline = await _write_outline(
+                "你是小说架构师。在编剧写本章剧本之前，先定下整部故事主线。"
+                "10 到 16 个节点，按因果顺序排列。每个节点写清角色、地点、不可逆变化。"
+                "不得用「待定」「待编剧」占位。",
+                {
+                    "raw_intent": run.generation_context.get("raw_intent") or "",
+                    "genre": getattr(work, "genre", "") or "",
+                    "locked_direction": run.generation_context.get("locked_direction") or {},
+                    "world_bible": run.generation_context.get("story_bible_block") or "",
+                },
+                0,
+            )
+            path, nodes = await replace_mainline_from(
+                session, work, path, nodes, list(outline.nodes), keep=0
+            )
+        if nodes and reviewed < len(nodes):
+            await _review(keep if reviewed == 0 else reviewed, 0, 2)
+            mark_mainline_reviewed(work, len(nodes))
+            reviewed = len(nodes)
+        if nodes and mainline_extension_due(chapter_no, len(nodes)) and reviewed >= len(nodes):
+            outline = await _write_outline(
+                "你是小说架构师。现有主线已经用到三分之二。"
+                "顺着最后几个节点的后果，再写 10 到 16 个后续节点。"
+                "不得重写已有节点，不得另起一条无关主线。",
+                {
+                    "existing_tail": outline_prompt_nodes(nodes)[-5:],
+                    "chapter_no": chapter_no,
+                    "locked_direction": run.generation_context.get("locked_direction") or {},
+                },
+                1,
+            )
+            path, nodes = await replace_mainline_from(
+                session, work, path, nodes, list(outline.nodes), keep=len(nodes)
+            )
+            await _review(reviewed, 2, 3)
+            mark_mainline_reviewed(work, len(nodes))
+        if nodes:
+            await session.flush()
+        return mainline_for_chapter(nodes, chapter_no)
+
     if phase == "BRIEF":
+        story_mainline = await _ensure_story_mainline()
+        sp["story_mainline"] = story_mainline
         # 导演先布置简洁宽松选题；甲乙丙丁只是编号，不绑定写死策略轴。
         assign_payload: dict[str, Any] = {
             **base_payload,
+            "story_mainline": story_mainline,
             "candidate_slots": list(SCRIPT_CANDIDATE_SLOTS),
             "assign_note": (
                 "给四个槽位各写一两句宽松选题；四条戏剧方向必须可区分；"
                 "至少一条逼出不可两全的张力；禁止写死情节步骤、代价类型、打脸清单。"
+                "选题必须落在 story_mainline.current 这个节点上，不得新开主线。"
             ),
         }
         if sp.get("last_reject_reason"):
@@ -866,7 +986,11 @@ async def _produce_script_tick(
                 "candidate_slot": slot,
                 "writer_task": task_for_slot(assignment, slot),
                 "assignment_goal": sp.get("assignment_goal") or "",
-                "note": "本请求只写这一条选题；自行发明戏核与代价；不得读取其他候选。",
+                "story_mainline": sp.get("story_mainline") or {},
+                "note": (
+                    "本请求只写这一条选题；自行发明戏核与代价；不得读取其他候选。"
+                    "必须推进 story_mainline.current，不得新开主线。"
+                ),
             }
             if sp.get("last_reject_reason"):
                 item["previous_reject_reason"] = sp["last_reject_reason"]
@@ -1076,6 +1200,8 @@ async def _produce_script_tick(
                 "text_must_exclude 是要从本分场删掉的逐字原文，"
                 "text_must_include 是本分场里必须留下的逐字原文；"
                 "要删的句子不要写进 text_must_include。"
+                "event_refs 的 role 不是正文。角色标错就在 revision_note 写明"
+                " event_id 和应改成的 role，不要把 \"role\" 字段写进 text_must_exclude。"
                 "不能用原文包含或排除判定的，category=semantic，并标明是否涉及前章。"
                 "能改计划就 passed=false，并在 revision_note 写清要改的场次。"
                 "passed=true 只表示这份分场可以交给执笔。",
@@ -1093,6 +1219,7 @@ async def _produce_script_tick(
                 "SELF_COMPILE",
             )
             from regent.novel.domain.self_review_check import (
+                demote_role_field_excludes,
                 demote_sole_passage_deletes,
                 ground_structural_quotes,
                 remember_semantic_issues,
@@ -1115,10 +1242,12 @@ async def _produce_script_tick(
                 for card in plan_obj.cards
                 for beat in card.beats
             )
-            dump["classified_issues"] = demote_sole_passage_deletes(
-                blob,
-                ground_structural_quotes(blob, dump.get("classified_issues") or []),
-                passages,
+            dump["classified_issues"] = demote_role_field_excludes(
+                demote_sole_passage_deletes(
+                    blob,
+                    ground_structural_quotes(blob, dump.get("classified_issues") or []),
+                    passages,
+                )
             )
             sp["compile_self_review_done"] = True
             sp["compile_self_review"] = dump
@@ -1187,14 +1316,36 @@ async def _produce_script_tick(
                 compile_payload,
                 repair_no=repair_no,
             )
-            if len(plan_draft.cards) > 4:
-                raise ProductionStopped(f"分场超限: {len(plan_draft.cards)}>4")
-            scene_ids = [c.scene_id for c in plan_draft.cards]
-            if len(scene_ids) != len(set(scene_ids)):
-                raise ProductionStopped("分场 scene_id 重复")
-            all_beat_ids = [b.beat_id for c in plan_draft.cards for b in c.beats]
-            if len(all_beat_ids) != len(set(all_beat_ids)):
-                raise ProductionStopped("分场 beat_id 重复")
+            from regent.novel.domain.script_events import (
+                collapse_duplicate_occurrences,
+                demote_reference_occurrences,
+                demote_replay_consequences,
+                ground_orphan_event_roles,
+                validate_plan_event_refs,
+            )
+
+            def _ground_plan(plan_obj: Any) -> Any:
+                events = sp.get("script_events") or []
+                raw_cards = [card.model_dump() for card in plan_obj.cards]
+                grounded = demote_reference_occurrences(
+                    demote_replay_consequences(
+                        collapse_duplicate_occurrences(
+                            ground_orphan_event_roles(raw_cards, events),
+                        ),
+                        events,
+                    ),
+                    events,
+                )
+                grounded = cap_scenes_and_merge(grounded, max_scenes=4)
+                grounded = collapse_duplicate_occurrences(grounded)
+                grounded = deduplicate_cross_scene_beats(grounded)
+                grounded = ensure_unique_scene_ids(grounded)
+                grounded = ensure_unique_beat_ids(grounded)
+                return plan_obj.model_copy(
+                    update={"cards": [SceneCard.model_validate(c) for c in grounded]}
+                )
+
+            plan_draft = _ground_plan(plan_draft)
             plan = ChapterScenePlan(
                 chapter_no=int(run.chapter_no),
                 cards=list(plan_draft.cards),
@@ -1223,34 +1374,6 @@ async def _produce_script_tick(
                 for item_id in card.acceptance_ids
                 if item_id not in known_acc_ids
             )
-            # 事件引用硬闸：清单完备 + 唯一所有权 + 义务落场
-            from regent.novel.domain.script_events import (
-                collapse_duplicate_occurrences,
-                demote_reference_occurrences,
-                demote_replay_consequences,
-                ground_orphan_event_roles,
-                validate_plan_event_refs,
-            )
-
-            def _ground_plan(plan_obj: Any) -> Any:
-                events = sp.get("script_events") or []
-                grounded = demote_reference_occurrences(
-                    demote_replay_consequences(
-                        collapse_duplicate_occurrences(
-                            ground_orphan_event_roles(
-                                [card.model_dump() for card in plan_obj.cards],
-                                events,
-                            )
-                        ),
-                        events,
-                    ),
-                    events,
-                )
-                return plan_obj.model_copy(
-                    update={"cards": [SceneCard.model_validate(c) for c in grounded]}
-                )
-
-            plan_draft = _ground_plan(plan_draft)
             event_ref_errors = validate_plan_event_refs(
                 [card.model_dump() for card in plan_draft.cards],
                 sp.get("script_events") or [],
@@ -1262,9 +1385,79 @@ async def _produce_script_tick(
             )
             if not hard:
                 self_issues = await _compile_self_issues(plan_draft)
+                constraint_missing_items = [
+                    str(item) for item in self_issues
+                    if str(item).startswith("constraint_missing:")
+                ]
+                if constraint_missing_items:
+                    open_sem = list(sp.get("open_semantic_issues") or [])
+                    for cm in constraint_missing_items:
+                        quote = cm.split(":", 1)[1] if ":" in cm else cm
+                        open_sem.append({
+                            "description": f"constraint_missing（降为语义）：{quote}",
+                            "origin": "compile_constraint_missing",
+                            "status": "OPEN",
+                            "involves_prior_chapter": False,
+                        })
+                    sp["open_semantic_issues"] = open_sem
+                self_issues = [
+                    item for item in self_issues
+                    if not str(item).startswith("constraint_missing:")
+                ]
                 if self_issues:
                     hard = self_issues
                 else:
+                    # 主线落地检查：当前节点的 promise 必须被任一节拍或 end_change 覆盖
+                    from regent.novel.domain.scene_card import _text_covers
+
+                    mainline_data = sp.get("story_mainline") or {}
+                    current_node = mainline_data.get("current") if isinstance(mainline_data, dict) else None
+                    promise_text = str((current_node or {}).get("promise") or "").strip()
+                    node_title = str((current_node or {}).get("title") or "").strip()
+
+                    if promise_text:
+                        beat_texts = [
+                            str(b.text or "")
+                            for c in plan_draft.cards
+                            for b in c.beats
+                        ]
+                        end_change_text = str(selected.end_change or "").strip()
+                        corpus = beat_texts + ([end_change_text] if end_change_text else [])
+
+                        covered = _text_covers(promise_text, corpus)
+                        if not covered and node_title:
+                            import re as _re
+                            proper_nouns = [
+                                m for m in _re.findall(r"[\u4e00-\u9fff]{2,}", node_title)
+                                if len(m) >= 6
+                            ]
+                            if proper_nouns:
+                                covered = all(
+                                    any(noun in text for text in corpus)
+                                    for noun in proper_nouns
+                                )
+                            else:
+                                covered = True
+
+                        if not covered:
+                            if sp.get("mainline_promise_retried"):
+                                sp["compile_hard_issues"] = [
+                                    f"mainline_promise_not_covered:{node_title}:{promise_text[:48]}"
+                                ]
+                                _save(run, production)
+                                raise ProductionStopped(
+                                    f"主线节点「{node_title}」的 promise 仍未落地："
+                                    f"{promise_text[:80]}"
+                                )
+                            sp["mainline_promise_retried"] = True
+                            compile_repair = [
+                                f"主线节点「{node_title}」的 promise 未在分场节拍中落地："
+                                f"{promise_text[:80]}。",
+                                "至少一个节拍或剧本 end_change 必须覆盖该 promise 的关键内容。"
+                                "这是故事矛盾，不是格式问题。修完后直接通过，不要再改格式。",
+                            ]
+                            continue
+
                     sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
                     break
             
@@ -1324,9 +1517,77 @@ async def _produce_script_tick(
             )
                 if not hard:
                     self_issues = await _compile_self_issues(plan_draft)
+                    constraint_missing_items = [
+                        str(item) for item in self_issues
+                        if str(item).startswith("constraint_missing:")
+                    ]
+                    if constraint_missing_items:
+                        open_sem = list(sp.get("open_semantic_issues") or [])
+                        for cm in constraint_missing_items:
+                            quote = cm.split(":", 1)[1] if ":" in cm else cm
+                            open_sem.append({
+                                "description": f"constraint_missing（降为语义）：{quote}",
+                                "origin": "compile_constraint_missing",
+                                "status": "OPEN",
+                                "involves_prior_chapter": False,
+                            })
+                        sp["open_semantic_issues"] = open_sem
+                    self_issues = [
+                        item for item in self_issues
+                        if not str(item).startswith("constraint_missing:")
+                    ]
                     if self_issues:
                         hard = self_issues
                     else:
+                        from regent.novel.domain.scene_card import _text_covers
+
+                        mainline_data = sp.get("story_mainline") or {}
+                        current_node = mainline_data.get("current") if isinstance(mainline_data, dict) else None
+                        promise_text = str((current_node or {}).get("promise") or "").strip()
+                        node_title = str((current_node or {}).get("title") or "").strip()
+
+                        if promise_text:
+                            beat_texts = [
+                                str(b.text or "")
+                                for c in plan_draft.cards
+                                for b in c.beats
+                            ]
+                            end_change_text = str(selected.end_change or "").strip()
+                            corpus = beat_texts + ([end_change_text] if end_change_text else [])
+
+                            covered = _text_covers(promise_text, corpus)
+                            if not covered and node_title:
+                                import re as _re
+                                proper_nouns = [
+                                    m for m in _re.findall(r"[\u4e00-\u9fff]{2,}", node_title)
+                                    if len(m) >= 6
+                                ]
+                                if proper_nouns:
+                                    covered = all(
+                                        any(noun in text for text in corpus)
+                                        for noun in proper_nouns
+                                    )
+                                else:
+                                    covered = True
+
+                            if not covered:
+                                if sp.get("mainline_promise_retried"):
+                                    sp["compile_hard_issues"] = [
+                                        f"mainline_promise_not_covered:{node_title}:{promise_text[:48]}"
+                                    ]
+                                    _save(run, production)
+                                    raise ProductionStopped(
+                                        f"主线节点「{node_title}」的 promise 仍未落地："
+                                        f"{promise_text[:80]}"
+                                    )
+                                sp["mainline_promise_retried"] = True
+                                compile_repair = [
+                                    f"主线节点「{node_title}」的 promise 未在分场节拍中落地："
+                                    f"{promise_text[:80]}。",
+                                    "至少一个节拍或剧本 end_change 必须覆盖该 promise 的关键内容。",
+                                ]
+                                continue
+
                         sp["acceptance_items"] = [i.model_dump(mode="json") for i in acc_items]
                         break
             

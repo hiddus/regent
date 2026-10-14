@@ -700,6 +700,153 @@ def must_land_ids(
     return ids
 
 
+def _normalize_beat_text(text: str) -> str:
+    return re.sub(r"[\W_]+", "", text)
+
+
+def deduplicate_cross_scene_beats(
+    cards: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """后场节拍整段包含前场长文本时，删掉后场那条重复节拍。
+
+    只删后场，不改前场。若该场因此没有节拍，保留一句不与前场重复的
+    purpose（由调用方兜底）。使用与 validate_scene_plan 相同的规范化规则：
+    去标点后长度 >= 24 且后场文本包含前场或相反。
+    """
+    seen: list[tuple[str, str, str]] = []
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            out.append(card)
+            continue
+        row = dict(card)
+        kept_beats: list[Any] = []
+        for beat in card.get("beats") or []:
+            if not isinstance(beat, dict):
+                kept_beats.append(beat)
+                continue
+            normalized = _normalize_beat_text(str(beat.get("text") or ""))
+            if len(normalized) < 24:
+                kept_beats.append(beat)
+                continue
+            is_dup = False
+            for sid, _bid, prior in seen:
+                if sid == card.get("scene_id"):
+                    continue
+                if normalized in prior or prior in normalized:
+                    is_dup = True
+                    break
+            if not is_dup:
+                kept_beats.append(beat)
+            seen.append(
+                (str(card.get("scene_id") or ""), str(beat.get("beat_id") or ""), normalized)
+            )
+        row["beats"] = kept_beats
+        out.append(row)
+    return out
+
+
+def ensure_unique_scene_ids(
+    cards: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """后出现的重复 scene_id 加后缀，保证章内唯一。"""
+    seen: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            out.append(card)
+            continue
+        row = dict(card)
+        sid = str(row.get("scene_id") or "")
+        if sid in seen:
+            seen[sid] += 1
+            row["scene_id"] = f"{sid}_{seen[sid]}"
+        else:
+            seen[sid] = 0
+        out.append(row)
+    return out
+
+
+def ensure_unique_beat_ids(
+    cards: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """后出现的重复 beat_id 加后缀，保证章内唯一。"""
+    seen: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            out.append(card)
+            continue
+        row = dict(card)
+        new_beats: list[Any] = []
+        for beat in card.get("beats") or []:
+            if not isinstance(beat, dict):
+                new_beats.append(beat)
+                continue
+            b = dict(beat)
+            bid = str(b.get("beat_id") or "")
+            if bid in seen:
+                seen[bid] += 1
+                b["beat_id"] = f"{bid}_{seen[bid]}"
+            else:
+                seen[bid] = 0
+            new_beats.append(b)
+        row["beats"] = new_beats
+        out.append(row)
+    return out
+
+
+def cap_scenes_and_merge(
+    cards: list[dict[str, Any]],
+    max_scenes: int,
+) -> list[dict[str, Any]]:
+    """超过 max_scenes 张时，保留前 max_scenes 张，把被裁场的 occurrence 并入最后一张保留场。
+
+    并入后仍走 occurrence 去重（由 collapse_duplicate_occurrences 处理）。
+    被裁场的非 occurrence event_refs 改为 reference 后并入。
+    """
+    if len(cards) <= max_scenes:
+        return list(cards)
+    kept = [dict(card) for card in cards[:max_scenes]]
+    last = dict(kept[-1])
+    last_refs = [dict(r) for r in (last.get("event_refs") or [])]
+    last_beats = list(last.get("beats") or [])
+    last_purpose_parts = [str(last.get("purpose") or "").strip()]
+
+    occurrence_ids: set[str] = set()
+    for kept_card in kept:
+        for ref in (kept_card.get("event_refs") or []):
+            if isinstance(ref, dict) and str(ref.get("role") or "") == "occurrence":
+                occurrence_ids.add(str(ref.get("event_id") or ""))
+
+    for excess in cards[max_scenes:]:
+        if not isinstance(excess, dict):
+            continue
+        excess_purpose = str(excess.get("purpose") or "").strip()
+        if excess_purpose:
+            last_purpose_parts.append(excess_purpose)
+        for beat in excess.get("beats") or []:
+            if isinstance(beat, dict):
+                last_beats.append(dict(beat))
+        for ref in excess.get("event_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            r = dict(ref)
+            eid = str(r.get("event_id") or "")
+            role = str(r.get("role") or "occurrence")
+            if role == "occurrence" and eid in occurrence_ids:
+                r["role"] = "reference"
+            elif role == "occurrence":
+                occurrence_ids.add(eid)
+            last_refs.append(r)
+
+    last["beats"] = last_beats
+    last["event_refs"] = last_refs
+    last["purpose"] = "；".join(p for p in last_purpose_parts if p)
+    kept[-1] = last
+    return kept
+
+
 def _text_covers(target: str, corpus: list[str], *, min_frag: int = 8) -> bool:
     """目标关键叙述是否被某条节拍覆盖（子串或足够长的公共片段）。"""
     t = (target or "").strip()
@@ -752,7 +899,7 @@ def validate_scene_plan(
     seen_beats: list[tuple[str, str, str]] = []
     for card in plan.cards:
         for beat in card.beats:
-            normalized = re.sub(r"[\W_]+", "", beat.text)
+            normalized = _normalize_beat_text(beat.text)
             if len(normalized) < 24:
                 continue
             for sid, bid, prior in seen_beats:

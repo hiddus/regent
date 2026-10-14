@@ -318,8 +318,7 @@ async def test_compile_repairs_duplicate_events_before_writing(monkeypatch):
     assert len(calls) == 4  # extract_script_events + 2 plan calls + 分场自审
     plan_calls = [c for c in calls if "acceptance_items" in c]
     assert len(plan_calls) == 2
-    assert "duplicate_event" in str(plan_calls[1]["repair_instructions"])
-    assert plan_calls[1]["previous_plan"]["cards"][1]["beats"][0]["text"] == duplicate
+    assert "empty_scene" in str(plan_calls[1]["repair_instructions"])
     assert run.generation_context["production"]["phase"] == "WRITE_SCENE"
 
 

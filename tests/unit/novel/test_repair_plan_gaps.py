@@ -547,3 +547,31 @@ def test_short_exclude_is_stripped_from_revised_plan():
     stripped = strip_excluded_phrases(text, issues)
     assert "他甚至没注意到是什么时候丢的" not in stripped
     assert "突然想不起父亲教他调游丝时手指的温度" in stripped
+
+
+def test_role_field_exclude_is_not_a_sentence_to_delete():
+    from regent.novel.domain.self_review_check import (
+        demote_role_field_excludes,
+        verify_structural_constraints,
+    )
+
+    plan = '{"event_id": "evt_echo", "role": "reference"}'
+    issues = [
+        {
+            "category": "structural",
+            "description": "evt_echo 应标为 occurrence",
+            "text_must_exclude": '"role": "reference"',
+            "text_must_include": "",
+        },
+        {
+            "category": "structural",
+            "description": "删掉手抖",
+            "text_must_exclude": "开门时手还在抖",
+            "text_must_include": "",
+        },
+    ]
+    demoted = demote_role_field_excludes(issues)
+    assert demoted[0]["category"] == "semantic"
+    assert demoted[0]["text_must_exclude"] == ""
+    assert demoted[1]["category"] == "structural"
+    assert verify_structural_constraints(plan, demoted) == []

@@ -9,7 +9,8 @@ import pytest
 from regent.model import ModelUsage, StructuredModelResponse
 from regent.novel.application import direction as d
 from regent.novel.application import executor as executor_app
-from regent.novel.application.generation import execute_step
+from regent.novel.application.directing_contracts import RoleSelfReview
+from regent.novel.application.generation import StoryOutline, StoryOutlineNode, execute_step
 from regent.novel.application.editor_audit import EditorAuditResult
 from regent.novel.domain.script_protocol import (
     PROTOCOL_SCRIPT,
@@ -183,7 +184,16 @@ class Session:
 
 def _script_outputs():
     quote = "他把钥匙放在桌上。"
+    mainline_nodes = [
+        StoryOutlineNode(title=f"节点{i}", node_type="ESCALATION", promise=f"承诺{i}")
+        for i in range(10)
+    ]
     return [
+        StoryOutline(
+            volume_title="首卷",
+            nodes=mainline_nodes,
+        ),
+        RoleSelfReview(passed=True, issues=[], classified_issues=[]),
         ScriptAssignmentBoard(
             goal_restated="写出可拍第一章，金手指当场兑现",
             tasks=[

@@ -6,7 +6,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# 事件引用的字段，不是分场正文。自审常把它们写进 text_must_exclude。
+_ROLE_FIELD = re.compile(
+    r'^"role"\s*:\s*"(?:reference|occurrence|consequence|new_round)"$'
+)
 
 
 def verify_structural_constraints(text: str, issues: list[Any] | None) -> list[str]:
@@ -168,6 +174,31 @@ def demote_sole_passage_deletes(
     return out
 
 
+def demote_role_field_excludes(issues: list[Any] | None) -> list[dict[str, Any]]:
+    """`"role": "reference"` 这类字段碎片不是要删的句子。
+
+    改记语义，留给分场改稿去改 event_refs。整份 JSON 里必然还有这些字段，
+    拿它们做删除约束会永远 constraint_present。
+    """
+    out: list[dict[str, Any]] = []
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            continue
+        row = dict(issue)
+        if str(row.get("category") or "") != "structural":
+            out.append(row)
+            continue
+        exclude = str(row.get("text_must_exclude") or "").strip()
+        include = str(row.get("text_must_include") or "").strip()
+        if _ROLE_FIELD.fullmatch(exclude):
+            row["text_must_exclude"] = ""
+            if not include or _ROLE_FIELD.fullmatch(include):
+                row["text_must_include"] = ""
+                row["category"] = "semantic"
+        out.append(row)
+    return out
+
+
 def strip_excluded_phrases(text: str, issues: list[Any] | None) -> str:
     """从改后的计划里删掉自审点名的短句。整段删除已改记语义，不会进到这里。"""
     body = str(text or "")
@@ -250,6 +281,7 @@ def should_trigger_self_review(
 
 __all__ = [
     "apply_semantic_resolutions",
+    "demote_role_field_excludes",
     "demote_sole_passage_deletes",
     "explain_plan_constraint",
     "fill_unclassified_as_semantic",
