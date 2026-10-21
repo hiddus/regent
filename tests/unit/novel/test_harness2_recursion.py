@@ -457,6 +457,86 @@ async def test_screen_never_kills_a_chapter_that_already_passed(novel_db, monkey
         assert row.scope == "work"
 
 
+@pytest.mark.asyncio
+async def test_screen_survives_an_unknown_call(novel_db, monkeypatch):
+    """筛查调用结果不明也降级放行：第 4 章 PROPOSE 就是 CALL_UNKNOWN 那种失败。"""
+    from regent.novel.application.production import CallUnknown
+
+    generic = {"knobs": {"previous_chapter_tail": 300}}
+
+    class _broker(FakeBroker):
+        async def __call__(self, *args, **kwargs):
+            if args[8] == "h2_screen":
+                raise CallUnknown("unreconciled call: h2_screen")
+            return await super().__call__(*args, **kwargs)
+
+    broker = _broker(
+        {
+            "ChapterProse": lambda payload, system, command: chapter.ChapterProse(
+                content=GOOD if command.endswith(":generic") else SHORT
+            ),
+            "HarnessProposal": [_proposal(generic, {})],
+            "ComposeDecision": [
+                ComposeDecision(
+                    decision="adopt_generic", deliver="generic", observation="好", experience="经验"
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(9):
+            if await _tick(session, run, work, broker):
+                break
+        await session.commit()
+        production = run.generation_context["production"]
+        assert production["phase"] == "DONE"
+        assert run.content == GOOD
+        assert production["h2_screen"]["book_specific"] is True
+        assert "CallUnknown" in production["h2_screen"]["reason"]
+        assert (await session.scalars(select(HarnessLibraryModel))).one().scope == "work"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_name", ["CallConflict", "CallInFlight", "StaleLease"])
+async def test_screen_does_not_swallow_conflicts_or_lost_leases(novel_db, monkeypatch, error_name):
+    """幂等冲突是缺陷；租约被占说明另一个 worker 持有这一章。都不是「筛查没跑成」。"""
+    from regent.novel.application import production as production_module
+
+    error = getattr(production_module, error_name)
+    generic = {"knobs": {"previous_chapter_tail": 300}}
+
+    class _broker(FakeBroker):
+        async def __call__(self, *args, **kwargs):
+            if args[8] == "h2_screen":
+                raise error(f"h2_screen: {error_name}")
+            return await super().__call__(*args, **kwargs)
+
+    broker = _broker(
+        {
+            "ChapterProse": lambda payload, system, command: chapter.ChapterProse(
+                content=GOOD if command.endswith(":generic") else SHORT
+            ),
+            "HarnessProposal": [_proposal(generic, {})],
+            "ComposeDecision": [
+                ComposeDecision(
+                    decision="adopt_generic", deliver="generic", observation="好", experience="经验"
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    work = _work()
+    async with novel_db() as session:
+        with pytest.raises(error):
+            for _ in range(9):
+                if await _tick(session, run, work, broker):
+                    break
+
+
 def test_back_edits_drops_overrides_no_edit_claims():
     """没人认账的配置修改不采纳：第 4 章那次调参就是三条 edits 都没提到它。"""
     edits = [
@@ -494,6 +574,47 @@ def test_back_edits_needs_a_place_in_the_reference_draft():
         {"skills": {"chapter_opening": {"mode": "always", "instruction": "第一句接上那个动作"}}},
     )
     assert kept["skills"]["chapter_opening"]["mode"] == "always"
+
+
+def test_back_edits_checks_the_quoted_reference_text():
+    """where 里引了原文就得真在参照稿里：「指向具体位置」不能靠随便写几个字蒙过去。"""
+    overrides = {"knobs": {"previous_chapter_tail": 300}}
+    reference = "齿轮在灯下转了半圈。林晚把包裹推到问题件区，没有填名字。"
+    edit = {
+        "what": "前章尾段 500 → 300",
+        "path": "knobs.previous_chapter_tail",
+        "where": "「林晚把包裹推到问题件区」那一段太长",
+    }
+    kept, reasons = back_edits([edit], overrides, reference)
+    assert kept == overrides
+    assert not reasons
+
+    forged = dict(edit, where="「他在雨里站了一整夜」那一段太长")
+    kept, reasons = back_edits([forged], overrides, reference)
+    assert kept == {}
+    assert reasons
+
+    # 没引原文就无从核对，维持原样放行；参照稿缺失时也不拿引文当拒收理由
+    plain = dict(edit, where="结尾那一段")
+    assert back_edits([plain], overrides, reference)[0] == overrides
+    assert back_edits([edit], overrides)[0] == overrides
+
+
+def test_back_edits_checks_single_curly_quotes_like_the_live_proposal():
+    """第 4 章真机提案的 where 全用‘’引原文，不认这种引号就等于对真数据不设防。"""
+    overrides = {"prompts": {"write": "同一手段在同一章内不得重复使用。"}}
+    reference = "陈默把照片放下。他重新蹲到门槛边，用拨针把门槛石彻底撬开。坑不大。"
+    live = {
+        "what": "prompts.write 增加‘同一手段不得在同一章内重复使用’约束",
+        "path": "prompts.write",
+        "where": "参照稿中‘他重新蹲到门槛边，用拨针把门槛石彻底撬开’——与前面是同一招的重复。",
+    }
+    assert back_edits([live], overrides, reference)[0] == overrides
+
+    forged = dict(live, where="参照稿中‘他翻墙进了隔壁院子’——与前面是同一招的重复。")
+    kept, reasons = back_edits([forged], overrides, reference)
+    assert kept == {}
+    assert reasons
 
 
 @pytest.mark.asyncio
@@ -1023,11 +1144,11 @@ async def test_record_waits_while_another_trial_is_open(novel_db):
 
 
 @pytest.mark.asyncio
-async def test_baseline_counts_default_arm_chapters(novel_db):
-    """换臂前那几章是默认臂写的，同样过的是确定性硬门，认得出来的必须算进基线。
+async def test_baseline_only_counts_chapters_that_recorded_first_pass(novel_db):
+    """基线只认 CHECK 真写下 ``first_pass`` 的章。
 
-    认不出首过信号的老运行（只因人名警告改过一次稿，判不出首稿到底过没过门）不计入，
-    而不是记成没过：把默认臂基线压低会让试用判定偏向采纳它本该防的东西。
+    老运行哪怕干干净净（没改稿没重写）也不计入：反推只能得出 True，含老章节的基线
+    恒为 100%，试用判定就要求试用章也 100% 一次过——护栏被推向必然回退。
     """
 
     def _arm_run(work_id, chapter_no, executor, **production):
@@ -1044,16 +1165,18 @@ async def test_baseline_counts_default_arm_chapters(novel_db):
     async with novel_db() as s:
         _, work_id = await _seed_work(s)
         default = executor_app.CHAPTER_EXECUTOR
+        # 1–3 是改动之前的默认臂运行：只有阶段与改稿计数，没有首过信号
         s.add(_arm_run(work_id, 1, default, phase="DONE", repairs=0, rewrites=0))
         s.add(_arm_run(work_id, 2, default, phase="DONE", repairs=1, rewrites=0))
         s.add(_arm_run(work_id, 3, default, phase="DONE", rewrites=1))
         s.add(_arm_run(work_id, 6, executor_app.SCENE_EXECUTOR, phase="DONE"))
         s.add(_arm_run(work_id, 7, default, phase="REPAIR"))
         s.add(_canon_run(work_id, 8, first_pass=True))
+        s.add(_canon_run(work_id, 9, first_pass=False))
         await s.commit()
-        # 只有第 1 章认得出「一次过」；第 2、3 章判不出，不计入而不是记成没过
-        assert await first_pass_baseline(s, work_id, before_chapter=4) == {"chapters": 1, "ok": 1}
-        assert await first_pass_baseline(s, work_id, before_chapter=9) == {"chapters": 1, "ok": 1}
+        assert await first_pass_baseline(s, work_id, before_chapter=4) == {"chapters": 0, "ok": 0}
+        # 第 8、9 章写了真实信号，一过一没过——基线不是清一色 True
+        assert await first_pass_baseline(s, work_id, before_chapter=10) == {"chapters": 2, "ok": 1}
 
 
 def test_first_pass_reads_legacy_key_and_refuses_to_guess():
@@ -1065,10 +1188,11 @@ def test_first_pass_reads_legacy_key_and_refuses_to_guess():
     default = executor_app.CHAPTER_EXECUTOR
     assert _first_pass(_ctx(H2, {"h2_first_pass": False})) is False
     assert _first_pass(_ctx(default, {"first_pass": True})) is True
-    # 老运行只有改稿计数：判不出首稿过没过门
+    assert _first_pass(_ctx(default, {"first_pass": False})) is False
+    # 老运行只有阶段与改稿计数：干净章也不猜，猜出来的只会是 True
+    assert _first_pass(_ctx(default, {"phase": "DONE", "repairs": 0, "rewrites": 0})) is None
     assert _first_pass(_ctx(default, {"phase": "DONE", "repairs": 1})) is None
     assert _first_pass(_ctx(default, {"phase": "REPAIR"})) is None
-    # 别的执行臂不是这台状态机
     assert _first_pass(_ctx(executor_app.SCENE_EXECUTOR, {"phase": "DONE"})) is None
 
 

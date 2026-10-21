@@ -36,29 +36,21 @@ TRIAL_CHAPTERS = 3
 def _first_pass(run: ChapterRunModel) -> bool | None:
     """这一章首稿是否一次过硬门；认不出来就返回 None（不计入基线）。
 
-    两臂现在都在 CHECK 里按同一口径记 ``first_pass``：只看硬门，不看软警告——
-    软警告会把这一章送进改稿，但改过稿不等于首稿没过门。``h2_first_pass`` 是
-    H2 臂早先写下的同义键，历史运行里还留着。
+    两臂都在 CHECK 里按同一口径记 ``first_pass``：只看硬门，不看软警告——软警告
+    会把这一章送进改稿，但改过稿不等于首稿没过门。``h2_first_pass`` 是 H2 臂早先
+    写下的同义键，历史运行里还留着。
 
-    两者都没有的老运行只能退回「没改过稿也没重写过」。这条判不出「只因人名警告
-    改过一次稿」的情形，所以判不出就不计入基线，而不是记成没过：默认臂基线被压低
-    会让 ``trial_passes`` 偏向采纳，护栏就偏向了它本该防的方向。
-    别的执行臂不是这台状态机，也不算。
+    两个键都没有的老运行一律返回 None，**不再按「没改过稿也没重写过」反推**。
+    反推只能得出 True：真没过门的章必然改过稿或重写过，会被排除；改过稿但首稿
+    其实过了门的章也被排除。留下的是清一色干净章，基线因此恒为 100%，
+    ``trial_passes`` 就要求试用章也 100% 一次过——护栏被推向「必然回退」，
+    和它本该防的方向正好相反。老章节靠新运行写满三章自愈，这期间按保守规则判。
     """
-    ctx = run.generation_context or {}
-    production = ctx.get("production") or {}
+    production = (run.generation_context or {}).get("production") or {}
     for key in ("first_pass", "h2_first_pass"):
         if key in production:
             return bool(production[key])
-    from regent.novel.application.executor import CHAPTER_EXECUTOR
-
-    if str(ctx.get("executor") or "") != CHAPTER_EXECUTOR:
-        return None
-    if production.get("phase") != "DONE":
-        return None
-    if int(production.get("repairs") or 0) or int(production.get("rewrites") or 0):
-        return None
-    return True
+    return None
 
 
 async def _latest_runs(

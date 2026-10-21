@@ -229,17 +229,45 @@ def _assign(tree: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     node[path[-1]] = value
 
 
-def _claims(path: tuple[str, ...], edits: list[dict[str, Any]]) -> bool:
+_QUOTE_PAIRS = (("「", "」"), ("“", "”"), ("『", "』"), ("‘", "’"), ('"', '"'))
+
+
+def _quoted(text: str) -> list[str]:
+    spans: list[str] = []
+    for open_, close in _QUOTE_PAIRS:
+        rest = text
+        while open_ in rest:
+            _, _, tail = rest.partition(open_)
+            span, _, rest = tail.partition(close)
+            if not span:
+                break
+            spans.append(span)
+    return [span.strip() for span in spans if len(span.strip()) >= 4]
+
+
+def _squash(text: str) -> str:
+    return "".join((text or "").split())
+
+
+def _claims(path: tuple[str, ...], edits: list[dict[str, Any]], reference: str = "") -> bool:
     """这条修改有没有一条 edits 认账：说清改了什么，并指向参照稿的位置。
 
     认账优先看 ``path`` 是不是这一叶的前缀（``skills.chapter_opening`` 认下它底下
     的 instruction 与 mode），其次才退回到 ``what`` 里出现了键名。没写 ``where``
     的修改不算认账：指不出参照稿的位置，就是没说清这处改动针对什么。
+
+    ``where`` 里引了原文的，引文必须真的在参照稿里——「指向参照稿具体位置」原先
+    只要求这一栏非空，随便写几个字就算数。没引原文的维持原样：无从核对就不加拒收。
     """
     dotted = ".".join(path)
     leaf = path[-1]
+    haystack = _squash(reference)
     for edit in edits:
-        if not str(edit.get("where") or "").strip():
+        where = str(edit.get("where") or "").strip()
+        if not where:
+            continue
+        quotes = _quoted(where)
+        if quotes and haystack and not any(_squash(q) in haystack for q in quotes):
             continue
         claimed = str(edit.get("path") or "").strip()
         if claimed and (dotted == claimed or dotted.startswith(f"{claimed}.")):
@@ -251,20 +279,23 @@ def _claims(path: tuple[str, ...], edits: list[dict[str, Any]]) -> bool:
 
 
 def back_edits(
-    edits: list[dict[str, Any]], overrides: dict[str, Any]
+    edits: list[dict[str, Any]], overrides: dict[str, Any], reference: str = ""
 ) -> tuple[dict[str, Any], list[str]]:
     """只留下有 edits 认账的修改，返回 (留下的覆盖层, 丢弃理由)。
 
     第 4 章的 generic 候选把 ``soft_check_repetition_ngram`` 改成 60，三条 edits 没
     一条提到它、``evidence`` 也全是空的。这样的改动一旦进了改进库，就等于把一次
     没解释过的调参当成经验传给别的书，所以这里按叶子逐项对账，没人认的丢掉。
+
+    ``reference`` 是参照稿全文（不是给模型看的那份截断视图），用来核 ``where`` 里
+    引的原文是不是真在那一稿里。
     """
     if not overrides:
         return {}, []
     kept: dict[str, Any] = {}
     dropped: list[str] = []
     for path, value in flatten(overrides).items():
-        if _claims(path, edits):
+        if _claims(path, edits, reference):
             _assign(kept, path, value)
         else:
             dropped.append(".".join(path))
@@ -322,7 +353,7 @@ async def propose_tick(
         overrides, rejected = validate_overrides(
             candidate.overrides, config, book_terms=terms, generic=kind == "generic"
         )
-        overrides, unclaimed = back_edits(edits, overrides)
+        overrides, unclaimed = back_edits(edits, overrides, str(reference.get("draft") or ""))
         candidates.append(
             {
                 "kind": kind,
@@ -580,9 +611,15 @@ async def screen_tick(
     专有名词筛查看不见改写过的情节说法：第 4 章那条 generic 条目经验写的是「同字
     不同齿距」、提示词补的是「上一章以声音形式出现的警告」，一个人名都没带，可是
     换个物件的书根本用不上，而它当时的 scope 是 global，对别的书可见。判不出来
-    或这次调用没预算，都按「是本书专有」处理——筛查是可选的，不能因为它把一章
+    或这次调用没跑成，都按「是本书专有」处理——筛查是可选的，不能因为它把一章
     已经过硬门的稿子拖成失败。
+
+    只吞「钱可能花了、结果不确定」的 ``CallUnknown``（第 4 章 PROPOSE 当时就是
+    CALL_UNKNOWN）。``CallInFlight``/``StaleLease`` 说的是另一个 worker 正持有这一章，
+    这时降级落定就是旧 worker 在替持有者写结论，必须上抛让持有者接着跑。幂等冲突、
+    货币上限、程序缺陷同样上抛：兜住等于把缺陷藏进一条 scope=work 的条目里。
     """
+    from regent.novel.application.production import CallUnknown
     from regent.novel.domain.errors import BudgetExhausted
 
     ctx = run.generation_context or {}
@@ -597,7 +634,7 @@ async def screen_tick(
         "reference_draft": draft_view(reference.get("draft")),
     }
     verdict: GenericScreen | None = None
-    starved = False
+    missed = ""
     try:
         verdict = await chapter._call(
             session,
@@ -613,12 +650,14 @@ async def screen_tick(
             temperature=0.0,
         )
     except BudgetExhausted:
-        starved = True
+        missed = "预算耗尽，筛查没跑"
+    except CallUnknown as exc:
+        missed = f"筛查调用没跑成（{type(exc).__name__}），按本书专有条目处理"
     production = run.generation_context["production"]
     if verdict is None:
         production["h2_screen"] = {
             "book_specific": True,
-            "reason": "预算耗尽，筛查没跑" if starved else "筛查没跑成，按本书专有条目处理",
+            "reason": missed or "筛查没跑成，按本书专有条目处理",
         }
     else:
         production["h2_screen"] = {

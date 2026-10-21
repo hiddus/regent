@@ -775,18 +775,52 @@ async def test_overlong_draft_is_compressed_not_chopped(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_compression_still_overlong_is_truncated_and_logged(monkeypatch):
-    """压缩稿还是超长才截断，并且留痕：这是兜底，不是常规路径。"""
+async def test_truncated_tail_is_a_hard_fail_not_a_note(monkeypatch):
+    """压缩没压回来、章末被截掉：按硬门失败处理，改不回来就终止，不能入正史。
+
+    第 4 章的交付稿就是这么丢了章纲定下的结果——截断只记了一笔，照常进正史。
+    """
+    from regent.novel.domain.errors import ProductionStopped
+
     run, calls = await _fit_run(monkeypatch, compressed=LONG)
     work = SimpleNamespace(id="w")
-    for _ in range(2):
+    stopped = ""
+    for _ in range(20):
+        try:
+            await produce_chapter_tick(
+                None, provider=None, work=work, run=run,
+                production=run.generation_context["production"],
+            )
+        except ProductionStopped as exc:
+            stopped = str(exc)
+            break
+    production = run.generation_context["production"]
+    assert production["fit_results"][0]["truncated"] is True
+    assert len(run.content) <= MAX_CHAPTER_CHARS
+    # 截掉的尾巴留了原文，硬门失败带字数，改稿载荷拿得到这段尾巴
+    cut = production["fit_truncated"]
+    assert cut and len(cut) > 100
+    assert any("章末被截掉" in item for item in production["check_fails"])
+    repairs = [c for c in calls if c["purpose"] == "chapter_repair"]
+    assert repairs and repairs[0]["payload"]["cut_tail"] == cut
+    # 每一稿都压不回来：走完改稿与重写后终止，绝不 DONE
+    assert "截掉" in stopped
+    assert production["phase"] != "DONE"
+
+
+@pytest.mark.asyncio
+async def test_clean_compression_leaves_no_truncation_mark(monkeypatch):
+    """压得回来就不留截断标记：标记只属于真砍过章末的那一稿。"""
+    run, _ = await _fit_run(monkeypatch, compressed=PROSE + "包裹留在问题件区。")
+    work = SimpleNamespace(id="w")
+    for _ in range(3):
         await produce_chapter_tick(
             None, provider=None, work=work, run=run,
             production=run.generation_context["production"],
         )
     production = run.generation_context["production"]
-    assert production["fit_results"][0]["truncated"] is True
-    assert len(run.content) <= MAX_CHAPTER_CHARS
+    assert production["phase"] == "DONE"
+    assert "fit_truncated" not in production
 
 
 def test_fit_command_id_follows_the_draft():

@@ -32,6 +32,6 @@ overrides 是配置覆盖层，只能用这些键：
 每处修改写进 edits：
 - what：改了什么（旧值 → 新值）
 - path：这处修改对应 overrides 里的哪个键，写完整路径，例如 knobs.previous_chapter_tail、skills.chapter_opening、prompts.write
-- where：指向参照稿的哪个位置；留空的修改不被认账
+- where：指向参照稿的哪个位置；留空的修改不被认账。引原文就用「」括起来，程序会核对这段引文是否真在参照稿里，对不上的同样不被认账
 - why：预期解决什么问题
 - evidence：引用的 library_hits 条目 id；没有留空

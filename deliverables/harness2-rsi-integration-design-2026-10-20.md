@@ -212,7 +212,7 @@ core/src/regent/novel/harness_packs/
 外部审计复核了第十节的真机证据，结论与代码、真机数据一致：第 1 步达标；第 2 步只算冒烟通过；第 3–5 步未开始；文档里的成本数字算错了（已在第十节更正）。另有 6 项文档未记录的问题，其中 2 项动摇「第 4 章成功」这个结论本身。全部已修，均有走生产 tick 的单测。
 
 **1（P1）第 4 章交付稿缺了章纲定下的结果。** 超长稿原先从最后一个句号静默砍到 2500 字，砍掉的往往正是章末结果——第 4 章入正史的稿子就这么丢了结局。这不是 H2 独有的：默认臂走同一条路，只是没人核对过章纲。
-修法：新增 **FIT 阶段**与 `chapter_fit` 定向压缩调用（`directing_chapter.py` 的 `accept_draft`、`fit_tick`、`CHAPTER_FIT_SYSTEM`）。任何要入正史的稿子超过 `MAX_CHAPTER_CHARS` 时进 FIT，让模型压到字数内而不是截断；压缩后仍超长才回落到截断，并把 `truncated=true` 记进 `fit_results` 供审计。同时 PROBE 的两个候选稿**不再截断、不再做长度门**（`check_chapter(..., ignore_max_length=True)`），否则组合器是在比两个被砍掉结尾的稿子——这正是第 4 章选错的成因之一。
+修法：新增 **FIT 阶段**与 `chapter_fit` 定向压缩调用（`directing_chapter.py` 的 `accept_draft`、`fit_tick`、`CHAPTER_FIT_SYSTEM`）。任何要入正史的稿子超过 `MAX_CHAPTER_CHARS` 时进 FIT，让模型压到字数内而不是截断；压缩后仍超长才回落到截断，并把 `truncated=true` 记进 `fit_results` 供审计（第十二节把「记一笔就放行」改成了硬门失败）。同时 PROBE 的两个候选稿**不再截断、不再做长度门**（`check_chapter(..., ignore_max_length=True)`），否则组合器是在比两个被砍掉结尾的稿子——这正是第 4 章选错的成因之一。
 代价：默认臂章级调用上限 13 → 16（正文、重写、改稿三稿各留一次压缩），H2 每轮 5 → 7。
 
 **2（P1）过拟合筛查只查了卡司人名。** 通用条目入库前只用 `mentions_names` 比人名，改写过的情节说法照样过关——第 4 章那条「同字不同齿距」实际依赖本书的齿轮设定，却以 `scope=global` 入库，会送给所有书。
@@ -222,7 +222,7 @@ core/src/regent/novel/harness_packs/
 修法：`ConfigEdit` 增 `path` 字段（指向 overrides 的哪个键），`back_edits` 按叶子逐项对账——`path` 前缀匹配优先（`skills.chapter_opening` 认下它底下的 `instruction` 与 `mode`），其次才看 `what` 里有没有键名；`where` 留空的修改不算认账。没人认的配置修改直接丢弃，并把丢了什么写进候选的 `rejected`。被认领的 edits 落到 `h2_lesson["edits"]`，SCREEN 的判定与理由落到 `h2_lesson["screen"]`，采纳链可事后追溯。
 
 **4（P2）试用基线的口径两臂不一致，偏向采纳。** 第十节第 2 条修的是「默认臂章节不计入基线」，但口径仍分家：H2 看 `h2_first_pass`，默认臂靠 `phase==DONE and repairs==rewrites==0` 反推。反推会把「失败后被重试成功」误当首过，基线偏高偏低都可能，方向不确定但结果偏向采纳。
-修法：CHECK 阶段在分臂之前统一写 `production["first_pass"] = not fails`，两臂同口径；`overlay._first_pass` 读 `("first_pass", "h2_first_pass")`，两个键都没有的老运行/他臂运行返回 `None` **排除**，而不是当成失败计入分母。已入正史的历史章不会追溯改写，所以真机上那条条目的 `baseline` 仍是修复前的值，下一轮起才是同口径对比。
+修法：CHECK 阶段在分臂之前统一写 `production["first_pass"] = not fails`，两臂同口径；`overlay._first_pass` 读 `("first_pass", "h2_first_pass")`，两个键都没有的老运行/他臂运行返回 `None` **排除**，而不是当成失败计入分母。已入正史的历史章不会追溯改写，所以真机上那条条目的 `baseline` 仍是修复前的值，下一轮起才是同口径对比。（当时还保留了一条「没改过稿就算首过」的老运行反推，第十二节查明它只会把基线抬到 100%，已删。）
 
 **5（P2）回放只核了 `input_hash`，覆盖不到配置。** `input_hash` 只覆盖用户载荷，系统提示（也就是钉住的基础包与覆盖层编译出来的东西）不在里面。晋级前提因此是半条：配置编译错了、覆盖层没生效，回放照样「通过」。
 修法：`check_write_replay(context, *, stored_prompt_hash="")` 同时比对 `ModelCallModel.prompt_hash`（= `sha256(system_prompt)`）。没传 `stored_prompt_hash` 时 `prompt_hash_ok=None`、`ok` 一律为 `False`——宁可报「没核全」也不报「通过」。`h2_server_probe.py` 已改为取该运行最早一条 `chapter_write` 的 `prompt_hash` 传入。
@@ -233,6 +233,30 @@ core/src/regent/novel/harness_packs/
 验证：`tests/unit/novel/test_harness2_recursion.py` 36 项、`test_director_chapter.py` 44 项、`test_xuanhuan_acceptance_root_cure.py` 16 项，`tests/unit` + `core/tests` 全量无 FAILED/ERROR。`deploy/novel/sync_tree.py` 的 SYMBOL_CHECKS 加了 `book_terms`、`screen_tick`、`back_edits`、`fit_tick`、`accept_draft`、`clear_last_error` 六项跨模块耦合点，部署时逐个验证可导入。
 
 **仍未验证的：** 上述六项都只有单测覆盖，**尚未部署到服务器、未在真机复跑**。第十一节第 4 条改的是口径，第 5 条给回放加了硬条件——这两项在真机复跑前，「晋级前提成立」这个说法只能算未证。审计建议的下一步是把第 2 步扩到 3–5 本书，并在真机上至少触发一次首稿未过硬门的路径，再谈对照臂。
+
+## 十二、复核第十一节：两项只算缓解，另带出四个新问题（2026-10-21）
+
+对 6dca074 做了一次逐项复核（读过六项的 diff、重跑 `tests/unit/novel` 与 `core/tests`）。结论：第 3、4、5、6 项真关上了；**第 1、2 项当时只算缓解**，且修复本身带出四个新问题。以下都已修，除标注外均有单测。
+
+**第 1 项原先没根治。** FIT 会把「必须保住的选择与结果」传给压缩调用，但程序不检查结果到底还在不在，全靠模型照做；压缩后仍超长时照样截断，只记一笔 `truncated=true` 就进 CHECK、进正史——第 4 章那种情况仍可能再发生，只是更少、留了痕。
+现在改成确定性硬门：截掉的尾部原文留在 `production["fit_truncated"]`，CHECK 追加硬门失败「压缩后仍超长，章末被截掉 N 字」，REPAIR 载荷带上 `cut_tail`（不给它，改稿只能凭空补一个结局）；`accept_draft` 收新稿时清掉标记。改不回来就按既有路径重写、终止失败，**不再可能带着被截掉的章末入正史**。
+
+**第 2 项原先只管新条目。** 服务器上那条 `7c7ec1d6`（「同字不同齿距」）仍是 `scope=global`。它眼下处于 `provisional`，`library.search` 要求试用条目 `source_work_id == 本书`，所以别的书看不见；但 `settle_trial` 只改 `status` 不改 `scope`——三章试用一过就变成 `adopted` 的 global 条目，对所有书可见，而那时没人再判它通不通用。
+新增 `deploy/novel/demote_provisional_global.py`（默认干跑，`--apply` 落库）把试用中的 global 条目降级为 `work` 范围。**这是部署步骤，不跑就等于没修。**
+
+**（P2）FIT 也改了默认臂，文档原先只写了上限变化。** 默认臂是生产主力，不受灰度隔离。原来超长稿直接截断（零成本），现在多一次压缩调用，章级上限 13 → 16。真机默认臂第 1–3 章是 2490/2481/2444 字，贴着 2500 的上限，说明原先都被截过——上线后默认臂很可能**大部分章节都要多付一次压缩调用的钱**。
+这是明知故犯：截断丢的是章末结果，比多一次调用贵。但成本增量必须实测，不能靠估。`fit_results` 每次压缩都留 `{tag, chars_before, chars_after, truncated}`，上线后按它统计触发率与新增成本。
+
+**（P3）SCREEN 只兜住了预算耗尽。** 文档写「没跑成一律按本书专有处理」，代码却只捕获 `BudgetExhausted`；`CallUnknown` 一类基础设施失败仍会上抛，把一章已经过硬门的稿子拖成失败——第 4 章 PROPOSE 当时就是这种失败。
+现在同时捕获 `CallUnknown` 并降级为本书条目，理由写进 `h2_screen.reason`。`CallInFlight`/`StaleLease` **不捕获**：它们说的是另一个 worker 正持有这一章，这时降级落定等于旧 worker 替持有者写结论，必须上抛让持有者接着跑（初版一并吞了这两个，复核时收窄）。`CallConflict`（幂等冲突）、`CallBudgetExceeded`（货币上限）与程序缺陷同样**照旧上抛**：那些不是「筛查没跑成」，兜住等于把缺陷藏进一条 `scope=work` 的条目里。
+
+**（P3）基线有幸存者偏差，方向和我原先的判断相反。** `_first_pass` 对没有 `first_pass` 键的老运行按「没改过稿也没重写过」反推，而这个反推**只可能得出 True**：真没过门的章必然改过稿或重写过，被排除；首稿过门但因软警告改过稿的章，也被排除。留下的是清一色干净章，含老章节的基线恒为 100%，`trial_passes` 于是要求试用章也 100% 一次过——护栏被推向「必然回退」。
+改为只认真实键，认不出就不计入（`test_baseline_only_counts_chapters_that_recorded_first_pass`）。这**部分回退了第十一节之前的第 2 条修复**：真机作品 `064adf0a` 的试用前基线会从 `{chapters:3, ok:3}` 退回 `{0,0}`，三章内按保守规则（3 章至少 2 章首过）判，之后由新运行写满真实信号自愈。两个方向都偏的口径不如一个都不偏的口径。
+
+**（P3）认账校验偏松。** `where` 只要求非空，一条 edit 认领 `prompts.write` 就等于认下整段改写。
+现在 `where` 里用「」/“”/『』/‘’/直引号引了原文的，引文必须真出现在参照稿全文里（‘’是复核时补的：第 4 章真机提案的 `where` 全用‘’引原文，初版不认这种引号，等于对真实数据不设防）（不是给模型看的那份截断视图），对不上就不算认账。没引原文的维持原样——无从核对就不加拒收，免得把改写得当的修改也丢了。`propose.md` 同步写明这条规则。注意 `improver/` 不在 `ConfigTree` 里，改它不动 `harness_hash`，已钉住的历史运行不受影响。
+
+**仍未做的：** 以上全部只有单测覆盖，**未部署、未真机复跑**。要能说「修复完成」还差四步：跑 `demote_provisional_global.py --apply`；部署后复跑 `h2_server_probe.py`，确认回放的 `prompt_hash` 那一半对得上、失败原因不再显示；观察默认臂 FIT 触发率与新增成本；按审计建议把第 2 步扩到 3–5 本书，并在真机上触发一次首稿未过硬门。
 
 ## 证据来源
 

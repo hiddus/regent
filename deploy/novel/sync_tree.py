@@ -73,7 +73,6 @@ SYMBOL_CHECKS = [
     ("regent.novel.harnessing.library", "search", "按范围检索改进库供提案引用"),
     ("regent.novel.harnessing.replay", "check_write_replay", "晋级前用 input_hash + prompt_hash 零调用复原"),
     ("regent.novel.harnessing.library", "SHAREABLE_STATUSES", "试用条目只对本本书可见"),
-    ("regent.novel.application.executor", "CHAPTER_EXECUTOR", "覆盖层按默认臂算试用基线"),
     ("regent.novel.application.directing_chapter", "fit_tick", "超长稿定向压缩，不砍掉章末结果"),
     ("regent.novel.application.directing_chapter", "accept_draft", "落稿前统一走去重与压缩分流"),
     ("regent.novel.application.works_advance", "clear_last_error", "入正史时清掉上一次的失败原因"),

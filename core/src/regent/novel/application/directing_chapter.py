@@ -960,6 +960,7 @@ def accept_draft(
     run: Any, production: dict[str, Any], *, ctx: dict[str, Any] | None, draft: str, tag: str
 ) -> None:
     """收下一稿：去重后不超长就落稿进 CHECK，超长先进 FIT 压缩，不砍尾。"""
+    production.pop("fit_truncated", None)
     body = dedupe_chapter_text(draft, previous_chapter_text(ctx))
     if len(body) <= MAX_CHAPTER_CHARS:
         _store_prose(run, production, body)
@@ -1002,16 +1003,23 @@ async def fit_tick(
     production = run.generation_context["production"]
     spec = dict(production.get("fit") or {})
     compressed = dedupe_chapter_text(written.content, previous_chapter_text(ctx))
-    body = fit_chapter_length(compressed)
+    flat = (compressed or "").replace("\r", "").strip()
+    body = fit_chapter_length(flat)
+    cut = flat[len(body) :].strip() if flat.startswith(body) else ""
+    truncated = len(flat) > MAX_CHAPTER_CHARS
     production.setdefault("fit_results", []).append(
         {
             "tag": str(spec.get("tag") or tag),
             "chars_before": len(str(spec.get("draft") or "")),
             "chars_after": len(body),
-            "truncated": len(compressed) > MAX_CHAPTER_CHARS,
+            "truncated": truncated,
         }
     )
     production.pop("fit", None)
+    if truncated:
+        # 砍掉的正是章末。留着尾巴让改稿把它接回去，并按硬门失败处理：
+        # 只记一笔就放行，等于把「第 4 章交付稿丢了章纲结果」原样再演一遍。
+        production["fit_truncated"] = cut
     _store_prose(run, production, body)
     production["phase"] = "CHECK"
     _save(run, production)
@@ -1400,6 +1408,10 @@ async def produce_chapter_tick(
             title=str(getattr(run, "title", "") or ""),
         )
         warnings = name_warnings(content, cast)
+        cut = str(production.get("fit_truncated") or "")
+        if cut:
+            # 确定性硬门：压缩没压回来、章末被截掉过，就不能当没事入正史
+            fails.append(f"压缩后仍超长，章末被截掉{len(cut)}字，本章结果可能没落地")
         h2 = _is_h2(production)
         # 首过只看硬门，两臂同一个口径：软警告会把这一章送进改稿，但改过稿不等于
         # 首稿没过门。口径不一致会让默认臂的基线被人名警告压低，试用判定就偏向采纳。
@@ -1473,6 +1485,10 @@ async def produce_chapter_tick(
             system = CHAPTER_REPAIR_SYSTEM
         payload["previous_draft"] = draft
         payload["check_fails"] = list(production.get("check_fails") or [])
+        cut = str(production.get("fit_truncated") or "")
+        if cut:
+            # 被截掉的章末原文交给改稿：不给它，改稿只能凭空补一个结局
+            payload["cut_tail"] = cut
         written = await _call(
             session,
             provider,
