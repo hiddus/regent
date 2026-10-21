@@ -12,6 +12,9 @@ PROTOCOL_SCRIPT_SCENE = "script_scene"
 PROTOCOL_CHAPTER = "chapter"
 
 CHAPTER_ARCHITECTURE = "director_chapter"
+H2_ARCHITECTURE = "director_chapter_h2"
+# 走短链整章协议的执行器族：H2 只在 CHECK 失败或追读自评报问题时多走递归阶段。
+CHAPTER_ARCHITECTURES = frozenset({CHAPTER_ARCHITECTURE, H2_ARCHITECTURE})
 SCRIPT_ARCHITECTURE = "director_script"
 SCRIPT_SCENE_ARCHITECTURE = "director_script_scene"
 # 新章默认走短链。已钉死的 director_script_scene 运行不改道。

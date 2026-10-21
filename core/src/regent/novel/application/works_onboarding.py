@@ -15,6 +15,9 @@ from regent.novel.application.works_access import get_owned_work as _get_owned_w
 from regent.novel.application.works_constants import (
     CHAPTERS_PER_NODE,
     DEFAULT_GENRES,
+    GENRE_MAX_CHARS,
+    GENRE_TAGS,
+    GENRE_UNRESOLVED,
     MAX_CLARIFY_ROUNDS,
     MAX_PATH_NODES,
     MAX_QUESTIONS_PER_ROUND,
@@ -62,19 +65,36 @@ def _tx_free_provider(provider: Any | None, session: AsyncSession) -> Any | None
     return TransactionFreeProvider(provider, session)
 
 
+def _genre_question() -> ClarifyQuestion:
+    return ClarifyQuestion(
+        question_id="genre",
+        prompt="想写哪个题材？",
+        options=list(GENRE_TAGS),
+        default_assumption=GENRE_UNRESOLVED,
+    )
+
+
+def _ensure_genre_question(
+    questions: list[ClarifyQuestion], *, genre: str
+) -> list[ClarifyQuestion]:
+    """题材题必问：LLM 动态题会整组替换写死模板，把它挤掉。
+
+    genre 是改进库 ``genre_tag`` 的检索键，缺了这本书就只能吃到全局经验，同类型
+    经验永远匹配不上。占满上限时挤掉最后一道动态题——题材跨书复用，前提细节在
+    方向卡阶段还会再问一次。
+    """
+    if genre.strip() or any(q.question_id == "genre" for q in questions):
+        return questions
+    kept = questions[: MAX_QUESTIONS_PER_ROUND - 1]
+    return [*kept, _genre_question()]
+
+
 def _build_clarify_questions(intent: str, genre: str) -> list[ClarifyQuestion]:
     """确定性生成澄清问题。信息不足时写入 assumptions 后继续，不得无限追问。"""
     text = (intent or "").strip()
     questions: list[ClarifyQuestion] = []
     if not genre:
-        questions.append(
-            ClarifyQuestion(
-                question_id="genre",
-                prompt="想写哪个题材？",
-                options=["沿用前提里的世界", "现实生活", "奇幻或超常", "按前提判断"],
-                default_assumption="沿用前提里的世界",
-            )
-        )
+        questions.append(_genre_question())
     # 东方玄幻额外问题：修炼体系偏好
     if genre == "东方玄幻" or (
         not genre
@@ -264,7 +284,7 @@ async def create_work(
         id=uuid.uuid4(),
         owner_id=owner_id,
         title=title or (raw_intent[:18] or "未命名作品"),
-        genre=genre,
+        genre=genre[:GENRE_MAX_CHARS],
         state=StoryWorkState.ONBOARDING.value,
         version=1,
     )
@@ -285,7 +305,7 @@ async def create_work(
     if kw:
         goal_assumptions.append(assumption_line(kw))
     if not genre.strip() and kw:
-        genre = format_direction_line(kw)[:200]
+        genre = format_direction_line(kw)[:GENRE_MAX_CHARS]
         work.genre = genre
 
     session.add(
@@ -319,6 +339,7 @@ async def create_work(
                 questions = [ClarifyQuestion(**q) for q in llm_qs]
         except Exception:
             pass  # 保留写死问题
+    questions = _ensure_genre_question(questions, genre=genre)
     onboarding = OnboardingSessionModel(
         id=uuid.uuid4(),
         work_id=work.id,
@@ -397,6 +418,13 @@ async def answer_clarify(
                 note = f"{q.prompt}（未回答，按默认：{q.default_assumption}）"
                 if note not in assumptions:
                     assumptions.append(note)
+
+    # 澄清答案里的题材必须落到作品上：改进库按 genre_tag 检索同类型经验，
+    # works.genre 空着就等于这本书永远看不到别人攒下的同类型经验。只写进
+    # goal.assumptions 不够——那不是检索键。未选题材时宁缺毋滥，不写占位值。
+    answered_genre = str(resolved.get("genre") or "").strip()
+    if answered_genre and answered_genre != GENRE_UNRESOLVED:
+        work.genre = answered_genre[:GENRE_MAX_CHARS]
 
     goal = await session.scalar(
         select(StoryGoalModel)

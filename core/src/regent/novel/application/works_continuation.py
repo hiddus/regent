@@ -333,6 +333,22 @@ async def ensure_next_run(
         return None
 
     executor = executor_app.choose_executor(work.id)
+    gen_ctx: dict[str, object] = {
+        "architecture_version": executor,
+        "executor": executor,
+        "executor_version": executor_app.executor_version(executor),
+        "continuation": {
+            "source_run_id": str(completed_run.id),
+            "source_chapter_no": int(completed_run.chapter_no),
+            "policy_version": policy.version,
+        },
+        "call_key_version": 2,
+        "production": {"call_key_version": 2},
+    }
+    if executor == executor_app.H2_EXECUTOR:
+        from regent.novel.harnessing.overlay import pin_harness
+
+        await pin_harness(session, work_id=work.id, context=gen_ctx)
     run = ChapterRunModel(
         id=uuid.uuid4(),
         work_id=work.id,
@@ -342,18 +358,7 @@ async def ensure_next_run(
         state=ChapterRunState.QUEUED.value,
         current_step=ChapterStep.ASSEMBLE.value,
         title=f"第 {next_ch} 章",
-        generation_context={
-            "architecture_version": executor,
-            "executor": executor,
-            "executor_version": executor_app.executor_version(executor),
-            "continuation": {
-                "source_run_id": str(completed_run.id),
-                "source_chapter_no": int(completed_run.chapter_no),
-                "policy_version": policy.version,
-            },
-            "call_key_version": 2,
-            "production": {"call_key_version": 2},
-        },
+        generation_context=gen_ctx,
         auto_advance=True,
     )
     try:

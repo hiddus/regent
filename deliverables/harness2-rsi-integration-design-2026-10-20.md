@@ -1,131 +1,220 @@
 # 吸收 Harness² 递归自改进：长篇写作配置的自我演化方案
 
-日期：2026-10-20（同日修订）。依据：本地 HEAD ac5a282 及工作区已有修改；Harness² 开源仓库 [google-research/harness2](https://github.com/google-research/harness2) 与论文 [arXiv:2610.14224](https://arxiv.org/html/2610.14224)；同组 [google-research/rrsi](https://github.com/google-research/rrsi)。本次只做设计，未修改业务代码，未调用付费模型。
+日期：2026-10-20（同日第三版）。依据：本地 HEAD ac5a282 及工作区已有修改；Harness² 开源仓库 [google-research/harness2](https://github.com/google-research/harness2) 与论文 [arXiv:2610.14224](https://arxiv.org/html/2610.14224)；同组 [google-research/rrsi](https://github.com/google-research/rrsi)。设计之后已按本文实现第 1 步，全程未调用付费模型。
 
-状态：方案，未实现。不代表长篇已具备稳定输出能力。
+状态：第 1 步代码与单测已完成（见文末“实现状态”），尚未上灰度、未用真实模型跑过。不代表长篇已具备稳定输出能力。
 
-修订说明：初版低估了四件事，分别是回放基础设施、噪声基线、在不稳定流水线上的成本，以及模块体量与团队节奏不匹配。本版把“自动闭环”降为有门槛的后续立项。当前只做一件小而可证伪的事：对写作阶段做离线回放探针，由人工组合候选。
+版本说明：初版照搬了 Harness² 的离线整章回放，成本和基础设施都不现实。第二版为规避这些问题退回到人工组合、离线实验，失去了 Harness² 的核心。本版保留核心，改变落点：把任务级递归放进正在写的这一章里，取代现有的盲目重写；把配置级递归放在整本书和跨书的任务流上。
 
 ## 判断
 
-Harness² 可以吸收，但不装它的运行时，也不在现阶段建自动闭环。
+Harness² 的核心是三件事，本方案全部保留：
 
-现阶段吸收的是方法：对同一输入做对照探针，由证据驱动提示词修改，并记录经验。组合与采纳由人完成，采纳的改动作为普通代码提交，并升级执行器版本号（现有 `EXECUTOR_VERSIONS` 机制）。自动改进器、改进库、本书覆盖层、在线循环，都要等第 9 节的门槛达标后再立项。
+1. **自动的对照改进：** 改进器提出配置修改，在同一任务上探测效果，依据行为对照组合出后继配置，不需要标准答案。
+2. **测试时、开放世界：** 改进发生在任务进行中，任务流就是真实作品逐章到来。
+3. **两层递归：** 每次改进的经验进入改进库，改变后续改进的提案与组合方式。
 
-可以演化的只有提示词、写作载荷装配旋钮和写作技巧。正史提交、硬门、预算上限、命令白名单冻结。
+落点与上游不同：
 
-前提已满足：服务器三章连写已在默认执行器 `director_chapter` 上通过验收（2026-10-20，作品 `064adf0a`，第 1–3 章均 CANONIZED，见 [mainline-expand-plan-2026-10-12.md](./mainline-expand-plan-2026-10-12.md) 状态更新）。本方案第一阶段仍不触碰生产路径。
+- **任务级递归在章内进行。** 章节没通过硬门、或追读自评指出问题时，在同一章的实时上下文上执行“提案 → 探针 → 组合”。输入就在内存中，不需要检查点回放。
+- **探针以写作阶段为单位。** 章纲已经定好，探针只换写作配置重写正文，每个约 1 次调用，不重跑整章。
+- **核验器冻结。** 硬门、正史、台账是本项目比上游多出来的真实核验器。正因为改进器不能修改它们，对照证据才可信。这不是防守，而是让递归有可靠信号的前提。
 
-这套机制只能改善由提示词、上下文装配和写作技巧引起的质量问题。台账、状态交接等结构缺口仍靠工程修复。
+风险隔离用现有的执行器灰度：新增执行器臂 `director_chapter_h2`，按作品分桶上线，默认臂不受影响。
+
+前提已满足：服务器三章连写已在默认执行器 `director_chapter` 上通过验收（2026-10-20，作品 `064adf0a`，第 1–3 章均 CANONIZED，见 [mainline-expand-plan-2026-10-12.md](./mainline-expand-plan-2026-10-12.md) 状态更新）。
 
 ## 一、为什么不直接接入 Harness² 运行时
 
-1. **执行器不匹配。** Harness² 只驱动 OpenCode 或 Codex 编码代理，靠运行时挂载的文件树起作用。生产默认臂 `director_chapter` 是“章纲 → 手段判定 → 写作 → 确定性硬门 → 最多改一次”的命令式流程，提示词是 Python 常量，每次调用都经过 `CallBroker` 预留与结算。
-2. **可编辑面越界。** 护栏、脚本、插件、子代理会改变控制流，在本项目中对应正史、台账与硬门。
-3. **安全与成本。** 上游执行器网络不受限，Codex 关闭沙箱；一次整章级 `k=1` 步骤需要多次完整回放。
+1. **执行器不匹配。** Harness² 只驱动 OpenCode 或 Codex 编码代理。生产默认臂 `director_chapter` 是“章纲 → 手段判定 → 写作 → 确定性硬门 → 最多改一次”的命令式流程，每次调用经过 `CallBroker` 预留与结算。
+2. **安全。** 上游执行器网络不受限，Codex 关闭沙箱。
 
-## 二、四个难点的核实结论
+因此移植算法和改进器提示词（Apache-2.0，保留许可与出处），不引入其运行时。
 
-| 难点 | 核实结果 | 本版处理 |
-|---|---|---|
-| 检查点回放 | 成立。`ModelCallModel` 只存 `prompt_hash`、`context_hash` 和输出，不存入参；`generation_context` 在 PRODUCE 中被改写（如 `target_node` 被章纲替换），没有整章入口快照 | 不做整章回放。只回放单个阶段，上游输出取参照运行已存的结果；先用已存哈希验证能否精确复原入参 |
-| 噪声下限 | 成立，且更严重。模型接口没有 `seed` 参数；`ChapterProse` 写作调用温度是 0.8，同输入方差不小 | 噪声测量作为第一阶段的首个交付；改用同检查点配对比较，不依赖绝对阈值 |
-| 成本 | 成立。整章级步骤约 60–80 次调用，在成功率未知的流水线上不可接受 | 写作阶段探针每次 1–2 次调用；只离线、人工触发；在线循环设成功率门槛 |
-| 体量与节奏 | 成立。11 个模块加 3 张表约需 2–3 个月 | 第一阶段只有一个离线脚本、一个测试文件，不建表、不建新包 |
+## 二、四个难点在本版中的处理
 
-## 三、阶段级回放：为什么可行、怎么验证
-
-整章回放难，是因为要重建 ASSEMBLE 后的全部上下文，并让多阶段链路在隔离环境中重跑。本版只回放被修改组件所在的那一个阶段。最常见的是写作阶段（WRITE），它的输入是：
-
-- `build_write_payload(ctx, cast)`：读取 `generation_context` 中的世界书块、文风、读者契约、`target_node`（此时已被章纲替换，正是执笔看到的内容）、最近章节、前文结果、正史与伏笔；
-- `_writer_system(ctx, cast)`：系统提示加前置门提示；
-- `production["cast"]`、`production["chapter_plan"]`：都已持久化在运行记录里。
-
-**可验证性：** `directing_calls._call` 把 `json.dumps(payload, ensure_ascii=False)` 的 sha256 同时写进 `production.calls[].input_hash` 和 `ModelCallModel.context_hash`。用已入正史运行的最终 `generation_context` 重建载荷并比对哈希：对上，说明入参被精确复原；对不上，就定位是哪个字段在 WRITE 之后被改写。
-
-据此分两步：
-
-1. **零调用的可行性检查（第一步交付）：** 对已有 `director_chapter` 的 CANONIZED 运行跑哈希比对，报告命中率。首稿调用（无 `avoid` 字段）与重写调用分别统计。
-2. **命中率不足时才加快照：** 在 ASSEMBLE 结束时写入不可变的 `assemble_snapshot`（或其哈希加对象存储引用）。这是 `generation.py` 中的一处小改动，同时满足 10-11 复盘中“从入口快照重放”的诊断需要。
-
-**隔离方式：** 探针不经过 `CallBroker`、不写数据库，直接调用模型接口，用 `quality_ab.MeteredProvider` 计量和限额。这样逻辑调用号的隔离问题不存在。
-
-**防止镜像漂移：** 探针调用生产中的同一批纯函数（`build_write_payload`、`_writer_system`、`settle_chapter_text`、`check_chapter`、`name_warnings`），不重写编排。测试断言：对同一快照，探针生成的入参哈希与生产记录一致。
-
-**局限：** 阶段级回放看不到改动对下游阶段和后续章节的连锁影响。章纲类改动需要同时回放 PLAN 与 WRITE，放到第二阶段。
-
-## 四、噪声与比较方法
-
-- 探针参数与生产一致：写作温度 0.8，同一模型。没有种子，“重复”就是独立采样。
-- **先测噪声：** 选 8 个检查点，参照提示词各写 4 次，共 32 次写作调用，约合 2.5 章的费用。对 `check_chapter` 的通过与否、失败码，以及 `quality.py` 的相邻重复、套话密度、推进量，报告同输入下的分布。对固定文本，确定性指标没有方差，方差全部来自采样。
-- **配对比较：** 每个候选在同一批检查点上与参照各采样 N 次（初值 3），逐检查点比较硬门通过数和指标；以胜、平、负计数做符号检验，不依赖绝对噪声阈值。噪声数据用于确定 N 是否够用。
-- **读者偏好：** 只对硬门都通过的成对稿件做盲评。裁判模型与执笔模型不同，并交换前后位置。第一阶段裁判可以由人担任。
-
-## 五、组件对应与可编辑面
-
-| Harness² 组件 | 小说引擎对应物 | 第一阶段 | 后续 |
-|---|---|---|---|
-| 系统提示 | `CHAPTER_WRITE/REPAIR_SYSTEM` | 探针可替换，采纳后走代码提交 | 加入 PLAN、METHOD、ARC_REVIEW |
-| 工具说明 | 写作载荷旋钮：前章尾段长度、前文结果条数等 | 探针可调，采纳后走代码提交 | 数据化，登记取值范围 |
-| 技能 | 按章节职责加载的写作技巧 | 不做 | 门槛达标后 |
-| 记忆 | 类型级写作经验 | 人工维护的经验文档 | 改进库 |
-| 子代理 | 追读自评频率、手段判定轮数 | 不做 | 预算内调参 |
-| 护栏、脚本、插件 | 硬门、确定性后处理、无 | 冻结 | 冻结；新增硬门只走人工 PR |
-
-故事正文、世界书与模型输出进入改进上下文时一律视为数据，不执行其中的指令。
-
-## 六、第一阶段交付
-
-| 交付 | 内容 |
+| 难点 | 处理 |
 |---|---|
-| `core/src/regent/novel/experiments/write_probe.py` | 离线命令：`check-replay` 做零调用哈希比对；`noise` 测噪声；`compare` 做候选对参照的配对探针。结果写入 `deploy/novel/artifacts/probe/` |
-| `tests/unit/novel/test_write_probe.py` | 入参哈希与生产一致；用 `SimProvider` 跑通 `compare`；探针不写数据库、不动生产预算 |
-| 经验文档 | 每次采纳或否决都写明：针对哪个失败、改了什么、探针证据、适用边界 |
-| `generation.py` 快照（条件性） | 仅当哈希命中率不足时加入 |
+| 检查点回放 | 任务级递归在章内进行，探针直接用当前运行的上下文，不需要回放。离线回放只用于晋级前的回归检查，并先用已存的 `input_hash` 做零调用的可复原验证 |
+| 噪声下限 | 单步采纳不靠分数，靠硬门结果和行为对照（与上游一致）。每一步都在同一输入上产生参照稿与探针稿，噪声分布随任务流自然积累，只在全局晋级时使用 |
+| 成本 | 只在失败或追读自评报问题时触发，每轮增加至多 5 次调用，排在原有改稿/重写之前。正常通过的章节成本不变 |
+| 体量 | 一个包五个文件、一张表；集成点是 `directing_chapter` 的新阶段和一个新执行器臂 |
 
-候选提示词可以由人或编码代理起草。采纳的改动作为普通提交合入，并把 `director_chapter@1` 升为 `@2`，保证盲评与复盘可归因。
+## 三、可编辑的写作配置
 
-估算 3–5 人日。除条件性快照外，不改生产路径，不建表。
+配置是一棵版本化、内容寻址的树：基础包 ← 本书覆盖层 ← 本章递归覆盖层，按运行钉住（`PINNED_CONTEXT_KEYS` 增加 `harness_id`、`harness_hash`、`harness_overlay`、`harness_overlay_id`）。
 
-## 七、第一阶段的费用
+| Harness² 组件 | 小说引擎对应物 | 生效方式 |
+|---|---|---|
+| 系统提示 | 执笔与修稿提示 | 常驻 |
+| 工具说明 | 写作载荷旋钮：前章尾段长度、前文结果条数、伏笔条数 | 常驻，有登记的取值范围 |
+| 记忆 | 本书与类型的写作经验（不是故事事实） | 常驻 |
+| 技能 | 写作技巧：揭示、打斗、关系戏、过渡、兑现、章首承接 | 按章纲中的章节职责按需加载 |
+| 脚本 | 声明式软检查：禁用句式、长段复用阈值、章首与前章尾的重合检查等 | 只产生提示，送入修稿；不能放行硬门未过的稿件 |
+| 插件 | 阶段钩子：满足条件时向写作载荷追加指引（如“上一章停在动作中途”时追加承接要求） | 声明式，只能追加指引 |
+| 子代理 | 追读自评频率、手段判定轮数 | 在预算上限内调参 |
+| 护栏 | 硬门、正史、台账、预算、命令白名单 | 冻结，这是核验器 |
 
-一次配对比较：参照 3 次加 2 个候选各 3 次，共 9 次写作调用；修稿阶段有失败时最多再加同等数量；盲评若用模型约 6 次。合计约 10–20 次调用，相当于 1–1.5 章，只在人工触发时发生。
+论文消融显示技能与脚本贡献最大，所以本版把它们放进可编辑面。它们用声明式格式表达，由程序解释执行，改进器写不出任意代码。改进器认为需要新增硬门时，只能输出代码修改建议，由人走 PR。
 
-噪声测量一次性约 32 次写作调用。上述为估算，第一次运行后以实测替换。
+故事正文、世界书与模型输出进入改进器上下文时一律视为数据，不执行其中的指令。
 
-## 八、第一阶段的退出判据
+## 四、任务级递归：章内的“提案 → 探针 → 组合”
 
-- 哈希比对给出命中率，必要时快照已合入，入参可精确复原。
-- 噪声报告给出每个指标的同输入分布，并确定配对采样次数 N。
-- 至少完成一轮针对真实失败的候选比较。重点是写作阶段可修的失败，如 R1 型“重演前章结尾”、长度越界、长段复用。结论（采纳或否决）有探针证据。
-- 若一轮下来没有任何候选在配对比较中稳定胜出，就如实记录，不进入第二阶段。
+`director_chapter_h2` 在现有阶段之间加入三个阶段：
 
-## 九、后续立项门槛
+```text
+PLAN → METHOD → WRITE → CHECK ─通过→ DONE
+                          │未通过
+                          ▼
+                 PROPOSE → PROBE → COMPOSE → WRITE(后继配置) → CHECK → REPAIR(最多一次) → DONE / 停章
+```
 
-满足全部条件才为第二阶段（自动改进器、多阶段回放、改进库、配置数据化）单独立项：
+- **参照：** 当前配置写出的这一稿，以及它的硬门失败码、软检查提示和正文。
+- **PROPOSE（1 次调用）：** 改进器读取参照稿、失败证据、当前配置树、改进库检索结果，一次给出两个候选修改：通用候选针对跨书反复出现的问题，本书候选针对本书类型与读者契约。每处修改必须指向参照稿中的具体位置，否则拒收。
+- **PROBE（2 次调用）：** 两个候选在同一章纲、同一上下文、同一温度下各写一稿，跑同样的硬门与软检查。
+- **COMPOSE（1 次调用）：** 组合器读取参照稿、两个候选的原样修改与 edits、两份探针的正文和门结果，给出采纳（通用 / 本书 / 合并 / 保持）与交付哪一稿；每个决定绑定一条观察。
+- **程序落定：** 模型只提议。采纳某一候选时覆盖层就是该候选的原样修改；合并只能取两个候选修改的子集；一个探针过了硬门时不许采纳另一个没过的；只交付过了硬门的稿子。被纠正的地方记入 `h2_history`。
+- **交付：** 有探针稿过了硬门，就交付它并把它的配置记为本章生效配置；否则用采纳的配置再写一次（后继正文）；组合器选“保持”时不再递归，回到原有改稿/重写路径。
+- **递归预算：** 一章至多 2 轮（`k=2`，顺序进行）。配置没变的候选不写探针，不花调用。
 
-1. 主线计划工作包 4 通过：服务器三章均 CANONIZED（2026-10-20 已满足）。
-2. 流水线稳定：至少 3 部作品、累计至少 30 章，章节入正史率不低于 80%，且没有人工改库。
-3. 第一阶段至少有 2 个经探针采纳的改动，在未参与比较的检查点上复现收益。
+调用预算：本臂章级上限 = 13 + 2 轮 × 5 次（提案、两次探针、组合、后继正文）= 23 次，金额上限仍为 200 元。所有递归调用都经 `_call` 走 `CallBroker` 预留与结算，一 tick 至多一次，命令 id 带轮次（如 `v1:h2:probe:r1:generic`、后继正文 `v1:chapter_write:h1`）。
 
-满足第二阶段出口后，才评估在线循环（本书覆盖层、按作品灰度）。届时再定改进库表结构、晋级流程与预算账户，沿用初版第 4–7 节的设计思路，但重新估算成本。
+**追读触发：** 每 3 章的追读自评（`ARC_REVIEW`）在这一章动笔前做出。它给出 `keeps_reading=false` 或有问题项、而这一章首稿已过硬门时，本章执行一轮同样的步骤；参照稿也在可交付之列，组合器在过了硬门的稿子里挑更能解决自评问题的一稿。这样，不只是硬门失败，长篇的节奏与追读问题也进入递归。
 
-## 十、不在本方案内
+## 五、配置级递归：本书与跨书
 
-- 不引入 OpenCode、Codex 或 Harness² 运行时依赖。
-- 不允许改进器修改 Python 代码、硬门、预算常量、命令白名单、正史与台账。
-- 不复用 `application/harness_evolution.py`：它以缺口关键词给经验打分，易被刷分，且只挂在旧产品路由上。
-- 不以自我改进替代 10-11、10-12 计划中的结构修复。
-- b0ce 等历史失败出自分场协议，不是 `director_chapter`。它们只作定性案例，不进入写作阶段的回放集。
+- **本书覆盖层：** 递归交付的稿子过了 CHECK，这一轮的修改叠到本书覆盖层上，进入试用，从下一章起生效。一本书同时只有一条试用；试用期间别的章节的改进只作为经验入库。新章节运行创建时（开写、连写、纠错重演三个入口统一调用 `pin_harness`）先结算到期的试用，再把当前覆盖层钉进运行上下文（`harness_overlay`、`harness_overlay_id`）。
+- **改进库：** 只有过了硬门交付的轮次才写入，模型的设想不进库。条目含完整配置、相对本书覆盖层的修改、经验、失败码、run_id。检索只看全局、本类型、本书三种范围，别的书的本书条目看不到。通用候选的修改或经验里出现本书人名时，条目降为本书范围。被提案引用、又帮一章过了硬门的条目记一次有效。
+- **回退：** 试用覆盖层写完 3 章后判定：首稿硬门通过率不低于试用前 3 章的基线就采纳，否则回退到上一条已采纳的覆盖层，回退原因写入改进库。没有基线时，3 章至少 2 章首稿通过才采纳。追读自评暂不进回退判据。
+- **整理：** 放置 30 天以上、从未被采纳也从未有效的经验退役；试用中和已采纳的不动。合并重叠条目尚未实现。
+
+## 六、全局晋级（只有这一步需要人）
+
+某条改进在多本书中被采纳，且这些书的硬门首稿通过率上升时，进入晋级候选：
+
+1. 离线回放回归：用已入正史的运行重建写作入参，并以存储的 `input_hash` 校验可精确复原；在留出章节上配对比较。此时噪声分布已由任务流积累，足以判断差异是否超过噪声。
+2. 人工盲评：走现有 `eval_cli prepare → rater-view → ingest → report → decide`，按冻结阈值裁决。
+3. 通过后升级全局配置版本，并经灰度放量。
+
+## 七、信号与防刷分
+
+- **单步依据：** 硬门通过与否、失败码变化、软检查提示数量、修稿是否被需要、正文长度，以及改进器对参照稿与探针稿的行为对照。改进器上下文中不出现任何阈值与评分标准。
+- **本书层监测：** 首稿硬门通过率、章节入正史率、每章调用数、追读自评 `keeps_reading`、`quality.py` 的相邻重复与推进量。
+- **过拟合筛查：** 通用组件中不得出现本书人名、物件或情节；只有本书覆盖层的记忆可以写本书特有内容。
+- **硬门不可松动：** 改进器只能新增软检查与指引，硬门结果对它只读。
+
+## 八、实现与体量
+
+```text
+core/src/regent/novel/harnessing/
+  surface.py     配置树、旋钮范围、覆盖层白名单校验（冻结面、正则安全、登记条件、过拟合）、技能/钩子/软检查的解释器
+  recursion.py   PROPOSE / PROBE / COMPOSE 三个 tick、组合落定规则、两轮上限、追读触发
+  overlay.py     本书覆盖层：钉住、试用、采纳与回退、写入经过验证的轮次
+  library.py     改进库写入、按范围检索、计数、回退记录、剪枝
+  replay.py      首稿写作入参重建与 input_hash 校验（含命令行）
+core/src/regent/novel/harness_packs/
+  base/v1/       执笔提示、旋钮、技能、软检查、钩子、经验（从现有常量平移，默认取值下载荷与默认臂一致）
+  improver/      改进器提示：提案、组合（经验由组合器给出，入库前经硬门验证）
+```
+
+- `directing_types.py`、`directing_protocol.py` 等：新增 `CHAPTER_ARCHITECTURES`，短链路由、步骤链、审校、事实装配同时认两个臂。
+- `directing_chapter.py`：本臂按钉住的配置装配执笔提示与载荷（前置门提示照常追加），CHECK 合并软检查，加入 PROPOSE、PROBE、COMPOSE 阶段。
+- `executor.py`：新增 `director_chapter_h2` 臂与版本号；钉住 `harness_id`、`harness_hash`、`harness_overlay`、`harness_overlay_id`。
+- `directing_budget.py`：本臂章级调用上限 23。
+- 新增一张表 `novel_harness_library`（迁移 0057）：既是改进库，也记本书覆盖层（`status`、`overlay_after`、`since_chapter`、`baseline`），不改作品表。
+
+估算约 2–3 周，可与主线计划并行。前提是 `base/v1` 平移经测试证明提示词哈希与原常量一致，默认臂行为不变。
+
+## 九、上线顺序
+
+| 步骤 | 内容 | 出口证据 |
+|---|---|---|
+| 1 | `base/v1` 平移，默认臂行为不变；用 `SimProvider` 跑通章内递归各阶段 | 提示词哈希一致；全量单测通过；模拟失败章能完成一次 PROPOSE → PROBE → COMPOSE |
+| 2 | `director_chapter_h2` 灰度到少量作品，与默认臂同时写 | 对照默认臂：首稿硬门通过率、章节入正史率、每章调用数 |
+| 3 | 开启追读触发与本书覆盖层 | 8–12 章故事段：追读自评、相邻重复、回退次数 |
+| 4 | 改进库跨书检索 | 新书首章通过率是否借助同类型经验提高 |
+| 5 | 全局晋级 | 回放回归加人工盲评，按冻结阈值通过 |
+
+第 2 步的对照对象是已通过三章验收的默认臂。章内递归针对的是首稿没过硬门、需要改稿或重写的章节，以及追读自评指出问题的章节；对照默认臂，看它是否提高首稿通过率和入正史率、是否改善追读。若在若干本书上仍没有改善，就如实记录，停止扩大灰度。
+
+## 十、已知风险
+
+- **改进器选错候选：** 论文附录记录过组合阶段选中较差候选。由“硬门通过的探针稿优先”和本书层回退兜底。
+- **本书配置漂移：** 连续采纳可能把配置推向局部偏好。有父版本链、回退、剪枝；必要时本书配置可整体重置为全局版本。
+- **结构缺口补不了：** 台账、场景交接这类问题，提示词与技能遮不住。改进器会反复在同一失败码上无效修改；改进库记录这一模式后，转为代码修改建议。
+- **成本集中在难写的书：** 递归只在失败或追读有问题时触发，越难写的书花得越多。本臂的调用上限与金额上限保持硬约束。
+
+## 实现状态（2026-10-20）
+
+已完成，均有走生产 tick 的单测（`tests/unit/novel/test_harness2_recursion.py`，28 项；`tests/unit/novel` 全量 820 项通过）：
+
+- 路由：本臂走短链协议与四步链，灰度开启时 `start_run` 钉住基础包与覆盖层。
+- 记账：递归每次调用经 `CallBroker`，一 tick 一次，命令 id 不撞，章级上限 23。
+- 首稿：本臂默认配置下的执笔提示以默认臂提示开头，载荷逐字一致；回放校验能用钉住的上下文复原首稿 `input_hash`。
+- 递归：探针交付、后继正文、追读触发、两轮后回到改稿路径；组合落定规则逐条有测。
+- 覆盖层：试用钉住、三章后采纳、低于基线回退到上一层；试用期间新改进只入库。
+- 配置面：冻结面、未登记旋钮与条件、越界值、无法编译或会回溯爆炸的正则、通用候选带人名，均被拒收；软检查（长段复用、章首重合、套话）、钩子占位符、技能条件按声明求值。
+
+未完成或未验证：
+
+- 合并重叠经验、追读自评进入回退判据、跨书晋级（第六节）均未实现。
+
+## 真机验证状态（2026-10-21）
+
+第 2 步已在服务器跑通，证据落盘 `deploy/novel/artifacts/h2/`，脚本 `deploy/novel/run_h2_chapter.py`、`deploy/novel/h2_server_probe.py`。
+
+环境与部署：整树部署 480 文件到 4 个容器（逐文件 sha256 全一致，26 项跨模块耦合点就位）；迁移 0057 已在 Postgres 执行，`novel_harness_library` 24 列 + 3 索引建成（此前只在 SQLite 验过）；`NOVEL_EXECUTOR_CANARY=director_chapter_h2`、比例 53（覆盖作品 `064adf0a` 的桶 52）。
+
+作品 `064adf0a`（前 3 章为默认臂，同书对照）：
+
+| 章 | 臂 | 结果 | 字数 | 调用 | 成本(分) | 输入 tok |
+|---|---|---|---|---|---|---|
+| 1–3 | director_chapter | CANONIZED | 2490/2481/2444 | 5/6/4 | 29/36/46 | 9.4k/17.3k/16.5k |
+| 4 | director_chapter_h2 | CANONIZED | 2482 | 12 | 178 | 89.7k |
+| 5 | director_chapter_h2 | CANONIZED | 2450 | 4 | 57 | 33.0k |
+
+逐项确认：
+
+- **钉住**：第 4 章 `harness_id=base/v1`、`harness_hash=c7ff08047db56f13`、无覆盖层；第 5 章 `harness_hash=50f680e58384f16b`、`harness_overlay_id` 指向第 4 章入库的条目——配置级递归确实从下一章起生效。
+- **章内递归**：第 4 章首稿一次过硬门（`h2_first_pass=true`），由追读自评的 3 条问题项触发一轮：PROPOSE（两候选各 3 处修改，均指向参照稿具体位置）→ PROBE generic / book（两稿都过硬门、无软检查问题）→ COMPOSE 选 `adopt_generic` 并交付探针稿。组合器的观察是真实的行为对照：book 探针把门外人影的痕迹写成布鞋补丁与樟脑味，等于提前揭底；generic 探针让两枚刻着同一警告的齿轮在章末并置。
+- **不改行为**：容器内核对基础包执笔提示与 `CHAPTER_WRITE_SYSTEM` 逐字相同（330 字）；覆盖层生效后 502 字，仍以默认臂提示开头。
+- **回放**：两章的 `input_hash` 都能用钉住的上下文零调用复原（第六节晋级前提成立）。
+- **成本**：未触发递归的第 5 章调用数与默认臂持平（4 次），成本 +24%；触发递归的第 4 章为默认臂均值的约 4 倍。
+- **入库**：1 条，`status=provisional`、`since_chapter=5`、`chapter_role=payoff`、`failure_code=arc`；试用判定需满 3 章，当前 1/1。
+
+真机暴露的三个问题：
+
+1. **试用中的条目对别的书可见（P1）。** `record_verified_round` 对通用经验写 `scope=global`，而 `library.search` 的 `LIVE_STATUSES` 含 `provisional`。实测以另一本书身份检索，命中了这条尚未过三章判定的试用条目。第五节的回退因此兜不住：别的书已经引用过，回退撤不回来。
+2. **换臂的书没有基线（P2）。** `first_pass_baseline` 只认带 `h2_first_pass` 的运行，默认臂不写这个键，所以本书基线是 `{chapters:0, ok:0}`，试用判定退回「3 章至少 2 章首稿通过」。符合第五节约定，但意味着同书 A/B 用不上换臂前的章节。
+3. **提案调用偏脆（P2）。** 第 4 章 PROPOSE 首次失败、重试才成功，白留 24 分预留。
+
+另有两处与 H2 无关但挡住后续步骤的既有缺口：`works.genre` 只有 27/197 本书填了，类型范围检索基本空转（挡第四节跨书检索）；`core/tests/unit/novel/domain/test_prose_front_gates.py` 有 2 项 `gate_debt` 过期用例仍在失败（88ae2c2 清理时漏删）。
+
+## 五项修复（2026-10-21）
+
+全部已部署到四个容器并跑完迁移 `20261021_0058`；`deploy/novel/h2_server_probe.py` 复跑确认。
+
+1. **试用条目只对本本书可见（P1）。** `library.py` 把 `LIVE_STATUSES` 拆成 `SHAREABLE_STATUSES`（candidate/adopted/superseded）与 `TRIAL_STATUS`（provisional），检索时试用条目额外要求 `source_work_id == 本书`。不需要数据迁移，服务器上那条 `provisional` 条目对其他书立即不可见。探针复跑：别的书命中 0 条、本书仍命中自己那条。
+2. **默认臂章节计入基线（P2）。** `overlay._first_pass` 在缺 `h2_first_pass` 时改看默认短链臂的等价信号：`executor == director_chapter`、`phase == DONE` 且 `repairs == rewrites == 0`（两条臂过的是同一套确定性硬门）。别的执行臂仍返回 `None` 不计入。探针复跑：本书试用前基线从 `{0,0}` 变为 `{chapters:3, ok:3}`，判定改为真实的一次过率对比。已入库条目的 `baseline` 仍是 `{0,0}`，本轮判定按保守规则走（3 章至少 2 章首过），下一轮起用真实基线。
+3. **调用失败不再丢现场（P2）。** `novel_model_calls` 新增 `error_detail`（varchar 255，迁移 0058）：`_mark_unknown` 落 `类型: 消息` 并打 WARNING 日志；`_settle_unknown` 把 `error_code` 改成 `RECONCILE_EXHAUSTED`（下游恢复账本依赖这个终态，语义不变）时，原始码与消息并入 `error_detail` 而不是丢弃。
+
+   **更正此前的归因**：先前把第 4 章 PROPOSE 首失败归给「改进器回传整段提示、输出 3534 tok」是推测，不成立——原始 `error_code` 已被 `_settle_unknown` 覆盖，worker 日志只留 `CALL_UNKNOWN`，当时根本没有证据能定位原因。这一项修的是「查不出来」本身；是否要把改进器改成 diff 式输出，等下次复现拿到 `error_detail` 再定。
+4. **题材必问且落库（挡第四节跨书检索）。** 根因不止「答案没落库」：`create_work` 里 LLM 动态澄清题会整组替换写死模板，题材题被挤掉，所以题材从来没被问过——真机上这些书的 `onboarding.questions` 里根本没有 `question_id=genre`。修法：`_ensure_genre_question` 保证题材题必在（占满 `MAX_QUESTIONS_PER_ROUND` 时挤掉最后一道动态题），选项改成固定标签集 `GENRE_TAGS`；`answer_clarify` 把答案落到 `work.genre`，未选题材（`按前提判断`）时宁缺毋滥不写占位值；开书入参与关键词回退一律收到列宽 64（原先按 200 截，Postgres 上会直接报错，SQLite 不校验所以本地测不出来）。
+   历史数据用 `deploy/novel/backfill_work_genre.py` 按前提一次性模型归类回填：170 本全部落库，`works.genre` 空值归零，分布 `悬疑 128 / 都市系统 16 / 东方玄幻 15 / 其他 7 / 无限流 4`。
+5. **清理过期用例。** `core/tests/unit/novel/domain/test_prose_front_gates.py` 里两项断言 `gate_debt` 前缀可 coerce 的用例，改成断言「债务标签一律硬停、不得 coerce」——`gate_debt` 标签在 88ae2c2 已废除、`src` 里零引用，2026-10-12 的决定是 VALIDATE 一律硬停。
+
+验证：仓库根 `tests/unit/novel`（含新增 `test_onboarding_genre.py`、库检索边界与基线用例）全绿；`core/tests` 50 项全绿。
+
 
 ## 证据来源
 
-- core/src/regent/novel/application/directing_chapter.py：提示词常量、`build_write_payload`、`_writer_system`、`check_chapter`、`produce_chapter_tick`
-- core/src/regent/novel/application/directing_calls.py：`_call` 入参序列化、`input_hash` 记录、`ChapterProse` 温度 0.8
-- core/src/regent/novel/application/production.py：`CallBroker`、`prompt_hash`/`context_hash` 校验、`output_json` 复用
-- core/src/regent/novel/infrastructure/models.py：`ChapterRunModel`、`ModelCallModel` 字段
-- core/src/regent/novel/application/generation.py：ASSEMBLE 重建 `generation_context`
-- core/src/regent/model/provider.py：只有 `temperature`，没有 `seed`
-- core/src/regent/novel/application/executor.py：`EXECUTOR_VERSIONS`、灰度分桶
-- core/src/regent/novel/domain/quality.py、experiments/quality_ab.py：质量指标、`MeteredProvider`、`SimProvider`
-- deliverables/long-novel-architecture-review-2026-10-01.md、long-novel-server-failure-review-2026-10-11.md、mainline-expand-plan-2026-10-12.md
+- core/src/regent/novel/application/directing_chapter.py：阶段机、提示词常量、`build_write_payload`、`check_chapter`、`ARC_REVIEW`
+- core/src/regent/novel/application/directing_calls.py：`_call` 入参序列化与 `input_hash`、`ChapterProse` 温度 0.8
+- core/src/regent/novel/application/production.py：`CallBroker`、`context_hash`、`output_json`
+- core/src/regent/novel/application/executor.py：执行器臂、版本号、灰度分桶、`PINNED_CONTEXT_KEYS`
+- core/src/regent/novel/application/directing_budget.py：章级调用与金额上限
+- core/src/regent/novel/application/eval_runner.py、eval_cli.py：盲评与冻结阈值裁决
+- core/src/regent/novel/domain/quality.py、experiments/quality_ab.py：质量指标、`SimProvider`
+- 论文 arXiv:2610.14224：Propose–Probe–Compose、改进库、组件消融（技能与脚本贡献最大）、回退分析
+- deliverables/long-novel-server-failure-review-2026-10-11.md、mainline-expand-plan-2026-10-12.md

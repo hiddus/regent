@@ -128,6 +128,10 @@ async def _queue_replay_run(
         "executor": executor,
         "executor_version": executor_app.executor_version(executor),
     }
+    if executor == executor_app.H2_EXECUTOR:
+        from regent.novel.harnessing.overlay import pin_harness
+
+        await pin_harness(session, work_id=work.id, context=context)
     if correction:
         context["correction"] = dict(correction)
         context["replay_reason"] = "fact_reported"

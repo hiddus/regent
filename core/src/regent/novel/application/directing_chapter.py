@@ -17,13 +17,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from regent.model import ModelProvider
 from regent.novel.application.directing_calls import _call, _input_version, _save
-from regent.novel.application.directing_types import PROTOCOL_CHAPTER
+from regent.novel.application.directing_types import H2_ARCHITECTURE, PROTOCOL_CHAPTER
 from regent.novel.domain.errors import ProductionStopped
 from regent.novel.domain.prose_copy import is_legitimate_repetition, longest_common_substring
 from regent.novel.domain.prose_front_gates import front_gate_hard_fails, front_gate_writer_hint
 from regent.novel.infrastructure.models import PersonaSpecModel, StoryWorkModel
 
 CHAPTER_PHASES = ("PLAN", "METHOD", "WRITE", "CHECK", "REPAIR", "DONE")
+# Harness² 递归臂在 CHECK 失败或追读自评报问题后插入的阶段。
+H2_PHASES = ("PROPOSE", "PROBE", "COMPOSE")
 
 # 网文单章通行下限。上限只比下限多 500 字。
 MIN_CHAPTER_CHARS = 2000
@@ -207,6 +209,7 @@ def empty_chapter_production(run: Any, existing: dict[str, Any] | None = None) -
     return {
         "schema_version": 1,
         "protocol": PROTOCOL_CHAPTER,
+        "executor": ctx.get("executor") or prior.get("executor") or "",
         "call_key_version": int(call_key or 2),
         "phase": "WRITE",
         "repairs": 0,
@@ -279,7 +282,9 @@ def build_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> dic
     }
 
 
-def _writer_system(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> str:
+def _writer_system(
+    ctx: dict[str, Any] | None, cast: dict[str, Any], *, base: str = CHAPTER_WRITE_SYSTEM
+) -> str:
     data = ctx or {}
     hint = front_gate_writer_hint(
         prose_style=data.get("prose_style") if isinstance(data.get("prose_style"), dict) else {},
@@ -291,8 +296,96 @@ def _writer_system(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> str:
         ),
     )
     if hint:
-        return CHAPTER_WRITE_SYSTEM + " " + hint
-    return CHAPTER_WRITE_SYSTEM
+        return base + " " + hint
+    return base
+
+
+def h2_config(
+    ctx: dict[str, Any] | None,
+    production: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> Any:
+    """钉住的基础包 ← 本书覆盖层 ← 本章递归覆盖层（← 探针候选）。"""
+    from regent.novel.harnessing.surface import (
+        BASE_HARNESS_ID,
+        apply_overrides,
+        load_harness,
+        merge_overrides,
+    )
+
+    data = ctx or {}
+    base = load_harness(str(data.get("harness_id") or BASE_HARNESS_ID))
+    layered = merge_overrides(data.get("harness_overlay") or {}, production.get("h2_overrides") or {})
+    if extra:
+        layered = merge_overrides(layered, extra)
+    return apply_overrides(base, layered)
+
+
+def writing_view(ctx: dict[str, Any] | None, production: dict[str, Any]) -> dict[str, Any]:
+    """技巧与钩子求值用的本章视图：只放程序算得出的事实。"""
+    from regent.novel.harnessing.surface import ends_mid_action
+
+    data = ctx or {}
+    plan = production.get("chapter_plan") or data.get("target_node") or {}
+    plan = plan if isinstance(plan, dict) else {}
+    chapter_no = int(data.get("chapter_no") or 1)
+    ages = [
+        chapter_no - int(item["source_chapter_no"])
+        for item in data.get("memory") or []
+        if isinstance(item, dict)
+        and item.get("kind") == "promise"
+        and str(item.get("state") or "OPEN") == "OPEN"
+        and not item.get("invalidated")
+        and item.get("source_chapter_no") is not None
+    ]
+    return {
+        "chapter_no": chapter_no,
+        "shows_rule": bool(plan.get("shows_rule")),
+        "payoff_due": bool(latest_arc_review(data, production).get("payoff_due")),
+        "choice": str(plan.get("choice") or ""),
+        "result": str(plan.get("result") or ""),
+        "previous_ends_mid_action": ends_mid_action(previous_chapter_text(data)[-200:]),
+        "oldest_promise_age": max(ages, default=0),
+        "same_method_rejects": int(production.get("same_method_rejects") or 0),
+    }
+
+
+def h2_writer_system(
+    ctx: dict[str, Any] | None, cast: dict[str, Any], config: Any, production: dict[str, Any]
+) -> str:
+    from regent.novel.harnessing.surface import resolve_hooks, resolve_skills
+
+    system = _writer_system(ctx, cast, base=config.get_prompt("write") or CHAPTER_WRITE_SYSTEM)
+    memory = config.get_memory()
+    if memory:
+        system += "\n\n写作经验：\n" + memory
+    view = writing_view(ctx, production)
+    skills = resolve_skills(config, view)
+    if skills:
+        system += "\n\n" + skills
+    hooks = resolve_hooks(config, view)
+    if hooks:
+        system += "\n\n" + "\n".join(hooks)
+    return system
+
+
+def h2_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any], config: Any) -> dict[str, Any]:
+    """旋钮取基础包默认值时，与 build_write_payload 逐字一致。"""
+    payload = build_write_payload(ctx, cast)
+    payload["previous_chapter"] = previous_chapter_text(ctx)[-int(config.get_knob("previous_chapter_tail")) :]
+    results = int(config.get_knob("earlier_results_count") or 0)
+    if results:
+        payload["earlier_results"] = payload["earlier_results"][-results:]
+    promises = int(config.get_knob("open_promises_max") or 0)
+    if promises:
+        payload["open_promises"] = payload["open_promises"][:promises]
+    return payload
+
+
+def h2_soft_issues(content: str, ctx: dict[str, Any] | None, config: Any) -> list[str]:
+    from regent.novel.harnessing.surface import run_soft_checks
+
+    return run_soft_checks(content, config, previous_chapter=previous_chapter_text(ctx))
 
 
 def drop_copied_span(
@@ -966,7 +1059,7 @@ async def produce_chapter_tick(
     phase = str(production.get("phase") or "WRITE")
     if phase == "DONE":
         return True
-    if phase not in CHAPTER_PHASES:
+    if phase not in CHAPTER_PHASES and phase not in H2_PHASES:
         raise ProductionStopped(f"未知短链阶段: {phase}")
     if mainline_exhausted(run.generation_context):
         raise ProductionStopped("主线用尽，先扩卷")
@@ -1133,6 +1226,8 @@ async def produce_chapter_tick(
         if verdict.ignores_notes and notes:
             ignored = str(verdict.ignored or "").strip()
             reasons.append("没有做到编辑意见" + ("：" + ignored if ignored else ""))
+        if verdict.same_method and methods:
+            production["same_method_rejects"] = int(production.get("same_method_rejects") or 0) + 1
         if reasons:
             production["plan_reject"] = "；".join(reasons)
             production["plan_rejected"] = {
@@ -1154,7 +1249,15 @@ async def produce_chapter_tick(
             run.generation_context["target_node"] = planned
             ctx = run.generation_context
         rewrites = int(production.get("rewrites") or 0)
-        payload = build_write_payload(ctx, cast)
+        h2_round = int(production.get("h2_round") or 0)
+        if _is_h2(production):
+            config = h2_config(ctx, production)
+            payload = h2_write_payload(ctx, cast, config)
+            system = h2_writer_system(ctx, cast, config, production)
+            production["h2_effective_hash"] = config.content_hash
+        else:
+            payload = build_write_payload(ctx, cast)
+            system = _writer_system(ctx, cast)
         if rewrites:
             payload["avoid"] = list(production.get("rewrite_fails") or [])
         written = await _call(
@@ -1164,11 +1267,13 @@ async def produce_chapter_tick(
             run,
             production,
             ChapterProse,
-            _writer_system(ctx, cast)
+            system
             + (" 上一稿因 avoid 里的问题没过，这一稿不要再出现。" if rewrites else ""),
             payload,
             "chapter_write",
-            f"v{version}:chapter_write" + (f":w{rewrites}" if rewrites else ""),
+            f"v{version}:chapter_write"
+            + (f":w{rewrites}" if rewrites else "")
+            + (f":h{h2_round}" if h2_round else ""),
         )
         production = run.generation_context["production"]
         _store_prose(run, production, settle_chapter_text(written.content, previous_chapter_text(ctx)))
@@ -1177,21 +1282,40 @@ async def produce_chapter_tick(
         return False
 
     if phase == "CHECK":
+        content = str(run.content or "")
         fails = check_chapter(
-            str(run.content or ""),
+            content,
             ctx=ctx,
             cast=cast,
             title=str(getattr(run, "title", "") or ""),
         )
-        warnings = name_warnings(str(run.content or ""), cast)
+        warnings = name_warnings(content, cast)
+        h2 = _is_h2(production)
+        if h2:
+            from regent.novel.harnessing import recursion
+
+            warnings += [
+                item for item in h2_soft_issues(content, ctx, h2_config(ctx, production)) if item not in warnings
+            ]
+            production.setdefault("h2_first_pass", not fails)
         repairs = int(production.get("repairs") or 0)
         production["check_fails"] = fails + warnings
+        if h2:
+            trigger = recursion.round_trigger(production, fails=fails)
+            if trigger:
+                recursion.start_round(run, production, trigger=trigger, fails=fails, soft=warnings)
+                _save(run, production)
+                return False
         if not fails and (not warnings or repairs >= 1):
             production["soft_issues"] = warnings
             production["phase"] = "DONE"
+            if h2:
+                from regent.novel.harnessing.overlay import record_verified_round
+
+                await record_verified_round(session, work=work, run=run, production=production)
             _save(run, production)
             return True
-        digest = _content_hash(str(run.content or ""))
+        digest = _content_hash(content)
         if repairs >= 1 or production.get("last_failed_hash") == digest:
             rewrites = int(production.get("rewrites") or 0)
             if rewrites >= MAX_REWRITES:
@@ -1210,11 +1334,30 @@ async def produce_chapter_tick(
         _save(run, production)
         return False
 
+    if phase in H2_PHASES:
+        if not _is_h2(production):
+            raise ProductionStopped(f"非 H2 臂不走递归阶段: {phase}")
+        from regent.novel.harnessing import recursion
+
+        handler = {
+            "PROPOSE": recursion.propose_tick,
+            "PROBE": recursion.probe_tick,
+            "COMPOSE": recursion.compose_tick,
+        }[phase]
+        await handler(session, provider=provider, work=work, run=run, production=production, cast=cast)
+        return False
+
     if phase == "REPAIR":
         if int(production.get("repairs") or 0) >= 1:
             raise ProductionStopped("短链只允许改稿一次")
         draft = str(run.content or "")
-        payload = build_write_payload(ctx, cast)
+        if _is_h2(production):
+            config = h2_config(ctx, production)
+            payload = h2_write_payload(ctx, cast, config)
+            system = config.get_prompt("repair") or CHAPTER_REPAIR_SYSTEM
+        else:
+            payload = build_write_payload(ctx, cast)
+            system = CHAPTER_REPAIR_SYSTEM
         payload["previous_draft"] = draft
         payload["check_fails"] = list(production.get("check_fails") or [])
         written = await _call(
@@ -1224,7 +1367,7 @@ async def produce_chapter_tick(
             run,
             production,
             ChapterProse,
-            CHAPTER_REPAIR_SYSTEM,
+            system,
             payload,
             "chapter_repair",
             f"v{version}:chapter_repair:{_content_hash(draft)[:12]}",
@@ -1241,3 +1384,7 @@ async def produce_chapter_tick(
         return False
 
     raise ProductionStopped(f"未知短链阶段: {phase}")
+
+
+def _is_h2(production: dict[str, Any]) -> bool:
+    return str(production.get("executor") or "") == H2_ARCHITECTURE

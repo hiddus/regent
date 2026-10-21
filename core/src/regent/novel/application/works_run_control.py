@@ -244,6 +244,17 @@ async def start_run(
     # R4/A-05：执行器按作品分桶在创建时确定，并钉进这一次运行的上下文。
     # 之后灰度比例怎么调都不能改在途运行——否则同一章前后半来自两个执行器。
     executor = executor_app.choose_executor(work_id)
+    gen_ctx: dict[str, object] = {
+        "architecture_version": executor,
+        "executor": executor,
+        "executor_version": executor_app.executor_version(executor),
+        "call_key_version": 2,
+        "production": {"call_key_version": 2},
+    }
+    if executor == executor_app.H2_EXECUTOR:
+        from regent.novel.harnessing.overlay import pin_harness
+
+        await pin_harness(session, work_id=work.id, context=gen_ctx)
     run = ChapterRunModel(
         id=uuid.uuid4(),
         work_id=work_id,
@@ -253,13 +264,7 @@ async def start_run(
         state=ChapterRunState.QUEUED.value,
         current_step=ChapterStep.ASSEMBLE.value,
         title=f"第 {chapter_no} 章",
-        generation_context={
-            "architecture_version": executor,
-            "executor": executor,
-            "executor_version": executor_app.executor_version(executor),
-            "call_key_version": 2,
-            "production": {"call_key_version": 2},
-        },
+        generation_context=gen_ctx,
         auto_advance=True,
     )
     session.add(run)

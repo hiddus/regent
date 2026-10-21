@@ -676,6 +676,8 @@ class ModelCallModel(NovelBase):
     # 已成功输出快照：恢复时复用，不重新调用也不重复计费（G-09）
     output_json: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     error_code: Mapped[str | None] = mapped_column(String(64))
+    # error_code 会被终态覆盖（对账耗尽 → RECONCILE_EXHAUSTED），原始故障留在这一列
+    error_detail: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -922,6 +924,66 @@ class EvalRunModel(NovelBase):
     verdict_reasons: Mapped[list[str]] = mapped_column(
         JSONB, default=list, nullable=False
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Harness² 改进库（递归自改进）
+# ---------------------------------------------------------------------------
+
+
+class HarnessLibraryModel(NovelBase):
+    """改进库条目：一章递归交付的稿子过了硬门才写入，按范围/类型/职责/失败码检索。
+
+    同一行兼作本书覆盖层：``overlay_after`` 非空的行是这本书试用或已采纳的配置。
+    status：candidate（只作经验）/ provisional（本书试用中，一本书同时只有一条）/
+    adopted / superseded（被更新的采纳顶替）/ rolled_back / retired（久未使用）。
+    """
+
+    __tablename__ = "novel_harness_library"
+    __table_args__ = (
+        Index("ix_harness_lib_scope_type", "scope", "genre_tag"),
+        Index("ix_harness_lib_failure", "failure_code"),
+        Index("ix_harness_lib_work_status", "source_work_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="global"
+    )
+    scope_key: Mapped[str] = mapped_column(
+        String(255), nullable=False, default=""
+    )
+    genre_tag: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    chapter_role: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    failure_code: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    config_tree: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    config_diff: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    experience: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    evidence_refs: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    adopted_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    effective_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="candidate")
+    rollback_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    parent_entry_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_work_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    harness_hash: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    overlay_after: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    since_chapter: Mapped[int | None] = mapped_column(Integer)
+    baseline: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

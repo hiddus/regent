@@ -9,7 +9,7 @@ from regent.novel.domain.prose_front_gates import (
 
 
 class TestReviewIssuesMayCoerce:
-    """review_issues_may_coerce: gate_debt:prose_front 分区语义。"""
+    """review_issues_may_coerce: 只认结构化顾问标签，递延债务不再放行。"""
 
     def test_empty_issues_coercible(self) -> None:
         assert review_issues_may_coerce([]) is True
@@ -24,24 +24,10 @@ class TestReviewIssuesMayCoerce:
     def test_bare_power_surface_coercible(self) -> None:
         assert review_issues_may_coerce(["[front:power_surface] 缺金手指"]) is True
 
-    def test_gate_debt_prose_front_power_surface_coercible(self) -> None:
-        issues = ["[gate_debt:prose_front][front:power_surface] 缺金手指"]
-        assert review_issues_may_coerce(issues) is True
-
-    def test_gate_debt_prose_front_redundant_not_coercible(self) -> None:
-        issues = ["[gate_debt:prose_front][front:redundant] 复读"]
-        assert review_issues_may_coerce(issues) is False
-
-    def test_mixed_gate_debt_redundant_blocks_all(self) -> None:
-        issues = [
-            "[gate_debt:prose_front][front:power_surface] 缺金手指",
-            "[gate_debt:prose_front][front:redundant] 复读",
-        ]
-        assert review_issues_may_coerce(issues) is False
-
-    def test_gate_debt_cont_coercible(self) -> None:
-        issues = ["[gate_debt:cont] 连续性缺失"]
-        assert review_issues_may_coerce(issues) is True
+    def test_gate_debt_label_no_longer_coercible(self) -> None:
+        """gate_debt 递延已废除（88ae2c2）：债务标签一律硬停，不许 coerce。"""
+        assert review_issues_may_coerce(["[gate_debt:prose_front][front:power_surface] x"]) is False
+        assert review_issues_may_coerce(["[gate_debt:cont] 连续性缺失"]) is False
 
     def test_front_title_not_coercible(self) -> None:
         assert review_issues_may_coerce(["[front:title] 标题缺失"]) is False

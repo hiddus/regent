@@ -197,6 +197,7 @@ async def test_unknown_result_is_held_and_never_blind_retried(novel_db):
             )
         call = await session.scalar(select(ModelCallModel))
         assert call.status == production.CALL_STATUS_UNKNOWN
+        assert call.error_detail == "TimeoutError: gateway timeout"
         assert call.reserved_amount_minor and call.reserved_amount_minor > 0
         assert (
             await session.scalar(
@@ -258,6 +259,9 @@ async def test_reconcile_settles_unknown_after_attempts_are_exhausted(novel_db):
         call = await session.scalar(select(ModelCallModel))
         assert call.status == production.CALL_STATUS_FAILED
         assert call.usage_source == "estimated"
+        assert call.error_code == "RECONCILE_EXHAUSTED"
+        # 终态覆盖不得抹掉原始故障：否则查不出这次到底是超时还是别的
+        assert call.error_detail == "TimeoutError: gateway timeout"
         # 放弃对账后按“费用已发生”结算，不留悬账
         consumed = await session.scalar(
             select(func.sum(CostEntryModel.amount_minor)).where(

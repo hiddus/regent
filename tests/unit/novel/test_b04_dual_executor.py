@@ -89,6 +89,7 @@ def test_two_real_strategies_are_registered_and_version_pinned():
         SCRIPT_ARCHITECTURE,
         SCRIPT_SCENE_ARCHITECTURE,
         CHAPTER_ARCHITECTURE,
+        "director_chapter_h2",
     }
     assert executor_app.STABLE_EXECUTOR == CHAPTER_ARCHITECTURE
     assert executor_app.executor_version(ARCHITECTURE) == "director_v2@2"

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -40,6 +41,8 @@ from regent.novel.domain.price_book import (
 from regent.novel.infrastructure.models import ChapterRunModel, ModelCallModel
 
 T = TypeVar("T", bound=BaseModel)
+
+logger = logging.getLogger(__name__)
 
 CALL_STATUS_RESERVED = "RESERVED"
 CALL_STATUS_SUCCEEDED = "SUCCEEDED"
@@ -290,6 +293,7 @@ class CallBroker:
                     acc,
                     ticket,
                     error_code=_error_code(exc),
+                    error_detail=_error_detail(exc),
                     request_id=str(getattr(exc, "request_id", "") or ""),
                 )
             raise CallUnknown(
@@ -470,6 +474,7 @@ class CallBroker:
         output_json: dict | None = None,
         usage_source: str,
         error_code: str | None = None,
+        error_detail: str | None = None,
     ) -> None:
         """统一的终态结算：按实际额消费、释放余额，**按 attempt 幂等**。
 
@@ -490,6 +495,8 @@ class CallBroker:
             call.output_hash = _sha(_dump(output_json))
         if error_code:
             call.error_code = error_code
+        if error_detail is not None:
+            call.error_detail = error_detail[:255]
         call.lease_owner = None
         call.lease_expires_at = None
         call.updated_at = datetime.now(UTC)
@@ -556,6 +563,7 @@ class CallBroker:
         ticket: _Ticket,
         *,
         error_code: str,
+        error_detail: str = "",
         request_id: str = "",
     ) -> None:
         call = await _call_row(session, ticket.logical_call_id, ticket.attempt)
@@ -563,11 +571,21 @@ class CallBroker:
             return
         call.status = CALL_STATUS_UNKNOWN
         call.error_code = error_code
+        if error_detail:
+            call.error_detail = error_detail[:255]
         # 超时类异常往往带着供应商 request_id：留下来，对账才有得可查。
         if request_id and not call.provider_request_id:
             call.provider_request_id = request_id[:64]
         call.lease_expires_at = None
         call.updated_at = datetime.now(UTC)
+        logger.warning(
+            "model call unknown: %s attempt=%s code=%s detail=%s request_id=%s",
+            ticket.logical_call_id,
+            ticket.attempt,
+            error_code,
+            error_detail,
+            request_id,
+        )
         await session.flush()
 
     async def _reuse(
@@ -679,6 +697,7 @@ class CallBroker:
                         acc,
                         ticket,
                         error_code=_error_code(response),
+                        error_detail=_error_detail(response),
                         request_id=str(getattr(response, "request_id", "") or ""),
                     )
                 if unknown is None:
@@ -754,8 +773,20 @@ class CallBroker:
         return "PENDING"
 
     async def _settle_unknown(self, session: AsyncSession, call: ModelCallModel) -> None:
-        """放弃对账：按“费用已发生”结算预留额，不留悬账（§4.4）。"""
+        """放弃对账：按“费用已发生”结算预留额，不留悬账（§4.4）。
+
+        ``error_code`` 改成终态是给下游看的（恢复账本据此升级处置），但覆盖它不能
+        把原始故障一起抹掉：否则一次调用失败只剩 RECONCILE_EXHAUSTED，查不出到底是
+        超时、超长还是解析失败。原始码与消息并进 ``error_detail`` 留着。
+        """
         amount = int(call.reserved_amount_minor or 0)
+        code = (call.error_code or "").strip()
+        detail = (call.error_detail or "").strip()
+        origin = detail or code
+        if code and detail and not detail.startswith(code):
+            origin = f"{code}; {detail}"
+        if origin == "RECONCILE_EXHAUSTED":
+            origin = ""
         await self._finalize(
             session,
             call,
@@ -763,6 +794,7 @@ class CallBroker:
             actual=amount,
             usage_source="estimated",
             error_code="RECONCILE_EXHAUSTED",
+            error_detail=origin[:255] or "原始故障未记录",
         )
 
 
@@ -861,6 +893,16 @@ def _lease_live(call: ModelCallModel) -> bool:
 
 def _error_code(exc: BaseException) -> str:
     return (getattr(exc, "failure_code", None) or type(exc).__name__)[:64]
+
+
+def _error_detail(exc: BaseException) -> str:
+    """原始故障的可读现场：类型加消息。
+
+    ``error_code`` 只有 64 字符且会被终态覆盖（对账耗尽改成 RECONCILE_EXHAUSTED），
+    光看它查不出一次调用到底是超时、超长还是解析失败，所以消息必须单独留一份。
+    """
+    message = str(exc).strip().replace("\n", " ")
+    return f"{type(exc).__name__}: {message}"[:255] if message else type(exc).__name__[:255]
 
 
 async def _latest_call(session: AsyncSession, logical_call_id: str) -> ModelCallModel | None:

@@ -41,6 +41,7 @@ _LATER_TABLES = frozenset(
         "novel_memory_items",
         "novel_memory_edges",
         "novel_eval_runs",
+        "novel_harness_library",
     }
 )
 
@@ -67,7 +68,7 @@ _LATER_COLUMNS: dict[str, frozenset[str]] = {
             "fencing_token",
         }
     ),
-    "novel_model_calls": frozenset(                                         # 0051 / 0052
+    "novel_model_calls": frozenset(                                   # 0051 / 0052 / 0058
         {
             "attempt",
             "reserved_amount_minor",
@@ -82,6 +83,7 @@ _LATER_COLUMNS: dict[str, frozenset[str]] = {
             "lease_ttl_seconds",
             "output_json",
             "error_code",
+            "error_detail",
             "updated_at",
         }
     ),

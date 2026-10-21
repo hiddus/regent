@@ -118,7 +118,7 @@ CHAPTER_STEP_ORDER: tuple[ChapterStep, ...] = (
 def chapter_step_order(context: dict | None = None) -> tuple[ChapterStep, ...]:
     """Pin the executor per run; unversioned in-flight chapters remain legacy."""
     arch = (context or {}).get("architecture_version")
-    if arch == "director_chapter":
+    if arch in {"director_chapter", "director_chapter_h2"}:
         return (
             ChapterStep.ASSEMBLE,
             ChapterStep.PRODUCE,

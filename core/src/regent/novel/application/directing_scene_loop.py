@@ -76,7 +76,7 @@ from regent.novel.application.directing_script_loop import (
     _produce_script_tick,
 )
 from regent.novel.application.directing_types import (
-    CHAPTER_ARCHITECTURE,
+    CHAPTER_ARCHITECTURES,
     PROTOCOL_CHAPTER,
     PROTOCOL_SCRIPT,
     PROTOCOL_SCRIPT_SCENE,
@@ -143,7 +143,7 @@ async def produce_tick(
     raw_context = run.generation_context or {}
     production = deepcopy(raw_context.get("production") or {})
     architecture = (run.generation_context or {}).get("architecture_version")
-    if production.get("protocol") == PROTOCOL_CHAPTER or architecture == CHAPTER_ARCHITECTURE:
+    if production.get("protocol") == PROTOCOL_CHAPTER or architecture in CHAPTER_ARCHITECTURES:
         return await produce_chapter_tick(
             session, provider=provider, work=work, run=run, production=production
         )

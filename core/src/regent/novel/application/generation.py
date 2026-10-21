@@ -406,6 +406,7 @@ async def _canon_facts(
         "director_script",
         "director_script_scene",
         "director_chapter",
+        "director_chapter_h2",
     }:
         accepted_rows = (await session.scalars(select(ChapterRunModel).where(
             ChapterRunModel.work_id == work.id,
@@ -495,6 +496,16 @@ class ClarifyQuestions(BaseModel):
         max_length=3,
         description="2-3 个澄清问题，每个包含 question_id, prompt, options, default_assumption",
     )
+
+
+class GenreTag(BaseModel):
+    """题材标签：取值必须落在 ``works_constants.GENRE_TAGS`` 内。
+
+    标签是改进库 ``genre_tag`` 的检索键，自由文本会让同类型经验永远匹配不上，
+    所以调用方必须校验取值（见 deploy/novel/backfill_work_genre.py）。
+    """
+
+    genre: str = Field(description="题材标签，只能取给定标签之一")
 
 
 async def generate_clarify_questions(
@@ -819,10 +830,12 @@ async def assemble(
         ARCHITECTURE,
         DIRECTED_ARCHITECTURES,
     )
+    from regent.novel.application.directing_types import CHAPTER_ARCHITECTURES
 
     architecture_version = (run.generation_context or {}).get(
         "architecture_version", ARCHITECTURE
     )
+    chapter_arm = architecture_version in CHAPTER_ARCHITECTURES
     goal = await _latest_goal(session, work.id)
     path = await session.scalar(
         select(CriticalPathModel)
@@ -927,7 +940,7 @@ async def assemble(
             "handoff_status": handoff_status,
         })
     chapter_plans.sort(key=lambda item: int(item["chapter_no"]))
-    if architecture_version in DIRECTED_ARCHITECTURES and architecture_version != "director_chapter" and nodes:
+    if architecture_version in DIRECTED_ARCHITECTURES and not chapter_arm and nodes:
         previous = recent_chapters[0] if recent_chapters else {}
         previous_id = previous.get("target_node", {}).get("id")
         previous_index = next((i for i, node in enumerate(nodes) if node.node_id == previous_id), None)
@@ -943,7 +956,7 @@ async def assemble(
         elif not recent_chapters:
             target = nodes[0]
     staged_slot: dict[str, Any] | None = None
-    if architecture_version == "director_chapter":
+    if chapter_arm:
         from regent.novel.application.directing_chapter import (
             chapter_node_for_run,
             max_chapters_per_stage,
@@ -1099,7 +1112,7 @@ async def assemble(
         } if next_node else {},
         "chapter_assignment": (
             {"objective": str(getattr(target, "promise", "") or "") if target is not None else ""}
-            if architecture_version == "director_chapter"
+            if chapter_arm
             else (
                 {"objective": "由导演按人物、因果与阅读体验决定本章职责"}
                 if architecture_version in DIRECTED_ARCHITECTURES
@@ -1123,7 +1136,7 @@ async def assemble(
     existing = list(
         (await session.scalars(select(PersonaSpecModel).where(PersonaSpecModel.work_id == work.id))).all()
     )
-    if not existing and architecture_version != "director_chapter":
+    if not existing and not chapter_arm:
         defaults = (
             ("主角", "推动目标但必须付出代价", "克制、具体、少解释"),
             ("同伴", "帮助主角，同时保护自己的秘密", "敏锐、留有余地"),

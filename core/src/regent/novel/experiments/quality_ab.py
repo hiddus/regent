@@ -744,6 +744,54 @@ class SimProvider:
                 fault="ok" if "FORCE_REJECT_CHAPTER" not in user_prompt else "render",
                 notes="sim",
             )
+        elif name == "ChapterProse":
+            body = (
+                "【模拟正文】门缝里有风。他没有立刻回答，只把工具匣往身侧挪了一寸，"
+                "让来人看见匣底那道旧刮痕。选择已经发生，代价跟着落地。"
+                "他没有解释，只是把匣子推了过去。来人愣了一下，伸手接住。"
+                "两人之间沉默了很久。最终来人说了一句：'我记住了。'"
+                "他点头，转身走进巷子深处。风从身后追来，他没有回头。"
+            )
+            if len(body) < 800:
+                body = body + ("利害推进，代价落地。" * ((800 - len(body)) // 8 + 1))
+                body = body[:2500]
+            output = response_model(content=body)
+        elif name == "HarnessProposal":
+            from regent.novel.harnessing.recursion import ConfigEdit, HarnessCandidate, HarnessProposal
+
+            output = HarnessProposal(
+                generic=HarnessCandidate(
+                    kind="generic",
+                    edits=[
+                        ConfigEdit(
+                            what="previous_chapter_tail: 500 → 300",
+                            where="参照稿开头重演了前章结尾",
+                            why="减少前章尾段长度以避免重演",
+                        )
+                    ],
+                    overrides={"knobs": {"previous_chapter_tail": 300}},
+                ),
+                book=HarnessCandidate(
+                    kind="book",
+                    edits=[
+                        ConfigEdit(
+                            what="追加技巧：章首承接",
+                            where="参照稿章首与前章尾重合",
+                            why="上一章停在动作中途，本章应直接接上",
+                        )
+                    ],
+                    overrides={"skills": {"chapter_opening": True}},
+                ),
+            )
+        elif name == "ComposeDecision":
+            from regent.novel.harnessing.recursion import ComposeDecision
+
+            output = ComposeDecision(
+                decision="adopt_generic",
+                observation="通用候选减少了前章尾段长度，探针稿未重演前章结尾",
+                adopted_overrides={"knobs": {"previous_chapter_tail": 300}},
+                experience="前章尾段超过 400 字时容易导致重演；缩短到 300 字可缓解",
+            )
         else:
             output = response_model()
         return StructuredModelResponse(output=output, usage=usage, model=self.model_name)

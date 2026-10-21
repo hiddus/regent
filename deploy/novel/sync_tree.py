@@ -52,6 +52,26 @@ SYMBOL_CHECKS = [
     ("regent.novel.application.production", "CallBroker", "R0 调用账本"),
     ("regent.novel.domain.prose_patch", "apply_patch", "R21 局部补丁合并"),
     ("regent.novel.domain.scene_requirements", "freeze_scene_requirements", "R21 要求清单冻结"),
+    # Harness² 臂（director_chapter_h2）：配置面、章内递归、覆盖层、改进库。
+    # 少拷任何一个都会让灰度作品在 CHECK 未过时 500，而默认臂看不出异常。
+    ("regent.novel.harnessing.surface", "load_base_pack", "按 harness_id 解析基础配置包"),
+    ("regent.novel.harnessing.surface", "resolve_skills", "按章节职责加载写作技能"),
+    ("regent.novel.harnessing.surface", "resolve_hooks", "阶段钩子向写作载荷追加指引"),
+    ("regent.novel.harnessing.surface", "run_soft_checks", "声明式软检查送入修稿"),
+    ("regent.novel.harnessing.surface", "ends_mid_action", "前章停在动作中途的钩子条件"),
+    ("regent.novel.harnessing.recursion", "propose_tick", "CHECK 未过进入 PROPOSE"),
+    ("regent.novel.harnessing.recursion", "probe_tick", "两个候选各写一稿探针"),
+    ("regent.novel.harnessing.recursion", "compose_tick", "组合落定与交付"),
+    ("regent.novel.harnessing.recursion", "is_h2_arm", "阶段机分流本臂"),
+    ("regent.novel.harnessing.overlay", "pin_harness", "三个运行创建入口统一钉住配置"),
+    ("regent.novel.harnessing.overlay", "record_verified_round", "过硬门交付的轮次入覆盖层"),
+    ("regent.novel.harnessing.overlay", "settle_trial", "试用满 3 章采纳或回退"),
+    ("regent.novel.harnessing.library", "record_entry", "改进库写入"),
+    ("regent.novel.harnessing.library", "search", "按范围检索改进库供提案引用"),
+    ("regent.novel.harnessing.replay", "check_write_replay", "晋级前用 input_hash 零调用复原"),
+    ("regent.novel.harnessing.library", "SHAREABLE_STATUSES", "试用条目只对本本书可见"),
+    ("regent.novel.application.executor", "CHAPTER_EXECUTOR", "覆盖层按默认臂算试用基线"),
+    ("regent.novel.application.works_constants", "GENRE_MAX_CHARS", "开书/澄清写 genre 前收到列宽"),
 ]
 
 

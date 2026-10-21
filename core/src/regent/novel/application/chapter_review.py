@@ -18,7 +18,7 @@ from regent.novel.application.directing_protocol import (
     production_protocol,
 )
 from regent.novel.application.directing_types import (
-    CHAPTER_ARCHITECTURE,
+    CHAPTER_ARCHITECTURES,
     MAX_CHAPTER_REPAIRS,
     PROTOCOL_CHAPTER,
     PROTOCOL_SCRIPT,
@@ -344,7 +344,7 @@ async def validate_chapter(
 ) -> bool:
     production = deepcopy(run.generation_context["production"])
     architecture = (run.generation_context or {}).get("architecture_version")
-    if production.get("protocol") == PROTOCOL_CHAPTER or architecture == CHAPTER_ARCHITECTURE:
+    if production.get("protocol") == PROTOCOL_CHAPTER or architecture in CHAPTER_ARCHITECTURES:
         from regent.novel.application.directing_chapter import check_chapter, seal_chapter_review
 
         if production.get("phase") != "DONE" or not run.content:

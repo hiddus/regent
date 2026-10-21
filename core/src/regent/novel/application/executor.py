@@ -27,6 +27,7 @@ from regent.novel.application.directing_protocol import (
 )
 from regent.novel.application.directing_types import (
     CHAPTER_ARCHITECTURE,
+    H2_ARCHITECTURE,
     SCRIPT_ARCHITECTURE,
     SCRIPT_SCENE_ARCHITECTURE,
 )
@@ -39,6 +40,7 @@ BEAT_EXECUTOR = BEAT_ARCHITECTURE
 SCRIPT_EXECUTOR = SCRIPT_ARCHITECTURE
 SCRIPT_SCENE_EXECUTOR = SCRIPT_SCENE_ARCHITECTURE
 CHAPTER_EXECUTOR = CHAPTER_ARCHITECTURE
+H2_EXECUTOR = H2_ARCHITECTURE
 # 历史名保留只读识别；不得再被 choose_executor 选中。
 LEGACY_EXECUTOR = "legacy_v1"
 KNOWN_EXECUTORS = frozenset(
@@ -48,6 +50,7 @@ KNOWN_EXECUTORS = frozenset(
         SCRIPT_ARCHITECTURE,
         SCRIPT_SCENE_ARCHITECTURE,
         CHAPTER_ARCHITECTURE,
+        H2_ARCHITECTURE,
     }
 )
 
@@ -60,6 +63,7 @@ EXECUTOR_VERSIONS: dict[str, str] = {
     SCRIPT_ARCHITECTURE: "director_script@1",
     SCRIPT_SCENE_ARCHITECTURE: "director_script_scene@1",
     CHAPTER_ARCHITECTURE: "director_chapter@1",
+    H2_ARCHITECTURE: "director_chapter_h2@1",
     LEGACY_EXECUTOR: "legacy_v1@1",
 }
 
@@ -115,6 +119,11 @@ PINNED_CONTEXT_KEYS: tuple[str, ...] = (
     DEFER_MARKER,
     "call_key_version",
     "continuation",
+    # H2 臂的配置身份：基础包、钉住时的有效哈希、本书覆盖层及其库条目。
+    "harness_id",
+    "harness_hash",
+    "harness_overlay",
+    "harness_overlay_id",
 )
 
 
