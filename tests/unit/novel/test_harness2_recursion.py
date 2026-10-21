@@ -27,13 +27,17 @@ from regent.novel.harnessing.overlay import first_pass_baseline, pin_harness, re
 from regent.novel.harnessing.recursion import (
     ComposeDecision,
     ConfigEdit,
+    GenericScreen,
     HarnessCandidate,
     HarnessProposal,
+    back_edits,
     settle_compose,
 )
 from regent.novel.harnessing.replay import check_write_replay, compute_payload_hash
 from regent.novel.harnessing.surface import (
     apply_overrides,
+    book_terms,
+    flatten,
     load_base_pack,
     load_improver_prompt,
     resolve_hooks,
@@ -178,16 +182,21 @@ async def _tick(session, run, work, broker: FakeBroker) -> bool:
     return done
 
 
+def _edits(overrides: dict, what: str, where: str) -> list[ConfigEdit]:
+    """每处配置修改配一条认账的 edits：path 指向键，where 指向参照稿。"""
+    return [ConfigEdit(what=what, path=".".join(path), where=where) for path in flatten(overrides)]
+
+
 def _proposal(generic: dict, book: dict) -> HarnessProposal:
     return HarnessProposal(
         generic=HarnessCandidate(
             kind="generic",
-            edits=[ConfigEdit(what="前章尾段 500 → 300", where="开头重演了前章结尾")],
+            edits=_edits(generic, "前章尾段 500 → 300", "开头重演了前章结尾"),
             overrides=generic,
         ),
         book=HarnessCandidate(
             kind="book",
-            edits=[ConfigEdit(what="加章首承接技巧", where="第一段")],
+            edits=_edits(book, "加章首承接技巧", "第一段"),
             overrides=book,
         ),
     )
@@ -211,8 +220,8 @@ def test_h2_routes_through_chapter_protocol():
         ChapterStep.REVIEW,
         ChapterStep.CANON,
     )
-    assert effective_call_cap({"protocol": "chapter", "executor": H2}) == 23
-    assert effective_call_cap({"protocol": "chapter", "executor": "director_chapter"}) == 13
+    assert effective_call_cap({"protocol": "chapter", "executor": H2}) == 30
+    assert effective_call_cap({"protocol": "chapter", "executor": "director_chapter"}) == 16
     assert {"harness_overlay", "harness_overlay_id"} <= set(executor_app.PINNED_CONTEXT_KEYS)
 
 
@@ -260,7 +269,7 @@ async def test_passing_first_draft_finishes_without_recursion(monkeypatch):
     assert await _tick(None, run, work, broker) is True
     production = run.generation_context["production"]
     assert production["phase"] == "DONE"
-    assert production["h2_first_pass"] is True
+    assert production["first_pass"] is True
     assert "h2_round" not in production
     assert len(broker.calls) == 1
 
@@ -292,13 +301,14 @@ async def test_failed_check_runs_one_round_and_delivers_passing_probe(novel_db, 
                     experience="前章尾段太长时容易重演，缩到 300 字",
                 )
             ],
+            "GenericScreen": [GenericScreen(book_specific=False)],
         }
     )
     monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
     run = _run()
     work = _work()
     async with novel_db() as session:
-        for _ in range(7):
+        for _ in range(9):
             if await _tick(session, run, work, broker):
                 break
         await session.commit()
@@ -310,15 +320,17 @@ async def test_failed_check_runs_one_round_and_delivers_passing_probe(novel_db, 
             "v1:h2:probe:r1:generic",
             "v1:h2:probe:r1:book",
             "v1:h2:compose:r1",
+            "v1:h2:screen:r1",
         ]
         assert [c["purpose"] for c in broker.calls][1:] == [
             "h2_propose",
             "h2_probe",
             "h2_probe",
             "h2_compose",
+            "h2_screen",
         ]
-        assert production["call_count"] == 5
-        assert production["h2_first_pass"] is False
+        assert production["call_count"] == 6
+        assert production["first_pass"] is False
         assert production["h2_delivered_from"] == "probe"
         assert production["h2_overrides"] == generic
         assert run.content == GOOD
@@ -331,6 +343,16 @@ async def test_failed_check_runs_one_round_and_delivers_passing_probe(novel_db, 
         assert [c["overrides"] for c in compose_request["candidates"]] == [generic, book]
         assert compose_request["candidates"][0]["edits"][0]["what"] == "前章尾段 500 → 300"
         assert compose_request["deliver_options"] == ["generic"]
+        # 采纳的这条经验连同它的 edits 一起留在运行记录里
+        assert production["h2_lesson"]["edits"] == {
+            "generic": compose_request["candidates"][0]["edits"]
+        }
+        assert production["h2_lesson"]["screen"] == {"book_specific": False, "reason": ""}
+        # 筛查看到的是这条经验与随之采纳的修改
+        screen_request = broker.calls[5]["payload"]
+        assert screen_request["experience"] == "前章尾段太长时容易重演，缩到 300 字"
+        assert screen_request["overrides"] == generic
+        assert "林晚" in screen_request["book_terms"]
         # 探针 book 的执笔提示带上了章首承接技巧，且仍保留前置门提示的基底
         book_system = broker.calls[3]["system"]
         assert "第一句直接接上那个动作" in book_system
@@ -343,6 +365,135 @@ async def test_failed_check_runs_one_round_and_delivers_passing_probe(novel_db, 
         assert rows[0].overlay_after == generic
         assert rows[0].since_chapter == 3
         assert production["h2_recorded"] == str(rows[0].id)
+
+
+@pytest.mark.asyncio
+async def test_screen_demotes_book_specific_lesson_to_work_scope(novel_db, monkeypatch):
+    """通用条目其实只在这本书成立时降级：改进库里它对别的书不可见。"""
+    generic = {"memory": "同字不同齿距：重复的字要换一种间距。"}
+
+    def _prose_for(payload, system, command):
+        return chapter.ChapterProse(content=GOOD if command.endswith(":generic") else SHORT)
+
+    broker = FakeBroker(
+        {
+            "ChapterProse": _prose_for,
+            "HarnessProposal": [_proposal(generic, {})],
+            "ComposeDecision": [
+                ComposeDecision(
+                    decision="adopt_generic",
+                    deliver="generic",
+                    observation="通用探针的重字不再连排",
+                    experience="同字不同齿距：重复的字要换一种间距。",
+                )
+            ],
+            "GenericScreen": [
+                GenericScreen(book_specific=True, reason="齿距说的是本书那把铜钥匙的齿")
+            ],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(9):
+            if await _tick(session, run, work, broker):
+                break
+        await session.commit()
+        production = run.generation_context["production"]
+        assert production["phase"] == "DONE"
+        assert production["h2_lesson"]["screen"] == {
+            "book_specific": True,
+            "reason": "齿距说的是本书那把铜钥匙的齿",
+        }
+        row = (await session.scalars(select(HarnessLibraryModel))).one()
+        assert row.scope == "work"
+        assert row.scope_key == str(work.id)
+        # 修改本身仍然生效，只是不共享
+        assert production["h2_overrides"] == generic
+        assert row.overlay_after == generic
+
+
+@pytest.mark.asyncio
+async def test_screen_never_kills_a_chapter_that_already_passed(novel_db, monkeypatch):
+    """筛查是可选的：没预算时按最坏情况降级，不能把已经过硬门的一章拖成失败。"""
+    from regent.novel.domain.errors import BudgetExhausted
+
+    generic = {"knobs": {"previous_chapter_tail": 300}}
+
+    class _broker(FakeBroker):
+        async def __call__(self, *args, **kwargs):
+            if args[8] == "h2_screen":
+                raise BudgetExhausted("本章货币预算已耗尽，草稿已保留", kind="cost")
+            return await super().__call__(*args, **kwargs)
+
+    broker = _broker(
+        {
+            "ChapterProse": lambda payload, system, command: chapter.ChapterProse(
+                content=GOOD if command.endswith(":generic") else SHORT
+            ),
+            "HarnessProposal": [_proposal(generic, {})],
+            "ComposeDecision": [
+                ComposeDecision(
+                    decision="adopt_generic", deliver="generic", observation="好", experience="经验"
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(9):
+            if await _tick(session, run, work, broker):
+                break
+        await session.commit()
+        production = run.generation_context["production"]
+        assert production["phase"] == "DONE"
+        assert run.content == GOOD
+        assert production["h2_screen"]["book_specific"] is True
+        assert "预算耗尽" in production["h2_screen"]["reason"]
+        row = (await session.scalars(select(HarnessLibraryModel))).one()
+        assert row.scope == "work"
+
+
+def test_back_edits_drops_overrides_no_edit_claims():
+    """没人认账的配置修改不采纳：第 4 章那次调参就是三条 edits 都没提到它。"""
+    edits = [
+        {"what": "前章尾段 500 → 300", "path": "knobs.previous_chapter_tail", "where": "开头一段"},
+    ]
+    overrides = {
+        "knobs": {"previous_chapter_tail": 300, "soft_check_repetition_ngram": 60},
+        "memory": "换一种间距。",
+    }
+    kept, reasons = back_edits(edits, overrides)
+    assert kept == {"knobs": {"previous_chapter_tail": 300}}
+    assert len(reasons) == 1
+    assert "knobs.soft_check_repetition_ngram" in reasons[0]
+    assert "memory" in reasons[0]
+
+
+def test_back_edits_needs_a_place_in_the_reference_draft():
+    """指不出参照稿位置的修改不算认账，哪怕 path 写对了。"""
+    overrides = {"knobs": {"previous_chapter_tail": 300}}
+    kept, reasons = back_edits(
+        [{"what": "前章尾段 500 → 300", "path": "knobs.previous_chapter_tail", "where": ""}],
+        overrides,
+    )
+    assert kept == {}
+    assert reasons
+    # 没写 path 时退回键名匹配
+    kept, reasons = back_edits(
+        [{"what": "knobs.previous_chapter_tail 500 → 300", "where": "开头一段"}], overrides
+    )
+    assert kept == overrides
+    assert not reasons
+    # path 认下整棵子树
+    kept, _ = back_edits(
+        [{"what": "加章首承接技巧", "path": "skills.chapter_opening", "where": "第一段"}],
+        {"skills": {"chapter_opening": {"mode": "always", "instruction": "第一句接上那个动作"}}},
+    )
+    assert kept["skills"]["chapter_opening"]["mode"] == "always"
 
 
 @pytest.mark.asyncio
@@ -435,13 +586,15 @@ async def test_two_rounds_then_falls_back_to_repair(novel_db, monkeypatch):
                 ComposeDecision(decision="adopt_generic", observation="少一处失败"),
                 ComposeDecision(decision="keep", observation="两个都更差"),
             ],
+            # 第一轮采纳的是通用候选：交付前要先过专有性筛查
+            "GenericScreen": [GenericScreen(book_specific=True, reason="靠本书的铜钥匙才成立")],
         }
     )
     monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
     run = _run()
     work = _work()
     async with novel_db() as session:
-        for _ in range(14):
+        for _ in range(18):
             await _tick(session, run, work, broker)
             if run.generation_context["production"]["phase"] == "REPAIR":
                 break
@@ -451,6 +604,7 @@ async def test_two_rounds_then_falls_back_to_repair(novel_db, monkeypatch):
     assert production["h2_stop"] is True
     assert [h["decision"] for h in production["h2_history"]] == ["adopt_generic", "keep"]
     assert "v1:h2:propose:r2" in {c["command"] for c in broker.calls}
+    assert "v1:h2:screen:r1" in {c["command"] for c in broker.calls}
     assert production["call_count"] <= effective_call_cap(production)
 
 
@@ -464,6 +618,8 @@ async def test_default_arm_never_enters_recursion(monkeypatch):
     await _tick(None, run, work, broker)
     production = run.generation_context["production"]
     assert production["phase"] == "REPAIR"
+    # 首过口径与 H2 臂同一个键：基线不能因为换了臂就认不出这几章
+    assert production["first_pass"] is False
     assert "h2_first_pass" not in production
     run.generation_context["production"]["phase"] = "PROPOSE"
     from regent.novel.domain.errors import ProductionStopped
@@ -600,14 +756,34 @@ def test_validate_overrides_rejects_frozen_unknown_and_unsafe():
 def test_generic_candidate_with_book_names_is_rejected():
     base = load_base_pack("v1")
     clean, errors = validate_overrides(
-        {"memory": "林晚每次开门前都要先摸钥匙。"}, base, cast_names=["林晚"], generic=True
+        {"memory": "林晚每次开门前都要先摸钥匙。"}, base, book_terms=["林晚"], generic=True
     )
     assert clean == {}
     assert "林晚" in errors[0]
     kept, _ = validate_overrides(
-        {"memory": "林晚每次开门前都要先摸钥匙。"}, base, cast_names=["林晚"]
+        {"memory": "林晚每次开门前都要先摸钥匙。"}, base, book_terms=["林晚"]
     )
     assert kept == {"memory": "林晚每次开门前都要先摸钥匙。"}
+
+
+def test_book_terms_cover_world_bible_places_and_aliases():
+    """只查卡司人名不够：世界书里的地名与别名同样会让通用条目变成噪音。"""
+    ctx = {
+        "world_bible": {
+            "personas": [{"name": "林晚", "aliases": ["晚晚"]}],
+            "places": [{"name": "雨城码头", "aliases": ["码头"]}],
+        }
+    }
+    terms = book_terms(ctx, {"陈默": {}})
+    assert {"林晚", "晚晚", "雨城码头", "码头", "陈默"} <= set(terms)
+    clean, errors = validate_overrides(
+        {"memory": "在雨城码头这类地方，人物要先动手再解释。"},
+        load_base_pack("v1"),
+        book_terms=terms,
+        generic=True,
+    )
+    assert clean == {}
+    assert "雨城码头" in errors[0]
 
 
 def test_safe_pattern_and_knob_range():
@@ -701,7 +877,7 @@ def _canon_run(work_id, chapter_no, *, overlay_id="", first_pass=True, state="CA
         generation_context={
             "executor": H2,
             "harness_overlay_id": overlay_id,
-            "production": {"h2_first_pass": first_pass},
+            "production": {"first_pass": first_pass},
         },
     )
 
@@ -848,7 +1024,11 @@ async def test_record_waits_while_another_trial_is_open(novel_db):
 
 @pytest.mark.asyncio
 async def test_baseline_counts_default_arm_chapters(novel_db):
-    """换臂前那几章是默认臂写的，同样过的是确定性硬门，必须算进基线。"""
+    """换臂前那几章是默认臂写的，同样过的是确定性硬门，认得出来的必须算进基线。
+
+    认不出首过信号的老运行（只因人名警告改过一次稿，判不出首稿到底过没过门）不计入，
+    而不是记成没过：把默认臂基线压低会让试用判定偏向采纳它本该防的东西。
+    """
 
     def _arm_run(work_id, chapter_no, executor, **production):
         return ChapterRunModel(
@@ -866,13 +1046,30 @@ async def test_baseline_counts_default_arm_chapters(novel_db):
         default = executor_app.CHAPTER_EXECUTOR
         s.add(_arm_run(work_id, 1, default, phase="DONE", repairs=0, rewrites=0))
         s.add(_arm_run(work_id, 2, default, phase="DONE", repairs=1, rewrites=0))
-        s.add(_arm_run(work_id, 3, default, phase="DONE", repairs=0, rewrites=1))
+        s.add(_arm_run(work_id, 3, default, phase="DONE", rewrites=1))
         s.add(_arm_run(work_id, 6, executor_app.SCENE_EXECUTOR, phase="DONE"))
         s.add(_arm_run(work_id, 7, default, phase="REPAIR"))
         s.add(_canon_run(work_id, 8, first_pass=True))
         await s.commit()
-        assert await first_pass_baseline(s, work_id, before_chapter=4) == {"chapters": 3, "ok": 1}
+        # 只有第 1 章认得出「一次过」；第 2、3 章判不出，不计入而不是记成没过
+        assert await first_pass_baseline(s, work_id, before_chapter=4) == {"chapters": 1, "ok": 1}
         assert await first_pass_baseline(s, work_id, before_chapter=9) == {"chapters": 1, "ok": 1}
+
+
+def test_first_pass_reads_legacy_key_and_refuses_to_guess():
+    from regent.novel.harnessing.overlay import _first_pass
+
+    def _ctx(executor: str, production: dict) -> SimpleNamespace:
+        return SimpleNamespace(generation_context={"executor": executor, "production": production})
+
+    default = executor_app.CHAPTER_EXECUTOR
+    assert _first_pass(_ctx(H2, {"h2_first_pass": False})) is False
+    assert _first_pass(_ctx(default, {"first_pass": True})) is True
+    # 老运行只有改稿计数：判不出首稿过没过门
+    assert _first_pass(_ctx(default, {"phase": "DONE", "repairs": 1})) is None
+    assert _first_pass(_ctx(default, {"phase": "REPAIR"})) is None
+    # 别的执行臂不是这台状态机
+    assert _first_pass(_ctx(executor_app.SCENE_EXECUTOR, {"phase": "DONE"})) is None
 
 
 # ---------------------------------------------------------------- 改进库
@@ -967,8 +1164,14 @@ async def test_replay_hash_matches_production_call(monkeypatch):
     monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
     await _tick(None, run, _work(), broker)
     assert len(broker.calls[0]["payload"]["previous_chapter"]) == 300
-    result = check_write_replay(run.generation_context)
+    prompt_hash = hashlib.sha256(broker.calls[0]["system"].encode("utf-8")).hexdigest()
+    result = check_write_replay(run.generation_context, stored_prompt_hash=prompt_hash)
     assert result["ok"] is True
     assert result["stored"] == compute_payload_hash(broker.calls[0]["payload"])
+    # 只核入参不算通过：覆盖层改的是提示词，缺 prompt_hash 就证明不了配置被钉住
+    partial = check_write_replay(run.generation_context)
+    assert partial["input_hash_ok"] is True
+    assert partial["prompt_hash_ok"] is None
+    assert partial["ok"] is False
     run.generation_context["canon"] = [{"statement": "后来改过的正史"}]
-    assert check_write_replay(run.generation_context)["ok"] is False
+    assert check_write_replay(run.generation_context, stored_prompt_hash=prompt_hash)["ok"] is False

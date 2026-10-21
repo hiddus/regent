@@ -10,18 +10,21 @@ import pytest
 
 from regent.novel.application import executor as executor_app
 from regent.novel.application.directing_chapter import (
+    CHAPTER_FIT_SYSTEM,
     CHAPTER_PHASES,
+    MAX_CHAPTER_CHARS,
     ChapterFacts,
     ChapterPlan,
     ChapterProse,
     ArcReview,
     MethodVerdict,
+    accept_draft,
     build_write_payload,
     chapter_node_for_run,
     check_chapter,
     drop_copied_span,
     drop_repeated_span,
-    settle_chapter_text,
+    dedupe_chapter_text,
     grounded_facts,
     load_cast,
     fit_chapter_length,
@@ -52,6 +55,15 @@ while len(PROSE) < 2000:
     )
     _sentence += 1
 PRIOR = "上一章写的是码头的雾和一艘没有名字的船。"
+
+LONG = PROSE
+_tail = 1
+while len(LONG) < 3200:
+    LONG += (
+        f"第{_tail}遍钟声敲响时，林晚数到第{_tail + 2}下才把抽屉合上，"
+        f"外面第{_tail + 5}阵雨还没停。"
+    )
+    _tail += 1
 
 
 def _run(*, phase: str = "WRITE", content: str = "", prior: str = PRIOR, repairs: int = 0) -> SimpleNamespace:
@@ -629,14 +641,22 @@ async def test_plan_that_ignores_editor_notes_is_replanned(monkeypatch):
 def test_chapter_call_cap_covers_the_short_path_only():
     from regent.novel.application.directing_budget import (
         CHAPTER_MAX_CALLS,
+        H2_CALLS_PER_ROUND,
+        H2_MAX_ROUNDS,
         MAX_CALLS,
         effective_call_cap,
     )
 
-    assert CHAPTER_MAX_CALLS == 13
+    assert CHAPTER_MAX_CALLS == 16
     assert MAX_CALLS == 120
-    assert effective_call_cap({"protocol": "chapter", "call_count": 0}) == 13
+    assert effective_call_cap({"protocol": "chapter", "call_count": 0}) == 16
     assert effective_call_cap({"protocol": "script_scene", "call_count": 0}) == 120
+    assert (
+        effective_call_cap(
+            {"protocol": "chapter", "executor": "director_chapter_h2", "call_count": 0}
+        )
+        == CHAPTER_MAX_CALLS + H2_MAX_ROUNDS * H2_CALLS_PER_ROUND
+    )
 
 
 @pytest.mark.asyncio
@@ -677,6 +697,116 @@ def test_overlong_chapter_fails():
     assert len(text) > 2500
     fails = check_chapter(text, ctx={"chapter_no": 1}, cast={"林晚": {}}, title="一")
     assert any("超过2500字" in item for item in fails)
+    # 长度是机械约束：探针比较两稿好坏时不该按它判失败
+    assert not check_chapter(
+        text, ctx={"chapter_no": 1}, cast={"林晚": {}}, title="一", ignore_max_length=True
+    )
+
+
+async def _fit_run(monkeypatch, *, compressed: str, draft: str = LONG) -> tuple[SimpleNamespace, list]:
+    run = _run()
+    run.generation_context["production"]["chapter_plan"] = {
+        "id": "n1",
+        "pressure": "考核逼他表态",
+        "choice": "陈默拒绝随便填名字",
+        "result": "包裹留在问题件区",
+    }
+    calls: list[dict] = []
+
+    async def _fake_call(*args, **kwargs):
+        purpose = args[8]
+        calls.append(
+            {"purpose": purpose, "command": args[9], "payload": args[7], "system": args[6]}
+        )
+        return ChapterProse(content=draft if purpose == "chapter_write" else compressed)
+
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", _fake_call)
+    return run, calls
+
+
+@pytest.mark.asyncio
+async def test_overlong_draft_is_compressed_not_chopped(monkeypatch):
+    """超长稿先压一次再落稿：章末结果正是砍尾会砍掉的那一段。"""
+    run, calls = await _fit_run(monkeypatch, compressed=PROSE + "包裹留在问题件区。")
+    work = SimpleNamespace(id="w")
+
+    async def _tick() -> bool:
+        return await produce_chapter_tick(
+            None, provider=None, work=work, run=run,
+            production=run.generation_context["production"],
+        )
+
+    assert await _tick() is False
+    production = run.generation_context["production"]
+    # 超长时不落稿、不进 CHECK，先挂着这一稿去压缩
+    assert production["phase"] == "FIT"
+    assert run.content == ""
+    tag = production["fit"]["tag"]
+    assert tag.startswith("write:w0:")
+    assert production["fit"]["draft"] == LONG
+
+    assert await _tick() is False
+    production = run.generation_context["production"]
+    fit = calls[1]
+    assert fit["purpose"] == "chapter_fit"
+    assert fit["command"] == f"v1:fit:{tag}"
+    assert fit["system"] == CHAPTER_FIT_SYSTEM
+    assert fit["payload"]["must_keep"] == {
+        "choice": "陈默拒绝随便填名字",
+        "result": "包裹留在问题件区",
+    }
+    assert fit["payload"]["max_chars"] == MAX_CHAPTER_CHARS
+    assert fit["payload"]["draft"] == LONG
+    assert fit["payload"]["cast_names"] == ["林晚"]
+    assert production["phase"] == "CHECK"
+    assert "fit" not in production
+    assert run.content == PROSE + "包裹留在问题件区。"
+    assert production["fit_results"] == [
+        {
+            "tag": tag,
+            "chars_before": len(LONG),
+            "chars_after": len(run.content),
+            "truncated": False,
+        }
+    ]
+    assert await _tick() is True
+    assert run.generation_context["production"]["phase"] == "DONE"
+    assert [c["purpose"] for c in calls] == ["chapter_write", "chapter_fit"]
+
+
+@pytest.mark.asyncio
+async def test_compression_still_overlong_is_truncated_and_logged(monkeypatch):
+    """压缩稿还是超长才截断，并且留痕：这是兜底，不是常规路径。"""
+    run, calls = await _fit_run(monkeypatch, compressed=LONG)
+    work = SimpleNamespace(id="w")
+    for _ in range(2):
+        await produce_chapter_tick(
+            None, provider=None, work=work, run=run,
+            production=run.generation_context["production"],
+        )
+    production = run.generation_context["production"]
+    assert production["fit_results"][0]["truncated"] is True
+    assert len(run.content) <= MAX_CHAPTER_CHARS
+
+
+def test_fit_command_id_follows_the_draft():
+    """同一个 tag 换一份稿子必须是新的一次调用，否则撞 CallBroker 的幂等键。"""
+    run = _run()
+    production = run.generation_context["production"]
+    accept_draft(run, production, ctx=run.generation_context, draft=LONG, tag="write:w0")
+    first = production["fit"]["tag"]
+    accept_draft(run, production, ctx=run.generation_context, draft=LONG + "又补了一句。", tag="write:w0")
+    assert production["fit"]["tag"] != first
+    assert production["fit"]["tag"].startswith("write:w0:")
+
+
+def test_short_draft_skips_compression():
+    run = _run()
+    production = run.generation_context["production"]
+    accept_draft(run, production, ctx=run.generation_context, draft=PROSE, tag="write:w0")
+    assert production["phase"] == "CHECK"
+    assert "fit" not in production
+    assert run.content == PROSE
 
 
 def test_replayed_cost_fails():
@@ -837,7 +967,7 @@ def test_repeated_span_inside_chapter_is_dropped():
     assert settled.count(once) == 1
     assert not repeated_span(settled)
     fails = check_chapter(
-        settle_chapter_text(text, PRIOR), ctx={"chapter_no": 2}, cast={"林晚": {}}, title="二"
+        dedupe_chapter_text(text, PRIOR), ctx={"chapter_no": 2}, cast={"林晚": {}}, title="二"
     )
     assert not any("又出现了一遍" in item for item in fails)
 

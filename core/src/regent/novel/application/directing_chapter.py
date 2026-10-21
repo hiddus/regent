@@ -23,9 +23,9 @@ from regent.novel.domain.prose_copy import is_legitimate_repetition, longest_com
 from regent.novel.domain.prose_front_gates import front_gate_hard_fails, front_gate_writer_hint
 from regent.novel.infrastructure.models import PersonaSpecModel, StoryWorkModel
 
-CHAPTER_PHASES = ("PLAN", "METHOD", "WRITE", "CHECK", "REPAIR", "DONE")
+CHAPTER_PHASES = ("PLAN", "METHOD", "WRITE", "FIT", "CHECK", "REPAIR", "DONE")
 # Harness² 递归臂在 CHECK 失败或追读自评报问题后插入的阶段。
-H2_PHASES = ("PROPOSE", "PROBE", "COMPOSE")
+H2_PHASES = ("PROPOSE", "PROBE", "COMPOSE", "SCREEN")
 
 # 网文单章通行下限。上限只比下限多 500 字。
 MIN_CHAPTER_CHARS = 2000
@@ -110,6 +110,15 @@ CHAPTER_REPAIR_SYSTEM = (
     "正文必须落在两千字到两千五百字之间。"
     "超过就删掉多余段落并接上；不足就把这一章没写完的那一个选择补到两千字，不另起一件事。\n"
     "只输出正文。"
+)
+
+CHAPTER_FIT_SYSTEM = (
+    "你在把同一章正文压到字数上限以内，不是在重写这一章。\n"
+    "删掉铺陈、重复的动作和解释性句子，把 must_keep 里的选择与结果原样保住，"
+    "并且让这个结果仍然落在章末。\n"
+    "不许增加新情节，不许改动已经发生的事、人名和结局，不许改成另一种类型，"
+    "不许把章末的处境写回压缩前的样子。\n"
+    f"压到 {MIN_CHAPTER_CHARS} 字以上、{MAX_CHAPTER_CHARS} 字以内。只输出正文。"
 )
 
 CHAPTER_FACT_SYSTEM = (
@@ -429,8 +438,13 @@ def drop_repeated_span(text: str, *, min_len: int = 24, floor: int = MIN_CHAPTER
         body = kept
 
 
-def settle_chapter_text(text: str, previous: str) -> str:
-    return fit_chapter_length(drop_repeated_span(drop_copied_span(text, previous)))
+def dedupe_chapter_text(text: str, previous: str) -> str:
+    """去掉抄上一章的整段和本章内的自我重复。
+
+    这两处都是删句子，删完可能变短，但不负责压到上限以内：超长由 FIT 那一次
+    定向压缩处理，压缩不回来才轮到 ``fit_chapter_length`` 截断。
+    """
+    return drop_repeated_span(drop_copied_span(text, previous))
 
 
 def fit_chapter_length(
@@ -439,7 +453,10 @@ def fit_chapter_length(
     limit: int = MAX_CHAPTER_CHARS,
     floor: int = MIN_CHAPTER_CHARS,
 ) -> str:
-    """改稿仍超长时，从最后一个句号或换行处删到上限以内，且不低于下限。"""
+    """压缩之后仍超长时的兜底：从最后一个句号或换行处删到上限以内，且不低于下限。
+
+    这是最后一道，不是常规路径：章末结果正好落在被删掉的那一段里，能压就不要砍。
+    """
     body = (text or "").replace("\r", "").strip()
     if len(body) <= limit:
         return body
@@ -837,6 +854,7 @@ def check_chapter(
     ctx: dict[str, Any] | None,
     cast: dict[str, Any],
     title: str,
+    ignore_max_length: bool = False,
 ) -> list[str]:
     data = ctx or {}
     text = (content or "").strip()
@@ -856,7 +874,7 @@ def check_chapter(
     )
     if len(text) < MIN_CHAPTER_CHARS:
         fails.append(f"正文不足{MIN_CHAPTER_CHARS}字")
-    if len(text) > MAX_CHAPTER_CHARS:
+    if len(text) > MAX_CHAPTER_CHARS and not ignore_max_length:
         fails.append(f"正文超过{MAX_CHAPTER_CHARS}字")
     previous = previous_chapter_text(data)
     copied = longest_common_substring(text, previous, min_len=80)
@@ -917,6 +935,86 @@ def _store_prose(run: Any, production: dict[str, Any], content: str) -> None:
         }
     ]
     production["accepted"] = []
+
+
+def fit_payload(
+    ctx: dict[str, Any] | None, production: dict[str, Any], cast: dict[str, Any], draft: str
+) -> dict[str, Any]:
+    """压缩调用的入参：超长稿加上这一章必须保住的选择与结果。"""
+    data = ctx or {}
+    plan = production.get("chapter_plan") or data.get("target_node") or {}
+    plan = plan if isinstance(plan, dict) else {}
+    return {
+        "draft": draft,
+        "must_keep": {
+            "choice": str(plan.get("choice") or ""),
+            "result": str(plan.get("result") or ""),
+        },
+        "min_chars": MIN_CHAPTER_CHARS,
+        "max_chars": MAX_CHAPTER_CHARS,
+        "cast_names": _cast_name_list(cast),
+    }
+
+
+def accept_draft(
+    run: Any, production: dict[str, Any], *, ctx: dict[str, Any] | None, draft: str, tag: str
+) -> None:
+    """收下一稿：去重后不超长就落稿进 CHECK，超长先进 FIT 压缩，不砍尾。"""
+    body = dedupe_chapter_text(draft, previous_chapter_text(ctx))
+    if len(body) <= MAX_CHAPTER_CHARS:
+        _store_prose(run, production, body)
+        production["phase"] = "CHECK"
+        return
+    # 稿子内容进命令标识：同一 tag 换一份稿子必须是新的一次调用，
+    # 否则会撞上 CallBroker 的幂等键（同键不同入参 → CallConflict）。
+    production["fit"] = {"draft": body, "tag": f"{tag}:{_content_hash(body)[:8]}"}
+    production["phase"] = "FIT"
+
+
+async def fit_tick(
+    session: AsyncSession,
+    *,
+    provider: ModelProvider,
+    work: StoryWorkModel,
+    run: Any,
+    production: dict[str, Any],
+    cast: dict[str, Any],
+    ctx: dict[str, Any] | None,
+    version: int,
+) -> None:
+    """超长稿定向压缩：压完落稿进 CHECK；压缩稿仍超长才截断并留痕。"""
+    spec = dict(production.get("fit") or {})
+    draft = str(spec.get("draft") or "")
+    tag = str(spec.get("tag") or "draft")
+    written = await _call(
+        session,
+        provider,
+        work,
+        run,
+        production,
+        ChapterProse,
+        CHAPTER_FIT_SYSTEM,
+        fit_payload(ctx, production, cast, draft),
+        "chapter_fit",
+        f"v{version}:fit:{tag}",
+        temperature=0.3,
+    )
+    production = run.generation_context["production"]
+    spec = dict(production.get("fit") or {})
+    compressed = dedupe_chapter_text(written.content, previous_chapter_text(ctx))
+    body = fit_chapter_length(compressed)
+    production.setdefault("fit_results", []).append(
+        {
+            "tag": str(spec.get("tag") or tag),
+            "chars_before": len(str(spec.get("draft") or "")),
+            "chars_after": len(body),
+            "truncated": len(compressed) > MAX_CHAPTER_CHARS,
+        }
+    )
+    production.pop("fit", None)
+    _store_prose(run, production, body)
+    production["phase"] = "CHECK"
+    _save(run, production)
 
 
 async def load_cast(
@@ -1276,9 +1374,21 @@ async def produce_chapter_tick(
             + (f":h{h2_round}" if h2_round else ""),
         )
         production = run.generation_context["production"]
-        _store_prose(run, production, settle_chapter_text(written.content, previous_chapter_text(ctx)))
-        production["phase"] = "CHECK"
+        accept_draft(run, production, ctx=ctx, draft=written.content, tag=f"write:w{rewrites}")
         _save(run, production)
+        return False
+
+    if phase == "FIT":
+        await fit_tick(
+            session,
+            provider=provider,
+            work=work,
+            run=run,
+            production=production,
+            cast=cast,
+            ctx=ctx,
+            version=version,
+        )
         return False
 
     if phase == "CHECK":
@@ -1291,13 +1401,15 @@ async def produce_chapter_tick(
         )
         warnings = name_warnings(content, cast)
         h2 = _is_h2(production)
+        # 首过只看硬门，两臂同一个口径：软警告会把这一章送进改稿，但改过稿不等于
+        # 首稿没过门。口径不一致会让默认臂的基线被人名警告压低，试用判定就偏向采纳。
+        production.setdefault("first_pass", not fails)
         if h2:
             from regent.novel.harnessing import recursion
 
             warnings += [
                 item for item in h2_soft_issues(content, ctx, h2_config(ctx, production)) if item not in warnings
             ]
-            production.setdefault("h2_first_pass", not fails)
         repairs = int(production.get("repairs") or 0)
         production["check_fails"] = fails + warnings
         if h2:
@@ -1343,6 +1455,7 @@ async def produce_chapter_tick(
             "PROPOSE": recursion.propose_tick,
             "PROBE": recursion.probe_tick,
             "COMPOSE": recursion.compose_tick,
+            "SCREEN": recursion.screen_tick,
         }[phase]
         await handler(session, provider=provider, work=work, run=run, production=production, cast=cast)
         return False
@@ -1373,13 +1486,8 @@ async def produce_chapter_tick(
             f"v{version}:chapter_repair:{_content_hash(draft)[:12]}",
         )
         production = run.generation_context["production"]
-        _store_prose(
-            run,
-            production,
-            settle_chapter_text(written.content, previous_chapter_text(ctx)),
-        )
         production["repairs"] = int(production.get("repairs") or 0) + 1
-        production["phase"] = "CHECK"
+        accept_draft(run, production, ctx=ctx, draft=written.content, tag="repair")
         _save(run, production)
         return False
 

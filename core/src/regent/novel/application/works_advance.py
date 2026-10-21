@@ -82,6 +82,23 @@ def _rewind_review_to_weave(*, run: ChapterRunModel, by_name: dict[str, ChapterS
     run.generation_context = context
 
 
+def clear_last_error(run: Any) -> None:
+    """入正史时清掉失败原因。
+
+    ``last_error`` 是中途某次可重试失败写下的，重试成功后没人清它，于是已经
+    CANONIZED 的章在进度投影里仍然挂着「model call result is unknown」这类
+    失败原因，界面对成功章显示失败。
+    """
+    context = dict(run.generation_context or {})
+    production = dict(context.get("production") or {})
+    if not context.get("last_error") and not production.get("last_error"):
+        return
+    context.pop("last_error", None)
+    production.pop("last_error", None)
+    context["production"] = production
+    run.generation_context = context
+
+
 async def advance_step(
     session: AsyncSession,
     *,
@@ -222,6 +239,7 @@ async def advance_step(
         assert_chapter_run_transition(run.state, ChapterRunState.CANONIZED.value)
         run.state = ChapterRunState.CANONIZED.value
         run.canonized_at = datetime.now(UTC)
+        clear_last_error(run)
         if not run.content:
             raise InvalidState("chapter cannot be canonized without generated content")
         run.word_count = len(run.content)
@@ -529,6 +547,7 @@ async def advance_step(
         assert_chapter_run_transition(run.state, ChapterRunState.CANONIZED.value)
         run.state = ChapterRunState.CANONIZED.value
         run.canonized_at = datetime.now(UTC)
+        clear_last_error(run)
         work.latest_chapter_no = max(int(work.latest_chapter_no), chapter_no)
         work.version += 1
         await session.flush()

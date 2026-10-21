@@ -341,3 +341,46 @@ def test_chapter_terminal_failed_overrides_writing_projection():
     assert out.failure_reason and "未兑现" in out.failure_reason
     assert "retry_chapter" in out.available_actions
     assert out.work_state == "RUNNING"  # 作品层仍可 RUNNING，但展示以章失败为准
+
+
+def test_canonized_chapter_shows_no_failure_reason():
+    """入正史的章上不该挂着上一次重试写下的失败原因。"""
+    from regent.novel.application.works_advance import clear_last_error
+    from regent.novel.application.works_run_control import _progress_for_run
+    from regent.novel.domain.states import ChapterRunState, StoryWorkState
+    import asyncio
+
+    step = SimpleNamespace(step="CANON", state="SUCCEEDED")
+    steps = SimpleNamespace(all=lambda: [step])
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        work_id=uuid.uuid4(),
+        chapter_no=4,
+        state=ChapterRunState.CANONIZED.value,
+        current_step="CANON",
+        version=5,
+        auto_advance=True,
+        generation_context={
+            "last_error": "model call result is unknown",
+            "production": {"phase": "DONE", "last_error": "model call result is unknown"},
+        },
+    )
+    work = SimpleNamespace(state=StoryWorkState.RUNNING.value)
+
+    class Session:
+        async def scalars(self, q):
+            return steps
+
+        async def get(self, *a, **k):
+            return work
+
+    out = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        _progress_for_run(Session(), run=run, work=work)
+    )
+    assert out.failure_reason is None
+
+    # 入正史时把失败原因一并清掉，别让它留在上下文里等下一次误读
+    clear_last_error(run)
+    assert "last_error" not in run.generation_context
+    assert "last_error" not in run.generation_context["production"]
+    assert run.generation_context["production"]["phase"] == "DONE"

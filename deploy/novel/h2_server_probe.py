@@ -1,7 +1,7 @@
 """在服务器容器里核查 H2 臂的四件不能在本地证的事。
 
 1. 改进库检索边界：试用中（provisional）的 global 条目会不会被别的书看到；
-2. 回放校验：用钉住的上下文能否复原首稿 input_hash（晋级前的零调用前提）；
+2. 回放校验：用钉住的上下文能否复原首稿 input_hash 与 prompt_hash（晋级前的零调用前提）；
 3. 试用判定：这条覆盖层的三章试用现在是什么状态、基线有没有；
 4. 覆盖层是否真的进了执笔提示（对比默认臂常量）。
 
@@ -29,7 +29,11 @@ async def main() -> None:
     from regent.config import get_settings
     from regent.infrastructure.database import create_engine, create_session_factory
     from regent.novel.harnessing import library, overlay, replay
-    from regent.novel.infrastructure.models import ChapterRunModel, HarnessLibraryModel
+    from regent.novel.infrastructure.models import (
+        ChapterRunModel,
+        HarnessLibraryModel,
+        ModelCallModel,
+    )
     from sqlalchemy import select
 
     out: dict = {}
@@ -70,7 +74,7 @@ async def main() -> None:
                 s, uuid.UUID(WORK), before_chapter=5
             )
 
-            # 2. 回放校验
+            # 2. 回放校验：入参与系统提示都要能零调用复原
             out["replay"] = []
             for run_id in RUNS:
                 run = await s.get(ChapterRunModel, uuid.UUID(run_id))
@@ -78,7 +82,18 @@ async def main() -> None:
                     out["replay"].append({"run_id": run_id, "ok": False, "reason": "运行不存在"})
                     continue
                 ctx = run.generation_context or {}
-                res = replay.check_write_replay(ctx)
+                stored_prompt = await s.scalar(
+                    select(ModelCallModel.prompt_hash)
+                    .where(
+                        ModelCallModel.run_id == run.id,
+                        ModelCallModel.purpose == "chapter_write",
+                    )
+                    .order_by(ModelCallModel.created_at)
+                    .limit(1)
+                )
+                res = replay.check_write_replay(
+                    ctx, stored_prompt_hash=str(stored_prompt or "")
+                )
                 out["replay"].append({
                     "run_id": run_id, "chapter_no": int(run.chapter_no),
                     "executor": ctx.get("executor"), "harness_id": ctx.get("harness_id"),
@@ -157,6 +172,7 @@ def main() -> int:
         print(f"  试用前基线（含默认臂章节）：{payload['baseline_before_ch5']}")
         for item in payload["replay"]:
             print(f"  回放 ch{item.get('chapter_no')} ok={item.get('ok')} "
+                  f"input={item.get('input_hash_ok')} prompt={item.get('prompt_hash_ok')} "
                   f"{item.get('reason') or ''} overlay={item.get('overlay_keys')}")
         trial = payload.get("trial") or {}
         print(f"  试用 status={trial.get('status')} since_ch{trial.get('since_chapter')} "

@@ -35,9 +35,9 @@ Harness² 的核心是三件事，本方案全部保留：
 
 | 难点 | 处理 |
 |---|---|
-| 检查点回放 | 任务级递归在章内进行，探针直接用当前运行的上下文，不需要回放。离线回放只用于晋级前的回归检查，并先用已存的 `input_hash` 做零调用的可复原验证 |
+| 检查点回放 | 任务级递归在章内进行，探针直接用当前运行的上下文，不需要回放。离线回放只用于晋级前的回归检查，并先用已存的 `input_hash` 与 `prompt_hash` 做零调用的可复原验证 |
 | 噪声下限 | 单步采纳不靠分数，靠硬门结果和行为对照（与上游一致）。每一步都在同一输入上产生参照稿与探针稿，噪声分布随任务流自然积累，只在全局晋级时使用 |
-| 成本 | 只在失败或追读自评报问题时触发，每轮增加至多 5 次调用，排在原有改稿/重写之前。正常通过的章节成本不变 |
+| 成本 | 只在失败或追读自评报问题时触发，每轮增加至多 7 次调用，排在原有改稿/重写之前。正常通过的章节调用数不变——但真机第 5 章（未触发递归）成本仍比默认臂均值高 54%，原因见第十一节 |
 | 体量 | 一个包五个文件、一张表；集成点是 `directing_chapter` 的新阶段和一个新执行器臂 |
 
 ## 三、可编辑的写作配置
@@ -93,7 +93,7 @@ PLAN → METHOD → WRITE → CHECK ─通过→ DONE
 
 某条改进在多本书中被采纳，且这些书的硬门首稿通过率上升时，进入晋级候选：
 
-1. 离线回放回归：用已入正史的运行重建写作入参，并以存储的 `input_hash` 校验可精确复原；在留出章节上配对比较。此时噪声分布已由任务流积累，足以判断差异是否超过噪声。
+1. 离线回放回归：用已入正史的运行重建写作入参，并以存储的 `input_hash`（载荷）与 `prompt_hash`（系统提示）校验可精确复原；在留出章节上配对比较。此时噪声分布已由任务流积累，足以判断差异是否超过噪声。
 2. 人工盲评：走现有 `eval_cli prepare → rater-view → ingest → report → decide`，按冻结阈值裁决。
 3. 通过后升级全局配置版本，并经灰度放量。
 
@@ -112,16 +112,16 @@ core/src/regent/novel/harnessing/
   recursion.py   PROPOSE / PROBE / COMPOSE 三个 tick、组合落定规则、两轮上限、追读触发
   overlay.py     本书覆盖层：钉住、试用、采纳与回退、写入经过验证的轮次
   library.py     改进库写入、按范围检索、计数、回退记录、剪枝
-  replay.py      首稿写作入参重建与 input_hash 校验（含命令行）
+  replay.py      首稿写作入参重建与 input_hash / prompt_hash 校验（含命令行）
 core/src/regent/novel/harness_packs/
   base/v1/       执笔提示、旋钮、技能、软检查、钩子、经验（从现有常量平移，默认取值下载荷与默认臂一致）
   improver/      改进器提示：提案、组合（经验由组合器给出，入库前经硬门验证）
 ```
 
 - `directing_types.py`、`directing_protocol.py` 等：新增 `CHAPTER_ARCHITECTURES`，短链路由、步骤链、审校、事实装配同时认两个臂。
-- `directing_chapter.py`：本臂按钉住的配置装配执笔提示与载荷（前置门提示照常追加），CHECK 合并软检查，加入 PROPOSE、PROBE、COMPOSE 阶段。
+- `directing_chapter.py`：本臂按钉住的配置装配执笔提示与载荷（前置门提示照常追加），CHECK 合并软检查，加入 PROPOSE、PROBE、COMPOSE、SCREEN 阶段；两臂共用的 FIT 阶段在正文超长时做一次定向压缩（见第十一节）。
 - `executor.py`：新增 `director_chapter_h2` 臂与版本号；钉住 `harness_id`、`harness_hash`、`harness_overlay`、`harness_overlay_id`。
-- `directing_budget.py`：本臂章级调用上限 23。
+- `directing_budget.py`：本臂章级调用上限 30（基础 16 + 两轮 × 7）。
 - 新增一张表 `novel_harness_library`（迁移 0057）：既是改进库，也记本书覆盖层（`status`、`overlay_after`、`since_chapter`、`baseline`），不改作品表。
 
 估算约 2–3 周，可与主线计划并行。前提是 `base/v1` 平移经测试证明提示词哈希与原常量一致，默认臂行为不变。
@@ -150,8 +150,8 @@ core/src/regent/novel/harness_packs/
 已完成，均有走生产 tick 的单测（`tests/unit/novel/test_harness2_recursion.py`，28 项；`tests/unit/novel` 全量 820 项通过）：
 
 - 路由：本臂走短链协议与四步链，灰度开启时 `start_run` 钉住基础包与覆盖层。
-- 记账：递归每次调用经 `CallBroker`，一 tick 一次，命令 id 不撞，章级上限 23。
-- 首稿：本臂默认配置下的执笔提示以默认臂提示开头，载荷逐字一致；回放校验能用钉住的上下文复原首稿 `input_hash`。
+- 记账：递归每次调用经 `CallBroker`，一 tick 一次，命令 id 不撞，章级上限 30。
+- 首稿：本臂默认配置下的执笔提示以默认臂提示开头，载荷逐字一致；回放校验能用钉住的上下文复原首稿 `input_hash` 与 `prompt_hash`。
 - 递归：探针交付、后继正文、追读触发、两轮后回到改稿路径；组合落定规则逐条有测。
 - 覆盖层：试用钉住、三章后采纳、低于基线回退到上一层；试用期间新改进只入库。
 - 配置面：冻结面、未登记旋钮与条件、越界值、无法编译或会回溯爆炸的正则、通用候选带人名，均被拒收；软检查（长段复用、章首重合、套话）、钩子占位符、技能条件按声明求值。
@@ -162,7 +162,7 @@ core/src/regent/novel/harness_packs/
 
 ## 真机验证状态（2026-10-21）
 
-第 2 步已在服务器跑通，证据落盘 `deploy/novel/artifacts/h2/`，脚本 `deploy/novel/run_h2_chapter.py`、`deploy/novel/h2_server_probe.py`。
+第 2 步**只能算冒烟通过，没达到表里的出口证据**。跑到的范围是：1 本书（`064adf0a`）、2 个 H2 章节、同书前 3 章为默认臂但没做配对对照。缺的三件：没有第二本以上的书，样本量不足以比首稿通过率；首稿未过硬门这条主路径（递归最该起作用的场景）在真机上一次都没触发过——两章的首稿都是一次过硬门，递归是被追读自评拉起来的；没有同期对照臂运行，成本与通过率只能与同书历史章节粗比。证据落盘 `deploy/novel/artifacts/h2/`，脚本 `deploy/novel/run_h2_chapter.py`、`deploy/novel/h2_server_probe.py`。
 
 环境与部署：整树部署 480 文件到 4 个容器（逐文件 sha256 全一致，26 项跨模块耦合点就位）；迁移 0057 已在 Postgres 执行，`novel_harness_library` 24 列 + 3 索引建成（此前只在 SQLite 验过）；`NOVEL_EXECUTOR_CANARY=director_chapter_h2`、比例 53（覆盖作品 `064adf0a` 的桶 52）。
 
@@ -179,8 +179,8 @@ core/src/regent/novel/harness_packs/
 - **钉住**：第 4 章 `harness_id=base/v1`、`harness_hash=c7ff08047db56f13`、无覆盖层；第 5 章 `harness_hash=50f680e58384f16b`、`harness_overlay_id` 指向第 4 章入库的条目——配置级递归确实从下一章起生效。
 - **章内递归**：第 4 章首稿一次过硬门（`h2_first_pass=true`），由追读自评的 3 条问题项触发一轮：PROPOSE（两候选各 3 处修改，均指向参照稿具体位置）→ PROBE generic / book（两稿都过硬门、无软检查问题）→ COMPOSE 选 `adopt_generic` 并交付探针稿。组合器的观察是真实的行为对照：book 探针把门外人影的痕迹写成布鞋补丁与樟脑味，等于提前揭底；generic 探针让两枚刻着同一警告的齿轮在章末并置。
 - **不改行为**：容器内核对基础包执笔提示与 `CHAPTER_WRITE_SYSTEM` 逐字相同（330 字）；覆盖层生效后 502 字，仍以默认臂提示开头。
-- **回放**：两章的 `input_hash` 都能用钉住的上下文零调用复原（第六节晋级前提成立）。
-- **成本**：未触发递归的第 5 章调用数与默认臂持平（4 次），成本 +24%；触发递归的第 4 章为默认臂均值的约 4 倍。
+- **回放**：两章的 `input_hash` 都能用钉住的上下文零调用复原（第六节晋级前提成立）。此项当时只核了载荷，覆盖不到系统提示，见第十一节第 5 条。
+- **成本**：默认臂三章均值 37 分。未触发递归的第 5 章调用数与默认臂持平（4 次），成本 57 分即 **+54%**；触发递归的第 4 章 178 分，为默认臂均值的 **≈4.8 倍**。第 5 章输入 token 33.0k，是第 3 章（16.5k）的 **2 倍**，同臂同类章节没有解释——当时记为「+24%」「约 4 倍」是算错的。
 - **入库**：1 条，`status=provisional`、`since_chapter=5`、`chapter_role=payoff`、`failure_code=arc`；试用判定需满 3 章，当前 1/1。
 
 真机暴露的三个问题：
@@ -206,6 +206,33 @@ core/src/regent/novel/harness_packs/
 
 验证：仓库根 `tests/unit/novel`（含新增 `test_onboarding_genre.py`、库检索边界与基线用例）全绿；`core/tests` 50 项全绿。
 
+
+## 十一、第二轮真机审计与六项修复（2026-10-21）
+
+外部审计复核了第十节的真机证据，结论与代码、真机数据一致：第 1 步达标；第 2 步只算冒烟通过；第 3–5 步未开始；文档里的成本数字算错了（已在第十节更正）。另有 6 项文档未记录的问题，其中 2 项动摇「第 4 章成功」这个结论本身。全部已修，均有走生产 tick 的单测。
+
+**1（P1）第 4 章交付稿缺了章纲定下的结果。** 超长稿原先从最后一个句号静默砍到 2500 字，砍掉的往往正是章末结果——第 4 章入正史的稿子就这么丢了结局。这不是 H2 独有的：默认臂走同一条路，只是没人核对过章纲。
+修法：新增 **FIT 阶段**与 `chapter_fit` 定向压缩调用（`directing_chapter.py` 的 `accept_draft`、`fit_tick`、`CHAPTER_FIT_SYSTEM`）。任何要入正史的稿子超过 `MAX_CHAPTER_CHARS` 时进 FIT，让模型压到字数内而不是截断；压缩后仍超长才回落到截断，并把 `truncated=true` 记进 `fit_results` 供审计。同时 PROBE 的两个候选稿**不再截断、不再做长度门**（`check_chapter(..., ignore_max_length=True)`），否则组合器是在比两个被砍掉结尾的稿子——这正是第 4 章选错的成因之一。
+代价：默认臂章级调用上限 13 → 16（正文、重写、改稿三稿各留一次压缩），H2 每轮 5 → 7。
+
+**2（P1）过拟合筛查只查了卡司人名。** 通用条目入库前只用 `mentions_names` 比人名，改写过的情节说法照样过关——第 4 章那条「同字不同齿距」实际依赖本书的齿轮设定，却以 `scope=global` 入库，会送给所有书。
+修法分两道：确定性的 `book_terms(ctx, cast)`（卡司名 + 世界设定里的人物/地名及其别名）替换原先只看人名的 `cast_names`，写进 `propose` 提示并作为 `validate_overrides` 的拒收依据；再加 **SCREEN 阶段**（`screen_tick`、`GenericScreen`、`harness_packs/improver/screen.md`）由一次调用判定改写过的情节是否仍属本书专有，`book_specific=true` 就降级成 `scope=work`。筛查判不准、没跑成、或预算耗尽时一律按最坏情况处理，只留在本书。SCREEN 只在 generic 分支插入，且只捕获 `BudgetExhausted`——已经过了硬门的章节不能因为一次可选调用而丢掉。
+
+**3（P2）「每处修改必须指向参照稿具体位置」没有执行。** 提示里写了，程序没查。第 4 章 generic 候选把 `soft_check_repetition_ngram` 改成 60，三条 edits 没一条提到它，照样进了覆盖层。
+修法：`ConfigEdit` 增 `path` 字段（指向 overrides 的哪个键），`back_edits` 按叶子逐项对账——`path` 前缀匹配优先（`skills.chapter_opening` 认下它底下的 `instruction` 与 `mode`），其次才看 `what` 里有没有键名；`where` 留空的修改不算认账。没人认的配置修改直接丢弃，并把丢了什么写进候选的 `rejected`。被认领的 edits 落到 `h2_lesson["edits"]`，SCREEN 的判定与理由落到 `h2_lesson["screen"]`，采纳链可事后追溯。
+
+**4（P2）试用基线的口径两臂不一致，偏向采纳。** 第十节第 2 条修的是「默认臂章节不计入基线」，但口径仍分家：H2 看 `h2_first_pass`，默认臂靠 `phase==DONE and repairs==rewrites==0` 反推。反推会把「失败后被重试成功」误当首过，基线偏高偏低都可能，方向不确定但结果偏向采纳。
+修法：CHECK 阶段在分臂之前统一写 `production["first_pass"] = not fails`，两臂同口径；`overlay._first_pass` 读 `("first_pass", "h2_first_pass")`，两个键都没有的老运行/他臂运行返回 `None` **排除**，而不是当成失败计入分母。已入正史的历史章不会追溯改写，所以真机上那条条目的 `baseline` 仍是修复前的值，下一轮起才是同口径对比。
+
+**5（P2）回放只核了 `input_hash`，覆盖不到配置。** `input_hash` 只覆盖用户载荷，系统提示（也就是钉住的基础包与覆盖层编译出来的东西）不在里面。晋级前提因此是半条：配置编译错了、覆盖层没生效，回放照样「通过」。
+修法：`check_write_replay(context, *, stored_prompt_hash="")` 同时比对 `ModelCallModel.prompt_hash`（= `sha256(system_prompt)`）。没传 `stored_prompt_hash` 时 `prompt_hash_ok=None`、`ok` 一律为 `False`——宁可报「没核全」也不报「通过」。`h2_server_probe.py` 已改为取该运行最早一条 `chapter_write` 的 `prompt_hash` 传入。
+
+**6（P3）已入正史的第 4 章仍挂着失败原因。** `failure_reason` 无条件读 `production.last_error`，而重试成功入正史后这个键没人清，界面对成功章显示「model call result is unknown」。
+修法：`works_run_control._progress_for_run` 只在 `run.state` 是 `TERMINAL_FAILED` / `RETRYABLE_FAILED` 时给 `failure_reason`，否则为空；入正史的两处（`works_advance.py`）显式调用 `clear_last_error(run)` 清掉 context 与 production 里的残留，`phase` 等现场保留。
+
+验证：`tests/unit/novel/test_harness2_recursion.py` 36 项、`test_director_chapter.py` 44 项、`test_xuanhuan_acceptance_root_cure.py` 16 项，`tests/unit` + `core/tests` 全量无 FAILED/ERROR。`deploy/novel/sync_tree.py` 的 SYMBOL_CHECKS 加了 `book_terms`、`screen_tick`、`back_edits`、`fit_tick`、`accept_draft`、`clear_last_error` 六项跨模块耦合点，部署时逐个验证可导入。
+
+**仍未验证的：** 上述六项都只有单测覆盖，**尚未部署到服务器、未在真机复跑**。第十一节第 4 条改的是口径，第 5 条给回放加了硬条件——这两项在真机复跑前，「晋级前提成立」这个说法只能算未证。审计建议的下一步是把第 2 步扩到 3–5 本书，并在真机上至少触发一次首稿未过硬门的路径，再谈对照臂。
 
 ## 证据来源
 

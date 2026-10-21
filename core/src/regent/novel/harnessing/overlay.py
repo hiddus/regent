@@ -23,6 +23,7 @@ from regent.novel.harnessing import library
 from regent.novel.harnessing.surface import (
     BASE_HARNESS_ID,
     apply_overrides,
+    book_terms,
     load_harness,
     mentions_names,
     merge_overrides,
@@ -35,21 +36,29 @@ TRIAL_CHAPTERS = 3
 def _first_pass(run: ChapterRunModel) -> bool | None:
     """这一章首稿是否一次过硬门；认不出来就返回 None（不计入基线）。
 
-    H2 臂在 CHECK 里直接记 ``h2_first_pass``。默认短链臂走的是同一套确定性硬门，
-    等价信号是入库前既没改过稿也没重写过；少了这条，中途换臂的书拿不到任何基线，
-    同书 A/B 只能退回「三章里两章首过」的粗判。别的执行臂不是这台状态机，不算。
+    两臂现在都在 CHECK 里按同一口径记 ``first_pass``：只看硬门，不看软警告——
+    软警告会把这一章送进改稿，但改过稿不等于首稿没过门。``h2_first_pass`` 是
+    H2 臂早先写下的同义键，历史运行里还留着。
+
+    两者都没有的老运行只能退回「没改过稿也没重写过」。这条判不出「只因人名警告
+    改过一次稿」的情形，所以判不出就不计入基线，而不是记成没过：默认臂基线被压低
+    会让 ``trial_passes`` 偏向采纳，护栏就偏向了它本该防的方向。
+    别的执行臂不是这台状态机，也不算。
     """
     ctx = run.generation_context or {}
     production = ctx.get("production") or {}
-    if "h2_first_pass" in production:
-        return bool(production["h2_first_pass"])
+    for key in ("first_pass", "h2_first_pass"):
+        if key in production:
+            return bool(production[key])
     from regent.novel.application.executor import CHAPTER_EXECUTOR
 
     if str(ctx.get("executor") or "") != CHAPTER_EXECUTOR:
         return None
     if production.get("phase") != "DONE":
         return None
-    return not int(production.get("repairs") or 0) and not int(production.get("rewrites") or 0)
+    if int(production.get("repairs") or 0) or int(production.get("rewrites") or 0):
+        return None
+    return True
 
 
 async def _latest_runs(
@@ -187,8 +196,17 @@ async def record_verified_round(
     ctx = run.generation_context or {}
     lesson = production.get("h2_lesson") or {}
     experience = str(lesson.get("experience") or "").strip()
-    names = list(production.get("cast") or {})
-    generic = lesson.get("kind") == "generic" and not mentions_names([experience, overrides], names)
+    terms = book_terms(ctx, production.get("cast") or {})
+    # 通用条目对所有书可见，要过两道：专有名词筛查是确定性的，改写过的情节说法
+    # （第 4 章那条「同字不同齿距」）由 SCREEN 那一次调用判。筛查没跑成、或者这一轮
+    # 根本没走 SCREEN（老运行、非 generic 分支），都按最坏情况处理，只留在本书。
+    screen = production.get("h2_screen")
+    generic = (
+        lesson.get("kind") == "generic"
+        and not mentions_names([experience, overrides], terms)
+        and isinstance(screen, dict)
+        and screen.get("book_specific") is False
+    )
     work_id = getattr(work, "id", None)
     chapter_no = int(getattr(run, "chapter_no", 0) or 0)
     trial_open = bool(await _work_entries(session, work_id, "provisional"))

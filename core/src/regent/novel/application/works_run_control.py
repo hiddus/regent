@@ -89,9 +89,17 @@ async def _progress_for_run(
                 else ["view_failure", "leave_safely"]
             ),
         )
-    failure_reason = str(
-        (production.get("last_error") or context.get("last_error") or "")
-    ).strip()
+    # 只在真的失败时给失败原因：入正史的章上挂着上一次重试的 last_error，
+    # 界面会对成功章显示「model call result is unknown」。
+    failure_reason = (
+        str((production.get("last_error") or context.get("last_error") or "")).strip()
+        if run.state
+        in (
+            ChapterRunState.TERMINAL_FAILED.value,
+            ChapterRunState.RETRYABLE_FAILED.value,
+        )
+        else ""
+    )
     return RunProgressOut(
         work_id=str(run.work_id),
         chapter_no=int(run.chapter_no),

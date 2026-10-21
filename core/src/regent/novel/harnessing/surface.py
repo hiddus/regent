@@ -181,7 +181,7 @@ def load_harness(harness_id: str) -> ConfigTree:
 
 
 def load_improver_prompt(kind: str) -> str:
-    """加载改进器提示词。kind: propose / compose。"""
+    """加载改进器提示词。kind: propose / compose / screen。"""
     path = PACK_ROOT / "improver" / f"{kind}.md"
     if not path.is_file():
         raise FileNotFoundError(f"改进器提示词不存在: {path}")
@@ -229,8 +229,27 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
+def book_terms(ctx: dict[str, Any] | None, cast: Any) -> list[str]:
+    """这本书的专有名词：卡司、世界书人物与地点（含别名）。
+
+    只查人名是不够的——通用条目一旦采纳就对所有书可见，本书的物件与地名同样
+    会让它在别的书里变成噪音。这里只能确定性地拿到专有名词，改写成别的情节
+    说法（例如把「齿轮」写成「同字不同齿距」）由 ``recursion.screen_tick`` 判。
+    """
+    data = ctx if isinstance(ctx, dict) else {}
+    bible = data.get("world_bible") if isinstance(data.get("world_bible"), dict) else {}
+    terms: list[str] = [str(name).strip() for name in (cast or {}) if str(name).strip()]
+    for key in ("personas", "places"):
+        for item in (bible or {}).get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            terms.append(str(item.get("name") or "").strip())
+            terms.extend(str(alias).strip() for alias in item.get("aliases") or [])
+    return sorted({term for term in terms if len(term) >= 2})
+
+
 def mentions_names(value: Any, names: list[str] | tuple[str, ...]) -> list[str]:
-    """值里出现的本书人名。通用候选与通用经验不许带本书事实。"""
+    """值里出现的本书专有名词。通用候选与通用经验不许带本书事实。"""
     text = "\n".join(_strings(value))
     return [name for name in names if len(name) >= 2 and name in text]
 
@@ -356,7 +375,7 @@ def validate_overrides(
     overrides: Any,
     base: ConfigTree,
     *,
-    cast_names: list[str] | tuple[str, ...] = (),
+    book_terms: list[str] | tuple[str, ...] = (),
     generic: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     """只留下可编辑面里合法的修改，返回 (干净的覆盖层, 拒收理由)。"""
@@ -373,9 +392,9 @@ def validate_overrides(
         if top not in EDITABLE_KEYS:
             errors.append(f"不认识的配置项: {top}")
             continue
-        if generic and mentions_names(value, cast_names):
+        if generic and mentions_names(value, book_terms):
             errors.append(
-                f"通用候选的 {top} 带了本书人名：{'、'.join(mentions_names(value, cast_names))}"
+                f"通用候选的 {top} 带了本书专有名词：{'、'.join(mentions_names(value, book_terms))}"
             )
             continue
         try:
