@@ -79,11 +79,18 @@ def test_quote_missing_from_content_is_evidence_defect():
 
 
 def test_unquoted_deterministic_issue_is_not_a_defect():
-    """前置硬门/字数/自然语言冲突没有摘录，本就无需接地，不算证据缺陷。"""
-    for issue in ("[front:banned_label] 操作员", "整章正文不足800字符", "第二场跳场"):
+    """程序自己产生的前置硬门/字数问题没有摘录，本就无需接地，不算证据缺陷。"""
+    for issue in ("[front:banned_label] 操作员", "整章正文不足800字符"):
         grounded, defect = partition_hard_by_grounding([issue], CONTENT)
         assert grounded == [issue]
         assert defect == []
+
+
+def test_unquoted_review_issue_is_evidence_defect():
+    """审校硬问题没有可核对摘录 → 证据缺陷，须复核。"""
+    grounded, defect = partition_hard_by_grounding(["第二场跳场"], CONTENT)
+    assert grounded == []
+    assert defect == ["第二场跳场"]
 
 
 def test_grounding_normalizes_whitespace_and_punctuation_but_keeps_facts():

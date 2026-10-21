@@ -233,7 +233,25 @@ async def test_swarm_rejects_outline_thin_catalog() -> None:
 
 
 @pytest.mark.asyncio
-async def test_swarm_accepts_rich_catalog() -> None:
+async def test_swarm_accepts_rich_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    from regent.infrastructure import host_resources
+
+    healthy = host_resources.HostResources(
+        disk_total_bytes=100,
+        disk_used_bytes=40,
+        disk_free_bytes=60,
+        disk_percent=40.0,
+        mem_total_bytes=None,
+        mem_available_bytes=None,
+        mem_percent=None,
+        load1=None,
+        load5=None,
+        load15=None,
+        cpu_count=8,
+        measured_at=0.0,
+        path="/",
+    )
+    monkeypatch.setattr(host_resources, "measure_host_resources", lambda *a, **k: healthy)
     transport = httpx.MockTransport(_handler_rich)
     live_qa = {
         "passed": True,

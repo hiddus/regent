@@ -477,10 +477,15 @@ def test_p0_5_revise_clones_accepted_not_draft(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_p0_5_runtime_preview_materializes_and_requires_entry(tmp_path: Path) -> None:
+async def test_p0_5_runtime_preview_materializes_and_requires_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from regent.agent.runtime_profile_v1 import RuntimeProfileV1, RUNTIME_PROFILE_SCHEMA_VERSION
     from regent.application.p1_ports import DeploymentRequest
+    from regent.infrastructure import host_resources
     from regent.infrastructure.runtime_preview import RuntimePreviewDeploymentProvider
+
+    monkeypatch.setattr(host_resources, "host_blocks_work", lambda *a, **k: (False, ""))
 
     class _Static:
         async def deploy(self, request: DeploymentRequest) -> Any:

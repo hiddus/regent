@@ -256,6 +256,8 @@ def volume_finished_by(run: ChapterRunModel) -> bool:
     context = run.generation_context or {}
     if context.get("story_complete"):
         return True
+    if context.get("volume_expansion_resolved"):
+        return False
     return stage_rhythm_finished(context, int(run.chapter_no or 0))
 
 

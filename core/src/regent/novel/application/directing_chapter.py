@@ -66,7 +66,9 @@ ARC_REVIEW_SYSTEM = (
     "previous_followed 写下判断；没做到的，这一轮写得更具体。\n"
     "directives 是后面几章必须做到的事，最多三条，每条要具体到只看章纲就能核对，不写空话。\n"
     "答应读者的东西已经好几章没有当场发生，payoff_due 为 true。"
-    "眼下这一段已经写到 stage_chapters 的下限、局面还停在原地，advance_stage 为 true；"
+    "stage_remaining 写下眼下这一段成立之前还没写到的事，最多三件，每件是一件会当场发生的具体的事。"
+    "还有没写到的事时 advance_stage 为 false，把最要紧的一件写进 directives，让后面的章把它写出来。"
+    "这一段该写的事都写过了、已经写到 stage_chapters 的下限、局面还停在原地，advance_stage 为 true；"
     "没写到下限时，问题写进 directives，不要催这一段成立。"
     "payoff_chapters 是已经兑现过的章，看它离现在有多远再判断 payoff_due。"
 )
@@ -162,7 +164,10 @@ class ArcReview(BaseModel):
         default_factory=list, max_length=3, description="后面几章必须做到的事，只看章纲就能核对"
     )
     payoff_due: bool = Field(default=False, description="答应读者的东西是否已经好几章没有当场发生")
-    advance_stage: bool = Field(default=False, description="眼下这一段是否已经拖住，下一章应让它成立")
+    stage_remaining: list[str] = Field(
+        default_factory=list, max_length=3, description="眼下这一段成立之前还没写到的事；都写过了就留空"
+    )
+    advance_stage: bool = Field(default=False, description="这一段该写的都写过、局面仍停在原地，下一章应让它成立")
 
 
 class PlanRepeated(RuntimeError):
@@ -484,8 +489,11 @@ def max_chapters_per_stage(rhythm: dict[str, Any]) -> int:
 
 
 def stage_pushed(rhythm: dict[str, Any], earlier: list[dict[str, Any]], review: dict[str, Any] | None) -> bool:
-    """自评要求这一段成立，且这一段已经写到下限：编辑只能催，不能跳过章数下限。"""
-    if not (review or {}).get("advance_stage"):
+    """自评要求这一段成立，且这一段已经写到下限：编辑只能催，不能跳过章数下限。
+
+    编辑自己还列着这一段没写到的事时，催的是把那件事写出来，不是让这一段提前成立。
+    """
+    if not (review or {}).get("advance_stage") or (review or {}).get("stage_remaining"):
         return False
     stages = [str(s) for s in (rhythm or {}).get("stages") or []]
     if not stages:

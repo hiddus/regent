@@ -80,6 +80,9 @@ def stage_rhythm_finished(context: dict[str, Any], chapter_no: int) -> bool:
     node = context.get("target_node") if isinstance(context.get("target_node"), dict) else {}
     if not stages or not node.get("choice"):
         return False
+    volume_chapters = int(rhythm.get("volume_chapters") or 0)
+    if volume_chapters and chapter_no + 1 >= int(rhythm.get("volume_start") or 1) + volume_chapters:
+        return True
     from regent.novel.application.directing_chapter import (
         max_chapters_per_stage,
         previous_plans,

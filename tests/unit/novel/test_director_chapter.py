@@ -558,6 +558,9 @@ def test_review_cannot_push_a_stage_below_its_floor():
         {"pressure": f"p{i}", "choice": f"c{i}", "result": f"r{i}", "stage_index": 1} for i in range(1, 5)
     ]
     assert stage_pushed(rhythm, ripe, {"advance_stage": True}) is True
+    unfinished = {"advance_stage": True, "stage_remaining": ["对手当面拿出证据"]}
+    assert stage_pushed(rhythm, ripe, unfinished) is False
+    assert "最后一章" not in (rhythm_mismatch(landed, rhythm, ripe, review=unfinished) or "")
     node = dict(landed)
     settle_stage_claim(node, rhythm, ripe, None)
     assert node["reaches_stage"] is True
@@ -578,6 +581,9 @@ def test_last_stage_landing_ends_the_volume():
     context["target_node"] = dict(last, reaches_stage=False)
     assert stage_rhythm_finished(context, 3) is False
     assert stage_rhythm_finished({"book_rhythm": {}, "target_node": last}, 3) is False
+    full = dict(context, book_rhythm=dict(rhythm, volume_start=1, volume_chapters=4))
+    full["target_node"] = dict(last, reaches_stage=False)
+    assert stage_rhythm_finished(full, 3) is True
 
     from regent.novel.application.works_continuation import volume_finished_by
 
@@ -585,6 +591,13 @@ def test_last_stage_landing_ends_the_volume():
     assert volume_finished_by(done) is True
     open_run = SimpleNamespace(chapter_no=3, generation_context=context)
     assert volume_finished_by(open_run) is False
+    expanded = SimpleNamespace(
+        chapter_no=3,
+        generation_context=dict(
+            context, target_node=last, volume_expansion_resolved={"volume_no": 2}
+        ),
+    )
+    assert volume_finished_by(expanded) is False
 
 
 @pytest.mark.asyncio
