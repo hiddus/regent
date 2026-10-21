@@ -753,7 +753,7 @@ async def _fit_run(
 
 def test_fitted_fixture_lands_inside_the_window():
     assert len(PADDED) > MAX_CHAPTER_CHARS
-    assert MIN_CHAPTER_CHARS <= len(FITTED) <= MAX_CHAPTER_CHARS
+    assert MIN_CHAPTER_CHARS <= len(FITTED) < FIT_TARGET_CHARS
 
 
 @pytest.mark.asyncio
@@ -795,14 +795,19 @@ async def test_overlong_draft_is_cut_by_paragraph_not_chopped(monkeypatch):
     assert len(payload["units"]) - 1 in payload["protected"]
     assert production["phase"] == "CHECK"
     assert "fit" not in production
-    assert run.content == FITTED
+    # 删到目标字数就停：铺陈段只删掉够数的那几段，正文段与章末一段不少
+    content = run.content
+    assert MIN_CHAPTER_CHARS <= len(content) <= FIT_TARGET_CHARS
+    assert all(piece in content for piece in _KEEP) and content.endswith(ENDING)
+    dropped = [piece for piece in _FILLER if piece not in content]
+    assert 0 < len(dropped) < len(_FILLER)
     assert production["fit_results"] == [
         {
             "tag": tag,
             "chars_before": len(PADDED),
-            "chars_dropped": len(PADDED) - len(FITTED),
-            "units_dropped": len(_FILLER),
-            "chars_after": len(FITTED),
+            "chars_dropped": len(PADDED) - len(content),
+            "units_dropped": len(dropped),
+            "chars_after": len(content),
             "truncated": False,
         }
     ]
@@ -817,11 +822,13 @@ def test_fit_cut_keeps_the_ending_and_the_floor():
     protected = fit_protected(units)
     assert protected[-1] == len(units) - 1
     assert sum(len(units[no][1]) for no in protected) >= 400
-    everything = list(range(len(units))) + [-1, len(units) + 5]
+    # 章末片段排在最前、越界编号夹在中间：都跳过，删到目标字数就停，不一路删到下限
+    everything = protected[::-1] + [-1, len(units) + 5] + list(range(len(units)))
     body, removed = apply_fit_cut(PADDED, everything)
     assert not set(removed) & set(protected)
     assert body.endswith(ENDING)
-    assert MIN_CHAPTER_CHARS <= len(body)
+    assert MIN_CHAPTER_CHARS <= len(body) <= FIT_TARGET_CHARS
+    assert len(removed) < len(units) - len(protected)
     # 模型什么都不挑，稿子原样回来
     assert apply_fit_cut(PADDED, []) == (PADDED, [])
 

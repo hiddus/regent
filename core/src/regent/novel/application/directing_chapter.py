@@ -122,11 +122,12 @@ FIT_UNIT_MAX_CHARS = 300
 CHAPTER_FIT_SYSTEM = (
     "你在给同一章正文删片段，把它删到字数上限以内，不是在改写这一章。\n"
     "units 是按顺序编号的正文片段，chars 是每段字数。挑出要整段删掉的编号写进 drop，"
-    "其余片段一字不改、按原顺序拼回去。\n"
+    "最该删的排在最前；其余片段一字不改、按原顺序拼回去，删够 need_cut 就停。\n"
     "删掉的 chars 合计不少于 need_cut。优先删铺陈、重复的动作、解释性的句子，"
     "以及回忆里逐个展开的细节。\n"
     "不删 protected 里的片段；不删 must_keep 里的选择与结果落在的片段；"
-    "不删后文还要用到的人或物第一次出现的片段；删完前后要接得上。\n"
+    "不删后文还要用到的人或物第一次出现的片段；对话里一问一答要一起删或一起留；"
+    "删完前后要接得上。\n"
     "只输出 drop。"
 )
 
@@ -989,20 +990,27 @@ def fit_protected(units: list[tuple[int, str]]) -> list[int]:
 
 
 def apply_fit_cut(draft: str, drop: list[int]) -> tuple[str, list[int]]:
-    """按模型挑的顺序删片段：跳过章末保护区、越界编号和会删到下限以下的那一段。"""
+    """按模型挑的顺序删片段，删到 ``FIT_TARGET_CHARS`` 以内就停。
+
+    跳过章末保护区、越界编号和会删到下限以下的那一段；模型挑多了不照单全删，
+    每多删一段就多一道接缝。
+    """
     units = fit_units(draft)
     sep = _paragraph_sep(draft)
     protected = set(fit_protected(units))
     removed: set[int] = set()
+    body = join_units(units, sep)
     for no in drop:
+        if len(body) <= FIT_TARGET_CHARS:
+            break
         if no in removed or no in protected or not 0 <= no < len(units):
             continue
         trial = removed | {no}
-        if len(join_units([u for i, u in enumerate(units) if i not in trial], sep)) < MIN_CHAPTER_CHARS:
+        shorter = join_units([u for i, u in enumerate(units) if i not in trial], sep)
+        if len(shorter) < MIN_CHAPTER_CHARS:
             continue
-        removed = trial
-    kept = [u for i, u in enumerate(units) if i not in removed]
-    return join_units(kept, sep), sorted(removed)
+        removed, body = trial, shorter
+    return body, sorted(removed)
 
 
 def fit_payload(
