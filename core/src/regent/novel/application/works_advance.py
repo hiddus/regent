@@ -118,6 +118,9 @@ async def advance_step(
     execute = execute_step_fn or execute_step
     emit = append_event_fn or append_event
     work = await _get_owned_work(session, work_id=work_id, owner_id=owner_id)
+    # 加锁读必须刷新内存对象：领取前的候选查询已把这行装进会话，那时别的 worker
+    # 可能还没提交。不刷新，锁到的是新行、手里拿的却是旧的 generation_context，
+    # 写回时会把别人刚落库的进度整份盖掉。
     if run_id is not None:
         run = await session.scalar(
             select(ChapterRunModel)
@@ -127,6 +130,7 @@ async def advance_step(
                 ChapterRunModel.branch_id == work.branch_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     else:
         run = await session.scalar(
@@ -139,6 +143,7 @@ async def advance_step(
             .order_by(ChapterRunModel.attempt.desc())
             .limit(1)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     if run is None:
         raise NotFound("chapter run not found")
@@ -224,7 +229,11 @@ async def advance_step(
         return None
 
     steps = list(
-        await session.scalars(select(ChapterStepModel).where(ChapterStepModel.run_id == run.id))
+        await session.scalars(
+            select(ChapterStepModel)
+            .where(ChapterStepModel.run_id == run.id)
+            .execution_options(populate_existing=True)
+        )
     )
     by_name = {s.step: s for s in steps}
     pending = next(
