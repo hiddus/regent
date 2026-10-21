@@ -54,9 +54,18 @@ def _first_pass(run: ChapterRunModel) -> bool | None:
 
 
 async def _latest_runs(
-    session: AsyncSession, work_id: uuid.UUID, *, low: int, high: int | None = None
-) -> list[ChapterRunModel]:
-    """每个章号只取最新一次尝试，按章号升序。"""
+    session: AsyncSession,
+    work_id: uuid.UUID,
+    *,
+    low: int,
+    high: int | None = None,
+    overlay_id: str | None = None,
+) -> list[tuple[ChapterRunModel, bool]]:
+    """每个章号取最新一次尝试，连同这一章有没有哪次尝试终止失败过，按章号升序。
+
+    只看最新一次会让「重写一遍」把终止失败洗掉：覆盖层把章写崩了，用户点重写、
+    第二次过了，试用就只记得那次成功。给了 ``overlay_id`` 时只看钉着它的尝试。
+    """
     stmt = select(ChapterRunModel).where(
         ChapterRunModel.work_id == work_id, ChapterRunModel.chapter_no >= low
     )
@@ -68,9 +77,19 @@ async def _latest_runs(
         )
     ).all()
     latest: dict[int, ChapterRunModel] = {}
+    failed: set[int] = set()
     for row in rows:
-        latest.setdefault(int(row.chapter_no), row)
-    return [latest[no] for no in sorted(latest)]
+        if overlay_id is not None and _overlay_of(row) != overlay_id:
+            continue
+        no = int(row.chapter_no)
+        latest.setdefault(no, row)
+        if row.state == ChapterRunState.TERMINAL_FAILED.value:
+            failed.add(no)
+    return [(latest[no], no in failed) for no in sorted(latest)]
+
+
+def _overlay_of(run: ChapterRunModel) -> str:
+    return str((run.generation_context or {}).get("harness_overlay_id") or "")
 
 
 async def first_pass_baseline(
@@ -80,26 +99,29 @@ async def first_pass_baseline(
     low = max(1, before_chapter - TRIAL_CHAPTERS)
     runs = await _latest_runs(session, work_id, low=low, high=before_chapter - 1)
     seen = [
-        _first_pass(run)
-        for run in runs
+        bool(_first_pass(run)) and not failed
+        for run, failed in runs
         if run.state == ChapterRunState.CANONIZED.value and _first_pass(run) is not None
     ]
     return {"chapters": len(seen), "ok": sum(1 for item in seen if item)}
 
 
 async def trial_outcome(session: AsyncSession, entry: HarnessLibraryModel) -> dict[str, int]:
-    """钉着这条覆盖层写完（入库或终止失败）的前几章。"""
+    """钉着这条覆盖层写完（入库或终止失败）的前几章；终止失败过的章不算一次过。"""
     if entry.source_work_id is None:
         return {"chapters": 0, "ok": 0}
-    runs = await _latest_runs(session, entry.source_work_id, low=int(entry.since_chapter or 1))
+    runs = await _latest_runs(
+        session,
+        entry.source_work_id,
+        low=int(entry.since_chapter or 1),
+        overlay_id=str(entry.id),
+    )
     chapters = ok = 0
-    for run in runs:
-        if str((run.generation_context or {}).get("harness_overlay_id") or "") != str(entry.id):
-            continue
+    for run, failed in runs:
         if run.state == ChapterRunState.CANONIZED.value:
             chapters += 1
-            ok += 1 if _first_pass(run) else 0
-        elif run.state == ChapterRunState.TERMINAL_FAILED.value:
+            ok += 1 if _first_pass(run) and not failed else 0
+        elif failed:
             chapters += 1
         if chapters >= TRIAL_CHAPTERS:
             break

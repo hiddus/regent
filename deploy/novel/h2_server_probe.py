@@ -169,7 +169,7 @@ def main() -> int:
             print(f"[OK] 本书仍检索得到自己的试用条目：{own}")
         else:
             print(f"[风险] 本书检索不到自己的试用条目：{own} vs {provisional_global}")
-        print(f"  试用前基线（含默认臂章节）：{payload['baseline_before_ch5']}")
+        print(f"  试用前基线（只计写下首过信号的章）：{payload['baseline_before_ch5']}")
         for item in payload["replay"]:
             print(f"  回放 ch{item.get('chapter_no')} ok={item.get('ok')} "
                   f"input={item.get('input_hash_ok')} prompt={item.get('prompt_hash_ok')} "

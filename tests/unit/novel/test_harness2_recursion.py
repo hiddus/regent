@@ -987,13 +987,15 @@ async def _seed_work(session):
     return owner, work_id
 
 
-def _canon_run(work_id, chapter_no, *, overlay_id="", first_pass=True, state="CANONIZED"):
+def _canon_run(
+    work_id, chapter_no, *, overlay_id="", first_pass=True, state="CANONIZED", attempt=1
+):
     return ChapterRunModel(
         id=uuid.uuid4(),
         work_id=work_id,
         branch_id=uuid.UUID(int=0),
         chapter_no=chapter_no,
-        attempt=1,
+        attempt=attempt,
         state=state,
         generation_context={
             "executor": H2,
@@ -1098,6 +1100,32 @@ async def test_trial_below_baseline_rolls_back_to_previous_overlay(novel_db):
         assert "低于基线" in trial.rollback_reason
         assert ctx["harness_overlay"] == older
         assert ctx["harness_overlay_id"] == str(adopted.id)
+
+
+@pytest.mark.asyncio
+async def test_regenerating_a_failed_chapter_does_not_erase_it_from_the_trial(novel_db):
+    """覆盖层把一章写崩、重写后过了：试用仍记这一章没一次过，基线同一口径。"""
+    from regent.novel.harnessing.overlay import trial_outcome
+
+    async with novel_db() as s:
+        _, work_id = await _seed_work(s)
+        trial = await lib.record_entry(
+            s,
+            scope="work",
+            scope_key=str(work_id),
+            source_work_id=work_id,
+            status="provisional",
+            overlay_after={"knobs": {"previous_chapter_tail": 300}},
+            since_chapter=5,
+        )
+        tid = str(trial.id)
+        s.add(_canon_run(work_id, 5, overlay_id=tid))
+        s.add(_canon_run(work_id, 6, overlay_id=tid, state="TERMINAL_FAILED"))
+        s.add(_canon_run(work_id, 6, overlay_id=tid, attempt=2))
+        s.add(_canon_run(work_id, 7, overlay_id=tid))
+        await s.flush()
+        assert await trial_outcome(s, trial) == {"chapters": 3, "ok": 2}
+        assert await first_pass_baseline(s, work_id, before_chapter=8) == {"chapters": 3, "ok": 2}
 
 
 @pytest.mark.asyncio
