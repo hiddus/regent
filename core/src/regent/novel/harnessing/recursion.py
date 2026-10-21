@@ -412,7 +412,7 @@ async def probe_tick(
             f"v{_input_version(run)}:h2:probe:r{_round(production)}:{kind}",
         )
         production = run.generation_context["production"]
-        # 探针不砍尾、也不按超长判失败：长度是机械约束，交给交付前那次压缩。
+        # 探针不砍尾、也不按超长判失败：长度是机械约束，交给交付前那次删段。
         # 砍完再比会让组合器看不到章末结果——第 4 章它比较的正是两份被砍掉结局的稿子。
         content = chapter.dedupe_chapter_text(
             written.content, chapter.previous_chapter_text(ctx)
@@ -559,7 +559,7 @@ def finish_round(run: Any, production: dict[str, Any]) -> None:
     if overrides and pending.get("delivered_from"):
         production["h2_overrides"] = merge_overrides(production.get("h2_overrides"), overrides)
     if deliver in KINDS:
-        # 交付的探针稿同样走「超长先压缩」：这一稿要进正史，砍尾就会砍掉章末结果。
+        # 交付的探针稿同样走「超长先删段」：这一稿要进正史，砍尾就会砍掉章末结果。
         chapter.accept_draft(
             run,
             production,

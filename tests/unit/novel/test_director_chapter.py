@@ -12,13 +12,17 @@ from regent.novel.application import executor as executor_app
 from regent.novel.application.directing_chapter import (
     CHAPTER_FIT_SYSTEM,
     CHAPTER_PHASES,
+    FIT_TARGET_CHARS,
     MAX_CHAPTER_CHARS,
+    MIN_CHAPTER_CHARS,
     ChapterFacts,
+    ChapterFitCut,
     ChapterPlan,
     ChapterProse,
     ArcReview,
     MethodVerdict,
     accept_draft,
+    apply_fit_cut,
     build_write_payload,
     chapter_node_for_run,
     check_chapter,
@@ -28,6 +32,8 @@ from regent.novel.application.directing_chapter import (
     grounded_facts,
     load_cast,
     fit_chapter_length,
+    fit_protected,
+    fit_units,
     prepare_chapter_canon,
     produce_chapter_tick,
     PlanRepeated,
@@ -703,7 +709,26 @@ def test_overlong_chapter_fails():
     )
 
 
-async def _fit_run(monkeypatch, *, compressed: str, draft: str = LONG) -> tuple[SimpleNamespace, list]:
+def _grouped(text: str, size: int = 3) -> list[str]:
+    sentences = [s + "。" for s in text.split("。") if s]
+    return ["".join(sentences[i : i + size]) for i in range(0, len(sentences), size)]
+
+
+_KEEP = _grouped(PROSE)
+_FILLER = _grouped(LONG[len(PROSE) :])
+ENDING = "陈默拒绝随便填名字，包裹留在问题件区。"
+# 中间夹着铺陈段的超长稿：删掉铺陈就落回上下限之间，章末结果原样留着
+PADDED = "\n\n".join(_KEEP[:4] + _FILLER + _KEEP[4:] + [ENDING])
+FITTED = "\n\n".join(_KEEP + [ENDING])
+
+
+def _filler_units(draft: str) -> list[int]:
+    return [no for no, (_, piece) in enumerate(fit_units(draft)) if piece in _FILLER]
+
+
+async def _fit_run(
+    monkeypatch, *, drop: list[int] | None = None, draft: str = PADDED
+) -> tuple[SimpleNamespace, list]:
     run = _run()
     run.generation_context["production"]["chapter_plan"] = {
         "id": "n1",
@@ -718,16 +743,23 @@ async def _fit_run(monkeypatch, *, compressed: str, draft: str = LONG) -> tuple[
         calls.append(
             {"purpose": purpose, "command": args[9], "payload": args[7], "system": args[6]}
         )
-        return ChapterProse(content=draft if purpose == "chapter_write" else compressed)
+        if purpose == "chapter_fit":
+            return ChapterFitCut(drop=_filler_units(draft) if drop is None else drop)
+        return ChapterProse(content=draft)
 
     monkeypatch.setattr("regent.novel.application.directing_chapter._call", _fake_call)
     return run, calls
 
 
+def test_fitted_fixture_lands_inside_the_window():
+    assert len(PADDED) > MAX_CHAPTER_CHARS
+    assert MIN_CHAPTER_CHARS <= len(FITTED) <= MAX_CHAPTER_CHARS
+
+
 @pytest.mark.asyncio
-async def test_overlong_draft_is_compressed_not_chopped(monkeypatch):
-    """超长稿先压一次再落稿：章末结果正是砍尾会砍掉的那一段。"""
-    run, calls = await _fit_run(monkeypatch, compressed=PROSE + "包裹留在问题件区。")
+async def test_overlong_draft_is_cut_by_paragraph_not_chopped(monkeypatch):
+    """超长稿由模型挑段、代码删段再落稿：章末结果正是砍尾会砍掉的那一段。"""
+    run, calls = await _fit_run(monkeypatch)
     work = SimpleNamespace(id="w")
 
     async def _tick() -> bool:
@@ -743,7 +775,7 @@ async def test_overlong_draft_is_compressed_not_chopped(monkeypatch):
     assert run.content == ""
     tag = production["fit"]["tag"]
     assert tag.startswith("write:w0:")
-    assert production["fit"]["draft"] == LONG
+    assert production["fit"]["draft"] == PADDED
 
     assert await _tick() is False
     production = run.generation_context["production"]
@@ -751,21 +783,26 @@ async def test_overlong_draft_is_compressed_not_chopped(monkeypatch):
     assert fit["purpose"] == "chapter_fit"
     assert fit["command"] == f"v1:fit:{tag}"
     assert fit["system"] == CHAPTER_FIT_SYSTEM
-    assert fit["payload"]["must_keep"] == {
+    payload = fit["payload"]
+    assert payload["must_keep"] == {
         "choice": "陈默拒绝随便填名字",
         "result": "包裹留在问题件区",
     }
-    assert fit["payload"]["max_chars"] == MAX_CHAPTER_CHARS
-    assert fit["payload"]["draft"] == LONG
-    assert fit["payload"]["cast_names"] == ["林晚"]
+    assert [unit["text"] for unit in payload["units"]] == _KEEP[:4] + _FILLER + _KEEP[4:] + [ENDING]
+    assert all(unit["chars"] == len(unit["text"]) for unit in payload["units"])
+    assert payload["need_cut"] == len(PADDED) - FIT_TARGET_CHARS
+    # 章末那段在保护区里，模型想删也删不掉
+    assert len(payload["units"]) - 1 in payload["protected"]
     assert production["phase"] == "CHECK"
     assert "fit" not in production
-    assert run.content == PROSE + "包裹留在问题件区。"
+    assert run.content == FITTED
     assert production["fit_results"] == [
         {
             "tag": tag,
-            "chars_before": len(LONG),
-            "chars_after": len(run.content),
+            "chars_before": len(PADDED),
+            "chars_dropped": len(PADDED) - len(FITTED),
+            "units_dropped": len(_FILLER),
+            "chars_after": len(FITTED),
             "truncated": False,
         }
     ]
@@ -774,15 +811,39 @@ async def test_overlong_draft_is_compressed_not_chopped(monkeypatch):
     assert [c["purpose"] for c in calls] == ["chapter_write", "chapter_fit"]
 
 
+def test_fit_cut_keeps_the_ending_and_the_floor():
+    """删段只认模型挑的编号，但章末保护区、越界编号和删破下限的那一段一律不删。"""
+    units = fit_units(PADDED)
+    protected = fit_protected(units)
+    assert protected[-1] == len(units) - 1
+    assert sum(len(units[no][1]) for no in protected) >= 400
+    everything = list(range(len(units))) + [-1, len(units) + 5]
+    body, removed = apply_fit_cut(PADDED, everything)
+    assert not set(removed) & set(protected)
+    assert body.endswith(ENDING)
+    assert MIN_CHAPTER_CHARS <= len(body)
+    # 模型什么都不挑，稿子原样回来
+    assert apply_fit_cut(PADDED, []) == (PADDED, [])
+
+
+def test_long_paragraph_is_split_into_sentences_with_closing_quotes():
+    para = "".join(f"他第{i}次说：“走。”她没动。" for i in range(40))
+    assert len(para) > 300
+    units = fit_units(para)
+    assert units[0] == (0, "他第0次说：“走。”")
+    assert units[1] == (0, "她没动。")
+    assert apply_fit_cut(para, [])[0] == para
+
+
 @pytest.mark.asyncio
 async def test_truncated_tail_is_a_hard_fail_not_a_note(monkeypatch):
-    """压缩没压回来、章末被截掉：按硬门失败处理，改不回来就终止，不能入正史。
+    """删段没删回来、章末被截掉：按硬门失败处理，改不回来就终止，不能入正史。
 
     第 4 章的交付稿就是这么丢了章纲定下的结果——截断只记了一笔，照常进正史。
     """
     from regent.novel.domain.errors import ProductionStopped
 
-    run, calls = await _fit_run(monkeypatch, compressed=LONG)
+    run, calls = await _fit_run(monkeypatch, drop=[], draft=LONG)
     work = SimpleNamespace(id="w")
     stopped = ""
     for _ in range(20):
@@ -803,15 +864,15 @@ async def test_truncated_tail_is_a_hard_fail_not_a_note(monkeypatch):
     assert any("章末被截掉" in item for item in production["check_fails"])
     repairs = [c for c in calls if c["purpose"] == "chapter_repair"]
     assert repairs and repairs[0]["payload"]["cut_tail"] == cut
-    # 每一稿都压不回来：走完改稿与重写后终止，绝不 DONE
+    # 每一稿都删不回来：走完改稿与重写后终止，绝不 DONE
     assert "截掉" in stopped
     assert production["phase"] != "DONE"
 
 
 @pytest.mark.asyncio
 async def test_clean_compression_leaves_no_truncation_mark(monkeypatch):
-    """压得回来就不留截断标记：标记只属于真砍过章末的那一稿。"""
-    run, _ = await _fit_run(monkeypatch, compressed=PROSE + "包裹留在问题件区。")
+    """删得回来就不留截断标记：标记只属于真砍过章末的那一稿。"""
+    run, _ = await _fit_run(monkeypatch)
     work = SimpleNamespace(id="w")
     for _ in range(3):
         await produce_chapter_tick(

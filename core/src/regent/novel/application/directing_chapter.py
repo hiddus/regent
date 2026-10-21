@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -112,13 +113,21 @@ CHAPTER_REPAIR_SYSTEM = (
     "只输出正文。"
 )
 
+# 删段的目标落在上下限中间：模型挑的段落字数合计常有出入，留出余量。
+FIT_TARGET_CHARS = MAX_CHAPTER_CHARS - 200
+# 章末这么多字以内的片段不许删：章纲的结果就落在这里。
+FIT_PROTECTED_TAIL_CHARS = 400
+FIT_UNIT_MAX_CHARS = 300
+
 CHAPTER_FIT_SYSTEM = (
-    "你在把同一章正文压到字数上限以内，不是在重写这一章。\n"
-    "删掉铺陈、重复的动作和解释性句子，把 must_keep 里的选择与结果原样保住，"
-    "并且让这个结果仍然落在章末。\n"
-    "不许增加新情节，不许改动已经发生的事、人名和结局，不许改成另一种类型，"
-    "不许把章末的处境写回压缩前的样子。\n"
-    f"压到 {MIN_CHAPTER_CHARS} 字以上、{MAX_CHAPTER_CHARS} 字以内。只输出正文。"
+    "你在给同一章正文删片段，把它删到字数上限以内，不是在改写这一章。\n"
+    "units 是按顺序编号的正文片段，chars 是每段字数。挑出要整段删掉的编号写进 drop，"
+    "其余片段一字不改、按原顺序拼回去。\n"
+    "删掉的 chars 合计不少于 need_cut。优先删铺陈、重复的动作、解释性的句子，"
+    "以及回忆里逐个展开的细节。\n"
+    "不删 protected 里的片段；不删 must_keep 里的选择与结果落在的片段；"
+    "不删后文还要用到的人或物第一次出现的片段；删完前后要接得上。\n"
+    "只输出 drop。"
 )
 
 CHAPTER_FACT_SYSTEM = (
@@ -189,6 +198,10 @@ class PlanRepeated(RuntimeError):
 
 class ChapterProse(BaseModel):
     content: str = Field(min_length=800, max_length=12000)
+
+
+class ChapterFitCut(BaseModel):
+    drop: list[int] = Field(default_factory=list, max_length=200, description="要整段删掉的片段编号")
 
 
 class ChapterFacts(BaseModel):
@@ -442,7 +455,7 @@ def dedupe_chapter_text(text: str, previous: str) -> str:
     """去掉抄上一章的整段和本章内的自我重复。
 
     这两处都是删句子，删完可能变短，但不负责压到上限以内：超长由 FIT 那一次
-    定向压缩处理，压缩不回来才轮到 ``fit_chapter_length`` 截断。
+    定向删段处理，删不回来才轮到 ``fit_chapter_length`` 截断。
     """
     return drop_repeated_span(drop_copied_span(text, previous))
 
@@ -453,9 +466,9 @@ def fit_chapter_length(
     limit: int = MAX_CHAPTER_CHARS,
     floor: int = MIN_CHAPTER_CHARS,
 ) -> str:
-    """压缩之后仍超长时的兜底：从最后一个句号或换行处删到上限以内，且不低于下限。
+    """删段之后仍超长时的兜底：从最后一个句号或换行处删到上限以内，且不低于下限。
 
-    这是最后一道，不是常规路径：章末结果正好落在被删掉的那一段里，能压就不要砍。
+    这是最后一道，不是常规路径：章末结果正好落在被删掉的那一段里，能删段就不要砍。
     """
     body = (text or "").replace("\r", "").strip()
     if len(body) <= limit:
@@ -937,29 +950,87 @@ def _store_prose(run: Any, production: dict[str, Any], content: str) -> None:
     production["accepted"] = []
 
 
+_SENTENCE_END = re.compile(r"(?<=[。！？!?])(?![」”’』\"])|(?<=[。！？!?][」”’』\"])")
+
+
+def fit_units(text: str) -> list[tuple[int, str]]:
+    """把稿子切成可整段删的片段：(所在段号, 原文)。过长的段再按句切开。"""
+    paragraphs = [p.strip() for p in (text or "").replace("\r", "").split("\n") if p.strip()]
+    units: list[tuple[int, str]] = []
+    for index, para in enumerate(paragraphs):
+        if len(para) <= FIT_UNIT_MAX_CHARS:
+            units.append((index, para))
+            continue
+        units.extend((index, piece) for piece in _SENTENCE_END.split(para) if piece)
+    return units
+
+
+def join_units(units: list[tuple[int, str]], sep: str = "\n\n") -> str:
+    paragraphs: dict[int, list[str]] = {}
+    for index, piece in units:
+        paragraphs.setdefault(index, []).append(piece)
+    return sep.join("".join(pieces) for pieces in paragraphs.values())
+
+
+def _paragraph_sep(text: str) -> str:
+    return "\n\n" if "\n\n" in (text or "").replace("\r", "") else "\n"
+
+
+def fit_protected(units: list[tuple[int, str]]) -> list[int]:
+    """章末片段：从最后一段往前数，直到覆盖 ``FIT_PROTECTED_TAIL_CHARS`` 字。"""
+    protected: list[int] = []
+    tail = 0
+    for no in range(len(units) - 1, -1, -1):
+        protected.append(no)
+        tail += len(units[no][1])
+        if tail >= FIT_PROTECTED_TAIL_CHARS:
+            break
+    return sorted(protected)
+
+
+def apply_fit_cut(draft: str, drop: list[int]) -> tuple[str, list[int]]:
+    """按模型挑的顺序删片段：跳过章末保护区、越界编号和会删到下限以下的那一段。"""
+    units = fit_units(draft)
+    sep = _paragraph_sep(draft)
+    protected = set(fit_protected(units))
+    removed: set[int] = set()
+    for no in drop:
+        if no in removed or no in protected or not 0 <= no < len(units):
+            continue
+        trial = removed | {no}
+        if len(join_units([u for i, u in enumerate(units) if i not in trial], sep)) < MIN_CHAPTER_CHARS:
+            continue
+        removed = trial
+    kept = [u for i, u in enumerate(units) if i not in removed]
+    return join_units(kept, sep), sorted(removed)
+
+
 def fit_payload(
     ctx: dict[str, Any] | None, production: dict[str, Any], cast: dict[str, Any], draft: str
 ) -> dict[str, Any]:
-    """压缩调用的入参：超长稿加上这一章必须保住的选择与结果。"""
+    """删段调用的入参：编号片段、至少要删的字数、章末保护区和必须保住的选择与结果。
+
+    模型数不准字，让它直接压到上限以内会原样交回；它只挑段，字数由代码保证。
+    """
     data = ctx or {}
     plan = production.get("chapter_plan") or data.get("target_node") or {}
     plan = plan if isinstance(plan, dict) else {}
+    units = fit_units(draft)
     return {
-        "draft": draft,
+        "units": [{"no": no, "chars": len(piece), "text": piece} for no, (_, piece) in enumerate(units)],
+        "need_cut": max(0, len(join_units(units, _paragraph_sep(draft))) - FIT_TARGET_CHARS),
+        "protected": fit_protected(units),
         "must_keep": {
             "choice": str(plan.get("choice") or ""),
             "result": str(plan.get("result") or ""),
         },
-        "min_chars": MIN_CHAPTER_CHARS,
-        "max_chars": MAX_CHAPTER_CHARS,
-        "cast_names": _cast_name_list(cast),
     }
 
 
 def accept_draft(
     run: Any, production: dict[str, Any], *, ctx: dict[str, Any] | None, draft: str, tag: str
 ) -> None:
-    """收下一稿：去重后不超长就落稿进 CHECK，超长先进 FIT 压缩，不砍尾。"""
+    """收下一稿：去重后不超长就落稿进 CHECK，超长先进 FIT 删段，不砍尾。"""
     production.pop("fit_truncated", None)
     body = dedupe_chapter_text(draft, previous_chapter_text(ctx))
     if len(body) <= MAX_CHAPTER_CHARS:
@@ -983,17 +1054,17 @@ async def fit_tick(
     ctx: dict[str, Any] | None,
     version: int,
 ) -> None:
-    """超长稿定向压缩：压完落稿进 CHECK；压缩稿仍超长才截断并留痕。"""
+    """超长稿定向删段：删完落稿进 CHECK；删完仍超长才截断并留痕。"""
     spec = dict(production.get("fit") or {})
     draft = str(spec.get("draft") or "")
     tag = str(spec.get("tag") or "draft")
-    written = await _call(
+    picked = await _call(
         session,
         provider,
         work,
         run,
         production,
-        ChapterProse,
+        ChapterFitCut,
         CHAPTER_FIT_SYSTEM,
         fit_payload(ctx, production, cast, draft),
         "chapter_fit",
@@ -1002,15 +1073,16 @@ async def fit_tick(
     )
     production = run.generation_context["production"]
     spec = dict(production.get("fit") or {})
-    compressed = dedupe_chapter_text(written.content, previous_chapter_text(ctx))
-    flat = (compressed or "").replace("\r", "").strip()
+    flat, removed = apply_fit_cut(draft, list(picked.drop))
     body = fit_chapter_length(flat)
     cut = flat[len(body) :].strip() if flat.startswith(body) else ""
     truncated = len(flat) > MAX_CHAPTER_CHARS
     production.setdefault("fit_results", []).append(
         {
             "tag": str(spec.get("tag") or tag),
-            "chars_before": len(str(spec.get("draft") or "")),
+            "chars_before": len(draft),
+            "chars_dropped": len(draft) - len(flat),
+            "units_dropped": len(removed),
             "chars_after": len(body),
             "truncated": truncated,
         }
@@ -1410,8 +1482,8 @@ async def produce_chapter_tick(
         warnings = name_warnings(content, cast)
         cut = str(production.get("fit_truncated") or "")
         if cut:
-            # 确定性硬门：压缩没压回来、章末被截掉过，就不能当没事入正史
-            fails.append(f"压缩后仍超长，章末被截掉{len(cut)}字，本章结果可能没落地")
+            # 确定性硬门：删段没删回来、章末被截掉过，就不能当没事入正史
+            fails.append(f"删段后仍超长，章末被截掉{len(cut)}字，本章结果可能没落地")
         h2 = _is_h2(production)
         # 首过只看硬门，两臂同一个口径：软警告会把这一章送进改稿，但改过稿不等于
         # 首稿没过门。口径不一致会让默认臂的基线被人名警告压低，试用判定就偏向采纳。

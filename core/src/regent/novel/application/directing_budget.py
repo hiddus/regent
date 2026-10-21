@@ -8,11 +8,11 @@ from typing import Any
 MAX_COST_MINOR = 20_000
 CURRENCY = "CNY"
 # 旧的多场链路仍用这个上限。短链不共用：追读自评 1 次、章纲至多 4 份、同一招判定 2 次、
-# 正文和重写 2 次、改稿 2 次、这三稿各自可能超长要压一次 3 次、事实抽取连同一次重试 2 次。
+# 正文和重写 2 次、改稿 2 次、这三稿各自可能超长要删一次段 3 次、事实抽取连同一次重试 2 次。
 MAX_CALLS = 120
 CHAPTER_MAX_CALLS = 16
 # Harness² 递归臂：一章至多 H2_MAX_ROUNDS 轮，每轮 PROPOSE + 2×PROBE + COMPOSE
-# + 通用条目的专有性筛查 + 后继正文，加上交付稿超长时的一次压缩。
+# + 通用条目的专有性筛查 + 后继正文，加上交付稿超长时的一次删段。
 H2_MAX_ROUNDS = 2
 H2_CALLS_PER_ROUND = 7
 CHAPTER_H2_MAX_CALLS = CHAPTER_MAX_CALLS + H2_MAX_ROUNDS * H2_CALLS_PER_ROUND
