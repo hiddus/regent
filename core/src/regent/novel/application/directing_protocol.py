@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from regent.novel.application.directing_types import (
+    CHAPTER_ARCHITECTURE,
+    PROTOCOL_CHAPTER,
     PROTOCOL_SCENE,
     PROTOCOL_SCRIPT,
     PROTOCOL_SCRIPT_SCENE,
@@ -17,7 +19,13 @@ BEAT_ARCHITECTURE = "director_v2_beat"
 PROTOCOL_BEAT = "beat"
 
 DIRECTED_ARCHITECTURES = frozenset(
-    {ARCHITECTURE, BEAT_ARCHITECTURE, SCRIPT_ARCHITECTURE, SCRIPT_SCENE_ARCHITECTURE}
+    {
+        ARCHITECTURE,
+        BEAT_ARCHITECTURE,
+        SCRIPT_ARCHITECTURE,
+        SCRIPT_SCENE_ARCHITECTURE,
+        CHAPTER_ARCHITECTURE,
+    }
 )
 
 
@@ -29,13 +37,21 @@ def production_protocol(run_or_production: Any) -> str:
     """返回本 run / production 钉死的 PRODUCE 协议。
 
     默认 ``scene``（director_v2@2）。对照臂 ``director_v2_beat`` / ``director_script``
-    / ``director_script_scene`` 或显式 ``protocol`` 钉定时走对应链路。
+    / ``director_script_scene`` / ``director_chapter`` 或显式 ``protocol`` 钉定时走对应链路。
     """
-    known = {PROTOCOL_SCENE, PROTOCOL_BEAT, PROTOCOL_SCRIPT, PROTOCOL_SCRIPT_SCENE}
+    known = {
+        PROTOCOL_SCENE,
+        PROTOCOL_BEAT,
+        PROTOCOL_SCRIPT,
+        PROTOCOL_SCRIPT_SCENE,
+        PROTOCOL_CHAPTER,
+    }
     if isinstance(run_or_production, dict):
         pinned = run_or_production.get("protocol")
         if pinned in known:
             return str(pinned)
+        if run_or_production.get("architecture_version") == CHAPTER_ARCHITECTURE:
+            return PROTOCOL_CHAPTER
         return PROTOCOL_SCENE
     ctx = getattr(run_or_production, "generation_context", None) or {}
     production = ctx.get("production") or {}
@@ -49,4 +65,6 @@ def production_protocol(run_or_production: Any) -> str:
         return PROTOCOL_SCRIPT
     if arch == SCRIPT_SCENE_ARCHITECTURE:
         return PROTOCOL_SCRIPT_SCENE
+    if arch == CHAPTER_ARCHITECTURE:
+        return PROTOCOL_CHAPTER
     return PROTOCOL_SCENE

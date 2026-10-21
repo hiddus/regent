@@ -4,8 +4,9 @@
 并钉进自己的上下文，之后任何灰度比例的调整都不得改变在途运行——否则同一章
 的前半段和后半段来自两个执行器，盲评与复盘都说不清哪个方案。
 
-生产默认臂为 ``director_script_scene``（四剧本选题 → 择优 → 逐场演绎）。
-对照臂为 ``director_v2``（场景协议直写）、``director_v2_beat``（逐节拍 Hive）、
+生产默认臂为 ``director_chapter``（一次成章 → 确定性硬门 → 最多一次改稿）。
+对照臂为 ``director_script_scene``（四剧本选题 → 择优 → 逐场演绎）、
+``director_v2``（场景协议直写）、``director_v2_beat``（逐节拍 Hive）、
 ``director_script``（择优后整章执笔）。
 ``legacy_v1`` 已退役，不再进入 ``KNOWN_EXECUTORS``。
 
@@ -25,21 +26,29 @@ from regent.novel.application.directing_protocol import (
     BEAT_ARCHITECTURE,
 )
 from regent.novel.application.directing_types import (
+    CHAPTER_ARCHITECTURE,
     SCRIPT_ARCHITECTURE,
     SCRIPT_SCENE_ARCHITECTURE,
 )
 from regent.novel.domain import evaluation
 
-# 生产默认：多剧本筛选后再分场；其余为对照/回退臂。
-STABLE_EXECUTOR = SCRIPT_SCENE_ARCHITECTURE
+# 生产默认：一次成章。剧本分场臂只服务已经钉死的在途运行。
+STABLE_EXECUTOR = CHAPTER_ARCHITECTURE
 SCENE_EXECUTOR = ARCHITECTURE
 BEAT_EXECUTOR = BEAT_ARCHITECTURE
 SCRIPT_EXECUTOR = SCRIPT_ARCHITECTURE
 SCRIPT_SCENE_EXECUTOR = SCRIPT_SCENE_ARCHITECTURE
+CHAPTER_EXECUTOR = CHAPTER_ARCHITECTURE
 # 历史名保留只读识别；不得再被 choose_executor 选中。
 LEGACY_EXECUTOR = "legacy_v1"
 KNOWN_EXECUTORS = frozenset(
-    {ARCHITECTURE, BEAT_ARCHITECTURE, SCRIPT_ARCHITECTURE, SCRIPT_SCENE_ARCHITECTURE}
+    {
+        ARCHITECTURE,
+        BEAT_ARCHITECTURE,
+        SCRIPT_ARCHITECTURE,
+        SCRIPT_SCENE_ARCHITECTURE,
+        CHAPTER_ARCHITECTURE,
+    }
 )
 
 # 固定版本号：策略身份与其实现一起冻结，盲评与复盘据此归因；采样可比性的
@@ -50,6 +59,7 @@ EXECUTOR_VERSIONS: dict[str, str] = {
     BEAT_ARCHITECTURE: "director_v2@1",
     SCRIPT_ARCHITECTURE: "director_script@1",
     SCRIPT_SCENE_ARCHITECTURE: "director_script_scene@1",
+    CHAPTER_ARCHITECTURE: "director_chapter@1",
     LEGACY_EXECUTOR: "legacy_v1@1",
 }
 

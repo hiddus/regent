@@ -109,16 +109,18 @@ def test_assemble_isolates_rejected_script():
         )
 
 
-def test_script_scene_is_default_executor(monkeypatch):
-    assert executor_app.STABLE_EXECUTOR == d.SCRIPT_SCENE_ARCHITECTURE
+def test_chapter_is_default_executor(monkeypatch):
+    assert executor_app.STABLE_EXECUTOR == d.CHAPTER_ARCHITECTURE
     assert executor_app.executor_version(d.SCRIPT_ARCHITECTURE) == "director_script@1"
     assert executor_app.executor_version(d.SCRIPT_SCENE_ARCHITECTURE) == (
         "director_script_scene@1"
     )
+    assert executor_app.executor_version(d.CHAPTER_ARCHITECTURE) == "director_chapter@1"
     assert d.SCRIPT_ARCHITECTURE in executor_app.KNOWN_EXECUTORS
+    assert d.SCRIPT_SCENE_ARCHITECTURE in executor_app.KNOWN_EXECUTORS
     monkeypatch.delenv("NOVEL_EXECUTOR_CANARY", raising=False)
     monkeypatch.delenv("NOVEL_EXECUTOR_CANARY_PERCENT", raising=False)
-    assert executor_app.choose_executor(str(uuid.uuid4())) == d.SCRIPT_SCENE_ARCHITECTURE
+    assert executor_app.choose_executor(str(uuid.uuid4())) == d.CHAPTER_ARCHITECTURE
     assert d.production_protocol(
         type(
             "R",

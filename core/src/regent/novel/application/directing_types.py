@@ -9,10 +9,13 @@ from __future__ import annotations
 PROTOCOL_SCENE = "scene"
 PROTOCOL_SCRIPT = "script"
 PROTOCOL_SCRIPT_SCENE = "script_scene"
+PROTOCOL_CHAPTER = "chapter"
 
-STABLE_EXECUTOR = "director_script_scene"
+CHAPTER_ARCHITECTURE = "director_chapter"
 SCRIPT_ARCHITECTURE = "director_script"
 SCRIPT_SCENE_ARCHITECTURE = "director_script_scene"
+# 新章默认走短链。已钉死的 director_script_scene 运行不改道。
+STABLE_EXECUTOR = CHAPTER_ARCHITECTURE
 
 MAX_TAKES = 4
 MAX_CHAPTER_REPAIRS = 2

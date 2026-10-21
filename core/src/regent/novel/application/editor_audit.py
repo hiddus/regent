@@ -73,13 +73,13 @@ def should_run_editor_audit(
 def editor_system_prompt(*, chapter_no: int = 1) -> str:
     _ = chapter_no
     return (
-        "你是网文校稿编辑，不是导演、不是事实对账员、不是文风打分器。\n"
+        "你是校稿编辑，不是导演、不是事实对账员、不是文风打分器。\n"
         "只做校稿向检查：通顺、重复、读者可读、同章自洽提示。禁止综合分；禁止改写正文。\n"
         "所有 issues 必须 hard=false（顾问提示）；明显人称/宿主壳/操作员代号/题文错名/"
-        "金手指完全未外显，应由 VALIDATE 前置拦截，你不要标 hard。\n"
+        "能力完全没说明，应由 VALIDATE 前置拦截，你不要标 hard。\n"
         "检查项（rule_id 必须用下列之一，一律 soft）：\n"
         "- jargon_first_gloss：发明术语附近释义偏弱（提示即可）\n"
-        "- power_readable：金手指表述还可更清楚（提示即可）\n"
+        "- power_readable：能力或机制的表述还可更清楚（提示即可）\n"
         "- intra_chapter_contradiction：同章小矛盾提示\n"
         "- title_cast_mismatch：题文人名可再对齐（提示即可）\n"
         "- closed_set_without_scope：名单限定可更清楚\n"

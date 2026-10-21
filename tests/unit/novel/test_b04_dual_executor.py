@@ -23,6 +23,7 @@ from regent.novel.application.direction import (
     PROTOCOL_SCENE,
     SCRIPT_ARCHITECTURE,
     SCRIPT_SCENE_ARCHITECTURE,
+    CHAPTER_ARCHITECTURE,
     production_protocol,
 )
 from regent.novel.domain.states import ChapterRunState, ChapterStep, chapter_step_order
@@ -87,8 +88,9 @@ def test_two_real_strategies_are_registered_and_version_pinned():
         BEAT_ARCHITECTURE,
         SCRIPT_ARCHITECTURE,
         SCRIPT_SCENE_ARCHITECTURE,
+        CHAPTER_ARCHITECTURE,
     }
-    assert executor_app.STABLE_EXECUTOR == SCRIPT_SCENE_ARCHITECTURE
+    assert executor_app.STABLE_EXECUTOR == CHAPTER_ARCHITECTURE
     assert executor_app.executor_version(ARCHITECTURE) == "director_v2@2"
     assert executor_app.executor_version(BEAT_ARCHITECTURE) == "director_v2@1"
     assert executor_app.executor_version(SCRIPT_ARCHITECTURE) == "director_script@1"
@@ -196,7 +198,7 @@ async def test_rollback_returns_new_runs_to_stable_and_defers_in_flight(
     monkeypatch.delenv("NOVEL_EXECUTOR_CANARY")
     monkeypatch.delenv("NOVEL_EXECUTOR_CANARY_PERCENT")
 
-    assert executor_app.choose_executor(work_id) == SCRIPT_SCENE_ARCHITECTURE, (
+    assert executor_app.choose_executor(work_id) == CHAPTER_ARCHITECTURE, (
         "回退后新运行仍进灰度臂"
     )
 
@@ -216,7 +218,7 @@ async def test_rollback_returns_new_runs_to_stable_and_defers_in_flight(
     assert ctx["architecture_version"] == BEAT_ARCHITECTURE
     assert ctx.get(executor_app.DEFER_MARKER) == {
         "pinned": BEAT_ARCHITECTURE,
-        "requested": SCRIPT_SCENE_ARCHITECTURE,
+        "requested": CHAPTER_ARCHITECTURE,
         "chapter_no": int(run.chapter_no),
     }
     assert len(deferred_events) == 1, "回退没有留下可查的切换推迟记录"

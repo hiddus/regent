@@ -44,7 +44,9 @@ def test_chapter_step_order_unknown_arch_falls_back():
 
 def test_script_scene_in_known_executors():
     assert "director_script_scene" in KNOWN_EXECUTORS
+    assert "director_chapter" in KNOWN_EXECUTORS
     assert EXECUTOR_VERSIONS["director_script_scene"] == "director_script_scene@1"
+    assert EXECUTOR_VERSIONS["director_chapter"] == "director_chapter@1"
 
 
 # ---------------------------------------------------------------------------

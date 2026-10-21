@@ -249,6 +249,16 @@ async def _volume_end_chapter(
     return end if end > 0 else None
 
 
+def volume_finished_by(run: ChapterRunModel) -> bool:
+    """这一章写完了这一卷：终局判断要调模型，判断落库前补偿扫描不能抢先开下一章。"""
+    from regent.novel.application.works_volumes import stage_rhythm_finished
+
+    context = run.generation_context or {}
+    if context.get("story_complete"):
+        return True
+    return stage_rhythm_finished(context, int(run.chapter_no or 0))
+
+
 async def ensure_next_run(
     session: AsyncSession,
     *,
@@ -292,6 +302,8 @@ async def ensure_next_run(
     if completed_run is None:
         return None
     if completed_run.state != ChapterRunState.CANONIZED.value:
+        return None
+    if volume_finished_by(completed_run):
         return None
     next_ch = int(completed_run.chapter_no) + 1
     if policy.target_chapter_no is not None and next_ch > int(policy.target_chapter_no):

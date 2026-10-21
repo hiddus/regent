@@ -28,6 +28,20 @@ from run_r3_three_chapters import (  # noqa: E402
 
 MODE = "product_continuation"
 
+BRAINHOLE_PREMISES = (
+    "地铁每少停一站，车上就多出一名乘客，这个人是某个乘客明天会成为的人。",
+    "电梯只在有人说谎时多出一层，那一层的门一开，谎就变成已经发生的事。",
+    "红绿灯如果有人闯了，这一分钟里所有人的下一步都按闯灯的人的选择执行。",
+    "二手书店里，谁先翻开一本书的最后一页，谁就要在今天替书里的主角做完没做完的那件事。",
+    "任何人把手机调成静音，静音期间说出口的话，第二天会变成新闻标题。",
+    "未写地址的快递只要送出，收件人就会变成包裹上临时写下的那个人。",
+    "酒店每复制一张房卡，原住客就会在新卡打开的房间里多出一天已经过完的人生。",
+)
+
+def _pick_direction(cards: list[dict]) -> dict:
+    """用最贴合前提的第一张卡。"""
+    return cards[0]
+
 
 def wait_product_chapters(
     r: Remote,
@@ -150,11 +164,22 @@ def wait_product_chapters(
     }
 
 
+def resolve_intent() -> str:
+    if len(sys.argv) > 3 and sys.argv[3] == "random":
+        picked = secrets.choice(BRAINHOLE_PREMISES)
+        print(f"[0] 随机脑洞 {picked}", flush=True)
+        return picked
+    return INTENT
+
+
 def main() -> int:
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 7200
+    target_chapters = int(sys.argv[2]) if len(sys.argv) > 2 else TARGET_CHAPTERS
+    intent = resolve_intent()
     ART.mkdir(parents=True, exist_ok=True)
     evidence: dict = {
         "mode": MODE,
+        "raw_intent": intent,
         "work_id": None,
         "git_note": "hot-synced novel tree before run",
         "chapters": [],
@@ -181,7 +206,7 @@ def main() -> int:
             "/works",
             token=token,
             body={
-                "raw_intent": INTENT,
+                "raw_intent": intent,
                 "client_nonce": f"r3p-{secrets.token_hex(4)}",
             },
             timeout=180,
@@ -200,9 +225,10 @@ def main() -> int:
             token=token,
             body={
                 "answers": {
-                    "genre": "现实主义魔幻",
-                    "tone": "温暖而悬疑",
+                    "genre": "按前提本身",
+                    "tone": "按前提的语气",
                     "length": "中篇",
+                    "pacing": "每章一件事，做完进入新处境",
                 }
             },
             timeout=600,
@@ -212,8 +238,14 @@ def main() -> int:
             print("[FAIL] 无方向卡", json.dumps(clarify, ensure_ascii=False)[:500])
             _save("product_evidence.json", evidence)
             return 1
-        card_id = cards[0].get("card_id") or cards[0].get("id")
-        print(f"[3] 方向卡 {card_id}")
+        evidence["directions"] = cards
+        chosen = _pick_direction(cards)
+        card_id = chosen.get("card_id") or chosen.get("id")
+        evidence["chosen_direction"] = chosen
+        print(
+            f"[3] 方向卡 {card_id} "
+            f"{chosen.get('title', '')} | {chosen.get('genre_promise', '')[:80]}"
+        )
 
         conf = _api(
             r,
@@ -251,7 +283,7 @@ def main() -> int:
             token=token,
             body={
                 "enabled": True,
-                "target_chapter_no": TARGET_CHAPTERS,
+                "target_chapter_no": target_chapters,
                 "volume_scope": "current",
             },
         )
@@ -277,9 +309,9 @@ def main() -> int:
             _save("product_evidence.json", evidence)
             return 1
 
-        print(f"[7] 等待产品自动续写至第 {TARGET_CHAPTERS} 章 (limit={limit}s)")
+        print(f"[7] 等待产品自动续写至第 {target_chapters} 章 (limit={limit}s)")
         result = wait_product_chapters(
-            r, work_id=work_id, token=token, target=TARGET_CHAPTERS, limit=limit
+            r, work_id=work_id, token=token, target=target_chapters, limit=limit
         )
         evidence["chapters"] = result.get("chapters") or []
         evidence["wait_result"] = {

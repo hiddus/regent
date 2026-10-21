@@ -105,9 +105,11 @@ from regent.novel.domain.prose_front_gates import (
 from regent.novel.domain.states import SceneArtifact, SceneRunState
 from regent.novel.infrastructure.models import ChapterRunModel, PersonaSpecModel, StoryWorkModel
 from regent.novel.application.directing_types import (
+    CHAPTER_ARCHITECTURE,
     MAX_CHAPTER_CREATIVE_REPAIRS,
     MAX_CHAPTER_REPAIRS,
     MAX_TAKES,
+    PROTOCOL_CHAPTER,
     PROTOCOL_SCENE,
     PROTOCOL_SCRIPT,
     PROTOCOL_SCRIPT_SCENE,

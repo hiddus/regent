@@ -28,10 +28,13 @@ from regent.novel.application import production, works
 from regent.novel.infrastructure.models import (
     ChapterRunModel,
     ChapterStepModel,
+    CriticalNodeModel,
+    CriticalPathModel,
     NovelPrincipalModel,
     PersonaSpecModel,
     StoryGoalModel,
     StoryWorkModel,
+    VolumeModel,
 )
 from sqlalchemy import select
 
@@ -79,6 +82,30 @@ async def _seed(factory) -> None:  # noqa: ANN001
         session.add(
             StoryGoalModel(id=uuid.uuid4(), work_id=work_id, raw_intent="信任的代价")
         )
+        session.add(
+            VolumeModel(
+                id=uuid.uuid4(),
+                work_id=work_id,
+                volume_no=1,
+                title="第一卷",
+                start_chapter_no=1,
+                end_chapter_no=3,
+                state="ACTIVE",
+            )
+        )
+        path_id = uuid.uuid4()
+        session.add(CriticalPathModel(id=path_id, work_id=work_id, node_count=3))
+        for ordinal in range(1, 4):
+            session.add(
+                CriticalNodeModel(
+                    id=uuid.uuid4(),
+                    path_id=path_id,
+                    node_id=f"n{ordinal}",
+                    ordinal=ordinal,
+                    title=f"节点{ordinal}",
+                    volume_no=1,
+                )
+            )
         await session.commit()
         await works.start_run(session, owner_id=owner, work_id=work_id)
         await session.commit()

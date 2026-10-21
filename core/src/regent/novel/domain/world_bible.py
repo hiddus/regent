@@ -133,10 +133,12 @@ SCREENWRITER_SYSTEM = (
     "conventions 只写已与戏剧引擎/读者契约/双小传对齐的最小集，拿不准就留空并写入 open_questions，"
     "禁止把单点偏好、器物 UX 细则、审校教训堆进共享公约。\n"
     "dramatic_engine 必须把方向卡里的欲望与阻力落成可执行条目："
-    "主角要什么、谁挡、代价、升级逻辑；禁止只复述标签。\n"
+    "主角要什么、谁挡、代价、事情怎么往前；禁止只复述标签。\n"
     "reader_contract 写清必须兑现与明确禁止；prose_style 写清视角、距离、语气、对白比重与禁用套路。"
-    "长篇网文默认第三人称有限（紧贴主角），除非用户明确要求第一人称。\n"
-    "必须为本作发明具体规则、地名行业、人物姓名；禁止套用他书模板梗。\n"
+    "默认第三人称有限，紧贴主要人物，除非用户明确要求别的人称。\n"
+    "必须为本作写清地点、人物姓名和他们赖以生活的行当；禁止套用他书模板梗。\n"
+    "若 payload 含 outline_cast：这些人物已写进全书节奏，personas 沿用这些名字和身份，"
+    "可以再补人，不要改名。\n"
     "若方向含穿越/换身/性转：personas 必须含 kind=traveler 与 kind=host_body，"
     "穿越者须有可读称呼（前世名或明确标签），不得与原身共用一套让读者分不清的写法；"
     "系统面板区分躯壳登记与当前操控意识时，必须让读者认出操控者即主角，"
@@ -314,9 +316,15 @@ def screenwriter_user_payload(
     locked_direction: dict[str, Any],
     revise_notes: str = "",
     previous_bible: dict[str, Any] | None = None,
+    outline_cast: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     lenses = resolve_lenses(direction_keywords)
     return {
+        "outline_cast": [
+            {"name": str(p.get("name") or ""), "identity": str(p.get("identity") or "")}
+            for p in (outline_cast or [])
+            if isinstance(p, dict) and str(p.get("name") or "").strip()
+        ],
         "raw_intent": raw_intent,
         "genre": genre,
         "direction_keywords": direction_keywords,

@@ -18,7 +18,9 @@ from regent.novel.application.directing_protocol import (
     production_protocol,
 )
 from regent.novel.application.directing_types import (
+    CHAPTER_ARCHITECTURE,
     MAX_CHAPTER_REPAIRS,
+    PROTOCOL_CHAPTER,
     PROTOCOL_SCRIPT,
     PROTOCOL_SCRIPT_SCENE,
 )
@@ -341,7 +343,24 @@ async def validate_chapter(
     run: ChapterRunModel,
 ) -> bool:
     production = deepcopy(run.generation_context["production"])
-    if production["phase"] != "DONE" or not production["accepted"]:
+    architecture = (run.generation_context or {}).get("architecture_version")
+    if production.get("protocol") == PROTOCOL_CHAPTER or architecture == CHAPTER_ARCHITECTURE:
+        from regent.novel.application.directing_chapter import check_chapter, seal_chapter_review
+
+        if production.get("phase") != "DONE" or not run.content:
+            raise ProductionStopped("未完成的短链章节不能审校")
+        fails = check_chapter(
+            str(run.content or ""),
+            ctx=run.generation_context,
+            cast=production.get("cast") or {},
+            title=str(getattr(run, "title", "") or ""),
+        )
+        if fails:
+            raise ProductionStopped("短链硬门未过：" + "；".join(fails[:4]))
+        seal_chapter_review(run, production)
+        _save(run, production)
+        return True
+    if production.get("phase") != "DONE" or not production.get("accepted"):
         raise ProductionStopped("未完成场景不能提交整章")
     from regent.novel.domain.repair_locate import build_scene_layout
 

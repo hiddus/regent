@@ -71,8 +71,8 @@ def _build_clarify_questions(intent: str, genre: str) -> list[ClarifyQuestion]:
             ClarifyQuestion(
                 question_id="genre",
                 prompt="想写哪个题材？",
-                options=list(DEFAULT_GENRES),
-                default_assumption=DEFAULT_GENRES[0],
+                options=["沿用前提里的世界", "现实生活", "奇幻或超常", "按前提判断"],
+                default_assumption="沿用前提里的世界",
             )
         )
     # 东方玄幻额外问题：修炼体系偏好
@@ -94,8 +94,8 @@ def _build_clarify_questions(intent: str, genre: str) -> list[ClarifyQuestion]:
             ClarifyQuestion(
                 question_id="desire",
                 prompt="主角最想要的到底是什么？",
-                options=["变强", "活下去", "被承认", "复仇"],
-                default_assumption="变强",
+                options=["做成眼前这件事", "保护某个人", "弄清真相", "活下去"],
+                default_assumption="做成眼前这件事",
             )
         )
     if "冲突" not in text and "敌人" not in text and "对手" not in text:
@@ -103,8 +103,8 @@ def _build_clarify_questions(intent: str, genre: str) -> list[ClarifyQuestion]:
             ClarifyQuestion(
                 question_id="conflict",
                 prompt="谁或什么在挡着他？",
-                options=["一个更强的对手", "规则本身", "身边最亲近的人", "自己的过去"],
-                default_assumption="一个更强的对手",
+                options=["眼前的局面", "另一个人", "自己的过去", "还没说清的阻碍"],
+                default_assumption="眼前的局面",
             )
         )
     return questions[:MAX_QUESTIONS_PER_ROUND]
@@ -152,68 +152,19 @@ async def _build_direction_cards(
             pass  # 回退到写死模板
 
     # 回退：写死模板
-    desire = answers.get("desire") or "变强"
-    conflict = answers.get("conflict") or "一个更强的对手"
-    g = answers.get("genre") or genre or DEFAULT_GENRES[0]
-
-    if "玄幻" in g:
-        return [
-            DirectionCard(
-                card_id="card-xuanhuan-mystery",
-                title=f"{g}·悬疑修炼流",
-                protagonist_desire=f"{desire}，但金手指本身就是一个未解谜团",
-                core_conflict=(
-                    f"{conflict}，而主角的每次突破都会揭开金手指的一层真相——"
-                    "它不是奖赏，而是某个远古存在的布局"
-                ),
-                genre_promise=(
-                    "修炼即解谜：每次境界突破不仅变强，还揭开世界观的一角。"
-                    "读者跟着主角一起拼凑真相，爽点来自“原来如此”的顿悟时刻。"
-                ),
-                pacing="中快：修炼突破与谜团揭示交替，每三章一个小真相，每十章一个大反转",
-                differentiator="悬疑+修炼混搭，爽点不是打脸而是“拼图完成”的智识快感",
-            ),
-            DirectionCard(
-                card_id="card-xuanhuan-faction",
-                title=f"{g}·群像博弈流",
-                protagonist_desire=f"{desire}，但所有势力都在下棋",
-                core_conflict=(
-                    f"{conflict}，而主角不是唯一的主角——"
-                    "对手也有金手指，盟友也有秘密，每个人都有自己的叙事线"
-                ),
-                genre_promise=(
-                    "多视角叙事：主角在明，对手在暗。"
-                    "爽点来自多方博弈的意外交汇——当读者发现三条看似无关的线其实指向同一个结局。"
-                ),
-                pacing="中：五章切换一次视角，十章一次多方碰撞的大场面",
-                differentiator="群像+玄幻混搭，不是一个人碾压所有人，而是聪明人在棋局中找到唯一胜路",
-            ),
-            DirectionCard(
-                card_id="card-xuanhuan-subvert",
-                title=f"{g}·反套路流",
-                protagonist_desire=f"{desire}，但金手指的代价没人告诉过他",
-                core_conflict=(
-                    f"{conflict}，而主角的每次“胜利”都会引发意想不到的后果——"
-                    "打脸了天才，却引来天才背后的势力；拿了机缘，却发现机缘是陷阱"
-                ),
-                genre_promise=(
-                    "反套路叙事：看似经典的开局，但每个“爽点”都有反转。"
-                    "读者以为要打脸，结果打出更大的麻烦；以为升级是好事，结果打开了潘多拉盒子。"
-                ),
-                pacing="快：每章有爽点，但每个爽点都带着“等等，这不对”的转折",
-                differentiator="反套路+玄幻混搭，爽感来自“猜不到下一步”的惊喜",
-            ),
-        ]
+    desire = answers.get("desire") or "把眼前的事做完"
+    conflict = answers.get("conflict") or "眼前的阻碍"
+    g = answers.get("genre") or genre or "这部小说"
 
     return [
         DirectionCard(
             card_id="card-fast",
-            title=f"{g}·快节奏逆袭",
-            protagonist_desire=f"{desire}，而且越快越好",
-            core_conflict=f"{conflict}一直压在他头上",
-            genre_promise="每章都有进展，三章一个小高潮",
-            pacing="快：短章、高频爽点",
-            differentiator="节奏最快，重情节推进，轻环境描写",
+            title=f"{g}·开篇就看见结果",
+            protagonist_desire=f"{desire}，而且这一章就要看到这件事发生",
+            core_conflict=f"{conflict}，并且这件事做完后处境立刻不同",
+            genre_promise="读者当场看见一件事做完，章末处境已经变了",
+            pacing="每章一件事，做完就进入新处境",
+            differentiator="最贴合前提本身，不另加用户没写的规则",
         ),
         DirectionCard(
             card_id="card-steady",
@@ -237,57 +188,28 @@ async def _build_direction_cards(
 
 
 def _default_path_nodes(genre: str, desire: str, conflict: str) -> list[CriticalNode]:
-    """10–20 节点默认关键路径。人工裁决点固定在死亡/背叛/揭露/开战。
-
-    30 万字架构：东方玄幻使用 18 节点种子（对应一卷 ~54 章），
-    其他题材保持原有 18 节点通用模板。
-    """
-    g = genre or DEFAULT_GENRES[0]
-
-    if "玄幻" in g:
-        # 东方玄幻混搭种子：融合悬疑+反套路+修炼，拒绝单一公式
-        # 每个节点都有“表面”和“暗线”两层，避免线性套路
-        seed = [
-            ("金手指觉醒：但代价不明", PathNodeType.INCITING),
-            ("第一次展示能力：引来注意而非赞赏", PathNodeType.REVELATION),
-            ("被势力试探：有人想拉拢，有人想除掉", PathNodeType.REVERSAL),
-            ("意外碾压：不是刻意打脸，而是实力差距太大", PathNodeType.ESCALATION),
-            ("发现金手指的异常：它似乎在自主行动", PathNodeType.REVELATION),
-            ("被迫卷入势力纷争：不是选择站队，而是被所有人利用", PathNodeType.REVERSAL),
-            ("突破境界：金手指解锁新能力，但世界观也被颠覆了一角", PathNodeType.CLIMAX),
-            ("发现更大的棋局：自己的金手指只是某个布局的棋子", PathNodeType.REVELATION),
-            ("进入秘境：规则对自己有利，但对其他人是死亡陷阱", PathNodeType.ESCALATION),
-            ("秘境中的意外发现：金手指的来源线索", PathNodeType.REVELATION),
-            ("盟友背叛：不是恶意，而是各有各的立场", PathNodeType.BETRAYAL),
-            ("绝境中觉醒：金手指的真正用法，没人想到", PathNodeType.CLIMAX),
-            ("反击：不是复仇，而是重新定义规则", PathNodeType.WAR),
-            ("离开故土：更大的世界展开", PathNodeType.REVERSAL),
-            ("新世界的冲击：这里的强者完全颠覆认知", PathNodeType.ESCALATION),
-            ("建立自己的势力：不是招兵买马，而是吸引同类人", PathNodeType.ESCALATION),
-            ("天劫降临：金手指与天劫产生共鸣，引来远古存在的注视", PathNodeType.CLIMAX),
-            ("卷末清算：谜团解开一层，但更大的谜团浮现", PathNodeType.RESOLUTION),
-        ]
-    else:
-        seed = [
-            ("开局：一个具体的不公", PathNodeType.INCITING),
-            ("获得第一个外力", PathNodeType.ESCALATION),
-            ("第一次小胜，结下第一个仇", PathNodeType.ESCALATION),
-            ("发现规则比想象中残酷", PathNodeType.REVELATION),
-            ("被迫与对手合作", PathNodeType.REVERSAL),
-            ("身边人隐瞒了一件事", PathNodeType.REVELATION),
-            ("第一次真正失败", PathNodeType.REVERSAL),
-            ("身份被揭露一半", PathNodeType.REVELATION),
-            ("亲近的人背叛", PathNodeType.BETRAYAL),
-            ("重要的人死了", PathNodeType.DEATH),
-            ("被迫站队，开战", PathNodeType.WAR),
-            ("拿到关键资源", PathNodeType.ESCALATION),
-            ("真相浮出水面", PathNodeType.REVELATION),
-            ("付出不可逆代价", PathNodeType.REVERSAL),
-            ("决战前夜", PathNodeType.CLIMAX),
-            ("卷末决战", PathNodeType.CLIMAX),
-            ("战后清算", PathNodeType.RESOLUTION),
-            ("新的悬念落地", PathNodeType.RESOLUTION),
-        ]
+    """模型没给出大纲时的结构空位。不预设题材，不写具体情节。"""
+    g = genre or "这部小说"
+    seed = [
+        ("开局：眼前的局面", PathNodeType.INCITING),
+        ("第一次做出选择", PathNodeType.ESCALATION),
+        ("选择带来直接后果", PathNodeType.ESCALATION),
+        ("有人隐瞒了一件事", PathNodeType.REVELATION),
+        ("原来的办法走不通", PathNodeType.REVERSAL),
+        ("关系发生变化", PathNodeType.REVELATION),
+        ("一次真正的失败", PathNodeType.REVERSAL),
+        ("真相露出一角", PathNodeType.REVELATION),
+        ("必须做一次取舍", PathNodeType.BETRAYAL),
+        ("局面被改写", PathNodeType.REVERSAL),
+        ("阻碍升级", PathNodeType.ESCALATION),
+        ("关键信息落地", PathNodeType.REVELATION),
+        ("付出代价", PathNodeType.REVERSAL),
+        ("这一段的冲突摊开", PathNodeType.CLIMAX),
+        ("冲突见分晓", PathNodeType.CLIMAX),
+        ("这一段的结果成立", PathNodeType.RESOLUTION),
+        ("下一程的处境出现", PathNodeType.ESCALATION),
+        ("收束这一段", PathNodeType.RESOLUTION),
+    ]
 
     nodes: list[CriticalNode] = []
     for idx, (title, ntype) in enumerate(seed):
@@ -767,24 +689,37 @@ async def confirm_direction(
         .order_by(CriticalPathModel.version.desc())
         .limit(1)
     )
+    outline_cast: list[dict[str, str]] = []
     if existing_path is None:
         outline = None
         if provider is not None and goal is not None:
-            try:
-                from regent.novel.application.generation import generate_outline
+            from regent.novel.application.generation import generate_outline, rhythm_problems
 
-                outline = await generate_outline(
-                    provider,
-                    raw_intent=goal.raw_intent,
-                    genre=work.genre or "",
-                    direction_title=chosen.title,
-                    protagonist_desire=chosen.protagonist_desire,
-                    core_conflict=chosen.core_conflict,
-                    genre_promise=chosen.genre_promise,
-                    direction_keywords=direction_kw,
-                )
+            outline_args = {
+                "raw_intent": goal.raw_intent,
+                "genre": work.genre or "",
+                "direction_title": chosen.title,
+                "protagonist_desire": chosen.protagonist_desire,
+                "core_conflict": chosen.core_conflict,
+                "genre_promise": chosen.genre_promise,
+                "direction_keywords": direction_kw,
+            }
+            try:
+                outline = await generate_outline(provider, **outline_args)
             except Exception:
                 outline = None
+            problems = rhythm_problems(outline.rhythm) if outline is not None else []
+            if problems:
+                try:
+                    redo = await generate_outline(
+                        provider, **outline_args, rhythm_feedback=problems
+                    )
+                except Exception:
+                    redo = None
+                if redo is not None and len(rhythm_problems(redo.rhythm)) <= len(problems):
+                    outline = redo
+        if outline is not None:
+            outline_cast = [p for p in outline.personas if isinstance(p, dict)]
 
         if outline is not None:
             from regent.novel.domain.models import CriticalNode, PathNodeType
@@ -851,12 +786,36 @@ async def confirm_direction(
         await session.flush()
 
         chapters_in_vol = len(nodes) * CHAPTERS_PER_NODE
+        rhythm = outline.rhythm if outline is not None else None
+        if rhythm is not None and not (rhythm.stake and rhythm.arc_end):
+            from regent.novel.application.generation import BookRhythm
+
+            rhythm = BookRhythm(
+                opening=rhythm.opening,
+                stake=chosen.protagonist_desire or chosen.core_conflict,
+                stages=list(rhythm.stages),
+                payoff_limit=rhythm.payoff_limit or 1,
+                arc_end=chosen.genre_promise or chosen.core_conflict,
+            )
+        vol_summary: list[dict[str, object]] = []
+        if rhythm is not None and rhythm.stake and rhythm.arc_end:
+            stages = [s.strip() for s in rhythm.stages if str(s or "").strip()][:5]
+            vol_summary.append(
+                {
+                    "kind": "book_rhythm",
+                    "opening": rhythm.opening,
+                    "stake": rhythm.stake,
+                    "stages": stages if len(stages) >= 3 else [],
+                    "payoff_limit": max(1, min(3, int(rhythm.payoff_limit or 1))),
+                    "arc_end": rhythm.arc_end,
+                }
+            )
         vol1 = VolumeModel(
             id=uuid.uuid4(),
             work_id=work_id,
             volume_no=1,
             title=vol_title,
-            summary=[],
+            summary=vol_summary,
             cultivation_realm=vol_realm,
             start_chapter_no=1,
             end_chapter_no=chapters_in_vol,
@@ -896,6 +855,7 @@ async def confirm_direction(
                 genre=work.genre or "",
                 direction_keywords=direction_kw,
                 locked_direction=locked_dir,
+                outline_cast=outline_cast,
             )
             bible_data = bible.model_dump(mode="json")
         except Exception:

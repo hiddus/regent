@@ -47,6 +47,10 @@ from regent.novel.application.directing_types import (
 from regent.novel.application.runtime import (
     RuntimeState,
 )
+from regent.novel.domain.prose_copy import (
+    is_legitimate_repetition as _is_legitimate_repetition,
+    longest_common_substring as _longest_common_substring,
+)
 from regent.novel.domain.commands import CommandKind
 from regent.novel.domain.commands import command as director_command
 from regent.novel.domain.errors import (
@@ -163,46 +167,6 @@ def _trim_context_for_writer(ctx: dict[str, Any]) -> dict[str, Any]:
     return trimmed
 
 
-def _longest_common_substring(a: str, b: str, *, min_len: int = 80) -> str:
-    """找两个字符串的最长公共子串（>=min_len 才返回）。
-
-    用于工作包3.3 文本重复检测：识别长连续复用（照抄/近似段落）。
-    """
-    if not a or not b or min_len < 1:
-        return ""
-    la, lb = len(a), len(b)
-    best = ""
-    for i in range(la):
-        for j in range(lb):
-            k = 0
-            while i + k < la and j + k < lb and a[i + k] == b[j + k]:
-                k += 1
-            if k >= min_len and k > len(best):
-                best = a[i : i + k]
-    return best
-
-
-def _is_legitimate_repetition(text: str, ledger: dict[str, Any] | None = None) -> bool:
-    """长重复只在整段就是固定铭文，或不足 40 字的引语时放行。
-
-    片段里出现引号或「说」「道」不能把整段照抄算成引用。
-    """
-    stripped = text.strip()
-    if not stripped:
-        return False
-    if ledger and isinstance(ledger, dict):
-        for prop in (ledger.get("props") or {}).values():
-            if not isinstance(prop, dict):
-                continue
-            for partition_text in (prop.get("partitions") or {}).values():
-                inscription = str(partition_text or "").strip()
-                if inscription and stripped == inscription:
-                    return True
-    if len(stripped) <= 40 and stripped[0] in "「『\"'":
-        return True
-    return False
-
-
 def _ledger_protocol(work: Any, production: dict[str, Any]) -> bool:
     """新数据协议只对锁定世界书时打上 ledger_v1 的作品生效。"""
     bible = getattr(work, "story_bible", None) or {}
@@ -215,7 +179,7 @@ def _script_writer_system(prose_style: dict[str, Any] | None = None, *, chapter_
     base = (
         "你是小说执笔者。按选定剧本与导演执导要求，完成整章文学演绎。"
         "统合动作、对白与心理；锁定单一主角有限视角。"
-        "必须让金手指在正文中被读者「看见兑现」，不能只靠说明。"
+        "若剧本里有超出日常的能力，让读者在正文里看见它发生，不能只靠说明。"
         "不得改写剧本因果终点与 must_land_beats；不得引入弃选剧本情节。"
         "正文目标约1800至2500字。" + WEB_NOVEL_POWER_CONTRACT
     )
@@ -2662,7 +2626,7 @@ async def _produce_script_tick(
         accept = await call(
             ChapterCreativeAccept,
             "你是总导演，做整章创作验收（不是事实核验器）。"
-            "判断读者是否愿意继续、能否代入主角权衡、金手指是否兑现。"
+            "判断读者是否愿意继续、能否跟着主角的选择走、这一章答应的事有没有发生。"
             "若失败，fault 三选一：supply=候选本就没有好戏；"
             "pick=有更好候选却选错（需对照 candidates）；render=剧本可拍但正文写坏。"
             "通过则 fault=ok。",

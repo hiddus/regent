@@ -41,27 +41,78 @@ from regent.novel.infrastructure.models import (
 )
 
 
+class BookRhythm(BaseModel):
+    """全书节奏。不写每一章的情节。"""
+
+    opening: str = Field(default="", description="第 1 章开场时的局面")
+    stake: str = Field(default="", description="主角这一卷一直要面对的事")
+    stages: list[str] = Field(
+        default_factory=list,
+        description="这一卷处境的 3 到 5 次变化，按先后排，每项一句处境变成什么，不写场面",
+    )
+    payoff_limit: int = Field(
+        default=1,
+        description="全书答应读者的核心结果在这一卷里发生的次数，1到3",
+    )
+    arc_end: str = Field(default="", description="最后一个阶段成立时的样子")
+
+
+def rhythm_problems(rhythm: BookRhythm | None) -> list[str]:
+    """节奏撑不起一卷时的原因。"""
+    if rhythm is None:
+        return ["没有全书节奏"]
+    from regent.novel.domain.prose_copy import longest_common_substring
+
+    problems: list[str] = []
+    stages = [s.strip() for s in rhythm.stages if str(s or "").strip()]
+    if not 3 <= len(stages) <= 5:
+        problems.append("stages 要有 3 到 5 个阶段")
+    opening = rhythm.opening.strip()
+    ending = (rhythm.arc_end or (stages[-1] if stages else "")).strip()
+    if not opening:
+        problems.append("缺少 opening")
+    if opening and ending and longest_common_substring(opening, ending, min_len=10):
+        problems.append("arc_end 和 opening 是同一件事，卷末在开局就做完了")
+    if opening and stages and longest_common_substring(opening, stages[0], min_len=10):
+        problems.append("第 1 个阶段在开局那一章就成立了")
+    for left, right in zip(stages, stages[1:]):
+        if longest_common_substring(left, right, min_len=10):
+            problems.append("相邻两个阶段是同一件事")
+            break
+    return problems
+
+
 class StoryOutlineNode(BaseModel):
     """大纲节点：LLM 根据 premise + 方向卡生成。"""
     title: str = Field(description="节点标题，必须具体到本作的角色/地名/事件")
     node_type: str = Field(description="INCITING/ESCALATION/REVELATION/REVERSAL/CLIMAX/BETRAYAL/DEATH/WAR/RESOLUTION")
-    promise: str = Field(default="", description="本章承诺给读者的体验（如：主角首次碾压、世界观第一次揭示）")
-    preconditions: list[str] = Field(default_factory=list, description="前置条件（如：主角已觉醒金手指）")
-    consequences: list[str] = Field(default_factory=list, description="后续影响（如：引来更强势力注意）")
+    promise: str = Field(
+        default="",
+        description=(
+            "这一卷往后的一个处境，不是即将开写的章纲。"
+            "不要把同一个结果连续排进好几个节点"
+        ),
+    )
+    preconditions: list[str] = Field(default_factory=list, description="前置条件（如：主角已经抵达约定地点）")
+    consequences: list[str] = Field(default_factory=list, description="后续影响（如：下一场因此换了地点或对手）")
 
 
 class StoryOutline(BaseModel):
     """LLM 生成的定制化故事大纲。"""
+    rhythm: BookRhythm = Field(default_factory=BookRhythm)
     volume_title: str = Field(description="首卷标题，必须体现本作特色")
-    cultivation_realm: str = Field(default="", description="首卷修炼境界范围")
+    cultivation_realm: str = Field(
+        default="",
+        description="若本作有能力或社会位置的阶段，写这一卷的范围；没有就留空",
+    )
     volume_goal: str = Field(default="", description="首卷整体目标")
     arc_titles: list[str] = Field(default_factory=list, description="弧段标题列表（3-5 个弧段）")
     nodes: list[StoryOutlineNode] = Field(min_length=10, max_length=16, description="关键路径节点（10-16 个）")
     personas: list[dict[str, str]] = Field(
         default_factory=list,
         description=(
-            "本作核心角色（3-5 个）。每项含 name/identity/drive/voice；"
-            "穿越/性转/系统作另须含 kind（traveler|host_body）与 bio（≥40字小传）"
+            "本作核心角色（3-5 个）。每项含 name/identity/drive/voice。"
+            "若本作有两套身份，另含 kind 与 bio"
         ),
     )
 
@@ -354,6 +405,7 @@ async def _canon_facts(
         "director_v2_beat",
         "director_script",
         "director_script_scene",
+        "director_chapter",
     }:
         accepted_rows = (await session.scalars(select(ChapterRunModel).where(
             ChapterRunModel.work_id == work.id,
@@ -412,6 +464,30 @@ async def _canon_facts(
     return current_volume_facts + prev_volume_summaries + world_state
 
 
+def _book_rhythm_from_volume(volume: Any) -> dict[str, Any]:
+    """从当前卷摘要里取出开书时写下的节奏。没有则返回空，旧作继续用路径节点。"""
+    summary = list(getattr(volume, "summary", None) or [])
+    for item in summary:
+        if isinstance(item, dict) and item.get("kind") == "book_rhythm":
+            try:
+                limit = int(item.get("payoff_limit") or 1)
+            except (TypeError, ValueError):
+                limit = 1
+            stages = [str(s) for s in (item.get("stages") or []) if str(s or "").strip()]
+            start = int(getattr(volume, "start_chapter_no", 1) or 1)
+            end = int(getattr(volume, "end_chapter_no", start) or start)
+            return {
+                "opening": str(item.get("opening") or ""),
+                "stake": str(item.get("stake") or ""),
+                "stages": stages[:5],
+                "payoff_limit": max(1, min(3, limit)),
+                "arc_end": str(item.get("arc_end") or ""),
+                "volume_start": start,
+                "volume_chapters": max(1, end - start + 1),
+            }
+    return {}
+
+
 class ClarifyQuestions(BaseModel):
     """LLM 动态生成的澄清问题。"""
     questions: list[dict[str, Any]] = Field(
@@ -434,8 +510,9 @@ async def generate_clarify_questions(
         "1. 问题必须针对这篇故事的具体内容——不要问通用问题\n"
         "2. 每个问题的选项必须贴合故事背景，不要用泛泛的选项\n"
         "3. 问题应该帮助确定故事方向、核心冲突或主角动机\n"
-        "4. 如果前提已经足够详细，只生成 1 个最关键的问题\n"
-        "5. 每个问题必须包含：question_id（英文标识）、prompt（问题文本）、options（3-4 个选项）、default_assumption（默认值）\n"
+        "4. 不要问结局、结局基调或最后怎样收场。故事要写很久，结局不在开书时定\n"
+        "5. 如果前提已经足够详细，只生成 1 个最关键的问题\n"
+        "6. 每个问题必须包含：question_id（英文标识）、prompt（问题文本）、options（3-4 个选项）、default_assumption（默认值）\n"
     )
     usr_prompt = json.dumps({
         "raw_intent": raw_intent,
@@ -470,15 +547,18 @@ async def generate_direction_cards(
     """根据用户 premise + 澄清答案，动态生成方向卡。"""
     sys_prompt = (
         "你是小说策划编辑。根据用户的故事前提和澄清答案，设计 2-3 个截然不同的故事方向。\n"
+        "方向之间的差别是故事会怎么发生，不是同一件事的不同情绪。\n"
+        "按用户的前提和澄清答案来。不要替用户没写的类型另加机制。\n"
         "要求：\n"
-        "1. 每张卡必须针对这篇故事的具体内容——标题、描述都要贴合 premise\n"
-        "2. 卡片之间差异必须明显：不同的叙事套路、不同的爽点类型、不同的节奏\n"
-        "3. 混搭多种套路，拒绝单一公式（如纯打脸、纯升级）\n"
-        "4. 每张卡必须包含：card_id（英文标识，如 card-mystery）、title（题材+流派名）、"
-        "protagonist_desire（主角想要什么+转折）、core_conflict（核心阻力+特色）、"
-        "genre_promise（给读者的体验承诺）、pacing（阅读节奏）、differentiator（与其他卡的差异点）\n"
-        "5. 方向卡的描述要具体到这篇故事的角色、设定、冲突——不要用泛泛的模板语言\n"
-        "6. 若提供 revision_feedback：上一轮卡片被用户否决，必须按反馈重做，"
+        "1. 第 1 张最贴合前提\n"
+        "2. 标题写清这一方向的开局和往下走的方向，不写结局\n"
+        "3. genre_promise 写读者会一路追下去的东西，具体到前提里的人和物；"
+        "不要写成某一场就能做完的事，也不要写和解、真相大白这类收场\n"
+        "4. pacing 按澄清答案里的节奏写；用户没指定时，每章一件事，做完就进入新处境\n"
+        "5. 每张卡必须包含：card_id（英文标识）、title、protagonist_desire、core_conflict、"
+        "genre_promise、pacing、differentiator\n"
+        "6. 描述贴合 premise 里的人和物，不要用泛泛的模板语言\n"
+        "7. 若提供 revision_feedback：上一轮卡片被用户否决，必须按反馈重做，"
         "不得复述被否决的套路；card_id 要用新的标识\n"
     )
     usr_prompt = json.dumps({
@@ -505,6 +585,7 @@ async def generate_world_bible(
     locked_direction: dict[str, Any] | None = None,
     revise_notes: str = "",
     previous_bible: dict[str, Any] | None = None,
+    outline_cast: list[dict[str, str]] | None = None,
 ) -> "WorldBible":
     """编剧：开写前产出故事世界设定书。"""
     from regent.novel.domain.world_bible import (
@@ -520,6 +601,7 @@ async def generate_world_bible(
         locked_direction=dict(locked_direction or {}),
         revise_notes=revise_notes,
         previous_bible=previous_bible,
+        outline_cast=outline_cast,
     )
     response = await provider.generate_structured(
         system_prompt=SCREENWRITER_SYSTEM,
@@ -539,32 +621,44 @@ async def generate_outline(
     core_conflict: str,
     genre_promise: str,
     direction_keywords: list[str] | None = None,
+    rhythm_feedback: list[str] | None = None,
 ) -> StoryOutline:
     """根据 premise + 方向卡生成定制化故事大纲。
 
     替代硬编码的路径节点模板，让 LLM 根据用户的具体设定
     生成定制化的路径节点、角色、卷结构。
     """
-    from regent.novel.domain.dossiers import outline_persona_instructions
+    from regent.novel.domain.dossiers import needs_dual_dossiers, outline_persona_instructions
     from regent.novel.domain.principle_lenses import lenses_as_prompt_block, resolve_lenses
 
     lens_block = lenses_as_prompt_block(resolve_lenses(direction_keywords))
+    persona_line = ""
+    if needs_dual_dossiers(direction_keywords):
+        persona_line = outline_persona_instructions() + "\n"
     sys_prompt = (
         "你是小说架构师。根据用户的故事前提和选定方向，设计故事大纲。\n"
         "要求：\n"
-        "1. 节点标题必须具体到角色名、地名、事件；时间锚点用词不可歧义"
-        "（重生回到『开播前夜』不得写成『重生前夜』这类可被读成未重生的标题）\n"
-        "2. 每个节点有 promise（读者期待）和 consequences（后续影响）\n"
-        "3. 节点间有因果链，不是独立事件\n"
-        "4. 角色具体到名字和身份；主角开局身份必须可核对（职业/节目中的位置），"
-        "若 genre/方向含性转，主角身份必须写明性转处境\n"
-        "5. 金手指/外挂须一句话可核对机制（如何运作+边界），禁止『无法解释的库』"
-        "『不去想从哪来』；默认仅主角携带重生记忆，勿无依据让全员重生；"
-        "外挂名称与玩法从本作发明\n"
-        "6. 混搭多种套路，拒绝单一公式\n"
-        "7. 10-16 个节点，3-5 个弧段，3-5 个角色\n"
-        f"8. {outline_persona_instructions()}\n"
-        "9. 先按原则透镜回答问题，再落地到本作设定；禁止套用他书具体梗。\n"
+        "1. 节点标题必须具体到本作的角色、地点和事件。时间词不能有两种读法\n"
+        "2. 全书节奏只写在 rhythm，不要写每一章的情节："
+        "opening 是第 1 章开场时的局面，前提里的开场事件写在这里；"
+        "stake 是主角这一卷一直要面对的事；"
+        "stages 是这一卷处境的 3 到 5 次变化，按先后排，每项一句「处境变成什么」，不写场面，"
+        "每一项要写好几章，主角在里面会试几种办法、碰几次壁才让它成立，不要写成一场就能发生的事；"
+        "相邻两项不是同一件事，第 1 项不能在开场那一章就成立；"
+        "arc_end 是最后一项成立时的样子，这一卷要写几十章，它不能是开场那一场就能做完的事；"
+        "payoff_limit 是全书答应读者的核心结果在这一卷里发生的次数，取 1 到 3\n"
+        "3. 节点是这一卷往后的结构位置，不是即将开写的章纲。"
+        "章纲会在每一章动笔前另出。节点不要排成连续几章的同一场演示\n"
+        "4. 节点间有因果链，不是独立事件\n"
+        "5. 角色具体到名字和身份；主角开局身份必须可核对（职业或在故事里的位置）。"
+        "前提里如果换了身份，写明换之后的处境\n"
+        "6. 若本作有超出日常的能力或机制，用一句话写清如何运作、边界在哪。"
+        "前提里没有，就不要加\n"
+        "7. 节点按选定方向往下长，不要为了混搭另起一套类型\n"
+        "8. 10-16 个节点，3-5 个弧段，3-5 个角色\n"
+        + "9. 若给了 rhythm_feedback，上一版节奏因这些原因被退回，按它重写 rhythm\n"
+        + (f"10. {persona_line}" if persona_line else "")
+        + "先按原则透镜回答问题，再落地到本作设定；禁止套用他书具体梗。\n"
         + (f"{lens_block}\n" if lens_block else "")
     )
     usr_prompt = json.dumps({
@@ -575,6 +669,7 @@ async def generate_outline(
         "protagonist_desire": protagonist_desire,
         "core_conflict": core_conflict,
         "genre_promise": genre_promise,
+        "rhythm_feedback": list(rhythm_feedback or []),
     }, ensure_ascii=False)
     response = await provider.generate_structured(
         system_prompt=sys_prompt,
@@ -695,8 +790,8 @@ async def generate_volume_expansion_outline(
         "1. 必须承接上一卷的结局后果——不能重新开始\n"
         "2. 节点标题必须具体到角色名、地名、事件\n"
         "3. 每个节点必须有 promise 和 consequences\n"
-        "4. 修炼境界必须递进（不能停留在上一卷的境界）\n"
-        "5. 引入新角色、新势力、新谜团，保持新鲜感\n"
+        "4. 若上一卷有能力阶段或社会位置，下一卷在此基础上往前，不能停在原地；没有就承接上一卷的处境\n"
+        "5. 在上一卷的后果上往前走，可以出现新的人和新的问题，不要另起一个无关的故事\n"
         "6. 12-18 个节点，覆盖 3-6 个弧段\n"
     )
     usr_prompt = json.dumps({
@@ -800,14 +895,26 @@ async def assemble(
     )
 
     recent_chapters: list[dict[str, Any]] = []
+    chapter_plans: list[dict[str, Any]] = []
+    volume_start = int(current_vol.start_chapter_no) if current_vol is not None else 1
     seen_chapters: set[int] = set()
     for row in recent_rows:
         number = int(row.chapter_no)
         if number in seen_chapters:
             continue
         seen_chapters.add(number)
-        content = row.content or ""
         previous_context = row.generation_context or {}
+        plan_node = previous_context.get("target_node")
+        if (
+            number >= volume_start
+            and isinstance(plan_node, dict)
+            and plan_node.get("choice")
+            and plan_node.get("result")
+        ):
+            chapter_plans.append({"chapter_no": number, **plan_node})
+        if len(recent_chapters) >= 3:
+            continue
+        content = row.content or ""
         bound_handoff, handoff_status = annotate_chapter_handoff(content, previous_context)
         recent_chapters.append({
             "chapter_no": number, "title": row.title,
@@ -819,9 +926,8 @@ async def assemble(
             "chapter_handoff": bound_handoff,
             "handoff_status": handoff_status,
         })
-        if len(recent_chapters) >= 3:
-            break
-    if architecture_version in DIRECTED_ARCHITECTURES and nodes:
+    chapter_plans.sort(key=lambda item: int(item["chapter_no"]))
+    if architecture_version in DIRECTED_ARCHITECTURES and architecture_version != "director_chapter" and nodes:
         previous = recent_chapters[0] if recent_chapters else {}
         previous_id = previous.get("target_node", {}).get("id")
         previous_index = next((i for i, node in enumerate(nodes) if node.node_id == previous_id), None)
@@ -836,6 +942,39 @@ async def assemble(
                 target = nodes[min(len(nodes) - 1, previous_index + int(completed))]
         elif not recent_chapters:
             target = nodes[0]
+    staged_slot: dict[str, Any] | None = None
+    if architecture_version == "director_chapter":
+        from regent.novel.application.directing_chapter import (
+            chapter_node_for_run,
+            max_chapters_per_stage,
+            stage_position,
+        )
+
+        picked, exhausted = chapter_node_for_run(nodes, chapter_no=int(run.chapter_no))
+        rhythm_now = _book_rhythm_from_volume(current_vol)
+        stages_now = list(rhythm_now.get("stages") or [])
+        if stages_now:
+            # 有阶段的卷：写完最后一个阶段或写满卷长才算这一卷结束，不按预排的结构空位数。
+            _, _, stages_done = stage_position(
+                chapter_plans, stages_now, cap=max_chapters_per_stage(rhythm_now)
+            )
+            past_volume = int(run.chapter_no) >= volume_start + int(
+                rhythm_now.get("volume_chapters") or 0
+            )
+            if stages_done or past_volume:
+                target = None
+                story_complete = True
+            else:
+                target = picked
+                story_complete = False
+                if picked is None:
+                    staged_slot = {"id": f"c{int(run.chapter_no):03d}", "title": "", "promise": ""}
+        elif exhausted:
+            target = None
+            story_complete = True
+        else:
+            target = picked
+            story_complete = False
     # 计算前后节点（让 DIRECT 知道从哪来、往哪去）
     target_idx = None
     if target is not None and nodes:
@@ -941,13 +1080,15 @@ async def assemble(
             "cultivation_realm": current_vol.cultivation_realm if current_vol else "",
             "remaining_arc": vol_remaining,
         },
+        "book_rhythm": _book_rhythm_from_volume(current_vol),
+        "chapter_plans": chapter_plans,
         "target_node": {
             "id": target.node_id,
             "title": target.title,
             "promise": target.promise,
             "preconditions": target.preconditions or [],
             "consequences": target.consequences or [],
-        } if target else {},
+        } if target else (staged_slot or {}),
         "prev_node": {
             "title": prev_node.title,
             "consequences": prev_node.consequences or [],
@@ -957,9 +1098,13 @@ async def assemble(
             "preconditions": next_node.preconditions or [],
         } if next_node else {},
         "chapter_assignment": (
-            {"objective": "由导演按人物、因果与阅读体验决定本章职责"}
-            if architecture_version in DIRECTED_ARCHITECTURES
-            else _chapter_assignment(run.chapter_no)
+            {"objective": str(getattr(target, "promise", "") or "") if target is not None else ""}
+            if architecture_version == "director_chapter"
+            else (
+                {"objective": "由导演按人物、因果与阅读体验决定本章职责"}
+                if architecture_version in DIRECTED_ARCHITECTURES
+                else _chapter_assignment(run.chapter_no)
+            )
         ),
         "actual_state": recent_chapters[0].get("actual_state", {}) if recent_chapters else {},
         "recent_chapters": recent_chapters,
@@ -969,11 +1114,16 @@ async def assemble(
         "memory": recalled.as_payload(),
         "memory_source_hash": recalled.source_hash,
     }
+    # ASSEMBLE 每次整表重建。production 是这一章的写作进度，不是可丢的展示字段；
+    # 丢掉之后第一次 PRODUCE 会 KeyError，重试才靠失败回写把空字典补回来。
+    old_production = old_context.get("production")
+    if isinstance(old_production, dict):
+        run.generation_context["production"] = old_production
 
     existing = list(
         (await session.scalars(select(PersonaSpecModel).where(PersonaSpecModel.work_id == work.id))).all()
     )
-    if not existing:
+    if not existing and architecture_version != "director_chapter":
         defaults = (
             ("主角", "推动目标但必须付出代价", "克制、具体、少解释"),
             ("同伴", "帮助主角，同时保护自己的秘密", "敏锐、留有余地"),
@@ -1129,7 +1279,13 @@ async def canon(
     session: AsyncSession, *, provider: ModelProvider, work: StoryWorkModel, run: ChapterRunModel
 ) -> None:
     source_hash = hashlib.sha256(run.content.encode("utf-8")).hexdigest()
-    from regent.novel.application.directing_protocol import is_directed
+    from regent.novel.application.directing_protocol import is_directed, production_protocol
+    from regent.novel.application.directing_types import PROTOCOL_CHAPTER
+
+    if production_protocol(run) == PROTOCOL_CHAPTER:
+        from regent.novel.application.directing_chapter import prepare_chapter_canon
+
+        await prepare_chapter_canon(session, provider=provider, work=work, run=run)
 
     if is_directed(run):
         if not run.review.get("passed") or run.generation_context.get("validated_content_hash") != source_hash:

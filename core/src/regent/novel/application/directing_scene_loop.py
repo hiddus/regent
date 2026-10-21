@@ -71,10 +71,13 @@ from regent.novel.application.directing_runtime import (
     _runtime_state,
     _validate_action,
 )
+from regent.novel.application.directing_chapter import produce_chapter_tick
 from regent.novel.application.directing_script_loop import (
     _produce_script_tick,
 )
 from regent.novel.application.directing_types import (
+    CHAPTER_ARCHITECTURE,
+    PROTOCOL_CHAPTER,
     PROTOCOL_SCRIPT,
     PROTOCOL_SCRIPT_SCENE,
 )
@@ -137,7 +140,13 @@ async def produce_tick(
     run: ChapterRunModel,
 ) -> bool:
     """Advance one command; False asks the worker to commit and yield."""
-    production = deepcopy(run.generation_context["production"])
+    raw_context = run.generation_context or {}
+    production = deepcopy(raw_context.get("production") or {})
+    architecture = (run.generation_context or {}).get("architecture_version")
+    if production.get("protocol") == PROTOCOL_CHAPTER or architecture == CHAPTER_ARCHITECTURE:
+        return await produce_chapter_tick(
+            session, provider=provider, work=work, run=run, production=production
+        )
     if production_protocol(production) in {PROTOCOL_SCRIPT, PROTOCOL_SCRIPT_SCENE}:
         return await _produce_script_tick(
             session, provider=provider, work=work, run=run, production=production
@@ -589,7 +598,7 @@ async def produce_tick(
                 + "禁止只输出后半段当作整场正文。"
                 "必须覆盖 must_preserve 中的可见最终状态（可压缩表达，不得删除成立依据）。"
                 "禁止新增重大事件、能力、人物或知识。只能使用给定材料。"
-                "若修订涉及外挂/系统/鱼塘等术语：补上读者向白话释义（能做/不能做或代价），"
+                "若修订涉及读者还不认识的能力或说法：补上一句白话，说明能做什么、边界在哪，"
                 "不要只改文风而留下黑话。"
                 + (
                     "若 payload 含 commons_rails，呈现须符合器物规则与本作公约。"
@@ -654,9 +663,8 @@ async def produce_tick(
                 "衔接前场结尾，避免重复复述；按目标字数形成完整场景。"
                 "必须覆盖 must_preserve 中的可见最终状态（可压缩表达，不得删除成立依据）。"
                 "输出必须是完整场景正文，不能只交局部片段。"
-                "若本场首次出现外挂/系统/资源池/鱼塘类术语：必须用一句读者向白话释义"
-                "（能做什么、不能做什么或代价来源），禁止只甩面板名与数值当读者已懂；"
-                "反说明书≠不解释，要嵌入角色感知，不要条款列表。"
+                "若本场首次出现读者还不认识的能力或说法：必须用一句白话说明能做什么、边界在哪，"
+                "嵌在人物的感知里，不要写成条款列表。"
                 + (
                     "若 payload 含 commons_rails，呈现须符合器物规则与本作公约。"
                     if commons_rails

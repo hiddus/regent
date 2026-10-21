@@ -184,7 +184,8 @@ def test_fragments_are_web_novel_with_power():
         "f3_awaken",
         "f4_ent_gender",
     }
-    assert "金手指" in qa.WEB_NOVEL_POWER_CONTRACT
+    assert "金手指" not in qa.WEB_NOVEL_POWER_CONTRACT
+    assert "不要加" in qa.WEB_NOVEL_POWER_CONTRACT
     assert "第一章" in qa.OPENING_CONTRACT
     assert "网文" in qa.WEB_HOOK_CONTRACT
     assert "代入" in qa.IMMERSION_CONTRACT

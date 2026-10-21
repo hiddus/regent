@@ -1,0 +1,1235 @@
+"""一次成章：写作、确定性硬门、最多一次改稿。
+
+不选题、不分场、不让第二个模型重讲这一章。
+"""
+
+# ruff: noqa: RUF001
+from __future__ import annotations
+
+import hashlib
+import json
+from copy import deepcopy
+from typing import Any
+
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from regent.model import ModelProvider
+from regent.novel.application.directing_calls import _call, _input_version, _save
+from regent.novel.application.directing_types import PROTOCOL_CHAPTER
+from regent.novel.domain.errors import ProductionStopped
+from regent.novel.domain.prose_copy import is_legitimate_repetition, longest_common_substring
+from regent.novel.domain.prose_front_gates import front_gate_hard_fails, front_gate_writer_hint
+from regent.novel.infrastructure.models import PersonaSpecModel, StoryWorkModel
+
+CHAPTER_PHASES = ("PLAN", "METHOD", "WRITE", "CHECK", "REPAIR", "DONE")
+
+# 网文单章通行下限。上限只比下限多 500 字。
+MIN_CHAPTER_CHARS = 2000
+MAX_CHAPTER_CHARS = MIN_CHAPTER_CHARS + 500
+
+CHAPTER_PLAN_SYSTEM = (
+    "你只出即将要写的这一章的章纲，不出后文，也不改全书节奏。\n"
+    "章纲三行：压力是这个人眼前要面对的事；选择是他这一章动手做的那一件；"
+    "结果是这个选择造成的，章末仍然成立。\n"
+    "选择只写他做了什么，不要列他没做什么。结果只写这一章改变了什么，"
+    "没有变的处境不要再复述一遍。三行各一百字以内。\n"
+    "previous_result 是上一章已经发生的结果，第 1 章给的是开场局面。"
+    "压力必须是这个结果造成的新处境：上一章做完之后，这个人现在卡在哪。"
+    "不要抄 stake，也不要和 earlier_plans 里任何一章的压力、选择或结果相同。"
+    "先在 used_methods 里归纳 earlier_plans 里主角用过的办法：换了说法、换了地点、"
+    "但还是同一种手段或同一种借口，算同一种。选择不能是其中任何一种；"
+    "老办法走不通时，让他付出更多或冒更大的险。\n"
+    "current_stage 是这一卷眼下正在走的那一段，它还没有发生，不要写进压力。"
+    "这一段一共写 stage_chapters 给出的章数范围，chapters_in_stage 是已经写了几章。"
+    "选择朝它推进一步；结果让它成立时 reaches_stage 为 true。"
+    "last_chapter_of_stage 为 true 时，这一章的结果要让它成立。"
+    "不要越过它去写 later_stages 或卷末。\n"
+    "shows_rule 表示这一章是否让全书答应读者的那件核心结果当场发生。"
+    "已经发生满 payoff_limit 次时，shows_rule 必须为 false。\n"
+    "若给了 rejected_plan，那份章纲已因 reject_reason 被退回，写一份和它不同的。\n"
+    "editor_notes 是编辑读完前几章后写下的意见，这一章照其中的 directives 做。"
+    "payoff_due 为 true 时，这一章让全书答应读者的那件核心结果当场发生，shows_rule 为 true。"
+    "advance_stage 为 true 时，这一章的结果让 current_stage 成立，reaches_stage 为 true。\n"
+    "人名只用给定卡司。按这部作品已经定下的方向写，不要改成另一种类型。"
+)
+
+ARC_REVIEW_SYSTEM = (
+    "你是这部书的追更读者兼责任编辑。只评最近几章的章纲，不改写它们。\n"
+    "reader_contract 是这部书答应读者的东西，dramatic_engine 是它靠什么往前走，"
+    "book_rhythm 是这一卷要走的路。拿这三样对照 recent_chapters。\n"
+    "先替读者回答：读完这几章，还会不会往下追。keeps_reading 写下判断。\n"
+    "再找出让读者想放下这本书的问题，最多三条。每条写清是哪几章、问题是什么、后面怎么改。"
+    "只写真正影响追读的问题，没有就留空。\n"
+    "previous_review 是上一轮的意见。先核对它的 directives 在这几章里做到没有，"
+    "previous_followed 写下判断；没做到的，这一轮写得更具体。\n"
+    "directives 是后面几章必须做到的事，最多三条，每条要具体到只看章纲就能核对，不写空话。\n"
+    "答应读者的东西已经好几章没有当场发生，payoff_due 为 true。"
+    "眼下这一段已经写到 stage_chapters 的下限、局面还停在原地，advance_stage 为 true；"
+    "没写到下限时，问题写进 directives，不要催这一段成立。"
+    "payoff_chapters 是已经兑现过的章，看它离现在有多远再判断 payoff_due。"
+)
+
+METHOD_JUDGE_SYSTEM = (
+    "你只判断这一章的章纲，不改写它。\n"
+    "一、选择是不是 used_methods 里已经用过的同一种手段。"
+    "换了说法、换了地点、换了对象，只要还是同一种手段或同一种借口，same_method 为 true。"
+    "这一章比用过的办法付出明显更多，或者冒了之前没有冒过的险，same_method 为 false。"
+    "used_methods 为空时 same_method 为 false。\n"
+    "二、结果有没有越过 current_stage。later_stages 或 arc_end 里的事在结果里已经发生，"
+    "或者它们要揭开的答案在结果里已经被说破，换了说法也算，skips_ahead 为 true。"
+    "只是朝 current_stage 推进一步，或者让 current_stage 成立，skips_ahead 为 false。\n"
+    "三、editor_notes 是编辑对这几章的要求。章纲明显违背其中一条，或者该做的一条也没做，"
+    "ignores_notes 为 true；没给 editor_notes 时为 false。\n"
+    "matched 写下重复的那一种手段；skipped 写下被提前写出的那件事；ignored 写下没做到的那条要求。"
+    "没有就留空。"
+)
+
+CHAPTER_WRITE_SYSTEM = (
+    "你是小说执笔。按这部作品已经定下的方向写，不要改成另一种类型。\n"
+    "这一章只做章纲里的那一个选择。先写压力，再写他动手。"
+    "结果必须是这个选择造成的，而且章末仍然成立。\n"
+    "这个结果只出现一次，出现了就停。不要换一个人把同一个结果再演一遍。\n"
+    "上一章给你的只是结尾，那就是这一章的现场。从结尾之后往下写，不要把这段结尾整段再抄一遍。"
+    "已经写成的身体、身份和去留保持原样；"
+    "若这一章的选择就是把某件事改回来，正文要写出是这一手造成的。\n"
+    "不要用角色讲课代替已经发生的动作，也不要用格言评价这件事。"
+    "承接上一章已经发生的事，不重写上一章。earlier_results 里的事都已经发生过，"
+    "不要让人物再当众说一遍或再做一遍。人名只用给定卡司。"
+    "只输出正文。正文两千字以上，两千五百字以内。"
+)
+
+CHAPTER_REPAIR_SYSTEM = (
+    "你在改同一章正文。不许新写感想，不许把已经发生的事再讲一遍，不许增加新情节。\n"
+    "章纲里的选择和结果要留下，章末的处境不要改回改稿前的样子。\n"
+    "正文必须落在两千字到两千五百字之间。"
+    "超过就删掉多余段落并接上；不足就把这一章没写完的那一个选择补到两千字，不另起一件事。\n"
+    "只输出正文。"
+)
+
+CHAPTER_FACT_SYSTEM = (
+    "从已完成章节提取后续必须保持一致的客观事实。"
+    "每项使用 statement、quote、entities、known_by、confidence。"
+    "quote 必须是正文里的连续原文，不得改写。正文没有写明的事不要提取。"
+)
+
+
+class ChapterPlan(BaseModel):
+    used_methods: list[str] = Field(
+        default_factory=list,
+        description="earlier_plans 里主角已经用过的办法，同一种手段或同一种借口只算一项，每项一句",
+    )
+    pressure: str = Field(description="上一章结果造成的新处境，这个人现在卡在哪")
+    choice: str = Field(description="他这一章动手做的那一件，不能是 used_methods 里的任何一种；不列没做的事")
+    result: str = Field(description="这个选择造成的结果，章末仍然成立；只写这一章改变了什么")
+    shows_rule: bool = Field(default=False, description="这一章是否让全书答应读者的核心结果当场发生")
+    reaches_stage: bool = Field(default=False, description="这一章的结果是否让 current_stage 成立")
+
+
+MAX_PLAN_ROUNDS = 3
+# 一章最多出 4 份章纲、判 2 次同一招。用完还撞车就收下最后一份并记警告：
+# 章纲重复是质量问题，不该让整本书停在这一章。
+MAX_PLAN_CALLS = 4
+MAX_METHOD_ROUNDS = 2
+# 改稿后硬门仍不过，按同一份章纲重写一次正文，再给一次改稿。
+MAX_REWRITES = 1
+# 每写完这么多章，下一章动笔前先做一次追读自评。
+ARC_REVIEW_EVERY = 3
+ARC_REVIEW_WINDOW = 6
+
+
+class MethodVerdict(BaseModel):
+    same_method: bool = Field(description="这一章的选择是否是已经用过的同一种手段")
+    matched: str = Field(default="", description="重复的那一种手段；不是同一种就留空")
+    skips_ahead: bool = Field(default=False, description="结果是否已经写出了后面阶段或卷末的事")
+    skipped: str = Field(default="", description="被提前写出的那件事；没有就留空")
+    ignores_notes: bool = Field(default=False, description="章纲是否违背或没做到 editor_notes 里的要求")
+    ignored: str = Field(default="", description="没做到的那条要求；没有就留空")
+
+
+class ArcProblem(BaseModel):
+    chapters: list[int] = Field(default_factory=list, description="问题出在哪几章")
+    problem: str = Field(description="让读者想放下这本书的问题")
+    fix: str = Field(description="后面怎么改")
+
+
+class ArcReview(BaseModel):
+    keeps_reading: bool = Field(description="读完这几章，读者还会不会往下追")
+    previous_followed: bool = Field(default=True, description="上一轮的 directives 这几章做到没有")
+    problems: list[ArcProblem] = Field(default_factory=list, max_length=3)
+    directives: list[str] = Field(
+        default_factory=list, max_length=3, description="后面几章必须做到的事，只看章纲就能核对"
+    )
+    payoff_due: bool = Field(default=False, description="答应读者的东西是否已经好几章没有当场发生")
+    advance_stage: bool = Field(default=False, description="眼下这一段是否已经拖住，下一章应让它成立")
+
+
+class PlanRepeated(RuntimeError):
+    """两次章纲都和前文撞车。不写正文，过一会儿换一轮重出。"""
+
+    failure_code = "CHAPTER_PLAN_REPEATED"
+
+
+class ChapterProse(BaseModel):
+    content: str = Field(min_length=800, max_length=12000)
+
+
+class ChapterFacts(BaseModel):
+    facts: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+
+
+def chapter_node_for_run(
+    nodes: list[Any],
+    *,
+    chapter_no: int,
+    chapters_per_node: int = 1,
+) -> tuple[Any | None, bool]:
+    """一章一个节点。超出覆盖范围时返回耗尽，不再夹到最后一个节点。"""
+    if not nodes:
+        return None, False
+    if int(chapter_no) > len(nodes) * int(chapters_per_node):
+        return None, True
+    index = (int(chapter_no) - 1) // int(chapters_per_node)
+    return nodes[index], False
+
+
+def empty_chapter_production(run: Any, existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    ctx = getattr(run, "generation_context", None) or {}
+    prior = existing or {}
+    state = ctx.get("actual_state") if isinstance(ctx.get("actual_state"), dict) else {}
+    call_key = prior.get("call_key_version", ctx.get("call_key_version", 2))
+    return {
+        "schema_version": 1,
+        "protocol": PROTOCOL_CHAPTER,
+        "call_key_version": int(call_key or 2),
+        "phase": "WRITE",
+        "repairs": 0,
+        "check_fails": [],
+        "cast": {},
+        "takes": [],
+        "accepted": [],
+        "working_state": deepcopy(state),
+        "call_count": int(prior.get("call_count") or 0),
+        "committed_minor": int(prior.get("committed_minor") or 0),
+    }
+
+
+def _ensure_production(run: Any, production: dict[str, Any]) -> None:
+    if production.get("protocol") == PROTOCOL_CHAPTER:
+        return
+    fresh = empty_chapter_production(run, production)
+    production.clear()
+    production.update(fresh)
+
+
+def mainline_exhausted(ctx: dict[str, Any] | None) -> bool:
+    data = ctx or {}
+    if data.get("story_complete"):
+        return True
+    node = data.get("target_node") or {}
+    return not (isinstance(node, dict) and node.get("id"))
+
+
+def previous_chapter_text(ctx: dict[str, Any] | None) -> str:
+    chapters = (ctx or {}).get("recent_chapters") or []
+    if not chapters or not isinstance(chapters[0], dict):
+        return ""
+    return str(chapters[0].get("content") or "")
+
+
+def open_promises(ctx: dict[str, Any] | None) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for item in (ctx or {}).get("memory") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") != "promise":
+            continue
+        if str(item.get("state") or "OPEN") != "OPEN":
+            continue
+        if item.get("invalidated"):
+            continue
+        found.append(
+            {
+                "subject": item.get("subject") or "",
+                "content": item.get("content") or item.get("statement") or "",
+            }
+        )
+    return found
+
+
+def build_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> dict[str, Any]:
+    data = ctx or {}
+    return {
+        "story_bible_block": data.get("story_bible_block") or "",
+        "prose_style": data.get("prose_style") or {},
+        "reader_contract": data.get("reader_contract") or {},
+        "dramatic_engine": data.get("dramatic_engine") or {},
+        "cast": cast,
+        "target_node": data.get("target_node") or {},
+        "previous_chapter": previous_chapter_text(data)[-500:],
+        "earlier_results": [item["result"] for item in previous_plans(data)],
+        "canon": data.get("canon") or [],
+        "open_promises": open_promises(data),
+    }
+
+
+def _writer_system(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> str:
+    data = ctx or {}
+    hint = front_gate_writer_hint(
+        prose_style=data.get("prose_style") if isinstance(data.get("prose_style"), dict) else {},
+        chapter_no=int(data.get("chapter_no") or 1),
+        cast=cast,
+        world_bible=data.get("world_bible") if isinstance(data.get("world_bible"), dict) else None,
+        reader_contract=(
+            data.get("reader_contract") if isinstance(data.get("reader_contract"), dict) else None
+        ),
+    )
+    if hint:
+        return CHAPTER_WRITE_SYSTEM + " " + hint
+    return CHAPTER_WRITE_SYSTEM
+
+
+def drop_copied_span(
+    text: str,
+    previous: str,
+    *,
+    min_len: int = 80,
+    floor: int = MIN_CHAPTER_CHARS,
+) -> str:
+    """删掉从上一章整段抄来的那一截。删完低于下限就保持原样，交给硬门。"""
+    body = (text or "").replace("\r", "").strip()
+    while True:
+        copied = longest_common_substring(body, previous or "", min_len=min_len)
+        if not copied or is_legitimate_repetition(copied):
+            return body
+        kept = body.replace(copied, "", 1).strip()
+        if len(kept) < floor:
+            return body
+        body = kept
+
+
+def drop_repeated_span(text: str, *, min_len: int = 24, floor: int = MIN_CHAPTER_CHARS) -> str:
+    """同一段原文在后文再出现时，删掉后一次。删完低于下限就保持原样，交给硬门。"""
+    body = (text or "").replace("\r", "").strip()
+    while True:
+        window = repeated_span(body, min_len=min_len)
+        if not window:
+            return body
+        start = body.find(window)
+        later = body.find(window, start + len(window))
+        length = len(window)
+        while (
+            later + length < len(body)
+            and start + length < later
+            and body[start + length] == body[later + length]
+        ):
+            length += 1
+        kept = (body[:later] + body[later + length :]).strip()
+        if len(kept) < floor:
+            return body
+        body = kept
+
+
+def settle_chapter_text(text: str, previous: str) -> str:
+    return fit_chapter_length(drop_repeated_span(drop_copied_span(text, previous)))
+
+
+def fit_chapter_length(
+    text: str,
+    *,
+    limit: int = MAX_CHAPTER_CHARS,
+    floor: int = MIN_CHAPTER_CHARS,
+) -> str:
+    """改稿仍超长时，从最后一个句号或换行处删到上限以内，且不低于下限。"""
+    body = (text or "").replace("\r", "").strip()
+    if len(body) <= limit:
+        return body
+    cut = body[:limit]
+    for sep in ("\n", "。"):
+        idx = cut.rfind(sep)
+        end = idx + len(sep)
+        if end >= floor:
+            return cut[:end].strip()
+    return cut.strip()
+
+
+def repeated_span(text: str, *, min_len: int = 24) -> str:
+    """同一章里不重叠地再出现一次的连续原文。"""
+    body = text or ""
+    if len(body) < min_len * 2:
+        return ""
+    for start in range(0, len(body) - min_len):
+        window = body[start : start + min_len]
+        if len(set(window)) < 6:
+            continue
+        if window in body[start + min_len :] and not is_legitimate_repetition(window):
+            return window
+    return ""
+
+
+def _cjk(ch: str) -> bool:
+    return "\u4e00" <= ch <= "\u9fff"
+
+
+# 这些字出现在差的那一位上时，是说法不是人名。
+_NOT_A_NAME_CHAR = frozenset(
+    "的了在把是和与这那他她它们着过被从对为就也都而但一不没个名向将让给到由以及或若如其之所则以"
+)
+# 人名前面可以紧挨着这些字。其余汉字说明这个窗口还嵌在别的词里。
+_NAME_PREFIX = frozenset("舅哥弟姐妹父母爸妈叔伯婶姨爷奶师老小阿叫姓是为名他她它")
+
+
+def _span_prefix(body: str, index: int) -> str:
+    start = index
+    while start > 0 and _cjk(body[start - 1]):
+        start -= 1
+    return body[start:index]
+
+
+def stray_names(text: str, cast_names: list[str]) -> list[str]:
+    """和卡司人名只差一个字的叫法。正文里的本人名不算。"""
+    body = text or ""
+    names = [name for name in cast_names if len(name) >= 3 and all(_cjk(ch) for ch in name)]
+    found: list[str] = []
+    known = set(names)
+    # 「林老师」对上「王老师」时，差的是卡司另一个人的姓：这是在叫那个人。
+    surnames = {name[0] for name in cast_names if len(name) >= 2 and _cjk(name[0])}
+    for name in names:
+        width = len(name)
+        for index in range(0, len(body) - width + 1):
+            token = body[index : index + width]
+            if token in known or not all(_cjk(ch) for ch in token):
+                continue
+            pairs = list(zip(token, name))
+            if sum(left != right for left, right in pairs) != 1:
+                continue
+            if any(left in _NOT_A_NAME_CHAR for left, right in pairs if left != right):
+                continue
+            if token[0] != name[0] and token[0] in surnames:
+                continue
+            prefix = _span_prefix(body, index)
+            if prefix and any(ch not in _NAME_PREFIX for ch in prefix):
+                continue
+            if token not in found:
+                found.append(token)
+    return found
+
+
+def _plan_entry(node: dict[str, Any]) -> dict[str, Any]:
+    entry = {
+        "pressure": str(node.get("pressure") or ""),
+        "choice": str(node.get("choice") or ""),
+        "result": str(node.get("result") or ""),
+        "shows_rule": bool(node.get("shows_rule")),
+    }
+    if node.get("stage_index") is not None:
+        entry["stage_index"] = int(node.get("stage_index") or 0)
+        entry["reaches_stage"] = bool(node.get("reaches_stage"))
+    return entry
+
+
+def previous_plans(ctx: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """本卷已入库章节的章纲，按章节顺序。"""
+    data = ctx or {}
+    ledger = data.get("chapter_plans")
+    if isinstance(ledger, list) and ledger:
+        return [_plan_entry(node) for node in ledger if isinstance(node, dict)]
+    found: list[dict[str, Any]] = []
+    for chapter in reversed(list(data.get("recent_chapters") or [])):
+        if not isinstance(chapter, dict):
+            continue
+        node = chapter.get("target_node") if isinstance(chapter.get("target_node"), dict) else {}
+        if node.get("choice") and node.get("result"):
+            found.append(_plan_entry(node))
+    return found
+
+
+def stage_position(
+    earlier: list[dict[str, Any]], stages: list[str], *, cap: int = 0
+) -> tuple[int, int, bool]:
+    """眼下在第几个阶段、这一段已经写了几章、阶段是否全部走完。
+
+    cap 大于 0 时，一段写满 cap 章就算走完，不再等章纲自己报成立。
+    """
+    if not stages:
+        return 0, 0, False
+    index = 0
+    spent = 0
+    for item in earlier:
+        if item.get("stage_index") is not None and int(item["stage_index"]) > index:
+            index = int(item["stage_index"])
+            spent = 0
+        spent += 1
+        if item.get("reaches_stage") or (cap and spent >= cap):
+            index += 1
+            spent = 0
+    return index, spent, index >= len(stages)
+
+
+def min_chapters_per_stage(rhythm: dict[str, Any]) -> int:
+    stages = list((rhythm or {}).get("stages") or [])
+    chapters = int((rhythm or {}).get("volume_chapters") or 0)
+    if not stages or chapters <= 0:
+        return 1
+    return max(1, chapters // (len(stages) * 2))
+
+
+def max_chapters_per_stage(rhythm: dict[str, Any]) -> int:
+    stages = list((rhythm or {}).get("stages") or [])
+    chapters = int((rhythm or {}).get("volume_chapters") or 0)
+    if not stages or chapters <= 0:
+        return 0
+    return max(min_chapters_per_stage(rhythm) + 1, -(-chapters // len(stages)))
+
+
+def stage_pushed(rhythm: dict[str, Any], earlier: list[dict[str, Any]], review: dict[str, Any] | None) -> bool:
+    """自评要求这一段成立，且这一段已经写到下限：编辑只能催，不能跳过章数下限。"""
+    if not (review or {}).get("advance_stage"):
+        return False
+    stages = [str(s) for s in (rhythm or {}).get("stages") or []]
+    if not stages:
+        return False
+    _, spent, done = stage_position(earlier, stages, cap=max_chapters_per_stage(rhythm))
+    return not done and spent + 1 >= min_chapters_per_stage(rhythm)
+
+
+def settle_stage_claim(
+    node: dict[str, Any], rhythm: dict[str, Any], earlier: list[dict[str, Any]], review: dict[str, Any] | None
+) -> None:
+    """带警告收下的章纲，不许借这一章把没写够的一段报成成立。"""
+    stages = [str(s) for s in (rhythm or {}).get("stages") or []]
+    if not stages or not node.get("reaches_stage"):
+        return
+    _, spent, _ = stage_position(earlier, stages, cap=max_chapters_per_stage(rhythm))
+    if spent + 1 < min_chapters_per_stage(rhythm) and not stage_pushed(rhythm, earlier, review):
+        node["reaches_stage"] = False
+
+
+def _shared_span(a: str, b: str, floor: int) -> str:
+    """两段章纲文字共有的原文。门槛随较短一段的长度放大：长结果里复述没变的处境不算同一场。"""
+    shorter = min(len(a), len(b))
+    return longest_common_substring(a, b, min_len=max(floor, shorter // 5))
+
+
+def _overlap_share(a: str, b: str, min_len: int) -> float:
+    """较短一段里有多少字落在两段共有的原文片段上。"""
+    shorter = min(len(a), len(b))
+    if shorter == 0:
+        return 0.0
+    covered = 0
+    rest_a, rest_b = a, b
+    while True:
+        span = longest_common_substring(rest_a, rest_b, min_len=min_len)
+        if not span:
+            break
+        covered += len(span)
+        rest_a = rest_a.replace(span, "\x00", 1)
+        rest_b = rest_b.replace(span, "\x01", 1)
+    return covered / shorter
+
+
+def _clip(text: Any, limit: int = 60) -> str:
+    body = str(text or "").strip()
+    return body if len(body) <= limit else body[:limit] + "……"
+
+
+def rhythm_mismatch(
+    plan: dict[str, Any],
+    rhythm: dict[str, Any],
+    earlier: list[dict[str, Any]],
+    *,
+    chapter_no: int | None = None,
+    review: dict[str, Any] | None = None,
+) -> str:
+    """章纲偏离全书节奏时返回原因。对得上就返回空字符串。
+
+    review 是这一章动笔前的追读自评：它可以要求这一章兑现看点或让眼下这一段成立。
+    """
+    review = review or {}
+    choice = str(plan.get("choice") or "").strip()
+    result = str(plan.get("result") or "").strip()
+    pressure = str(plan.get("pressure") or "").strip()
+    if not pressure or not choice or not result:
+        return "章纲缺了压力、选择或结果"
+    first = int(chapter_no or len(earlier) + 1) - len(earlier)
+    for offset, item in enumerate(earlier):
+        label = f"第{first + offset}章"
+        # 结果里复述没变的处境不算同一场：共有原文要占到一半以上。
+        if _overlap_share(result, str(item.get("result") or ""), 10) >= 0.5:
+            return f"这一章的结果和{label}是同一场（{label}：{_clip(item.get('result'))}）"
+        if _shared_span(pressure, str(item.get("pressure") or ""), 20):
+            return f"这一章的压力和{label}相同，要写上一章结果造成的新处境"
+        if _shared_span(choice, str(item.get("choice") or ""), 12):
+            return (
+                f"主角在{label}已经这样做过（{_clip(item.get('choice'))}），"
+                "这一章换一种做法，或者让局面逼他做一件更冒险的事"
+            )
+    stake = str((rhythm or {}).get("stake") or "")
+    if earlier and stake and longest_common_substring(pressure, stake, min_len=12):
+        return "压力照抄了这一卷的目标，要写上一章结果造成的新处境"
+    stages = [str(s) for s in (rhythm or {}).get("stages") or []]
+    if stages:
+        index, spent, _ = stage_position(earlier, stages, cap=max_chapters_per_stage(rhythm))
+        if not earlier and longest_common_substring(pressure, stages[0], min_len=12):
+            return "第一段还没发生，不要写进压力；这一章从开场局面出发"
+        for later in stages[index + 1 :]:
+            if longest_common_substring(result, later, min_len=12):
+                return "这一章越过了眼下这一段，直接写到了后面的阶段"
+        floor = min_chapters_per_stage(rhythm)
+        pushed = stage_pushed(rhythm, earlier, review)
+        if plan.get("reaches_stage") and spent + 1 < floor and not pushed:
+            return f"眼下这一段才写了 {spent + 1} 章，先写这一段里的下一步，不要这一章就让它成立"
+        cap = max_chapters_per_stage(rhythm)
+        last = bool(cap and spent + 1 >= cap) or pushed
+        if last and index < len(stages) and not plan.get("reaches_stage"):
+            why = "编辑判断这一段已经拖住了" if pushed and not (cap and spent + 1 >= cap) else "这一章是这一段的最后一章"
+            return f"{why}，结果要让「{_clip(stages[index], 40)}」成立，reaches_stage 为 true"
+    if review.get("payoff_due"):
+        if not plan.get("shows_rule"):
+            return "编辑判断答应读者的东西已经好几章没有兑现，这一章让它当场发生，shows_rule 为 true"
+        return ""
+    limit = int((rhythm or {}).get("payoff_limit") or 1)
+    shown = sum(1 for item in earlier if item.get("shows_rule"))
+    if plan.get("shows_rule") and shown >= limit:
+        return "这一卷答应读者的事已经发生够了，这一章要写它逼出来的下一步"
+    return ""
+
+
+def _plan_node(
+    plan: ChapterPlan, *, node_id: str, stage_index: int | None = None
+) -> dict[str, Any]:
+    promise = f"压力：{plan.pressure}\n选择：{plan.choice}\n结果：{plan.result}"
+    node = {
+        "id": node_id,
+        "title": plan.choice[:40],
+        "promise": promise,
+        "pressure": plan.pressure,
+        "choice": plan.choice,
+        "result": plan.result,
+        "shows_rule": bool(plan.shows_rule),
+        "used_methods": list(plan.used_methods),
+        "preconditions": [],
+        "consequences": [],
+    }
+    if stage_index is not None:
+        node["stage_index"] = int(stage_index)
+        node["reaches_stage"] = bool(plan.reaches_stage)
+    return node
+
+
+def plan_payload(ctx: dict[str, Any] | None, cast: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+    data = ctx or {}
+    rhythm = data.get("book_rhythm") if isinstance(data.get("book_rhythm"), dict) else {}
+    earlier = previous_plans(data)
+    stages = [str(s) for s in rhythm.get("stages") or []]
+    cap = max_chapters_per_stage(rhythm)
+    index, spent, _ = stage_position(earlier, stages, cap=cap)
+    if earlier:
+        previous_result = earlier[-1]["result"]
+    else:
+        previous_result = str(rhythm.get("opening") or "")
+    payload: dict[str, Any] = {
+        "chapter_no": int(data.get("chapter_no") or 1),
+        "book_rhythm": {
+            "stake": rhythm.get("stake") or "",
+            "payoff_limit": rhythm.get("payoff_limit") or 1,
+            "arc_end": rhythm.get("arc_end") or "",
+        },
+        "previous_result": previous_result,
+        "earlier_plans": earlier,
+        "previous_ending": previous_chapter_text(data)[-400:],
+        "cast": list(cast),
+        "reject_reason": production.get("plan_reject") or "",
+        "rejected_plan": production.get("plan_rejected") or {},
+    }
+    review = production.get("arc_review") if isinstance(production.get("arc_review"), dict) else {}
+    if stages:
+        payload["current_stage"] = stages[min(index, len(stages) - 1)]
+        payload["chapters_in_stage"] = spent
+        payload["stage_chapters"] = [min_chapters_per_stage(rhythm), cap]
+        payload["last_chapter_of_stage"] = bool(cap and spent + 1 >= cap)
+        payload["later_stages"] = stages[index + 1 :]
+        payload["advance_stage"] = stage_pushed(rhythm, earlier, review)
+    payload["payoff_due"] = bool(review.get("payoff_due"))
+    notes = editor_notes(data, production)
+    if notes:
+        payload["editor_notes"] = notes
+    return payload
+
+
+def latest_arc_review(ctx: dict[str, Any] | None, production: dict[str, Any]) -> dict[str, Any]:
+    """这一章做过的自评；没做就取本卷最近一章留下的。"""
+    own = production.get("arc_review")
+    if isinstance(own, dict) and own:
+        return own
+    for node in reversed(list((ctx or {}).get("chapter_plans") or [])):
+        if isinstance(node, dict) and isinstance(node.get("arc_review"), dict) and node["arc_review"]:
+            return node["arc_review"]
+    return {}
+
+
+def editor_notes(ctx: dict[str, Any] | None, production: dict[str, Any]) -> dict[str, Any]:
+    review = latest_arc_review(ctx, production)
+    directives = [str(item).strip() for item in review.get("directives") or [] if str(item).strip()]
+    problems = [
+        str(item.get("problem") or "").strip()
+        for item in review.get("problems") or []
+        if isinstance(item, dict) and str(item.get("problem") or "").strip()
+    ]
+    if not directives and not problems:
+        return {}
+    return {"problems": problems, "directives": directives}
+
+
+def arc_review_due(ctx: dict[str, Any] | None, production: dict[str, Any]) -> bool:
+    if production.get("arc_checked"):
+        return False
+    written = len(previous_plans(ctx))
+    return written >= ARC_REVIEW_EVERY and written % ARC_REVIEW_EVERY == 0
+
+
+def arc_review_payload(ctx: dict[str, Any] | None, production: dict[str, Any]) -> dict[str, Any]:
+    data = ctx or {}
+    rhythm = data.get("book_rhythm") if isinstance(data.get("book_rhythm"), dict) else {}
+    stages = [str(s) for s in rhythm.get("stages") or []]
+    ledger = [node for node in data.get("chapter_plans") or [] if isinstance(node, dict)]
+    recent = [
+        {
+            "chapter_no": node.get("chapter_no"),
+            **{key: _plan_entry(node).get(key) for key in ("pressure", "choice", "result", "shows_rule")},
+        }
+        for node in ledger[-ARC_REVIEW_WINDOW:]
+    ]
+    earlier = previous_plans(data)
+    index, spent, _ = stage_position(earlier, stages, cap=max_chapters_per_stage(rhythm))
+    previous = latest_arc_review(data, {})
+    return {
+        "reader_contract": data.get("reader_contract") or {},
+        "dramatic_engine": data.get("dramatic_engine") or {},
+        "book_rhythm": {
+            "stake": rhythm.get("stake") or "",
+            "current_stage": stages[min(index, len(stages) - 1)] if stages else "",
+            "chapters_in_stage": spent,
+            "stage_chapters": [min_chapters_per_stage(rhythm), max_chapters_per_stage(rhythm)],
+            "later_stages": stages[index + 1 :],
+            "arc_end": rhythm.get("arc_end") or "",
+        },
+        "payoff_chapters": [
+            node.get("chapter_no") for node in ledger if _plan_entry(node).get("shows_rule")
+        ],
+        "recent_chapters": recent,
+        "previous_review": {
+            "directives": previous.get("directives") or [],
+            "problems": [
+                item.get("problem") for item in previous.get("problems") or [] if isinstance(item, dict)
+            ],
+        }
+        if previous
+        else {},
+    }
+
+
+def check_chapter(
+    content: str,
+    *,
+    ctx: dict[str, Any] | None,
+    cast: dict[str, Any],
+    title: str,
+) -> list[str]:
+    data = ctx or {}
+    text = (content or "").strip()
+    world = data.get("world_bible") if isinstance(data.get("world_bible"), dict) else None
+    style = data.get("prose_style") if isinstance(data.get("prose_style"), dict) else {}
+    contract = data.get("reader_contract") if isinstance(data.get("reader_contract"), dict) else None
+    fails = front_gate_hard_fails(
+        text,
+        prose_style=style,
+        title=title,
+        cast=cast,
+        production_packet={},
+        chapter_no=int(data.get("chapter_no") or 1),
+        min_chars=800,
+        world_bible=world,
+        reader_contract=contract,
+    )
+    if len(text) < MIN_CHAPTER_CHARS:
+        fails.append(f"正文不足{MIN_CHAPTER_CHARS}字")
+    if len(text) > MAX_CHAPTER_CHARS:
+        fails.append(f"正文超过{MAX_CHAPTER_CHARS}字")
+    previous = previous_chapter_text(data)
+    copied = longest_common_substring(text, previous, min_len=80)
+    if copied and not is_legitimate_repetition(copied):
+        fails.append(f"与上一章连续重复{len(copied)}字")
+    replay = repeated_span(text)
+    if replay:
+        fails.append("同一段原文在后文又出现了一遍")
+    return list(dict.fromkeys(fails))
+
+
+def name_warnings(content: str, cast: dict[str, Any]) -> list[str]:
+    """近似人名只是猜测：交给改稿去核对，改不掉也不拦章。"""
+    stray = stray_names(content or "", _cast_name_list(cast))
+    if not stray:
+        return []
+    return ["出现了和卡司只差一字的叫法，若是人名请改回卡司里的名字：" + "、".join(stray[:3])]
+
+
+def _cast_name_list(cast: dict[str, Any]) -> list[str]:
+    return [str(name).strip() for name in (cast or {}) if str(name).strip()]
+
+
+def grounded_facts(content: str, facts: list[Any]) -> list[dict[str, Any]]:
+    """只保留摘录能在正文中逐字找到的事实。"""
+    text = content or ""
+    kept: list[dict[str, Any]] = []
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        quote = str(fact.get("quote") or "").strip()
+        statement = str(fact.get("statement") or "").strip()
+        if statement and quote and quote in text:
+            kept.append(fact)
+    return kept
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _store_prose(run: Any, production: dict[str, Any], content: str) -> None:
+    text = content.strip()
+    run.content = text
+    run.word_count = len(text)
+    versions: list[str] = []
+    if production.get("takes"):
+        versions = list((production["takes"][0] or {}).get("prose_versions") or [])
+    versions.append(text)
+    production["takes"] = [
+        {
+            "take_no": 1,
+            "scene_index": 0,
+            "content": text,
+            "status": "DRAFT",
+            "prose_versions": versions,
+            "validation": {"passed": False, "issues": [], "facts": []},
+        }
+    ]
+    production["accepted"] = []
+
+
+async def load_cast(
+    session: AsyncSession,
+    work: StoryWorkModel,
+    ctx: dict[str, Any] | None,
+) -> dict[str, Any]:
+    rows = (
+        await session.scalars(select(PersonaSpecModel).where(PersonaSpecModel.work_id == work.id))
+    ).all()
+    cast = {
+        row.name: {"identity": row.identity, "drives": row.drives, "voice": row.voice}
+        for row in rows
+    }
+    if cast:
+        return cast
+    bible = (ctx or {}).get("world_bible") if isinstance((ctx or {}).get("world_bible"), dict) else {}
+    for persona in (bible or {}).get("personas") or []:
+        if not isinstance(persona, dict):
+            continue
+        name = str(persona.get("name") or "").strip()
+        if not name:
+            continue
+        cast[name] = {
+            "identity": persona.get("identity") or {"role": name},
+            "drives": persona.get("drives") or {},
+            "voice": persona.get("voice") or {},
+        }
+    if not cast:
+        raise ProductionStopped("世界书未登记人物")
+    return cast
+
+
+def seal_chapter_review(run: Any, production: dict[str, Any]) -> None:
+    """审校只登记通过和正文哈希，不改正文、不抽事实。"""
+    text = str(run.content or "")
+    digest = _content_hash(text)
+    if production.get("takes"):
+        take = production["takes"][0]
+        take["status"] = "ACCEPTED"
+        take["validation"] = {"passed": True, "issues": [], "facts": []}
+    production["accepted"] = [0]
+    production["review_history"] = [
+        {
+            "content_hash": digest,
+            "passed": True,
+            "hard_issues": [],
+            "chapter_repairs": int(production.get("repairs") or 0),
+        }
+    ]
+    run.review = {
+        "passed": True,
+        "hard_issues": [],
+        "soft_issues": [],
+        "continuity_issues": [],
+        "front_gate_issues": [],
+    }
+
+
+async def prepare_chapter_canon(
+    session: AsyncSession,
+    *,
+    provider: ModelProvider,
+    work: StoryWorkModel,
+    run: Any,
+) -> None:
+    """抽事实、丢掉对不上正文的摘录，再固化接受边界。"""
+    from regent.novel.application.chapter_accept import finalize_chapter_acceptance
+
+    production = deepcopy(run.generation_context["production"])
+    content = str(run.content or "")
+    fails = check_chapter(
+        content,
+        ctx=run.generation_context,
+        cast=production.get("cast") or {},
+        title=str(getattr(run, "title", "") or ""),
+    )
+    if fails:
+        raise ProductionStopped("短链硬门未过：" + "；".join(fails[:4]))
+    if not (run.review or {}).get("passed"):
+        raise RuntimeError("UNVALIDATED_CHAPTER")
+    history = production.get("review_history") or []
+    digest = _content_hash(content)
+    review_hash = str(history[-1].get("content_hash") or "") if history else ""
+    if review_hash != digest:
+        raise RuntimeError("UNVALIDATED_CHAPTER")
+    from regent.novel.application.production import CallUnknown
+
+    misses = int(production.get("facts_unknown") or 0)
+    try:
+        extracted = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            ChapterFacts,
+            CHAPTER_FACT_SYSTEM,
+            {"chapter": content},
+            "chapter_facts",
+            f"v{_input_version(run)}:chapter_facts:{digest[:12]}"
+            + (f":m{misses}" if misses else ""),
+        )
+    except CallUnknown:
+        # 正文已经过了硬门。事实抽取第二次仍拿不到结果时不抽了，不能让写好的章节整章终止。
+        production["facts_unknown"] = misses + 1
+        if misses < 1:
+            _save(run, production)
+            raise
+        production["facts_skipped"] = True
+        _save(run, production)
+        extracted = ChapterFacts(facts=[])
+    # _call 已把带 call_count 的 production 写回 run；继续用这份字典。
+    production = run.generation_context["production"]
+    facts = grounded_facts(content, list(extracted.facts))
+    if not production.get("takes"):
+        _store_prose(run, production, content)
+    production["takes"][0]["validation"] = {"passed": True, "issues": [], "facts": facts}
+    production["takes"][0]["status"] = "ACCEPTED"
+    production["accepted"] = [0]
+    finalize_chapter_acceptance(
+        run,
+        production,
+        node_completed=False,
+        review_passed=True,
+    )
+    _save(run, production)
+
+
+async def produce_chapter_tick(
+    session: AsyncSession,
+    *,
+    provider: ModelProvider,
+    work: StoryWorkModel,
+    run: Any,
+    production: dict[str, Any],
+) -> bool:
+    """一 tick 至多一次模型调用。返回 True 表示 PRODUCE 可以结束。"""
+    _ensure_production(run, production)
+    phase = str(production.get("phase") or "WRITE")
+    if phase == "DONE":
+        return True
+    if phase not in CHAPTER_PHASES:
+        raise ProductionStopped(f"未知短链阶段: {phase}")
+    if mainline_exhausted(run.generation_context):
+        raise ProductionStopped("主线用尽，先扩卷")
+    if not production.get("cast"):
+        production["cast"] = await load_cast(session, work, run.generation_context)
+    cast = production["cast"]
+    ctx = run.generation_context or {}
+    version = _input_version(run)
+
+    if phase == "PLAN" or (
+        phase == "WRITE" and ctx.get("book_rhythm") and not production.get("chapter_plan")
+    ):
+        rhythm = ctx.get("book_rhythm") if isinstance(ctx.get("book_rhythm"), dict) else {}
+        if arc_review_due(ctx, production):
+            request = arc_review_payload(ctx, production)
+            review = await _call(
+                session,
+                provider,
+                work,
+                run,
+                production,
+                ArcReview,
+                ARC_REVIEW_SYSTEM,
+                request,
+                "chapter_arc_review",
+                f"v{version}:chapter_arc:"
+                f"{_content_hash(json.dumps(request, ensure_ascii=False, sort_keys=True))[:12]}",
+                temperature=0,
+            )
+            production = run.generation_context["production"]
+            production["arc_review"] = review.model_dump()
+            production["arc_checked"] = True
+            production["phase"] = "PLAN"
+            _save(run, production)
+            return False
+        plan_calls = int(production.get("plan_calls") or 0)
+        earlier = previous_plans(ctx)
+        stages = [str(s) for s in rhythm.get("stages") or []]
+        stage_index = (
+            stage_position(earlier, stages, cap=max_chapters_per_stage(rhythm))[0]
+            if stages
+            else None
+        )
+        request = plan_payload(ctx, cast, production)
+        digest = _content_hash(json.dumps(request, ensure_ascii=False, sort_keys=True))
+        planned = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            ChapterPlan,
+            CHAPTER_PLAN_SYSTEM,
+            request,
+            "chapter_plan",
+            f"v{version}:chapter_plan:{plan_calls}:{digest[:12]}",
+            temperature=0 if plan_calls == 0 else 0.7,
+        )
+        production = run.generation_context["production"]
+        production["plan_calls"] = plan_calls + 1
+        node = _plan_node(
+            planned,
+            node_id=str((ctx.get("target_node") or {}).get("id") or f"ch{getattr(run, 'chapter_no', 1)}"),
+            stage_index=stage_index,
+        )
+        if isinstance(production.get("arc_review"), dict):
+            node["arc_review"] = production["arc_review"]
+        reason = rhythm_mismatch(
+            node,
+            rhythm,
+            earlier,
+            chapter_no=int(getattr(run, "chapter_no", 0) or 0) or None,
+            review=production.get("arc_review") if isinstance(production.get("arc_review"), dict) else None,
+        )
+        out_of_plans = plan_calls + 1 >= MAX_PLAN_CALLS
+        if reason and not out_of_plans:
+            production["plan_reject"] = reason
+            production["plan_rejected"] = {
+                key: node[key] for key in ("pressure", "choice", "result")
+            }
+            production["phase"] = "PLAN"
+            _save(run, production)
+            return False
+        if reason:
+            production.setdefault("plan_warnings", []).append(reason)
+            settle_stage_claim(
+                node,
+                rhythm,
+                earlier,
+                production.get("arc_review") if isinstance(production.get("arc_review"), dict) else None,
+            )
+        production["chapter_plan"] = node
+        production["plan_reject"] = ""
+        production["plan_rejected"] = {}
+        if (
+            (earlier or stages)
+            and not out_of_plans
+            and int(production.get("method_rounds") or 0) < MAX_METHOD_ROUNDS
+        ):
+            production["phase"] = "METHOD"
+        else:
+            production["phase"] = "WRITE"
+            run.generation_context["target_node"] = node
+        _save(run, production)
+        return False
+
+    if phase == "METHOD":
+        node = production.get("chapter_plan") if isinstance(production.get("chapter_plan"), dict) else {}
+        methods = [str(item).strip() for item in (node.get("used_methods") or []) if str(item).strip()]
+        if not methods:
+            methods = [
+                str(item.get("choice") or "").strip()
+                for item in previous_plans(ctx)
+                if str(item.get("choice") or "").strip()
+            ]
+        stage_view = plan_payload(ctx, cast, production)
+        later = list(stage_view.get("later_stages") or [])
+        arc_end = str((stage_view.get("book_rhythm") or {}).get("arc_end") or "")
+        notes = stage_view.get("editor_notes") or {}
+        if (not methods and not later and not arc_end and not notes) or int(
+            production.get("method_rounds") or 0
+        ) >= MAX_METHOD_ROUNDS:
+            production["phase"] = "WRITE"
+            run.generation_context["target_node"] = node
+            _save(run, production)
+            return False
+        request = {
+            "used_methods": methods,
+            "current_stage": stage_view.get("current_stage") or "",
+            "later_stages": later,
+            "arc_end": arc_end,
+            "editor_notes": notes,
+            "pressure": node.get("pressure") or "",
+            "choice": node.get("choice") or "",
+            "result": node.get("result") or "",
+        }
+        verdict = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            MethodVerdict,
+            METHOD_JUDGE_SYSTEM,
+            request,
+            "chapter_method",
+            f"v{version}:chapter_method:{production.get('method_rounds') or 0}:"
+            f"{_content_hash(json.dumps(request, ensure_ascii=False, sort_keys=True))[:12]}",
+            temperature=0,
+        )
+        production = run.generation_context["production"]
+        node = production.get("chapter_plan") if isinstance(production.get("chapter_plan"), dict) else node
+        reasons: list[str] = []
+        if verdict.same_method and methods:
+            matched = str(verdict.matched or "").strip()
+            reasons.append("这一章的选择是已经用过的同一种手段" + ("：" + matched if matched else ""))
+        if verdict.skips_ahead and (later or arc_end):
+            skipped = str(verdict.skipped or "").strip()
+            reasons.append(
+                "这一章的结果提前写出了后面的事"
+                + ("：" + skipped if skipped else "")
+                + "。结果只朝 current_stage 推进，后面的事和答案留到后面的章节"
+            )
+        if verdict.ignores_notes and notes:
+            ignored = str(verdict.ignored or "").strip()
+            reasons.append("没有做到编辑意见" + ("：" + ignored if ignored else ""))
+        if reasons:
+            production["plan_reject"] = "；".join(reasons)
+            production["plan_rejected"] = {
+                key: node.get(key) for key in ("pressure", "choice", "result")
+            }
+            production["method_rounds"] = int(production.get("method_rounds") or 0) + 1
+            production.pop("chapter_plan", None)
+            production["phase"] = "PLAN"
+            _save(run, production)
+            return False
+        production["phase"] = "WRITE"
+        run.generation_context["target_node"] = node
+        _save(run, production)
+        return False
+
+    if phase == "WRITE":
+        planned = production.get("chapter_plan")
+        if isinstance(planned, dict) and planned.get("choice"):
+            run.generation_context["target_node"] = planned
+            ctx = run.generation_context
+        rewrites = int(production.get("rewrites") or 0)
+        payload = build_write_payload(ctx, cast)
+        if rewrites:
+            payload["avoid"] = list(production.get("rewrite_fails") or [])
+        written = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            ChapterProse,
+            _writer_system(ctx, cast)
+            + (" 上一稿因 avoid 里的问题没过，这一稿不要再出现。" if rewrites else ""),
+            payload,
+            "chapter_write",
+            f"v{version}:chapter_write" + (f":w{rewrites}" if rewrites else ""),
+        )
+        production = run.generation_context["production"]
+        _store_prose(run, production, settle_chapter_text(written.content, previous_chapter_text(ctx)))
+        production["phase"] = "CHECK"
+        _save(run, production)
+        return False
+
+    if phase == "CHECK":
+        fails = check_chapter(
+            str(run.content or ""),
+            ctx=ctx,
+            cast=cast,
+            title=str(getattr(run, "title", "") or ""),
+        )
+        warnings = name_warnings(str(run.content or ""), cast)
+        repairs = int(production.get("repairs") or 0)
+        production["check_fails"] = fails + warnings
+        if not fails and (not warnings or repairs >= 1):
+            production["soft_issues"] = warnings
+            production["phase"] = "DONE"
+            _save(run, production)
+            return True
+        digest = _content_hash(str(run.content or ""))
+        if repairs >= 1 or production.get("last_failed_hash") == digest:
+            rewrites = int(production.get("rewrites") or 0)
+            if rewrites >= MAX_REWRITES:
+                raise ProductionStopped(
+                    "短链重写后仍未通过硬门：" + "；".join(str(item) for item in fails[:4])
+                )
+            production["rewrites"] = rewrites + 1
+            production["rewrite_fails"] = fails
+            production["repairs"] = 0
+            production["last_failed_hash"] = ""
+            production["phase"] = "WRITE"
+            _save(run, production)
+            return False
+        production["last_failed_hash"] = digest
+        production["phase"] = "REPAIR"
+        _save(run, production)
+        return False
+
+    if phase == "REPAIR":
+        if int(production.get("repairs") or 0) >= 1:
+            raise ProductionStopped("短链只允许改稿一次")
+        draft = str(run.content or "")
+        payload = build_write_payload(ctx, cast)
+        payload["previous_draft"] = draft
+        payload["check_fails"] = list(production.get("check_fails") or [])
+        written = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            ChapterProse,
+            CHAPTER_REPAIR_SYSTEM,
+            payload,
+            "chapter_repair",
+            f"v{version}:chapter_repair:{_content_hash(draft)[:12]}",
+        )
+        production = run.generation_context["production"]
+        _store_prose(
+            run,
+            production,
+            settle_chapter_text(written.content, previous_chapter_text(ctx)),
+        )
+        production["repairs"] = int(production.get("repairs") or 0) + 1
+        production["phase"] = "CHECK"
+        _save(run, production)
+        return False
+
+    raise ProductionStopped(f"未知短链阶段: {phase}")

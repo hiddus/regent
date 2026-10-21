@@ -110,6 +110,7 @@ async def _call[T: BaseModel](
     payload: dict[str, Any],
     purpose: str,
     command_id: str,
+    temperature: float | None = None,
 ) -> T:
     """发起一次导演逻辑调用：调用前预留、事务外调用、调用后结算、恢复可复用。"""
     from regent.novel.application.production import CallBroker
@@ -140,7 +141,14 @@ async def _call[T: BaseModel](
             command_id=command_id,
             system_prompt=system,
             user_prompt=user_prompt,
-            temperature=0.8 if schema in (ActorTurn, SceneText, ChapterScript) else 0,
+            temperature=temperature
+            if temperature is not None
+            else (
+                0.8
+                if schema in (ActorTurn, SceneText, ChapterScript)
+                or schema.__name__ == "ChapterProse"
+                else 0
+            ),
             model_hint=getattr(provider, "model_name", "") or "",
         )
     except QuotaExceeded as exc:

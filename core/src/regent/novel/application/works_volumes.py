@@ -73,9 +73,34 @@ async def _path_node_ids(session: AsyncSession, work: StoryWorkModel) -> list[st
     )
 
 
+def stage_rhythm_finished(context: dict[str, Any], chapter_no: int) -> bool:
+    """按阶段写的卷：这一章让最后一段成立，这一卷就写完了，交给终局判断，不再开下一章。"""
+    rhythm = context.get("book_rhythm") if isinstance(context.get("book_rhythm"), dict) else {}
+    stages = [str(s) for s in rhythm.get("stages") or [] if str(s or "").strip()]
+    node = context.get("target_node") if isinstance(context.get("target_node"), dict) else {}
+    if not stages or not node.get("choice"):
+        return False
+    from regent.novel.application.directing_chapter import (
+        max_chapters_per_stage,
+        previous_plans,
+        stage_position,
+    )
+
+    ledger = [
+        item
+        for item in context.get("chapter_plans") or []
+        if isinstance(item, dict) and int(item.get("chapter_no") or 0) < chapter_no
+    ]
+    plans = previous_plans({"chapter_plans": ledger}) if ledger else []
+    plans.append(previous_plans({"chapter_plans": [node]})[0])
+    return stage_position(plans, stages, cap=max_chapters_per_stage(rhythm))[2]
+
+
 async def _last_node_completed(session: AsyncSession, work: StoryWorkModel, run) -> bool:
     """本章完成的是不是关键路径上的最后一个节点（P1-3）。"""
     context = run.generation_context or {}
+    if stage_rhythm_finished(context, int(getattr(run, "chapter_no", 0) or 0)):
+        return True
     if not context.get("node_completed"):
         return False
     target_id = (context.get("target_node") or {}).get("id")
