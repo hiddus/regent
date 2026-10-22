@@ -124,10 +124,21 @@ def _latest_run(r: Remote, work_id: str, chapter_no: int) -> str:
 
 def chapter_digest(prod: dict, pin: dict, call_rows: list[dict], spent: str, state: str) -> dict:
     history = prod.get("h2_history") or []
+    writes = [row for row in call_rows if row.get("purpose") == "chapter_write"]
+    try:
+        overlay = json.loads(pin.get("harness_overlay") or "null") or {}
+    except json.JSONDecodeError:
+        overlay = {}
+    review = prod.get("arc_review") if isinstance(prod.get("arc_review"), dict) else {}
     return {
         "state": state,
         "executor": pin.get("executor"),
+        "harness_id": pin.get("harness_id"),
         "overlay_id": pin.get("harness_overlay_id"),
+        "overlay_prompts": sorted((overlay.get("prompts") or {}) if isinstance(overlay, dict) else {}),
+        "write_in_tokens": int(writes[0]["input_tokens"]) if writes else 0,
+        "write_out_tokens": int(writes[0]["output_tokens"]) if writes else 0,
+        "keeps_reading": review.get("keeps_reading"),
         "calls": len(call_rows),
         "cost": spent,
         "first_pass": prod.get("first_pass"),
