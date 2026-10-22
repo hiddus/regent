@@ -4,7 +4,8 @@
 （provisional，一本书同时只有一条）。之后用这层配置写的章节攒够
 ``TRIAL_CHAPTERS`` 章就判定：一次过率不低于试用前同样章数的基线就采纳，
 否则回退到上一层。没有基线时，三章里至少两章一次过才采纳。试用前追读自评
-判「会追」的，试用中只要有一次判「不追」也回退。
+判「会追」的，试用中只要有一次判「不追」也回退。试用章首稿字数中位数超长、
+且比试用前长出两成以上的，也回退。
 
 新章节运行创建时调用 ``pin_harness``：先结算到期的试用，再把当前覆盖层
 钉进运行上下文。钉住之后这一章不再跟着库变。
@@ -33,6 +34,9 @@ from regent.novel.harnessing.surface import (
 from regent.novel.infrastructure.models import ChapterRunModel, HarnessLibraryModel
 
 TRIAL_CHAPTERS = 3
+# 试用章首稿比试用前长出这么多倍（且超长）就回退：加戏的覆盖层先让初稿变长，
+# 删段、截断、首过失败都跟在后面。
+TRIAL_DRAFT_GROWTH = 1.2
 
 
 def _first_pass(run: ChapterRunModel) -> bool | None:
@@ -102,18 +106,45 @@ def _overlay_of(run: ChapterRunModel) -> str:
     return str((run.generation_context or {}).get("harness_overlay_id") or "")
 
 
+def _draft_chars(run: ChapterRunModel) -> int | None:
+    """这一章首稿的字数；没记 ``draft_chars`` 的老运行从首次删段或入库正文推。"""
+    production = (run.generation_context or {}).get("production") or {}
+    if production.get("draft_chars"):
+        return int(production["draft_chars"])
+    for item in production.get("fit_results") or []:
+        if str(item.get("tag") or "").startswith("write:"):
+            return int(item.get("chars_before") or 0) or None
+    if run.state == ChapterRunState.CANONIZED.value and run.content:
+        return len(run.content)
+    return None
+
+
+def _median(values: list[int]) -> int:
+    ordered = sorted(values)
+    if not ordered:
+        return 0
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) // 2
+
+
 async def first_pass_baseline(
     session: AsyncSession, work_id: uuid.UUID, *, before_chapter: int
 ) -> dict[str, int]:
-    """试用前最近几章的一次过率；认不出首过信号的章（别的执行臂）不算。"""
+    """试用前最近几章的一次过率与首稿字数中位数；认不出首过信号的章（别的执行臂）不算。"""
     low = max(1, before_chapter - TRIAL_CHAPTERS)
     runs = await _latest_runs(session, work_id, low=low, high=before_chapter - 1)
-    seen = [
-        bool(_first_pass(run)) and not failed
+    counted = [
+        (run, failed)
         for run, failed in runs
         if run.state == ChapterRunState.CANONIZED.value and _first_pass(run) is not None
     ]
-    return {"chapters": len(seen), "ok": sum(1 for item in seen if item)}
+    seen = [bool(_first_pass(run)) and not failed for run, failed in counted]
+    drafts = [n for n in (_draft_chars(run) for run, _ in counted) if n]
+    return {
+        "chapters": len(seen),
+        "ok": sum(1 for item in seen if item),
+        "draft_median": _median(drafts),
+    }
 
 
 async def trial_outcome(session: AsyncSession, entry: HarnessLibraryModel) -> dict[str, int]:
@@ -123,27 +154,47 @@ async def trial_outcome(session: AsyncSession, entry: HarnessLibraryModel) -> di
     试用首章那一次看的全是试用前的章，不算。
     """
     if entry.source_work_id is None:
-        return {"chapters": 0, "ok": 0, "lost": 0}
+        return {"chapters": 0, "ok": 0, "lost": 0, "draft_median": 0}
     since = int(entry.since_chapter or 1)
     runs = await _latest_runs(session, entry.source_work_id, low=since, overlay_id=str(entry.id))
     chapters = ok = lost = 0
+    drafts: list[int] = []
     for run, failed in runs:
         if run.state == ChapterRunState.CANONIZED.value:
             chapters += 1
             ok += 1 if _first_pass(run) and not failed else 0
         elif failed:
             chapters += 1
+        if run.state == ChapterRunState.CANONIZED.value or failed:
+            drafts += [n for n in (_draft_chars(run),) if n]
         if int(run.chapter_no) > since and _keeps_reading(run) is False:
             lost += 1
         if chapters >= TRIAL_CHAPTERS:
             break
-    return {"chapters": chapters, "ok": ok, "lost": lost}
+    return {"chapters": chapters, "ok": ok, "lost": lost, "draft_median": _median(drafts)}
+
+
+def drafts_grew(outcome: dict[str, int], baseline: dict[str, Any]) -> bool:
+    """试用章首稿中位数超长，且比试用前长出 ``TRIAL_DRAFT_GROWTH`` 倍以上。"""
+    from regent.novel.application.directing_chapter import MAX_CHAPTER_CHARS
+
+    trial = int(outcome.get("draft_median") or 0)
+    before = int(baseline.get("draft_median") or 0)
+    return bool(before) and trial > MAX_CHAPTER_CHARS and trial > before * TRIAL_DRAFT_GROWTH
 
 
 def trial_passes(outcome: dict[str, int], baseline: dict[str, Any]) -> bool:
-    """一次过率不低于基线；试用前追读自评判「会追」的，试用中不能转成「不追」。"""
+    """一次过率不低于基线；试用前追读自评判「会追」的，试用中不能转成「不追」；
+    首稿不能明显变长。"""
     if baseline.get("keeps_reading") is True and int(outcome.get("lost") or 0) > 0:
         return False
+    if drafts_grew(outcome, baseline):
+        return False
+    return pass_rate_holds(outcome, baseline)
+
+
+def pass_rate_holds(outcome: dict[str, int], baseline: dict[str, Any]) -> bool:
+    """一次过率不低于基线；没有满窗基线时三章至少两章一次过。"""
     chapters = int(outcome.get("chapters") or 0)
     ok = int(outcome.get("ok") or 0)
     base_n = int(baseline.get("chapters") or 0)
@@ -172,6 +223,12 @@ async def settle_trial(session: AsyncSession, work_id: uuid.UUID) -> HarnessLibr
         outcome = await trial_outcome(session, entry)
         if outcome["chapters"] < TRIAL_CHAPTERS:
             return entry
+        if "draft_median" not in (entry.baseline or {}):
+            # 早先入库的条目基线没记首稿字数，按入库时同一窗口补算
+            before = await first_pass_baseline(
+                session, work_id, before_chapter=int(entry.since_chapter or 1) - 1
+            )
+            entry.baseline = {**(entry.baseline or {}), "draft_median": before["draft_median"]}
         if trial_passes(outcome, entry.baseline or {}):
             for older in await _work_entries(session, work_id, "adopted"):
                 older.status = "superseded"
@@ -181,12 +238,19 @@ async def settle_trial(session: AsyncSession, work_id: uuid.UUID) -> HarnessLibr
             await library.mark_adopted(session, entry.id)
         else:
             base = entry.baseline or {}
-            reason = (
-                f"试用 {outcome['chapters']} 章一次过 {outcome['ok']} 章，"
-                f"低于基线 {base.get('ok', 0)}/{base.get('chapters', 0)}"
-            )
+            reasons = []
             if base.get("keeps_reading") is True and outcome.get("lost"):
-                reason = f"试用前追读自评判会追，试用中 {outcome['lost']} 次判不追；" + reason
+                reasons.append(f"试用前追读自评判会追，试用中 {outcome['lost']} 次判不追")
+            if drafts_grew(outcome, base):
+                reasons.append(
+                    f"试用首稿中位 {outcome['draft_median']} 字，试用前 {base['draft_median']} 字"
+                )
+            if not pass_rate_holds(outcome, base):
+                reasons.append(
+                    f"试用 {outcome['chapters']} 章一次过 {outcome['ok']} 章，"
+                    f"低于基线 {base.get('ok', 0)}/{base.get('chapters', 0)}"
+                )
+            reason = "；".join(reasons)
             await library.record_rollback(session, entry.id, reason=reason)
             entry.baseline = {**base, "trial": outcome}
     adopted = await _work_entries(session, work_id, "adopted")

@@ -794,6 +794,28 @@ async def test_arc_review_problems_trigger_round_on_passing_draft(novel_db, monk
 
 
 @pytest.mark.asyncio
+async def test_arc_review_that_keeps_reading_does_not_open_a_round(novel_db, monkeypatch):
+    """自评判会追时也会列问题：不开递归，原稿直接交付，只花执笔一次调用。"""
+    broker = FakeBroker({"ChapterProse": lambda *_: chapter.ChapterProse(content=GOOD)})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    run.generation_context["production"]["arc_review"] = {
+        "keeps_reading": True,
+        "problems": [{"chapters": [1], "problem": "主角一直被动", "fix": "让他先动手"}],
+    }
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(4):
+            if await _tick(session, run, work, broker):
+                break
+    production = run.generation_context["production"]
+    assert production["phase"] == "DONE"
+    assert [c["command"] for c in broker.calls] == ["v1:chapter_write"]
+    assert "h2_reference" not in production
+    assert production["draft_chars"] == len(GOOD)
+
+
+@pytest.mark.asyncio
 async def test_two_rounds_then_falls_back_to_repair(novel_db, monkeypatch):
     proposals = [
         _proposal(
@@ -1122,10 +1144,13 @@ def _canon_run(
     state="CANONIZED",
     attempt=1,
     keeps_reading=None,
+    draft_chars=None,
 ):
     production: dict = {"first_pass": first_pass}
     if keeps_reading is not None:
         production["arc_review"] = {"keeps_reading": keeps_reading}
+    if draft_chars is not None:
+        production["draft_chars"] = draft_chars
     return ChapterRunModel(
         id=uuid.uuid4(),
         work_id=work_id,
@@ -1316,8 +1341,48 @@ async def test_trial_rolls_back_when_readers_stop_following(novel_db):
         await pin_harness(s, work_id=work_id, context={})
         await s.refresh(trial)
         assert trial.status == "rolled_back"
-        assert trial.baseline["trial"] == {"chapters": 3, "ok": 3, "lost": 1}
+        assert trial.baseline["trial"] == {"chapters": 3, "ok": 3, "lost": 1, "draft_median": 0}
         assert "判不追" in trial.rollback_reason
+
+
+@pytest.mark.asyncio
+async def test_trial_rolls_back_when_first_drafts_grow_longer(novel_db):
+    """一次过率达标，但试用章首稿中位数超长且比试用前长两成以上：回退。"""
+    async with novel_db() as s:
+        _, work_id = await _seed_work(s)
+        for no, chars in ((2, 2400), (3, 2900), (4, 2700)):
+            s.add(_canon_run(work_id, no, draft_chars=chars))
+        trial = await lib.record_entry(
+            s,
+            scope="work",
+            scope_key=str(work_id),
+            source_work_id=work_id,
+            status="provisional",
+            overlay_after={"prompts": {"write_extra": "本章必须让对手当场现身。"}},
+            since_chapter=6,
+            baseline={"chapters": 3, "ok": 3, "keeps_reading": True},
+        )
+        tid = str(trial.id)
+        for no, chars in ((6, 3600), (7, 3300), (8, 4200)):
+            s.add(_canon_run(work_id, no, overlay_id=tid, draft_chars=chars))
+        await s.flush()
+        await pin_harness(s, work_id=work_id, context={})
+        await s.refresh(trial)
+        assert trial.status == "rolled_back"
+        assert trial.baseline["draft_median"] == 2700
+        assert trial.baseline["trial"]["draft_median"] == 3600
+        assert trial.rollback_reason == "试用首稿中位 3600 字，试用前 2700 字"
+
+
+def test_slightly_longer_first_drafts_still_pass_the_trial():
+    """首稿只长了一点、或者没超长，不算变长。"""
+    from regent.novel.harnessing.overlay import trial_passes
+
+    base = {"chapters": 3, "ok": 3, "draft_median": 2700}
+    assert trial_passes({"chapters": 3, "ok": 3, "draft_median": 3100}, base)
+    assert trial_passes({"chapters": 3, "ok": 3, "draft_median": 2480}, {**base, "draft_median": 1900})
+    assert not trial_passes({"chapters": 3, "ok": 3, "draft_median": 3300}, base)
+    assert trial_passes({"chapters": 3, "ok": 3, "draft_median": 3300}, {"chapters": 3, "ok": 3})
 
 
 @pytest.mark.asyncio
@@ -1342,8 +1407,12 @@ async def test_regenerating_a_failed_chapter_does_not_erase_it_from_the_trial(no
         s.add(_canon_run(work_id, 6, overlay_id=tid, attempt=2))
         s.add(_canon_run(work_id, 7, overlay_id=tid))
         await s.flush()
-        assert await trial_outcome(s, trial) == {"chapters": 3, "ok": 2, "lost": 0}
-        assert await first_pass_baseline(s, work_id, before_chapter=8) == {"chapters": 3, "ok": 2}
+        assert await trial_outcome(s, trial) == {"chapters": 3, "ok": 2, "lost": 0, "draft_median": 0}
+        assert await first_pass_baseline(s, work_id, before_chapter=8) == {
+            "chapters": 3,
+            "ok": 2,
+            "draft_median": 0,
+        }
 
 
 @pytest.mark.asyncio
@@ -1420,9 +1489,11 @@ async def test_baseline_only_counts_chapters_that_recorded_first_pass(novel_db):
         s.add(_canon_run(work_id, 8, first_pass=True))
         s.add(_canon_run(work_id, 9, first_pass=False))
         await s.commit()
-        assert await first_pass_baseline(s, work_id, before_chapter=4) == {"chapters": 0, "ok": 0}
+        base = await first_pass_baseline(s, work_id, before_chapter=4)
+        assert (base["chapters"], base["ok"]) == (0, 0)
         # 第 8、9 章写了真实信号，一过一没过——基线不是清一色 True
-        assert await first_pass_baseline(s, work_id, before_chapter=10) == {"chapters": 2, "ok": 1}
+        base = await first_pass_baseline(s, work_id, before_chapter=10)
+        assert (base["chapters"], base["ok"]) == (2, 1)
 
 
 def test_first_pass_reads_legacy_key_and_refuses_to_guess():

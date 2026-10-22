@@ -1186,6 +1186,8 @@ def accept_draft(
     """收下一稿：去重后不超长就落稿进 CHECK，超长先进 FIT 删段，不砍尾。"""
     production.pop("fit_truncated", None)
     body = dedupe_chapter_text(draft, previous_chapter_text(ctx))
+    # 首稿字数：覆盖层试用拿它和试用前比，加戏的覆盖层会先在这里露出来
+    production.setdefault("draft_chars", len(body))
     if len(body) <= MAX_CHAPTER_CHARS:
         _store_prose(run, production, body)
         production["phase"] = "CHECK"

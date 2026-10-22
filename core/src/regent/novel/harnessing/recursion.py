@@ -129,7 +129,11 @@ def arc_issues(production: dict[str, Any]) -> list[str]:
 
 
 def round_trigger(production: dict[str, Any], *, fails: list[str]) -> str:
-    """该不该开一轮递归：硬门没过开 check 轮；过了但追读自评报问题开一次 arc 轮。"""
+    """该不该开一轮递归：硬门没过开 check 轮；过了但追读自评判「不追」开一次 arc 轮。
+
+    自评判「会追」时也会列问题；按「有问题就开」会让每个自评章都多花一轮、
+    交付重写稿，而追读自评分不出重写稿是否更好。
+    """
     if production.get("h2_stop"):
         return ""
     rounds = int(production.get("h2_round") or 0)
@@ -137,7 +141,9 @@ def round_trigger(production: dict[str, Any], *, fails: list[str]) -> str:
         return ""
     if fails:
         return "check"
-    if rounds == 0 and not production.get("h2_arc_done") and arc_issues(production):
+    review = production.get("arc_review")
+    lost = isinstance(review, dict) and review.get("keeps_reading") is False
+    if rounds == 0 and not production.get("h2_arc_done") and lost:
         return "arc"
     return ""
 
