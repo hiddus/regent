@@ -79,6 +79,12 @@ SYMBOL_CHECKS = [
     ("regent.novel.application.directing_chapter", "length_brief", "改稿入参带现成字数"),
     ("regent.novel.harnessing.surface", "BASE_PACK_VERSION", "新运行钉 base/v3，旧运行按钉住的版本回放"),
     ("regent.novel.application.directing_chapter", "CHAPTER_LENGTH_RULE", "执笔与改稿提示首尾各一次字数规则"),
+    ("regent.novel.harnessing.surface", "upgrade_prompts", "覆盖层提示只能追加，旧整段替换钉住时转成追加"),
+    ("regent.novel.application.directing_chapter", "h2_repair_system", "改稿提示接覆盖层追加的指引"),
+    ("regent.novel.application.directing_chapter", "write_canon", "执笔载荷只带相关事实"),
+    ("regent.novel.application.directing_chapter", "FRONT_GATE_MARK", "前置门删金手指条款，老运行回放照旧"),
+    ("regent.novel.harnessing.library", "merge_overlapping", "入库时合并重叠经验"),
+    ("regent.novel.harnessing.library", "promotion_candidates", "晋级候选清单"),
     ("regent.novel.application.works_advance", "clear_last_error", "入正史时清掉上一次的失败原因"),
     ("regent.novel.application.works_constants", "GENRE_MAX_CHARS", "开书/澄清写 genre 前收到列宽"),
 ]

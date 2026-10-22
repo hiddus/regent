@@ -73,8 +73,13 @@ def front_gate_writer_hint(
     cast: dict[str, Any] | list[str] | None = None,
     world_bible: dict[str, Any] | None = None,
     reader_contract: dict[str, Any] | None = None,
+    power_clause: bool = False,
 ) -> str:
-    """执笔 system 追加：把易拖到责编的硬伤提前写死。"""
+    """执笔 system 追加：把易拖到责编的硬伤提前写死。
+
+    ``power_clause`` 只给回放用：不分题材要求金手指外显的旧条款已删，
+    此前写下的运行要原样复原系统提示，``prompt_hash`` 才对得上。
+    """
     parts: list[str] = []
     style_hint = prose_style_writer_hint(prose_style)
     if style_hint:
@@ -103,10 +108,19 @@ def front_gate_writer_hint(
         + identity
         + "禁止用『操作员+代号』等非卡司元叙事账号称呼叙述者；"
         "章题人名须与正文宿主/卡司一致；"
-        f"作品禁用={avoid_txt}。"
+        + (
+            "金手指/系统规则须在正文被读者看见（能做/不能做/代价至少落地一处），禁止只甩黑话面板；"
+            if power_clause
+            else ""
+        )
+        + f"作品禁用={avoid_txt}。"
     )
     if int(chapter_no) == 1:
-        parts.append("首章必须让读者站稳：谁在壳里、眼前压力是什么。")
+        parts.append(
+            "首章必须让读者站稳：谁在壳里、金手指怎么用、眼前压力是什么。"
+            if power_clause
+            else "首章必须让读者站稳：谁在壳里、眼前压力是什么。"
+        )
     return " ".join(parts)
 
 

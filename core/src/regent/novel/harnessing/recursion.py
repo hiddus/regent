@@ -32,12 +32,14 @@ from regent.novel.application.directing_types import H2_ARCHITECTURE
 from regent.novel.harnessing.surface import (
     DEFAULT_KNOB_RANGES,
     HOOK_CONDITIONS,
+    LEGACY_PROMPTS,
     SKILL_CONDITIONS,
     SOFT_CHECK_KINDS,
     book_terms,
     flatten,
     load_improver_prompt,
     merge_overrides,
+    upgrade_prompts,
     validate_overrides,
 )
 
@@ -185,7 +187,9 @@ async def library_hits(
 
 def _config_view(config: Any) -> dict[str, Any]:
     return {
-        "prompts": {key: config.get_prompt(key) for key in ("write", "repair")},
+        "prompts": {
+            key: config.get_prompt(key) for key in ("write", "repair", "write_extra", "repair_extra")
+        },
         "knobs": {
             key: {"value": config.get_knob(key), "min": spec["min"], "max": spec["max"]}
             for key, spec in DEFAULT_KNOB_RANGES.items()
@@ -200,8 +204,8 @@ def _config_view(config: Any) -> dict[str, Any]:
 def _surface_rules() -> dict[str, Any]:
     return {
         "editable": [
-            "prompts.write",
-            "prompts.repair",
+            "prompts.write_extra",
+            "prompts.repair_extra",
             "knobs",
             "skills",
             "soft_checks",
@@ -277,12 +281,17 @@ def _claims(path: tuple[str, ...], edits: list[dict[str, Any]], reference: str =
         if quotes and haystack and not any(_squash(q) in haystack for q in quotes):
             continue
         claimed = str(edit.get("path") or "").strip()
+        claimed = _UPGRADED_PATHS.get(claimed, claimed)
         if claimed and (dotted == claimed or dotted.startswith(f"{claimed}.")):
             return True
         what = str(edit.get("what") or "")
         if dotted in what or leaf in what:
             return True
     return False
+
+
+# 模型整段改写的 prompts.write 已被 upgrade_prompts 转成 write_extra，认账跟着转。
+_UPGRADED_PATHS = {f"prompts.{old}": f"prompts.{new}" for old, new in LEGACY_PROMPTS.items()}
 
 
 def back_edits(
@@ -358,7 +367,10 @@ async def propose_tick(
         candidate: HarnessCandidate = getattr(proposal, kind)
         edits = [edit.model_dump() for edit in candidate.edits]
         overrides, rejected = validate_overrides(
-            candidate.overrides, config, book_terms=terms, generic=kind == "generic"
+            upgrade_prompts(candidate.overrides, current=config),
+            config,
+            book_terms=terms,
+            generic=kind == "generic",
         )
         overrides, unclaimed = back_edits(edits, overrides, str(reference.get("draft") or ""))
         candidates.append(
@@ -532,6 +544,9 @@ class GenericScreen(BaseModel):
         description="这条通用经验是否其实依赖本书专有的物件、设定或情节"
     )
     reason: str = Field(default="", description="依赖了本书的什么；不依赖就留空")
+    genre_only: bool = Field(
+        default=False, description="不依赖本书，但只对 genre 这一类型的书成立，换了类型就不适用"
+    )
 
 
 def finish_round(run: Any, production: dict[str, Any]) -> None:
@@ -637,6 +652,7 @@ async def screen_tick(
         "observation": str(pending.get("observation") or ""),
         "overrides": pending.get("overrides") or {},
         "book_terms": book_terms(ctx, cast),
+        "genre": str(getattr(work, "genre", "") or ""),
         "chapter": _plan_view(ctx, production),
         "reference_draft": draft_view(reference.get("draft")),
     }
@@ -669,6 +685,7 @@ async def screen_tick(
     else:
         production["h2_screen"] = {
             "book_specific": bool(verdict.book_specific),
+            "genre_only": bool(verdict.genre_only),
             "reason": str(verdict.reason or "")[:200],
         }
     finish_round(run, production)

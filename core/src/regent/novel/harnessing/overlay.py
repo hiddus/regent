@@ -3,7 +3,8 @@
 一章递归交付的稿子过了硬门，这一轮的配置修改叠到本书覆盖层上，进入试用
 （provisional，一本书同时只有一条）。之后用这层配置写的章节攒够
 ``TRIAL_CHAPTERS`` 章就判定：一次过率不低于试用前同样章数的基线就采纳，
-否则回退到上一层。没有基线时，三章里至少两章一次过才采纳。
+否则回退到上一层。没有基线时，三章里至少两章一次过才采纳。试用前追读自评
+判「会追」的，试用中只要有一次判「不追」也回退。
 
 新章节运行创建时调用 ``pin_harness``：先结算到期的试用，再把当前覆盖层
 钉进运行上下文。钉住之后这一章不再跟着库变。
@@ -27,6 +28,7 @@ from regent.novel.harnessing.surface import (
     load_harness,
     mentions_names,
     merge_overrides,
+    upgrade_prompts,
 )
 from regent.novel.infrastructure.models import ChapterRunModel, HarnessLibraryModel
 
@@ -88,6 +90,14 @@ async def _latest_runs(
     return [(latest[no], no in failed) for no in sorted(latest)]
 
 
+def _keeps_reading(run: ChapterRunModel) -> bool | None:
+    """这一章动笔前做的追读自评；这一章没做就是 None。"""
+    review = ((run.generation_context or {}).get("production") or {}).get("arc_review")
+    if isinstance(review, dict) and "keeps_reading" in review:
+        return bool(review["keeps_reading"])
+    return None
+
+
 def _overlay_of(run: ChapterRunModel) -> str:
     return str((run.generation_context or {}).get("harness_overlay_id") or "")
 
@@ -107,28 +117,33 @@ async def first_pass_baseline(
 
 
 async def trial_outcome(session: AsyncSession, entry: HarnessLibraryModel) -> dict[str, int]:
-    """钉着这条覆盖层写完（入库或终止失败）的前几章；终止失败过的章不算一次过。"""
+    """钉着这条覆盖层写完（入库或终止失败）的前几章；终止失败过的章不算一次过。
+
+    ``lost`` 数的是试用章动笔前判「不追了」的追读自评。自评看的是这一章之前的几章，
+    试用首章那一次看的全是试用前的章，不算。
+    """
     if entry.source_work_id is None:
-        return {"chapters": 0, "ok": 0}
-    runs = await _latest_runs(
-        session,
-        entry.source_work_id,
-        low=int(entry.since_chapter or 1),
-        overlay_id=str(entry.id),
-    )
-    chapters = ok = 0
+        return {"chapters": 0, "ok": 0, "lost": 0}
+    since = int(entry.since_chapter or 1)
+    runs = await _latest_runs(session, entry.source_work_id, low=since, overlay_id=str(entry.id))
+    chapters = ok = lost = 0
     for run, failed in runs:
         if run.state == ChapterRunState.CANONIZED.value:
             chapters += 1
             ok += 1 if _first_pass(run) and not failed else 0
         elif failed:
             chapters += 1
+        if int(run.chapter_no) > since and _keeps_reading(run) is False:
+            lost += 1
         if chapters >= TRIAL_CHAPTERS:
             break
-    return {"chapters": chapters, "ok": ok}
+    return {"chapters": chapters, "ok": ok, "lost": lost}
 
 
 def trial_passes(outcome: dict[str, int], baseline: dict[str, Any]) -> bool:
+    """一次过率不低于基线；试用前追读自评判「会追」的，试用中不能转成「不追」。"""
+    if baseline.get("keeps_reading") is True and int(outcome.get("lost") or 0) > 0:
+        return False
     chapters = int(outcome.get("chapters") or 0)
     ok = int(outcome.get("ok") or 0)
     base_n = int(baseline.get("chapters") or 0)
@@ -166,14 +181,13 @@ async def settle_trial(session: AsyncSession, work_id: uuid.UUID) -> HarnessLibr
             await library.mark_adopted(session, entry.id)
         else:
             base = entry.baseline or {}
-            await library.record_rollback(
-                session,
-                entry.id,
-                reason=(
-                    f"试用 {outcome['chapters']} 章一次过 {outcome['ok']} 章，"
-                    f"低于基线 {base.get('ok', 0)}/{base.get('chapters', 0)}"
-                ),
+            reason = (
+                f"试用 {outcome['chapters']} 章一次过 {outcome['ok']} 章，"
+                f"低于基线 {base.get('ok', 0)}/{base.get('chapters', 0)}"
             )
+            if base.get("keeps_reading") is True and outcome.get("lost"):
+                reason = f"试用前追读自评判会追，试用中 {outcome['lost']} 次判不追；" + reason
+            await library.record_rollback(session, entry.id, reason=reason)
             entry.baseline = {**base, "trial": outcome}
     adopted = await _work_entries(session, work_id, "adopted")
     if not adopted:
@@ -186,7 +200,8 @@ async def pin_harness(
 ) -> None:
     """新运行创建时钉住基础包与本书覆盖层。"""
     entry = await settle_trial(session, work_id)
-    overlay = dict(entry.overlay_after or {}) if entry is not None else {}
+    # 早期条目整段替换过执笔提示；新运行一律转成追加，基础包升级才到得了这本书。
+    overlay = upgrade_prompts(entry.overlay_after or {}) if entry is not None else {}
     config = apply_overrides(load_harness(BASE_HARNESS_ID), overlay)
     context["harness_id"] = BASE_HARNESS_ID
     context["harness_hash"] = config.content_hash
@@ -205,7 +220,7 @@ async def record_verified_round(
     overrides = production.get("h2_overrides") or {}
     if not overrides:
         return None
-    from regent.novel.application.directing_chapter import h2_config
+    from regent.novel.application.directing_chapter import h2_config, latest_arc_review
 
     ctx = run.generation_context or {}
     lesson = production.get("h2_lesson") or {}
@@ -221,22 +236,34 @@ async def record_verified_round(
         and isinstance(screen, dict)
         and screen.get("book_specific") is False
     )
+    genre = str(getattr(work, "genre", "") or "")
+    # 只对本类型成立的通用经验进类型范围：同类型的书检索得到，别的类型看不见。
+    scope = "work"
+    if generic:
+        scope = "genre" if screen.get("genre_only") and genre else "global"
     work_id = getattr(work, "id", None)
     chapter_no = int(getattr(run, "chapter_no", 0) or 0)
     trial_open = bool(await _work_entries(session, work_id, "provisional"))
     codes = [code for code in lesson.get("failure_codes") or [] if code]
     plan = production.get("chapter_plan") or ctx.get("target_node") or {}
+    baseline = await first_pass_baseline(session, work_id, before_chapter=chapter_no)
+    review = latest_arc_review(ctx, production)
+    if "keeps_reading" in review:
+        baseline["keeps_reading"] = bool(review["keeps_reading"])
     entry = await library.record_entry(
         session,
-        scope="global" if generic else "work",
-        scope_key="" if generic else str(work_id),
-        genre_tag=str(getattr(work, "genre", "") or ""),
+        scope=scope,
+        scope_key=str(work_id) if scope == "work" else "",
+        genre_tag=genre,
         chapter_role="payoff" if isinstance(plan, dict) and plan.get("shows_rule") else "chapter",
         failure_code=codes[0] if codes else "arc" if lesson.get("trigger") == "arc" else "",
         config_tree=h2_config(ctx, production).tree,
         config_diff=overrides,
         experience=experience,
-        evidence_refs=[str(run.id)],
+        evidence_refs=[
+            str(run.id),
+            *(f"{library.CITE_PREFIX}{hit}" for hit in lesson.get("cited") or []),
+        ],
         parent_entry_id=ctx.get("harness_overlay_id") or None,
         source_work_id=work_id,
         source_run_id=getattr(run, "id", None),
@@ -246,9 +273,12 @@ async def record_verified_round(
         if trial_open
         else merge_overrides(ctx.get("harness_overlay") or {}, overrides),
         since_chapter=chapter_no + 1,
-        baseline=await first_pass_baseline(session, work_id, before_chapter=chapter_no),
+        baseline=baseline,
     )
     for hit in lesson.get("cited") or []:
         await library.mark_effective(session, hit)
+    # 库只在这里长，整理也放在这里：没有别的定时任务会去跑它。
+    await library.merge_overlapping(session)
+    await library.prune_unused(session)
     production["h2_recorded"] = str(entry.id)
     return entry

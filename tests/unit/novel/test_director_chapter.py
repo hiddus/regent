@@ -46,6 +46,7 @@ from regent.novel.application.directing_chapter import (
     rhythm_mismatch,
     stage_position,
     stray_names,
+    write_canon,
 )
 from regent.novel.application.generation import BookRhythm, CanonExtraction, rhythm_problems
 from regent.novel.application.chapter_review import validate_chapter
@@ -1231,6 +1232,48 @@ def test_length_brief_gives_the_count_and_the_gap():
     assert length_brief("字" * 2300) == {"current_chars": 2300, "min_chars": 2000, "max_chars": 2500}
     assert length_brief("字" * 3000)["need_cut"] == 3000 - FIT_TARGET_CHARS
     assert length_brief("字" * 1800)["need_add"] == 200
+
+
+def _fact(no: int, *entities: str) -> dict:
+    return {
+        "statement": f"第{no}章的事：{'、'.join(entities)}",
+        "quote": "原文摘录" * 10,
+        "entities": ["陈默", *entities],
+        "known_by": ["陈默"],
+        "chapter_no": no,
+        "volume_no": 1,
+        "confidence": 1.0,
+        "source_tracking": {"take_id": "scene0:take1", "source_hash": "x" * 64},
+    }
+
+
+def test_power_clause_stays_only_for_runs_written_before_it_was_dropped():
+    from regent.novel.application.directing_chapter import FRONT_GATE_MARK, _writer_system
+
+    ctx = _run().generation_context
+    # 老运行没有标记：回放照旧带金手指条款，prompt_hash 对得上
+    assert "金手指" in _writer_system(ctx, {})
+    assert "金手指" not in _writer_system({**ctx, "front_gate": FRONT_GATE_MARK}, {})
+
+
+def test_write_canon_keeps_recent_and_plan_relevant_facts_only():
+    canon = [_fact(1, "铜壳怀表"), _fact(1, "旧照片"), *[_fact(5, f"零件{i}") for i in range(45)], _fact(6, "门槛石")]
+    data = {
+        "canon": canon,
+        "chapter_no": 7,
+        "production": {"chapter_plan": {"choice": "陈默打开那只铜壳怀表"}},
+    }
+    cast = {"陈默": {}}
+    # 没有标记的老运行：整份原样，回放的 input_hash 不变
+    assert write_canon(data, cast) == canon
+
+    kept = write_canon({**data, "write_canon": "relevant"}, cast)
+    statements = [fact["statement"] for fact in kept]
+    assert statements[0] == "第1章的事：铜壳怀表"
+    assert "第1章的事：旧照片" not in statements
+    assert statements[-1] == "第6章的事：门槛石"
+    assert len(kept) == 1 + 40
+    assert set(kept[0]) == {"statement", "known_by", "chapter_no"}
 
 
 @pytest.mark.parametrize("schema", [ChapterFacts, CanonExtraction])

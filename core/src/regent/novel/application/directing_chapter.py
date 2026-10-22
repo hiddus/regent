@@ -206,7 +206,14 @@ class PlanRepeated(RuntimeError):
 
 
 class ChapterProse(BaseModel):
-    content: str = Field(min_length=800, max_length=12000)
+    # provider 把 Schema 拼在系统提示最末，模型看到的范围要和字数规则一致；
+    # 校验仍放宽到 800–12000：超长交给 FIT 删段，拒收只会多一次整章重写。
+    content: str = Field(
+        min_length=800,
+        max_length=12000,
+        description=f"这一章的正文，{MIN_CHAPTER_CHARS + 1}~{MAX_CHAPTER_CHARS - 1}字",
+        json_schema_extra={"minLength": MIN_CHAPTER_CHARS + 1, "maxLength": MAX_CHAPTER_CHARS - 1},
+    )
 
 
 class ChapterFitCut(BaseModel):
@@ -306,6 +313,52 @@ def open_promises(ctx: dict[str, Any] | None) -> list[dict[str, Any]]:
     return found
 
 
+# 执笔只需要事实本身：原文摘录与溯源字段占了 canon 的大半，每次执笔、探针、
+# 后继正文都整份带上。新运行在 ASSEMBLE 时打 ``write_canon`` 标记；没有标记的
+# 老运行照旧整份，回放的 input_hash 不变。
+WRITE_CANON_MARK = "relevant"
+# 前置门提示删了不分题材的金手指条款；没有这个标记的老运行回放时照旧带上它。
+FRONT_GATE_MARK = "no_power_clause"
+WRITE_CANON_RECENT_CHAPTERS = 2
+WRITE_CANON_RECENT_MAX = 40
+WRITE_CANON_EARLIER_MAX = 20
+_CANON_BOOKKEEPING = ("quote", "source_tracking", "confidence", "volume_no", "entities")
+
+
+def _fact_view(fact: Any) -> Any:
+    if not isinstance(fact, dict) or not (fact.get("statement") or fact.get("content")):
+        return fact
+    return {key: value for key, value in fact.items() if key not in _CANON_BOOKKEEPING}
+
+
+def write_canon(data: dict[str, Any], cast: dict[str, Any]) -> list[Any]:
+    """这一章用得上的事实：最近两章的最多 40 条，更早的只留实体在章纲里出现过的、最多 20 条。
+
+    两份配额分开算：最近两章就能写满 80 条，合在一起截尾会把更早的相关事实全挤掉。
+    """
+    canon = list(data.get("canon") or [])
+    if data.get("write_canon") != WRITE_CANON_MARK:
+        return canon
+    production = data.get("production") if isinstance(data.get("production"), dict) else {}
+    plan = production.get("chapter_plan") or data.get("target_node") or {}
+    plan_text = json.dumps(plan, ensure_ascii=False)
+    names = {str(name) for name in cast or {}}
+    floor = int(data.get("chapter_no") or 1) - WRITE_CANON_RECENT_CHAPTERS
+    recent: list[int] = []
+    earlier: list[int] = []
+    for index, fact in enumerate(canon):
+        if not isinstance(fact, dict) or int(fact.get("chapter_no") or 0) >= floor:
+            recent.append(index)
+            continue
+        cues = [
+            str(e) for e in fact.get("entities") or [] if len(str(e)) >= 2 and str(e) not in names
+        ]
+        if any(cue in plan_text for cue in cues):
+            earlier.append(index)
+    keep = set(recent[-WRITE_CANON_RECENT_MAX:]) | set(earlier[-WRITE_CANON_EARLIER_MAX:])
+    return [_fact_view(fact) for index, fact in enumerate(canon) if index in keep]
+
+
 def build_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> dict[str, Any]:
     data = ctx or {}
     return {
@@ -317,7 +370,7 @@ def build_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> dic
         "target_node": data.get("target_node") or {},
         "previous_chapter": previous_chapter_text(data)[-500:],
         "earlier_results": [item["result"] for item in previous_plans(data)],
-        "canon": data.get("canon") or [],
+        "canon": write_canon(data, cast),
         "open_promises": open_promises(data),
     }
 
@@ -344,6 +397,7 @@ def _writer_body(ctx: dict[str, Any] | None, cast: dict[str, Any], *, base: str)
         reader_contract=(
             data.get("reader_contract") if isinstance(data.get("reader_contract"), dict) else None
         ),
+        power_clause=data.get("front_gate") != FRONT_GATE_MARK,
     )
     if hint:
         return base + " " + hint
@@ -400,12 +454,31 @@ def writing_view(ctx: dict[str, Any] | None, production: dict[str, Any]) -> dict
     }
 
 
+def _with_extra(config: Any, key: str, fallback: str) -> str:
+    """基础提示 + 覆盖层追加的指引；没有追加时与基础提示逐字相同。"""
+    base = config.get_prompt(key) or fallback
+    extra = config.get_prompt(f"{key}_extra")
+    return base + "\n" + extra if extra else base
+
+
+def h2_repair_system(config: Any) -> str:
+    """追加的指引放在改稿提示正文之后，字数规则仍收在最末。"""
+    base = config.get_prompt("repair") or CHAPTER_REPAIR_SYSTEM
+    extra = config.get_prompt("repair_extra")
+    if not extra:
+        return base
+    tail = config.get_prompt("write_tail")
+    if tail and base.endswith(tail):
+        return base[: -len(tail)].rstrip("\n") + "\n" + extra + "\n" + tail
+    return base + "\n" + extra
+
+
 def h2_writer_system(
     ctx: dict[str, Any] | None, cast: dict[str, Any], config: Any, production: dict[str, Any]
 ) -> str:
     from regent.novel.harnessing.surface import resolve_hooks, resolve_skills
 
-    system = _writer_body(ctx, cast, base=config.get_prompt("write") or CHAPTER_WRITE_SYSTEM)
+    system = _writer_body(ctx, cast, base=_with_extra(config, "write", CHAPTER_WRITE_SYSTEM))
     memory = config.get_memory()
     if memory:
         system += "\n\n写作经验：\n" + memory
@@ -1633,7 +1706,7 @@ async def produce_chapter_tick(
         if _is_h2(production):
             config = h2_config(ctx, production)
             payload = h2_write_payload(ctx, cast, config)
-            system = config.get_prompt("repair") or CHAPTER_REPAIR_SYSTEM
+            system = h2_repair_system(config)
         else:
             payload = build_write_payload(ctx, cast)
             system = CHAPTER_REPAIR_SYSTEM

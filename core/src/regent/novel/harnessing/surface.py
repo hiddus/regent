@@ -35,9 +35,14 @@ FROZEN_KEYS: frozenset[str] = frozenset(
 EDITABLE_KEYS: frozenset[str] = frozenset(
     {"prompts", "knobs", "skills", "soft_checks", "hooks", "memory"}
 )
-EDITABLE_PROMPTS: frozenset[str] = frozenset({"write", "repair"})
+# 提示词只能追加指引：整段替换会把基础包钉死在抄写时的版本上，之后的基础包升级
+# 都到不了这本书。早期条目整段替换过 write/repair，只为钉着它们的老运行回放保留。
+EDITABLE_PROMPTS: frozenset[str] = frozenset({"write_extra", "repair_extra"})
+LEGACY_PROMPTS: dict[str, str] = {"write": "write_extra", "repair": "repair_extra"}
 PROMPT_MIN_CHARS = 20
 PROMPT_MAX_CHARS = 3000
+EXTRA_MIN_CHARS = 4
+EXTRA_MAX_CHARS = 600
 MEMORY_MAX_CHARS = 2000
 INSTRUCTION_MAX_CHARS = 300
 GUIDANCE_MAX_CHARS = 200
@@ -180,6 +185,66 @@ def load_harness(harness_id: str) -> ConfigTree:
     if kind != "base" or not version:
         raise ValueError(f"未知配置包: {harness_id}")
     return load_base_pack(version)
+
+
+def base_pack_versions() -> list[str]:
+    return sorted(path.name for path in (PACK_ROOT / "base").iterdir() if path.is_dir())
+
+
+_SENTENCE = re.compile(r"[^。！？!?\n]+[。！？!?]*")
+
+
+def _sentences(text: str) -> list[str]:
+    return [m.group(0).strip() for m in _SENTENCE.finditer(text or "") if m.group(0).strip()]
+
+
+def prompt_additions(text: str, known: list[str] | tuple[str, ...]) -> str:
+    """整段改写的提示词里，已知提示（各版基础包、当前生效的）都没有的句子。"""
+    seen = {"".join(s.split()) for prompt in known for s in _sentences(prompt)}
+    added: list[str] = []
+    for sentence in _sentences(text):
+        key = "".join(sentence.split())
+        if key not in seen:
+            seen.add(key)
+            added.append(sentence)
+    out = ""
+    for sentence in added:
+        if len(out) + len(sentence) > EXTRA_MAX_CHARS:
+            break
+        out += sentence
+    return out
+
+
+def known_prompts(key: str, *extra: str) -> list[str]:
+    texts = [load_base_pack(version).get_prompt(key) for version in base_pack_versions()]
+    return [text for text in (*texts, *extra) if text]
+
+
+def upgrade_prompts(overrides: Any, *, current: ConfigTree | None = None) -> Any:
+    """把整段替换的 prompts.write / prompts.repair 改写成追加指引。
+
+    只留下各版基础包与当前生效提示里都没有的句子；改写了基础句的，整句当新增
+    追加（重复一遍基础句，好过把基础包钉死）。新增为空就整项丢掉。
+    """
+    if not isinstance(overrides, dict):
+        return overrides
+    out = deepcopy(overrides)
+    prompts = out.get("prompts")
+    if not isinstance(prompts, dict):
+        return out
+    for legacy, extra_key in LEGACY_PROMPTS.items():
+        if legacy not in prompts:
+            continue
+        text = str(prompts.pop(legacy) or "")
+        have = str(prompts.get(extra_key) or "")
+        own = [current.get_prompt(legacy), current.get_prompt(extra_key)] if current else []
+        added = prompt_additions(text, known_prompts(legacy, have, *own))
+        joined = (have + added)[:EXTRA_MAX_CHARS] if added else have
+        if joined:
+            prompts[extra_key] = joined
+    if not prompts:
+        out.pop("prompts")
+    return out
 
 
 def load_improver_prompt(kind: str) -> str:
@@ -379,8 +444,12 @@ def validate_overrides(
     *,
     book_terms: list[str] | tuple[str, ...] = (),
     generic: bool = False,
+    legacy: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
-    """只留下可编辑面里合法的修改，返回 (干净的覆盖层, 拒收理由)。"""
+    """只留下可编辑面里合法的修改，返回 (干净的覆盖层, 拒收理由)。
+
+    ``legacy`` 只给加载已钉住的覆盖层用：老条目整段替换过 write/repair，回放要原样复原。
+    """
     if not overrides:
         return {}, []
     if not isinstance(overrides, dict):
@@ -413,11 +482,16 @@ def validate_overrides(
         for key, item in value.items():
             try:
                 if top == "prompts":
-                    if key not in EDITABLE_PROMPTS:
-                        raise ValueError(f"不许改提示词 {key}")
-                    section[key] = _check_text(
-                        item, f"提示词 {key}", PROMPT_MIN_CHARS, PROMPT_MAX_CHARS
-                    )
+                    if key in EDITABLE_PROMPTS:
+                        section[key] = _check_text(
+                            item, f"提示词 {key}", EXTRA_MIN_CHARS, EXTRA_MAX_CHARS
+                        )
+                    elif legacy and key in LEGACY_PROMPTS:
+                        section[key] = _check_text(
+                            item, f"提示词 {key}", PROMPT_MIN_CHARS, PROMPT_MAX_CHARS
+                        )
+                    else:
+                        raise ValueError(f"不许改提示词 {key}（只能追加：write_extra / repair_extra）")
                 elif top == "knobs":
                     section[key] = validate_knob_value(key, item)
                 else:
@@ -458,7 +532,7 @@ def merge_overrides(lower: dict[str, Any] | None, upper: dict[str, Any] | None) 
 
 def apply_overrides(base: ConfigTree, overrides: dict[str, Any] | None) -> ConfigTree:
     """把覆盖层合并到基础配置上。非法修改丢弃，不进入配置。"""
-    clean, _ = validate_overrides(overrides or {}, base)
+    clean, _ = validate_overrides(overrides or {}, base, legacy=True)
     if not clean:
         return base
     merged = deepcopy(base.tree)

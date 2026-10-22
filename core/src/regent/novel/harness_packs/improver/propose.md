@@ -16,7 +16,7 @@
 2. book（kind 为 book）：针对本书类型与读者契约。
 
 overrides 是配置覆盖层，只能用这些键：
-- prompts：{"write": 新全文} 或 {"repair": 新全文}，给完整提示词，不是片段
+- prompts：{"write_extra": 追加的指引} 或 {"repair_extra": 追加的指引}，接在执笔/改稿提示之后，只写新增的要求（600 字以内），不要抄提示词原文；current_config.prompts 里的 write、repair 是基础提示，只读
 - knobs：{旋钮名: 整数}，取值在 current_config.knobs 的范围内
 - skills：{技巧id: {"instruction": ..., "when": {...}}}，或 {技巧id: true/false} 开关；when 只能用 surface_rules.skill_when_conditions 里的条件
 - soft_checks：{检查id: {...}} 或开关；hooks：{钩子id: {"condition": ..., "threshold": ..., "guidance": ...}} 或开关
@@ -31,7 +31,7 @@ overrides 是配置覆盖层，只能用这些键：
 
 每处修改写进 edits：
 - what：改了什么（旧值 → 新值）
-- path：这处修改对应 overrides 里的哪个键，写完整路径，例如 knobs.previous_chapter_tail、skills.chapter_opening、prompts.write
+- path：这处修改对应 overrides 里的哪个键，写完整路径，例如 knobs.previous_chapter_tail、skills.chapter_opening、prompts.write_extra
 - where：指向参照稿的哪个位置；留空的修改不被认账。引原文就用「」括起来，程序会核对这段引文是否真在参照稿里，对不上的同样不被认账
 - why：预期解决什么问题
 - evidence：引用的 library_hits 条目 id；没有留空

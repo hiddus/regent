@@ -46,6 +46,7 @@ from regent.novel.harnessing.surface import (
     resolve_skills,
     run_soft_checks,
     safe_pattern,
+    upgrade_prompts,
     validate_knob_value,
     validate_overrides,
 )
@@ -350,7 +351,11 @@ async def test_failed_check_runs_one_round_and_delivers_passing_probe(novel_db, 
         assert production["h2_lesson"]["edits"] == {
             "generic": compose_request["candidates"][0]["edits"]
         }
-        assert production["h2_lesson"]["screen"] == {"book_specific": False, "reason": ""}
+        assert production["h2_lesson"]["screen"] == {
+            "book_specific": False,
+            "genre_only": False,
+            "reason": "",
+        }
         # 筛查看到的是这条经验与随之采纳的修改
         screen_request = broker.calls[5]["payload"]
         assert screen_request["experience"] == "前章尾段太长时容易重演，缩到 300 字"
@@ -460,6 +465,7 @@ async def test_screen_demotes_book_specific_lesson_to_work_scope(novel_db, monke
         assert production["phase"] == "DONE"
         assert production["h2_lesson"]["screen"] == {
             "book_specific": True,
+            "genre_only": False,
             "reason": "齿距说的是本书那把铜钥匙的齿",
         }
         row = (await session.scalars(select(HarnessLibraryModel))).one()
@@ -468,6 +474,48 @@ async def test_screen_demotes_book_specific_lesson_to_work_scope(novel_db, monke
         # 修改本身仍然生效，只是不共享
         assert production["h2_overrides"] == generic
         assert row.overlay_after == generic
+
+
+@pytest.mark.asyncio
+async def test_screen_keeps_genre_only_lesson_in_its_genre(novel_db, monkeypatch):
+    """不依赖本书、只对本类型成立的经验进类型范围：同类型检索得到，别的类型看不见。"""
+    generic = {"memory": "线索要在主角动手之前就摆在读者眼前。"}
+
+    def _prose_for(payload, system, command):
+        return chapter.ChapterProse(content=GOOD if command.endswith(":generic") else SHORT)
+
+    broker = FakeBroker(
+        {
+            "ChapterProse": _prose_for,
+            "HarnessProposal": [_proposal(generic, {})],
+            "ComposeDecision": [
+                ComposeDecision(
+                    decision="adopt_generic",
+                    deliver="generic",
+                    observation="通用探针先摆出线索",
+                    experience="线索要在主角动手之前就摆在读者眼前。",
+                )
+            ],
+            "GenericScreen": [GenericScreen(book_specific=False, genre_only=True)],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(9):
+            if await _tick(session, run, work, broker):
+                break
+        await session.commit()
+        assert broker.calls[-1]["payload"]["genre"] == "悬疑"
+        row = (await session.scalars(select(HarnessLibraryModel))).one()
+        assert (row.scope, row.scope_key, row.genre_tag) == ("genre", "", "悬疑")
+        row.status = "adopted"
+        await session.flush()
+        same = await lib.search(session, work_id=uuid.uuid4(), genre_tag="悬疑")
+        other = await lib.search(session, work_id=uuid.uuid4(), genre_tag="言情")
+        assert [hit["id"] for hit in same] == [str(row.id)]
+        assert other == []
 
 
 @pytest.mark.asyncio
@@ -1066,8 +1114,18 @@ async def _seed_work(session):
 
 
 def _canon_run(
-    work_id, chapter_no, *, overlay_id="", first_pass=True, state="CANONIZED", attempt=1
+    work_id,
+    chapter_no,
+    *,
+    overlay_id="",
+    first_pass=True,
+    state="CANONIZED",
+    attempt=1,
+    keeps_reading=None,
 ):
+    production: dict = {"first_pass": first_pass}
+    if keeps_reading is not None:
+        production["arc_review"] = {"keeps_reading": keeps_reading}
     return ChapterRunModel(
         id=uuid.uuid4(),
         work_id=work_id,
@@ -1078,7 +1136,7 @@ def _canon_run(
         generation_context={
             "executor": H2,
             "harness_overlay_id": overlay_id,
-            "production": {"first_pass": first_pass},
+            "production": production,
         },
     )
 
@@ -1180,6 +1238,88 @@ async def test_trial_below_baseline_rolls_back_to_previous_overlay(novel_db):
         assert ctx["harness_overlay_id"] == str(adopted.id)
 
 
+NEW_RULE = "同一手段在同一章内不得重复使用。"
+
+
+def test_whole_prompt_rewrites_become_appended_guidance():
+    """抄了 v1 全文再加一句的整段替换，只留下那一句；基础包升级照样到得了这本书。"""
+    v1 = load_harness("base/v1")
+    legacy = {
+        "prompts": {"write": v1.get_prompt("write") + "\n" + NEW_RULE, "repair": v1.get_prompt("repair")},
+        "knobs": {"previous_chapter_tail": 300},
+    }
+    out = upgrade_prompts(legacy)
+    assert out == {"prompts": {"write_extra": NEW_RULE}, "knobs": {"previous_chapter_tail": 300}}
+    assert upgrade_prompts({"prompts": {"write": v1.get_prompt("write")}}) == {}
+
+    base = load_base_pack()
+    clean, errors = validate_overrides({"prompts": {"write": NEW_RULE * 3}}, base)
+    assert clean == {} and "只能追加" in errors[0]
+    # 钉着老覆盖层的运行照旧整段替换，回放的 prompt_hash 不变
+    assert apply_overrides(v1, legacy).get_prompt("write") == legacy["prompts"]["write"]
+
+    config = apply_overrides(base, out)
+    run = _run()
+    ctx = run.generation_context
+    system = chapter.h2_writer_system(ctx, ctx["production"]["cast"], config, ctx["production"])
+    assert system.startswith(chapter.CHAPTER_WRITE_SYSTEM + "\n" + NEW_RULE)
+    assert system.endswith("\n" + chapter.CHAPTER_LENGTH_RULE)
+    repair = chapter.h2_repair_system(apply_overrides(base, {"prompts": {"repair_extra": NEW_RULE}}))
+    assert repair.endswith("\n" + NEW_RULE + "\n" + chapter.CHAPTER_LENGTH_RULE)
+    assert chapter.h2_repair_system(base) == chapter.CHAPTER_REPAIR_SYSTEM
+
+
+@pytest.mark.asyncio
+async def test_pinning_converts_a_legacy_whole_prompt_overlay(novel_db):
+    v1 = load_harness("base/v1")
+    legacy = {"prompts": {"write": v1.get_prompt("write") + "\n" + NEW_RULE}}
+    async with novel_db() as s:
+        _, work_id = await _seed_work(s)
+        entry = await lib.record_entry(
+            s,
+            scope="work",
+            scope_key=str(work_id),
+            source_work_id=work_id,
+            status="adopted",
+            overlay_after=legacy,
+            since_chapter=2,
+        )
+        entry.decided_at = datetime.now(UTC)
+        ctx: dict = {}
+        await pin_harness(s, work_id=work_id, context=ctx)
+    assert ctx["harness_overlay"] == {"prompts": {"write_extra": NEW_RULE}}
+    pinned = apply_overrides(load_base_pack(), ctx["harness_overlay"])
+    assert pinned.get_prompt("write") == chapter.CHAPTER_WRITE_SYSTEM
+    assert ctx["harness_hash"] == pinned.content_hash
+
+
+@pytest.mark.asyncio
+async def test_trial_rolls_back_when_readers_stop_following(novel_db):
+    """一次过率达标，但试用前判会追、试用中判不追：回退。试用首章那次自评不算。"""
+    async with novel_db() as s:
+        _, work_id = await _seed_work(s)
+        trial = await lib.record_entry(
+            s,
+            scope="work",
+            scope_key=str(work_id),
+            source_work_id=work_id,
+            status="provisional",
+            overlay_after={"knobs": {"previous_chapter_tail": 300}},
+            since_chapter=5,
+            baseline={"chapters": 0, "ok": 0, "keeps_reading": True},
+        )
+        tid = str(trial.id)
+        s.add(_canon_run(work_id, 5, overlay_id=tid, keeps_reading=False))
+        s.add(_canon_run(work_id, 6, overlay_id=tid, keeps_reading=False))
+        s.add(_canon_run(work_id, 7, overlay_id=tid))
+        await s.flush()
+        await pin_harness(s, work_id=work_id, context={})
+        await s.refresh(trial)
+        assert trial.status == "rolled_back"
+        assert trial.baseline["trial"] == {"chapters": 3, "ok": 3, "lost": 1}
+        assert "判不追" in trial.rollback_reason
+
+
 @pytest.mark.asyncio
 async def test_regenerating_a_failed_chapter_does_not_erase_it_from_the_trial(novel_db):
     """覆盖层把一章写崩、重写后过了：试用仍记这一章没一次过，基线同一口径。"""
@@ -1202,7 +1342,7 @@ async def test_regenerating_a_failed_chapter_does_not_erase_it_from_the_trial(no
         s.add(_canon_run(work_id, 6, overlay_id=tid, attempt=2))
         s.add(_canon_run(work_id, 7, overlay_id=tid))
         await s.flush()
-        assert await trial_outcome(s, trial) == {"chapters": 3, "ok": 2}
+        assert await trial_outcome(s, trial) == {"chapters": 3, "ok": 2, "lost": 0}
         assert await first_pass_baseline(s, work_id, before_chapter=8) == {"chapters": 3, "ok": 2}
 
 
@@ -1357,6 +1497,51 @@ async def test_provisional_entry_is_visible_only_to_its_own_book(novel_db):
             "通用已采纳",
             "通用候选",
         }
+
+
+@pytest.mark.asyncio
+async def test_overlapping_candidates_merge_into_the_older_entry_on_the_same_shelf(novel_db):
+    lesson = "章末结果要落在这一次选择上，不要换一个人把同一个结果再演一遍。"
+    async with novel_db() as s:
+        older = await lib.record_entry(s, scope="global", experience=lesson, status="adopted")
+        older.created_at = datetime.now(UTC) - timedelta(days=1)
+        twin = await lib.record_entry(
+            s, scope="global", experience=lesson.replace("一次", "这次"), evidence_refs=["r2"]
+        )
+        twin.effective_count = 2
+        other_book = await lib.record_entry(s, scope="work", scope_key="b", experience=lesson)
+        unrelated = await lib.record_entry(s, scope="global", experience="前章尾段太长时缩到三百字。")
+        await s.flush()
+        assert await lib.merge_overlapping(s) == 1
+        assert twin.status == "merged" and twin.rollback_reason == f"并入 {older.id}"
+        assert older.effective_count == 2 and older.evidence_refs == ["r2"]
+        assert other_book.status == unrelated.status == "candidate"
+        assert str(twin.id) not in {h["id"] for h in await lib.search(s, limit=10)}
+
+
+@pytest.mark.asyncio
+async def test_promotion_lists_shared_entries_that_helped_another_book(novel_db):
+    home, guest = uuid.uuid4(), uuid.uuid4()
+    async with novel_db() as s:
+        shared = await lib.record_entry(
+            s, scope="global", experience="不要重演上一章结尾", status="adopted", source_work_id=home
+        )
+        lonely = await lib.record_entry(
+            s, scope="global", experience="只在本书用过", status="adopted", source_work_id=home
+        )
+        await lib.record_entry(
+            s,
+            scope="work",
+            scope_key=str(guest),
+            experience="借了别的书的经验",
+            source_work_id=guest,
+            evidence_refs=["run", f"{lib.CITE_PREFIX}{shared.id}"],
+        )
+        await s.flush()
+        found = await lib.promotion_candidates(s)
+        assert [item["id"] for item in found] == [str(shared.id)]
+        assert found[0]["works"] == sorted([str(home), str(guest)])
+        assert str(lonely.id) not in {item["id"] for item in found}
 
 
 @pytest.mark.asyncio
