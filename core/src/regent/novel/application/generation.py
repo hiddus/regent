@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -159,6 +159,12 @@ class ChapterReview(BaseModel):
 
 class CanonExtraction(BaseModel):
     facts: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+
+    @field_validator("facts", mode="before")
+    @classmethod
+    def _keep_first_facts(cls, value: Any) -> Any:
+        # 多给的截掉，不整次拒收。
+        return value[:40] if isinstance(value, list) else value
 
 
 def _visible_performances(run: ChapterRunModel) -> list[dict[str, Any]]:

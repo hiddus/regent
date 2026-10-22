@@ -1,0 +1,61 @@
+# 写作技巧（v1）。按本章视图按需加载，改进器可增删条目。
+# when：映射表示条件同时成立，列表表示任一成立。可用条件见 surface.SKILL_CONDITIONS。
+# mode：auto（按 when）/ always / off。
+
+reveal:
+  label: 揭示
+  trigger: 当章节职责是揭开一个伏笔或答案
+  when:
+    result_any: ["发现", "揭开", "知道了", "明白", "真相"]
+  instruction: >
+    揭示要让读者自己看出来，不要让角色讲出来。
+    先写角色看到了什么或听到了什么，再写他因此明白了什么，
+    不要写成"原来……"的总结句。
+
+action:
+  label: 打斗
+  trigger: 当章节职责是冲突或对抗
+  when:
+    choice_any: ["打", "战", "斗", "冲", "闯", "攻", "拼"]
+  instruction: >
+    动作戏用短句，一句一个动作。
+    不写内心独白，不解释招式名称，只写身体在做什么。
+    打完之后才允许写结果。
+
+relationship:
+  label: 关系戏
+  trigger: 当章节职责是人物关系变化
+  when:
+    choice_any: ["说", "谈", "问", "告诉", "道歉", "解释", "求"]
+  instruction: >
+    关系变化靠对话里的措辞变化体现，不靠旁白说明。
+    同一个人前后称呼变了，就是关系变了。
+
+transition:
+  label: 过渡
+  trigger: 当章节职责是时间或空间跳转
+  when:
+    result_any: ["到了", "来到", "第二天", "次日", "此后"]
+  instruction: >
+    过渡章只写一件小事，用这件事带出时间或地点的变化。
+    不要总结前几章，不要预告后面要发生什么。
+
+payoff:
+  label: 兑现
+  trigger: 当 shows_rule 为 true 或 payoff_due 为 true
+  when:
+    - shows_rule: true
+    - payoff_due: true
+  instruction: >
+    这一章要让读者答应的那件事当场发生。
+    不要铺垫，不要推迟，直接从压力写到场面。
+    发生之后立刻停，不要换一个人再演一遍。
+
+chapter_opening:
+  label: 章首承接
+  trigger: 当上一章停在动作中途
+  when:
+    previous_ends_mid_action: true
+  instruction: >
+    上一章停在半句话或一个动作中间，这一章第一句直接接上那个动作，
+    不要先回顾上一章发生了什么。

@@ -35,10 +35,12 @@ from regent.novel.harnessing.recursion import (
 )
 from regent.novel.harnessing.replay import check_write_replay, compute_payload_hash
 from regent.novel.harnessing.surface import (
+    BASE_HARNESS_ID,
     apply_overrides,
     book_terms,
     flatten,
     load_base_pack,
+    load_harness,
     load_improver_prompt,
     resolve_hooks,
     resolve_skills,
@@ -76,7 +78,7 @@ PRIOR = "上一章写的是码头的雾和一艘没有名字的船。"
 
 
 def _run(*, phase: str = "WRITE", content: str = "", executor: str = H2) -> SimpleNamespace:
-    base = load_base_pack("v1")
+    base = load_base_pack()
     return SimpleNamespace(
         id=uuid.uuid4(),
         chapter_no=2,
@@ -88,7 +90,7 @@ def _run(*, phase: str = "WRITE", content: str = "", executor: str = H2) -> Simp
         generation_context={
             "architecture_version": executor,
             "executor": executor,
-            "harness_id": "base/v1",
+            "harness_id": BASE_HARNESS_ID,
             "harness_hash": base.content_hash,
             "harness_overlay": {},
             "harness_overlay_id": "",
@@ -256,7 +258,7 @@ async def test_first_write_keeps_front_gate_hint_and_default_payload(monkeypatch
     assert "【前置硬约束】" in call["system"]
     assert call["system"].startswith(chapter._writer_system(ctx, cast))
     assert call["payload"] == chapter.build_write_payload(ctx, cast)
-    assert ctx["production"]["h2_effective_hash"] == load_base_pack("v1").content_hash
+    assert ctx["production"]["h2_effective_hash"] == load_base_pack().content_hash
 
 
 @pytest.mark.asyncio
@@ -336,7 +338,7 @@ async def test_failed_check_runs_one_round_and_delivers_passing_probe(novel_db, 
         assert run.content == GOOD
         assert (
             production["h2_effective_hash"]
-            == apply_overrides(load_base_pack("v1"), generic).content_hash
+            == apply_overrides(load_base_pack(), generic).content_hash
         )
         # 组合器看到了两个候选的原样修改与探针结果
         compose_request = broker.calls[4]["payload"]
@@ -365,6 +367,59 @@ async def test_failed_check_runs_one_round_and_delivers_passing_probe(novel_db, 
         assert rows[0].overlay_after == generic
         assert rows[0].since_chapter == 3
         assert production["h2_recorded"] == str(rows[0].id)
+
+
+@pytest.mark.asyncio
+async def test_proposal_with_only_one_candidate_still_runs_the_round(novel_db, monkeypatch):
+    generic = {"knobs": {"previous_chapter_tail": 300}}
+    # 真机 69f06a8b：模型只回了 generic，缺 book 字段
+    raw = {
+        "generic": {
+            "kind": "generic",
+            "edits": [e.model_dump() for e in _edits(generic, "前章尾段 500 → 300", "开头")],
+            "overrides": generic,
+        }
+    }
+
+    def _prose_for(payload, system, command):
+        if command == "v1:chapter_write":
+            return chapter.ChapterProse(content=SHORT)
+        return chapter.ChapterProse(content=GOOD)
+
+    broker = FakeBroker(
+        {
+            "ChapterProse": _prose_for,
+            "HarnessProposal": [HarnessProposal.model_validate(raw)],
+            "ComposeDecision": [
+                ComposeDecision(
+                    decision="adopt_generic",
+                    deliver="generic",
+                    observation="通用探针没有重演前章结尾",
+                    experience="前章尾段太长时容易重演，缩到 300 字",
+                )
+            ],
+            "GenericScreen": [GenericScreen(book_specific=False)],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(9):
+            if await _tick(session, run, work, broker):
+                break
+        await session.commit()
+        production = run.generation_context["production"]
+        assert production["phase"] == "DONE"
+        assert [c["command"] for c in broker.calls] == [
+            "v1:chapter_write",
+            "v1:h2:propose:r1",
+            "v1:h2:probe:r1:generic",
+            "v1:h2:compose:r1",
+            "v1:h2:screen:r1",
+        ]
+        assert [p.get("skipped") for p in production["h2_probes"]] == [False, True]
+        assert run.content == GOOD
 
 
 @pytest.mark.asyncio
@@ -829,9 +884,15 @@ def test_compose_never_delivers_failed_draft():
 
 
 def test_base_pack_matches_python_constants_and_defaults():
-    config = load_base_pack("v1")
+    config = load_base_pack()
+    assert BASE_HARNESS_ID == "base/v2"
     assert config.get_prompt("write") == chapter.CHAPTER_WRITE_SYSTEM
     assert config.get_prompt("repair") == chapter.CHAPTER_REPAIR_SYSTEM
+    # 已钉 base/v1 的旧运行照旧加载旧包，回放的 prompt_hash 不变
+    old = load_harness("base/v1")
+    assert old.content_hash != config.content_hash
+    assert old.get_prompt("write").endswith("正文两千字以上，两千五百字以内。")
+    assert old.tree["knobs"] == config.tree["knobs"]
     assert config.get_knob("open_promises_max") == 0
     assert config.get_memory() == ""
     run = _run()
@@ -843,7 +904,7 @@ def test_base_pack_matches_python_constants_and_defaults():
 
 
 def test_validate_overrides_rejects_frozen_unknown_and_unsafe():
-    base = load_base_pack("v1")
+    base = load_base_pack()
     clean, errors = validate_overrides(
         {
             "hard_gates": {"min_chars": 0},
@@ -875,7 +936,7 @@ def test_validate_overrides_rejects_frozen_unknown_and_unsafe():
 
 
 def test_generic_candidate_with_book_names_is_rejected():
-    base = load_base_pack("v1")
+    base = load_base_pack()
     clean, errors = validate_overrides(
         {"memory": "林晚每次开门前都要先摸钥匙。"}, base, book_terms=["林晚"], generic=True
     )
@@ -899,7 +960,7 @@ def test_book_terms_cover_world_bible_places_and_aliases():
     assert {"林晚", "晚晚", "雨城码头", "码头", "陈默"} <= set(terms)
     clean, errors = validate_overrides(
         {"memory": "在雨城码头这类地方，人物要先动手再解释。"},
-        load_base_pack("v1"),
+        load_base_pack(),
         book_terms=terms,
         generic=True,
     )
@@ -921,7 +982,7 @@ def test_safe_pattern_and_knob_range():
 
 
 def test_soft_checks_detect_overlap_repetition_and_patterns():
-    config = load_base_pack("v1")
+    config = load_base_pack()
     shared = "雾从码头那边一层一层漫过来，灯笼的光被压成一团昏黄，他听见船板在水里轻轻撞了三下又停住，岸上没有一个人回头看"
     previous = "前文铺垫。" * 10 + shared
     content = shared + "。他推开门。" + "原来他竟然早就到了。"
@@ -938,7 +999,7 @@ def test_soft_checks_detect_overlap_repetition_and_patterns():
 
 
 def test_hooks_fill_placeholders_from_view():
-    config = load_base_pack("v1")
+    config = load_base_pack()
     view = {"previous_ends_mid_action": True, "oldest_promise_age": 7, "same_method_rejects": 2}
     hooks = resolve_hooks(config, view)
     assert any("接上那个动作" in item for item in hooks)
@@ -961,7 +1022,7 @@ def test_writing_view_derives_hook_inputs():
 
 
 def test_skills_follow_declarative_conditions_and_switches():
-    config = load_base_pack("v1")
+    config = load_base_pack()
     assert "读者答应的那件事当场发生" in resolve_skills(config, {"payoff_due": True})
     assert "读者答应的那件事当场发生" in resolve_skills(config, {"shows_rule": True})
     assert "动作戏用短句" in resolve_skills(config, {"choice": "冲进库房"})
@@ -1023,8 +1084,8 @@ async def test_start_run_on_h2_canary_pins_harness(novel_db, monkeypatch):
         run = await s.scalar(select(ChapterRunModel))
         ctx = run.generation_context
         assert ctx["executor"] == H2
-        assert ctx["harness_id"] == "base/v1"
-        assert ctx["harness_hash"] == load_base_pack("v1").content_hash
+        assert ctx["harness_id"] == BASE_HARNESS_ID
+        assert ctx["harness_hash"] == load_base_pack().content_hash
         assert ctx["harness_overlay"] == {}
         assert ctx["harness_overlay_id"] == ""
         assert production_protocol(run) == "chapter"
@@ -1050,7 +1111,7 @@ async def test_provisional_overlay_is_pinned_then_adopted_after_trial(novel_db):
         await pin_harness(s, work_id=work_id, context=ctx)
         assert ctx["harness_overlay"] == overlay
         assert ctx["harness_overlay_id"] == str(entry.id)
-        assert ctx["harness_hash"] == apply_overrides(load_base_pack("v1"), overlay).content_hash
+        assert ctx["harness_hash"] == apply_overrides(load_base_pack(), overlay).content_hash
         for no, ok in ((2, True), (3, False), (4, True)):
             s.add(_canon_run(work_id, no, overlay_id=str(entry.id), first_pass=ok))
         await s.flush()

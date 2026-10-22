@@ -120,7 +120,7 @@ async def main() -> None:
     from regent.novel.application import directing_chapter as dc
     from regent.novel.harnessing.surface import apply_overrides, load_base_pack
 
-    base = load_base_pack("v1")
+    base = load_base_pack()
     out["prompt_parity"] = {
         "base_write_equals_default": base.get_prompt("write") == dc.CHAPTER_WRITE_SYSTEM,
         "base_write_len": len(base.get_prompt("write")),

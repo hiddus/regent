@@ -274,10 +274,12 @@ async def ensure_next_run(
     if work.deleted_at is not None:
         return None
     # 锁作品推进记录，避免双 Worker 同时补偿
+    # 锁后复核要看库里的行：不刷新就是在复核会话里早先装进来的旧对象
     locked = await session.scalar(
         select(StoryWorkModel)
         .where(StoryWorkModel.id == work.id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if locked is None:
         return None

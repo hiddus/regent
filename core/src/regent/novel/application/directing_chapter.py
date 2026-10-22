@@ -12,7 +12,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,13 +102,16 @@ CHAPTER_WRITE_SYSTEM = (
     "不要用角色讲课代替已经发生的动作，也不要用格言评价这件事。"
     "承接上一章已经发生的事，不重写上一章。earlier_results 里的事都已经发生过，"
     "不要让人物再当众说一遍或再做一遍。人名只用给定卡司。"
-    "只输出正文。正文两千字以上，两千五百字以内。"
+    "只输出正文。正文两千字以上，两千五百字以内，按两千二百字写："
+    "结果落地就收尾，不在结果之后另加场景、回顾或感慨。"
+    "超过两千五百字的部分会被整段删掉，删掉的地方接不上。"
 )
 
 CHAPTER_REPAIR_SYSTEM = (
     "你在改同一章正文。不许新写感想，不许把已经发生的事再讲一遍，不许增加新情节。\n"
     "章纲里的选择和结果要留下，章末的处境不要改回改稿前的样子。\n"
-    "正文必须落在两千字到两千五百字之间。"
+    "正文必须落在两千字到两千五百字之间。length 是 previous_draft 现在的字数和改完后该落的区间："
+    "只改 check_fails 指出的地方，其余句子照原样留下，不要顺手扩写。"
     "超过就删掉多余段落并接上；不足就把这一章没写完的那一个选择补到两千字，不另起一件事。\n"
     "只输出正文。"
 )
@@ -205,8 +208,17 @@ class ChapterFitCut(BaseModel):
     drop: list[int] = Field(default_factory=list, max_length=200, description="要整段删掉的片段编号")
 
 
+MAX_CHAPTER_FACTS = 40
+
+
 class ChapterFacts(BaseModel):
-    facts: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+    facts: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_CHAPTER_FACTS)
+
+    @field_validator("facts", mode="before")
+    @classmethod
+    def _keep_first_facts(cls, value: Any) -> Any:
+        # 多给的截掉，不整次拒收：拒收两次这一章就零事实入正史。
+        return value[:MAX_CHAPTER_FACTS] if isinstance(value, list) else value
 
 
 def chapter_node_for_run(
@@ -459,6 +471,17 @@ def dedupe_chapter_text(text: str, previous: str) -> str:
     定向删段处理，删不回来才轮到 ``fit_chapter_length`` 截断。
     """
     return drop_repeated_span(drop_copied_span(text, previous))
+
+
+def length_brief(draft: str) -> dict[str, int]:
+    """改稿入参里的字数：模型数不准字，给它现成的数和该落的区间。"""
+    chars = len(draft or "")
+    brief = {"current_chars": chars, "min_chars": MIN_CHAPTER_CHARS, "max_chars": MAX_CHAPTER_CHARS}
+    if chars > MAX_CHAPTER_CHARS:
+        brief["need_cut"] = chars - FIT_TARGET_CHARS
+    elif chars < MIN_CHAPTER_CHARS:
+        brief["need_add"] = MIN_CHAPTER_CHARS - chars
+    return brief
 
 
 def fit_chapter_length(
@@ -989,11 +1012,39 @@ def fit_protected(units: list[tuple[int, str]]) -> list[int]:
     return sorted(protected)
 
 
-def apply_fit_cut(draft: str, drop: list[int]) -> tuple[str, list[int]]:
+_QUESTION_END = re.compile(r"[？?][”」』\"']?\s*$")
+_DIALOGUE_START = re.compile(r"^\s*[“「『\"]")
+
+
+def fit_seam_break(units: list[tuple[int, str]], removed: set[int], terms: list[str]) -> str:
+    """删掉 ``removed`` 后会断开的接缝；没有返回空串。
+
+    只查代码查得准的两种：专名第一次出场的那段被删、后文还在用它；
+    问句被删、紧跟的对白答句还留着。
+    """
+    for term in terms:
+        hits = [no for no, (_, piece) in enumerate(units) if term in piece]
+        if hits and hits[0] in removed and any(no not in removed for no in hits):
+            return f"专名首次出场被删：{term}"
+    for no in removed:
+        nxt = no + 1
+        if (
+            nxt < len(units)
+            and nxt not in removed
+            and _QUESTION_END.search(units[no][1])
+            and _DIALOGUE_START.match(units[nxt][1])
+        ):
+            return f"问句被删、答句还在：片段 {no}"
+    return ""
+
+
+def apply_fit_cut(
+    draft: str, drop: list[int], *, terms: list[str] | tuple[str, ...] = ()
+) -> tuple[str, list[int]]:
     """按模型挑的顺序删片段，删到 ``FIT_TARGET_CHARS`` 以内就停。
 
-    跳过章末保护区、越界编号和会删到下限以下的那一段；模型挑多了不照单全删，
-    每多删一段就多一道接缝。
+    跳过章末保护区、越界编号、会删到下限以下的、以及会断开接缝（``fit_seam_break``）
+    的那一段；模型挑多了不照单全删，每多删一段就多一道接缝。
     """
     units = fit_units(draft)
     sep = _paragraph_sep(draft)
@@ -1006,6 +1057,8 @@ def apply_fit_cut(draft: str, drop: list[int]) -> tuple[str, list[int]]:
         if no in removed or no in protected or not 0 <= no < len(units):
             continue
         trial = removed | {no}
+        if fit_seam_break(units, trial, list(terms)):
+            continue
         shorter = join_units([u for i, u in enumerate(units) if i not in trial], sep)
         if len(shorter) < MIN_CHAPTER_CHARS:
             continue
@@ -1079,9 +1132,11 @@ async def fit_tick(
         f"v{version}:fit:{tag}",
         temperature=0.3,
     )
+    from regent.novel.harnessing.surface import book_terms
+
     production = run.generation_context["production"]
     spec = dict(production.get("fit") or {})
-    flat, removed = apply_fit_cut(draft, list(picked.drop))
+    flat, removed = apply_fit_cut(draft, list(picked.drop), terms=book_terms(ctx, cast))
     body = fit_chapter_length(flat)
     cut = flat[len(body) :].strip() if flat.startswith(body) else ""
     truncated = len(flat) > MAX_CHAPTER_CHARS
@@ -1565,6 +1620,7 @@ async def produce_chapter_tick(
             system = CHAPTER_REPAIR_SYSTEM
         payload["previous_draft"] = draft
         payload["check_fails"] = list(production.get("check_fails") or [])
+        payload["length"] = length_brief(draft)
         cut = str(production.get("fit_truncated") or "")
         if cut:
             # 被截掉的章末原文交给改稿：不给它，改稿只能凭空补一个结局

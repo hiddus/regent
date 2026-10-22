@@ -19,7 +19,9 @@ from typing import Any
 import yaml
 
 PACK_ROOT = Path(__file__).resolve().parent.parent / "harness_packs"
-BASE_HARNESS_ID = "base/v1"
+# 新运行钉这一版；已发布的包不原地改，旧运行按钉住的 harness_id 加载旧包，回放哈希才对得上。
+BASE_PACK_VERSION = "v2"
+BASE_HARNESS_ID = f"base/{BASE_PACK_VERSION}"
 
 FROZEN_KEYS: frozenset[str] = frozenset(
     {
@@ -143,7 +145,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return raw
 
 
-def load_base_pack(version: str = "v1") -> ConfigTree:
+def load_base_pack(version: str = BASE_PACK_VERSION) -> ConfigTree:
     """从 ``harness_packs/base/<version>/`` 加载基础配置包。"""
     pack_dir = PACK_ROOT / "base" / version
     if not pack_dir.is_dir():

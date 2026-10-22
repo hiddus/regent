@@ -30,9 +30,11 @@ from regent.novel.application.directing_chapter import (
     drop_repeated_span,
     dedupe_chapter_text,
     grounded_facts,
+    length_brief,
     load_cast,
     fit_chapter_length,
     fit_protected,
+    fit_seam_break,
     fit_units,
     prepare_chapter_canon,
     produce_chapter_tick,
@@ -45,7 +47,7 @@ from regent.novel.application.directing_chapter import (
     stage_position,
     stray_names,
 )
-from regent.novel.application.generation import BookRhythm, rhythm_problems
+from regent.novel.application.generation import BookRhythm, CanonExtraction, rhythm_problems
 from regent.novel.application.chapter_review import validate_chapter
 from regent.novel.application.directing_protocol import production_protocol
 from regent.novel.application.directing_scene_loop import produce_tick
@@ -833,6 +835,29 @@ def test_fit_cut_keeps_the_ending_and_the_floor():
     assert apply_fit_cut(PADDED, []) == (PADDED, [])
 
 
+def test_fit_cut_skips_drops_that_break_a_seam():
+    """模型挑的段会让专名凭空出现、或问句没了答句还在：这种段不删，接着删别的。"""
+    intro = "周砚推门进来，" + "雨" * 140
+    filler = ["风" * 150 for _ in range(14)]
+    question, answer = "“包裹是谁寄的？”", "“不知道。”他摇头。"
+    later = "周砚把包裹放回架上。" + "灯" * 140
+    ending = "结" * 420
+    paras = [intro, *filler, question, answer, later, ending]
+    draft = "\n\n".join(paras)
+    assert len(draft) > MAX_CHAPTER_CHARS
+    q_no = paras.index(question)
+    body, removed = apply_fit_cut(draft, [0, q_no, *range(1, 15)], terms=["周砚"])
+    assert 0 not in removed and q_no not in removed
+    assert body.startswith(intro) and question in body
+    assert MIN_CHAPTER_CHARS <= len(body) <= FIT_TARGET_CHARS
+    units = fit_units(draft)
+    assert fit_seam_break(units, {q_no}, []).startswith("问句被删")
+    assert fit_seam_break(units, {q_no, q_no + 1}, []) == ""
+    assert fit_seam_break(units, {0}, ["周砚"]).startswith("专名首次出场被删")
+    # 不给专名表时只查问答
+    assert fit_seam_break(units, {0}, []) == ""
+
+
 def test_long_paragraph_is_split_into_sentences_with_closing_quotes():
     para = "".join(f"他第{i}次说：“走。”她没动。" for i in range(40))
     assert len(para) > 300
@@ -871,6 +896,9 @@ async def test_truncated_tail_is_a_hard_fail_not_a_note(monkeypatch):
     assert any("章末被截掉" in item for item in production["check_fails"])
     repairs = [c for c in calls if c["purpose"] == "chapter_repair"]
     assert repairs and repairs[0]["payload"]["cut_tail"] == cut
+    # 改稿拿到现成的字数，不靠模型自己数
+    assert repairs[0]["payload"]["length"] == length_brief(repairs[0]["payload"]["previous_draft"])
+    assert repairs[0]["payload"]["length"]["max_chars"] == MAX_CHAPTER_CHARS
     # 每一稿都删不回来：走完改稿与重写后终止，绝不 DONE
     assert "截掉" in stopped
     assert production["phase"] != "DONE"
@@ -1197,3 +1225,17 @@ async def test_pinned_script_scene_still_routes_to_script_tick(monkeypatch):
     )
     assert await produce_tick(None, provider=None, work=None, run=run) is False
     assert seen["script"] is True
+
+
+def test_length_brief_gives_the_count_and_the_gap():
+    assert length_brief("字" * 2300) == {"current_chars": 2300, "min_chars": 2000, "max_chars": 2500}
+    assert length_brief("字" * 3000)["need_cut"] == 3000 - FIT_TARGET_CHARS
+    assert length_brief("字" * 1800)["need_add"] == 200
+
+
+@pytest.mark.parametrize("schema", [ChapterFacts, CanonExtraction])
+def test_extra_facts_are_trimmed_not_rejected(schema):
+    # 真机 4d48a7fe 第 3 章：模型给了 47 条，整次被拒两回后这一章零事实入正史
+    facts = [{"subject": f"人物{i}", "fact": f"第{i}条"} for i in range(47)]
+    parsed = schema.model_validate({"facts": facts})
+    assert parsed.facts == facts[:40]

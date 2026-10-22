@@ -100,3 +100,38 @@ async def test_locked_run_is_reloaded_not_taken_from_the_session(novel_db, monke
         )
 
     assert seen == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_paused_work_is_seen_even_if_the_session_holds_it_running(novel_db, monkeypatch):
+    monkeypatch.setattr(works, "append_event", _noop_event)
+    await _seed(novel_db)
+    seen: list[str] = []
+
+    async def _execute(session, *, provider, work, run, step):  # noqa: ANN001, ANN202
+        seen.append("executed")
+        return True
+
+    async with novel_db() as session:
+        run = (await session.scalars(select(ChapterRunModel))).one()
+        work = await session.get(StoryWorkModel, run.work_id)
+        assert work.state == "RUNNING"
+        # 别的会话因超支暂停了作品
+        await session.execute(
+            update(StoryWorkModel)
+            .where(StoryWorkModel.id == work.id)
+            .values(state="PAUSED_COST")
+            .execution_options(synchronize_session=False)
+        )
+        await advance_step(
+            session,
+            provider=None,
+            owner_id=work.owner_id,
+            work_id=work.id,
+            chapter_no=int(run.chapter_no),
+            run_id=run.id,
+            execute_step_fn=_execute,
+            append_event_fn=_noop_event,
+        )
+
+    assert seen == []

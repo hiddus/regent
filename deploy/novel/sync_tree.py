@@ -75,6 +75,9 @@ SYMBOL_CHECKS = [
     ("regent.novel.harnessing.library", "SHAREABLE_STATUSES", "试用条目只对本本书可见"),
     ("regent.novel.application.directing_chapter", "apply_fit_cut", "超长稿由模型挑段、代码删段，不砍掉章末结果"),
     ("regent.novel.application.directing_chapter", "accept_draft", "落稿前统一走去重与压缩分流"),
+    ("regent.novel.application.directing_chapter", "fit_seam_break", "删段不许让专名凭空出现、问答拆开"),
+    ("regent.novel.application.directing_chapter", "length_brief", "改稿入参带现成字数"),
+    ("regent.novel.harnessing.surface", "BASE_PACK_VERSION", "新运行钉 base/v2，旧运行按钉住的版本回放"),
     ("regent.novel.application.works_advance", "clear_last_error", "入正史时清掉上一次的失败原因"),
     ("regent.novel.application.works_constants", "GENRE_MAX_CHARS", "开书/澄清写 genre 前收到列宽"),
 ]

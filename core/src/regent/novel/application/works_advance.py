@@ -118,6 +118,8 @@ async def advance_step(
     execute = execute_step_fn or execute_step
     emit = append_event_fn or append_event
     work = await _get_owned_work(session, work_id=work_id, owner_id=owner_id)
+    # 领取那一轮可能早把作品装进了会话；暂停/取消要看库里此刻的状态。
+    await session.refresh(work)
     # 加锁读必须刷新内存对象：领取前的候选查询已把这行装进会话，那时别的 worker
     # 可能还没提交。不刷新，锁到的是新行、手里拿的却是旧的 generation_context，
     # 写回时会把别人刚落库的进度整份盖掉。

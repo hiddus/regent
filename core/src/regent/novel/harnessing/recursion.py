@@ -79,8 +79,15 @@ class HarnessCandidate(BaseModel):
 
 
 class HarnessProposal(BaseModel):
-    generic: HarnessCandidate = Field(description="针对跨书反复出现的问题，不带本书人名与情节")
-    book: HarnessCandidate = Field(description="针对本书类型与读者契约")
+    # 模型常只给一个候选；缺的那个当作“配置没变”，探针跳过，不让整次提案作废。
+    generic: HarnessCandidate = Field(
+        default_factory=lambda: HarnessCandidate(kind="generic"),
+        description="针对跨书反复出现的问题，不带本书人名与情节",
+    )
+    book: HarnessCandidate = Field(
+        default_factory=lambda: HarnessCandidate(kind="book"),
+        description="针对本书类型与读者契约",
+    )
 
 
 class ComposeDecision(BaseModel):
