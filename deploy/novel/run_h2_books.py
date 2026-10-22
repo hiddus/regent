@@ -6,7 +6,10 @@
 逐章记：执行臂、终态、调用次数与花费、首过、删段（前后字数、是否截断）、
 递归轮次与触发来源、交付来源、硬门失败。终止失败不重写——那正是要看的数据。
 
-用法：python deploy/novel/run_h2_books.py <题材编号 0-3> [章数] [每章轮询上限秒]
+用法：python deploy/novel/run_h2_books.py <题材编号 0-3> [章数] [每章轮询上限秒] [执行臂]
+      给了执行臂时，建作品后先判桶，不是这个臂就换一本（澄清之前判，不白花建书调用）。
+      python deploy/novel/run_h2_books.py --work <work_id> <起章> <止章> [每章轮询上限秒]
+      续写已有的书：按作品的 owner 重新登录。
 证据：deploy/novel/artifacts/h2_books/<work_id>/
 """
 
@@ -59,13 +62,35 @@ def _ok(resp: dict) -> bool:
     return 200 <= int(resp.get("status") or 0) < 400
 
 
-def onboard(r: Remote, token: str, book: dict) -> str:
+def bucket(r: Remote, work_id: str) -> str:
+    return r.run(
+        "docker exec regent-api python -c \""
+        "from regent.novel.application import executor as ex;"
+        f"print(ex.choose_executor('{work_id}'))\"",
+        timeout=120,
+    ).out.strip()
+
+
+def create_work(r: Remote, token: str, book: dict, want_arm: str = "") -> str:
+    for _ in range(8):
+        tag = secrets.token_hex(4)
+        work = _api(
+            r, "POST", "/works", token=token,
+            body={"raw_intent": book["intent"], "client_nonce": f"h2b-{tag}"},
+        )
+        work_id = str(work.get("body", {}).get("work_id") or "")
+        if not work_id:
+            raise SystemExit(f"[FAIL] 建作品 {json.dumps(work, ensure_ascii=False)[:400]}")
+        arm = bucket(r, work_id)
+        print(f"[建书] {work_id} {book['answers']['genre']} 分桶 {arm}", flush=True)
+        if not want_arm or arm == want_arm:
+            return work_id
+    raise SystemExit(f"[FAIL] 连建 8 本都没落进 {want_arm}")
+
+
+def onboard(r: Remote, token: str, book: dict, want_arm: str = "") -> str:
     tag = secrets.token_hex(4)
-    work = _api(r, "POST", "/works", token=token, body={"raw_intent": book["intent"], "client_nonce": f"h2b-{tag}"})
-    work_id = str(work.get("body", {}).get("work_id") or "")
-    if not work_id:
-        raise SystemExit(f"[FAIL] 建作品 {json.dumps(work, ensure_ascii=False)[:400]}")
-    print(f"[建书] {work_id} {book['answers']['genre']}", flush=True)
+    work_id = create_work(r, token, book, want_arm)
     clarify = _api(
         r, "POST", f"/works/{work_id}/clarify", token=token, body={"answers": book["answers"]}, timeout=600
     )
@@ -145,31 +170,54 @@ def run_chapter(r: Remote, token: str, work_id: str, chapter_no: int, limit: int
     return digest
 
 
-def main() -> int:
-    index = int(sys.argv[1])
-    chapters = int(sys.argv[2]) if len(sys.argv) > 2 else 3
-    limit = int(sys.argv[3]) if len(sys.argv) > 3 else 2400
-    book = BOOKS[index]
+def _login(r: Remote, subject: str) -> str:
+    auth = _api(r, "POST", "/auth/session", params=f"subject={subject}&display_name=H2Books")
+    token = str(auth.get("body", {}).get("token") or "")
+    if not token:
+        raise SystemExit(f"[FAIL] token {auth}")
+    return token
+
+
+def _owner_subject(r: Remote, work_id: str) -> str:
+    return q(
+        r,
+        "SELECT p.subject FROM novel_works w JOIN novel_principals p ON p.id = w.owner_id "
+        f"WHERE w.id = '{work_id}'",
+    ).strip()
+
+
+def write_chapters(subject: str, work_id: str, first: int, last: int, limit: int) -> list[dict]:
+    """逐章写；SSH 断了就重连，从这一章接着等（已起的运行不会重起）。"""
+    digests: list[dict] = []
+    chapter_no = first
+    drops = 0
+    while chapter_no <= last:
+        try:
+            with Remote() as r:
+                token = _login(r, subject)
+                while chapter_no <= last:
+                    digest = run_chapter(r, token, work_id, chapter_no, limit)
+                    digests.append(digest)
+                    if digest.get("state") != "CANONIZED":
+                        return digests
+                    chapter_no += 1
+        except (OSError, EOFError) as exc:
+            drops += 1
+            print(f"[断线] 第 {chapter_no} 章 {type(exc).__name__}: {exc}；重连第 {drops} 次", flush=True)
+            if drops > 5:
+                raise
+        except Exception as exc:  # noqa: BLE001
+            if "SSH" not in str(exc) and "session" not in str(exc).lower():
+                raise
+            drops += 1
+            print(f"[断线] 第 {chapter_no} 章 {exc}；重连第 {drops} 次", flush=True)
+            if drops > 5:
+                raise
+    return digests
+
+
+def _summarize(work_id: str, book: dict | None, arm: str, digests: list[dict], name: str) -> None:
     with Remote() as r:
-        auth = _api(r, "POST", "/auth/session", params=f"subject=h2b-{secrets.token_hex(4)}&display_name=H2Books")
-        token = str(auth.get("body", {}).get("token") or "")
-        if not token:
-            print("[FAIL] token", auth)
-            return 1
-        work_id = onboard(r, token, book)
-        arm = r.run(
-            "docker exec regent-api python -c \""
-            "from regent.novel.application import executor as ex;"
-            f"print(ex.choose_executor('{work_id}'))\"",
-            timeout=120,
-        ).out.strip()
-        print(f"[分桶] {arm}", flush=True)
-        digests = []
-        for chapter_no in range(1, chapters + 1):
-            digest = run_chapter(r, token, work_id, chapter_no, limit)
-            digests.append(digest)
-            if digest.get("state") != "CANONIZED":
-                break
         summary = {
             "work_id": work_id,
             "book": book,
@@ -177,8 +225,36 @@ def main() -> int:
             "chapters": digests,
             "library": library(r, work_id),
         }
-        _save(work_id, "summary.json", summary)
-        print(f"[完成] {work_id} 证据 {ART / work_id}", flush=True)
+    _save(work_id, name, summary)
+    print(f"[完成] {work_id} 证据 {ART / work_id}", flush=True)
+
+
+def main() -> int:
+    if sys.argv[1] == "--work":
+        work_id, first, last = sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+        limit = int(sys.argv[5]) if len(sys.argv) > 5 else 2400
+        with Remote() as r:
+            subject = _owner_subject(r, work_id)
+            arm = bucket(r, work_id)
+        if not subject:
+            print(f"[FAIL] 找不到作品 {work_id} 的 owner")
+            return 1
+        print(f"[续写] {work_id} 第 {first}-{last} 章 分桶 {arm}", flush=True)
+        digests = write_chapters(subject, work_id, first, last, limit)
+        _summarize(work_id, None, arm, digests, f"summary_ch{first}-{last}.json")
+        return 0
+    index = int(sys.argv[1])
+    chapters = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+    limit = int(sys.argv[3]) if len(sys.argv) > 3 else 2400
+    want_arm = sys.argv[4] if len(sys.argv) > 4 else ""
+    book = BOOKS[index]
+    subject = f"h2b-{secrets.token_hex(4)}"
+    with Remote() as r:
+        work_id = onboard(r, _login(r, subject), book, want_arm)
+        arm = bucket(r, work_id)
+    print(f"[分桶] {arm}", flush=True)
+    digests = write_chapters(subject, work_id, 1, chapters, limit)
+    _summarize(work_id, book, arm, digests, "summary.json")
     return 0
 
 
