@@ -103,13 +103,10 @@ def front_gate_writer_hint(
         + identity
         + "禁止用『操作员+代号』等非卡司元叙事账号称呼叙述者；"
         "章题人名须与正文宿主/卡司一致；"
-        "金手指/系统规则须在正文被读者看见（能做/不能做/代价至少落地一处），"
-        f"禁止只甩黑话面板；作品禁用={avoid_txt}。"
+        f"作品禁用={avoid_txt}。"
     )
     if int(chapter_no) == 1:
-        parts.append(
-            "首章必须让读者站稳：谁在壳里、金手指怎么用、眼前压力是什么。"
-        )
+        parts.append("首章必须让读者站稳：谁在壳里、眼前压力是什么。")
     return " ".join(parts)
 
 

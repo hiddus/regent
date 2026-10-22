@@ -27,7 +27,7 @@ def test_writer_hint_covers_front_constraints():
     hint = front_gate_writer_hint(prose_style=STYLE, chapter_no=1, cast=CAST)
     assert "行文契约" in hint
     assert "操作员" in hint
-    assert "金手指" in hint
+    assert "金手指" not in hint
     assert "沈栀" in hint
 
 
