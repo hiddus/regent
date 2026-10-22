@@ -86,6 +86,7 @@ SYMBOL_CHECKS = [
     ("regent.novel.harnessing.library", "merge_overlapping", "入库时合并重叠经验"),
     ("regent.novel.harnessing.library", "promotion_candidates", "晋级候选清单"),
     ("regent.novel.harnessing.overlay", "drafts_grew", "试用首稿变长即回退"),
+    ("regent.novel.application.directing_chapter", "PROMPT_MAX_CHARS", "提示字数与验收上限分开"),
     ("regent.novel.application.works_advance", "clear_last_error", "入正史时清掉上一次的失败原因"),
     ("regent.novel.application.works_constants", "GENRE_MAX_CHARS", "开书/澄清写 genre 前收到列宽"),
 ]

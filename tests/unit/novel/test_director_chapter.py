@@ -703,9 +703,11 @@ async def test_plan_replaces_prewritten_chapter_plot(monkeypatch):
 
 def test_overlong_chapter_fails():
     text = _pad("夜色很浓", 200)
-    assert len(text) > 2500
+    assert len(text) > MAX_CHAPTER_CHARS == 3000
     fails = check_chapter(text, ctx={"chapter_no": 1}, cast={"林晚": {}}, title="一")
-    assert any("超过2500字" in item for item in fails)
+    assert any("超过3000字" in item for item in fails)
+    # 提示要的是 2001–2499 字；2500–3000 字照样验收，不送去删段
+    assert not check_chapter(_pad("夜色很浓", 165), ctx={"chapter_no": 1}, cast={"林晚": {}}, title="一")
     # 长度是机械约束：探针比较两稿好坏时不该按它判失败
     assert not check_chapter(
         text, ctx={"chapter_no": 1}, cast={"林晚": {}}, title="一", ignore_max_length=True
@@ -839,7 +841,7 @@ def test_fit_cut_keeps_the_ending_and_the_floor():
 def test_fit_cut_skips_drops_that_break_a_seam():
     """模型挑的段会让专名凭空出现、或问句没了答句还在：这种段不删，接着删别的。"""
     intro = "周砚推门进来，" + "雨" * 140
-    filler = ["风" * 150 for _ in range(14)]
+    filler = ["风" * 150 for _ in range(18)]
     question, answer = "“包裹是谁寄的？”", "“不知道。”他摇头。"
     later = "周砚把包裹放回架上。" + "灯" * 140
     ending = "结" * 420
@@ -847,7 +849,7 @@ def test_fit_cut_skips_drops_that_break_a_seam():
     draft = "\n\n".join(paras)
     assert len(draft) > MAX_CHAPTER_CHARS
     q_no = paras.index(question)
-    body, removed = apply_fit_cut(draft, [0, q_no, *range(1, 15)], terms=["周砚"])
+    body, removed = apply_fit_cut(draft, [0, q_no, *range(1, 19)], terms=["周砚"])
     assert 0 not in removed and q_no not in removed
     assert body.startswith(intro) and question in body
     assert MIN_CHAPTER_CHARS <= len(body) <= FIT_TARGET_CHARS
@@ -1229,8 +1231,9 @@ async def test_pinned_script_scene_still_routes_to_script_tick(monkeypatch):
 
 
 def test_length_brief_gives_the_count_and_the_gap():
-    assert length_brief("字" * 2300) == {"current_chars": 2300, "min_chars": 2000, "max_chars": 2500}
-    assert length_brief("字" * 3000)["need_cut"] == 3000 - FIT_TARGET_CHARS
+    assert length_brief("字" * 2300) == {"current_chars": 2300, "min_chars": 2000, "max_chars": 3000}
+    assert "need_cut" not in length_brief("字" * 2800)
+    assert length_brief("字" * 3500)["need_cut"] == 3500 - FIT_TARGET_CHARS
     assert length_brief("字" * 1800)["need_add"] == 200
 
 

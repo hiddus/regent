@@ -28,9 +28,12 @@ CHAPTER_PHASES = ("PLAN", "METHOD", "WRITE", "FIT", "CHECK", "REPAIR", "DONE")
 # Harness² 递归臂在 CHECK 失败或追读自评报问题后插入的阶段。
 H2_PHASES = ("PROPOSE", "PROBE", "COMPOSE", "SCREEN")
 
-# 网文单章通行下限。上限只比下限多 500 字。
+# 网文单章通行下限。提示里要的上限只比下限多 500 字。
 MIN_CHAPTER_CHARS = 2000
-MAX_CHAPTER_CHARS = MIN_CHAPTER_CHARS + 500
+PROMPT_MAX_CHARS = MIN_CHAPTER_CHARS + 500
+# 验收上限比提示宽 500 字：照提示写的初稿也常到三千字上下，按提示上限验收要删十几段，
+# 删掉的铺垫让正文前后接不上。提示里的字数不跟着放宽，否则初稿会一起变长。
+MAX_CHAPTER_CHARS = PROMPT_MAX_CHARS + 500
 
 CHAPTER_PLAN_SYSTEM = (
     "你只出即将要写的这一章的章纲，不出后文，也不改全书节奏。\n"
@@ -92,7 +95,7 @@ METHOD_JUDGE_SYSTEM = (
 )
 
 # 执笔与改稿提示首尾各放一次：只写在中间的字数要求，模型常写到三千五以上。
-CHAPTER_LENGTH_RULE = f"每章字数：{MIN_CHAPTER_CHARS + 1}~{MAX_CHAPTER_CHARS - 1}字。"
+CHAPTER_LENGTH_RULE = f"每章字数：{MIN_CHAPTER_CHARS + 1}~{PROMPT_MAX_CHARS - 1}字。"
 
 CHAPTER_WRITE_SYSTEM = (
     CHAPTER_LENGTH_RULE + "\n"
@@ -211,8 +214,8 @@ class ChapterProse(BaseModel):
     content: str = Field(
         min_length=800,
         max_length=12000,
-        description=f"这一章的正文，{MIN_CHAPTER_CHARS + 1}~{MAX_CHAPTER_CHARS - 1}字",
-        json_schema_extra={"minLength": MIN_CHAPTER_CHARS + 1, "maxLength": MAX_CHAPTER_CHARS - 1},
+        description=f"这一章的正文，{MIN_CHAPTER_CHARS + 1}~{PROMPT_MAX_CHARS - 1}字",
+        json_schema_extra={"minLength": MIN_CHAPTER_CHARS + 1, "maxLength": PROMPT_MAX_CHARS - 1},
     )
 
 

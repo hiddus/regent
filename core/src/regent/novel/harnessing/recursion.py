@@ -45,13 +45,13 @@ from regent.novel.harnessing.surface import (
 
 KINDS = ("generic", "book")
 DECISIONS = ("adopt_generic", "adopt_book", "merge", "keep")
-DRAFT_CHARS = 2500
+DRAFT_CHARS = 3000
 
 
 def draft_view(text: Any, *, limit: int = DRAFT_CHARS, tail: int = 600) -> str:
     """给改进器看的稿子：超长时保头也保尾。
 
-    章末结果是判断这一稿好不好的关键，只截前 2500 字等于让提案器和组合器看不到
+    章末结果是判断这一稿好不好的关键，只截前面一段等于让提案器和组合器看不到
     结局，提出的约束也就无从对准真正被砍掉的那一段。
     """
     body = str(text or "")
