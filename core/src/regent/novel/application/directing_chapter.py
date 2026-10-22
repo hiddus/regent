@@ -91,7 +91,11 @@ METHOD_JUDGE_SYSTEM = (
     "没有就留空。"
 )
 
+# 执笔与改稿提示首尾各放一次：只写在中间的字数要求，模型常写到三千五以上。
+CHAPTER_LENGTH_RULE = f"每章字数：{MIN_CHAPTER_CHARS + 1}~{MAX_CHAPTER_CHARS - 1}字。"
+
 CHAPTER_WRITE_SYSTEM = (
+    CHAPTER_LENGTH_RULE + "\n"
     "你是小说执笔。按这部作品已经定下的方向写，不要改成另一种类型。\n"
     "这一章只做章纲里的那一个选择。先写压力，再写他动手。"
     "结果必须是这个选择造成的，而且章末仍然成立。\n"
@@ -108,12 +112,13 @@ CHAPTER_WRITE_SYSTEM = (
 )
 
 CHAPTER_REPAIR_SYSTEM = (
+    CHAPTER_LENGTH_RULE + "\n"
     "你在改同一章正文。不许新写感想，不许把已经发生的事再讲一遍，不许增加新情节。\n"
     "章纲里的选择和结果要留下，章末的处境不要改回改稿前的样子。\n"
     "正文必须落在两千字到两千五百字之间。length 是 previous_draft 现在的字数和改完后该落的区间："
     "只改 check_fails 指出的地方，其余句子照原样留下，不要顺手扩写。"
     "超过就删掉多余段落并接上；不足就把这一章没写完的那一个选择补到两千字，不另起一件事。\n"
-    "只输出正文。"
+    "只输出正文。\n" + CHAPTER_LENGTH_RULE
 )
 
 # 删段的目标落在上下限中间：模型挑的段落字数合计常有出入，留出余量。
@@ -318,8 +323,18 @@ def build_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any]) -> dic
 
 
 def _writer_system(
-    ctx: dict[str, Any] | None, cast: dict[str, Any], *, base: str = CHAPTER_WRITE_SYSTEM
+    ctx: dict[str, Any] | None,
+    cast: dict[str, Any],
+    *,
+    base: str = CHAPTER_WRITE_SYSTEM,
+    tail: str = CHAPTER_LENGTH_RULE,
 ) -> str:
+    """执笔系统提示：基底 + 前置门提示，``tail`` 收在最末。"""
+    body = _writer_body(ctx, cast, base=base)
+    return body + "\n" + tail if tail else body
+
+
+def _writer_body(ctx: dict[str, Any] | None, cast: dict[str, Any], *, base: str) -> str:
     data = ctx or {}
     hint = front_gate_writer_hint(
         prose_style=data.get("prose_style") if isinstance(data.get("prose_style"), dict) else {},
@@ -390,7 +405,7 @@ def h2_writer_system(
 ) -> str:
     from regent.novel.harnessing.surface import resolve_hooks, resolve_skills
 
-    system = _writer_system(ctx, cast, base=config.get_prompt("write") or CHAPTER_WRITE_SYSTEM)
+    system = _writer_body(ctx, cast, base=config.get_prompt("write") or CHAPTER_WRITE_SYSTEM)
     memory = config.get_memory()
     if memory:
         system += "\n\n写作经验：\n" + memory
@@ -401,6 +416,10 @@ def h2_writer_system(
     hooks = resolve_hooks(config, view)
     if hooks:
         system += "\n\n" + "\n".join(hooks)
+    # 收尾的字数规则跟着钉住的基础包走（v3 起才有），覆盖层改不到它。
+    tail = config.get_prompt("write_tail")
+    if tail:
+        system += "\n" + tail
     return system
 
 

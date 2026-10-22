@@ -256,7 +256,8 @@ async def test_first_write_keeps_front_gate_hint_and_default_payload(monkeypatch
     cast = ctx["production"]["cast"]
     assert call["command"] == "v1:chapter_write"
     assert "【前置硬约束】" in call["system"]
-    assert call["system"].startswith(chapter._writer_system(ctx, cast))
+    assert call["system"].startswith(chapter._writer_system(ctx, cast, tail=""))
+    assert call["system"].endswith("\n" + chapter.CHAPTER_LENGTH_RULE)
     assert call["payload"] == chapter.build_write_payload(ctx, cast)
     assert ctx["production"]["h2_effective_hash"] == load_base_pack().content_hash
 
@@ -885,9 +886,25 @@ def test_compose_never_delivers_failed_draft():
 
 def test_base_pack_matches_python_constants_and_defaults():
     config = load_base_pack()
-    assert BASE_HARNESS_ID == "base/v2"
+    assert BASE_HARNESS_ID == "base/v3"
     assert config.get_prompt("write") == chapter.CHAPTER_WRITE_SYSTEM
     assert config.get_prompt("repair") == chapter.CHAPTER_REPAIR_SYSTEM
+    # 字数规则首尾各一次：提示开头一次，系统提示最末再一次
+    rule = chapter.CHAPTER_LENGTH_RULE
+    assert rule == "每章字数：2001~2499字。"
+    assert config.get_prompt("write_tail") == rule
+    assert chapter.CHAPTER_WRITE_SYSTEM.startswith(rule)
+    assert chapter.CHAPTER_REPAIR_SYSTEM.startswith(rule)
+    assert chapter.CHAPTER_REPAIR_SYSTEM.endswith(rule)
+    assert load_harness("base/v2").get_prompt("write_tail") == ""
+    run = _run()
+    ctx = run.generation_context
+    default_system = chapter._writer_system(ctx, ctx["production"]["cast"])
+    assert default_system.startswith(rule) and default_system.endswith("\n" + rule)
+    # 钉着 v2 的旧运行：系统提示不带收尾规则，回放哈希不变
+    v2 = load_harness("base/v2")
+    old_system = chapter.h2_writer_system(ctx, ctx["production"]["cast"], v2, ctx["production"])
+    assert not old_system.endswith(rule)
     # 已钉 base/v1 的旧运行照旧加载旧包，回放的 prompt_hash 不变
     old = load_harness("base/v1")
     assert old.content_hash != config.content_hash

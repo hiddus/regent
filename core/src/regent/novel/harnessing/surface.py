@@ -20,7 +20,7 @@ import yaml
 
 PACK_ROOT = Path(__file__).resolve().parent.parent / "harness_packs"
 # 新运行钉这一版；已发布的包不原地改，旧运行按钉住的 harness_id 加载旧包，回放哈希才对得上。
-BASE_PACK_VERSION = "v2"
+BASE_PACK_VERSION = "v3"
 BASE_HARNESS_ID = f"base/{BASE_PACK_VERSION}"
 
 FROZEN_KEYS: frozenset[str] = frozenset(
