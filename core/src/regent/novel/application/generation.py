@@ -810,6 +810,8 @@ async def generate_volume_expansion_outline(
         "4. 若上一卷有能力阶段或社会位置，下一卷在此基础上往前，不能停在原地；没有就承接上一卷的处境\n"
         "5. 在上一卷的后果上往前走，可以出现新的人和新的问题，不要另起一个无关的故事\n"
         "6. 12-18 个节点，覆盖 3-6 个弧段\n"
+        "7. rhythm 写这一卷：stake 是主角这一卷一直要面对的事，stages 是这一卷处境的 3 到 5 次变化，"
+        "arc_end 是最后一个阶段成立时的样子；opening 留空\n"
     )
     usr_prompt = json.dumps({
         "raw_intent": raw_intent,
@@ -969,7 +971,12 @@ async def assemble(
             stage_position,
         )
 
-        picked, exhausted = chapter_node_for_run(nodes, chapter_no=int(run.chapter_no))
+        volume_nodes = [
+            n for n in nodes if current_vol is not None and n.volume_no == current_vol.volume_no
+        ] or nodes
+        picked, exhausted = chapter_node_for_run(
+            volume_nodes, chapter_no=int(run.chapter_no) - volume_start + 1
+        )
         rhythm_now = _book_rhythm_from_volume(current_vol)
         stages_now = list(rhythm_now.get("stages") or [])
         if stages_now:

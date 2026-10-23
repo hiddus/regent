@@ -427,3 +427,64 @@ async def test_expansion_pending_keeps_the_story_open_for_user_confirm(
         e.get("event_type") == "volume.expansion_pending" for e in events
     ), "应继续时没有留下待确认扩卷事件"
     assert [int(v.volume_no) for v in await _volumes(novel_db, work_id)] == [1]
+
+
+async def test_staged_volume_expands_into_a_staged_volume_with_its_own_nodes(
+    novel_db, monkeypatch
+):
+    """按阶段写的卷扩出来的新卷也按阶段写，章级导演从新卷第一个节点开始。"""
+    from regent.novel.application import generation
+    from regent.novel.application.directing_types import CHAPTER_ARCHITECTURE
+
+    _capture_events(monkeypatch)
+    owner, work_id = await _boot(novel_db, node_count=2, end_chapter=2)
+    outline = StoryOutline(
+        volume_title="第二卷",
+        nodes=[
+            StoryOutlineNode(title=f"新卷节点{i}", node_type="ESCALATION", promise=f"处境{i}")
+            for i in range(1, 11)
+        ],
+    )
+    async with novel_db() as session:
+        volume = (await _volumes_in(session, work_id))[0]
+        volume.summary = [
+            {"kind": "book_rhythm", "stake": "活下去", "stages": ["一", "二", "三"], "arc_end": "逃出去"}
+        ]
+        work = await session.get(StoryWorkModel, work_id)
+        work.latest_chapter_no = 2
+        assert await works.expand_next_volume(session, work=work, provider=_Provider([], outline=outline))
+        await session.commit()
+
+    second = (await _volumes(novel_db, work_id))[1]
+    rhythm = second.summary[0]
+    assert rhythm["stages"] == ["处境1", "处境3", "处境5", "处境8", "处境10"]
+    assert (rhythm["stake"], rhythm["arc_end"]) == ("活下去", "逃出去")
+
+    async with novel_db() as session:
+        work = await session.get(StoryWorkModel, work_id)
+        run = ChapterRunModel(
+            id=uuid.uuid4(),
+            work_id=work_id,
+            branch_id=work.branch_id,
+            chapter_no=3,
+            attempt=1,
+            state="QUEUED",
+            generation_context={"architecture_version": CHAPTER_ARCHITECTURE},
+        )
+        session.add(run)
+        await session.commit()
+        await generation.assemble(session, work=work, run=run)
+        context = run.generation_context
+    assert context["target_node"]["title"] == "新卷节点1"
+    assert context["book_rhythm"]["volume_start"] == 3
+    assert not context.get("story_complete")
+
+
+async def _volumes_in(session, work_id) -> list[VolumeModel]:
+    return list(
+        (
+            await session.scalars(
+                select(VolumeModel).where(VolumeModel.work_id == work_id).order_by(VolumeModel.volume_no)
+            )
+        ).all()
+    )

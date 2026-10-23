@@ -161,6 +161,8 @@ def run_chapter(r: Remote, token: str, work_id: str, chapter_no: int, limit: int
     # 连续写作开着时上一章入正史后会自动起下一章，这时再起章是 409
     if not _latest_run(r, work_id, chapter_no):
         started = _api(r, "POST", f"/works/{work_id}/runs", token=token, body={}, timeout=180)
+        if not _ok(started) and "ending_undecided" in json.dumps(started) and _expand(r, token, work_id):
+            started = _api(r, "POST", f"/works/{work_id}/runs", token=token, body={}, timeout=180)
         if not _ok(started) and not _latest_run(r, work_id, chapter_no):
             return {"state": "START_FAILED", "response": started}
     state, _ = wait_canonized(r, work_id=work_id, token=token, chapter_no=chapter_no, limit=limit)
@@ -179,6 +181,15 @@ def run_chapter(r: Remote, token: str, work_id: str, chapter_no: int, limit: int
     digest = chapter_digest(prod, pin, call_rows, cost(r, run_id), state)
     print(f"[第 {chapter_no} 章] {json.dumps(digest, ensure_ascii=False)}", flush=True)
     return digest
+
+
+def _expand(r: Remote, token: str, work_id: str) -> bool:
+    """卷写完、终局待定：以作者身份确认扩下一卷，章节测试接着跑。"""
+    volume = int(q(r, f"SELECT total_volume_count FROM novel_works WHERE id = '{work_id}'").strip()) + 1
+    resp = _api(r, "POST", f"/works/{work_id}/volumes/{volume}/expand", token=token, body={}, timeout=600)
+    body = resp.get("body") or {}
+    print(f"[扩卷] 第 {volume} 卷 {resp.get('status')} 第 {body.get('start_chapter_no')}-{body.get('end_chapter_no')} 章", flush=True)
+    return _ok(resp)
 
 
 def _login(r: Remote, subject: str) -> str:

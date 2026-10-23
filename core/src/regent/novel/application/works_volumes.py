@@ -48,6 +48,47 @@ def _cn_num(n: int) -> str:
     return mapping.get(n, str(n))
 
 
+def carried_rhythm(
+    prev_summary: list[Any] | None, rhythm: Any, promises: list[str]
+) -> list[dict[str, Any]]:
+    """上一卷按阶段写的，下一卷也按阶段写。
+
+    没有阶段的新卷会按全书章号去找节点：节点数远少于已写章数，第一章就是主线用尽。
+    大纲没给出 3 到 5 个阶段时，从新卷节点的处境里均匀取五个。
+    """
+    prev = next(
+        (
+            item
+            for item in prev_summary or []
+            if isinstance(item, dict) and item.get("kind") == "book_rhythm" and item.get("stages")
+        ),
+        None,
+    )
+    if prev is None:
+        return []
+    stages = [str(s).strip() for s in getattr(rhythm, "stages", None) or [] if str(s or "").strip()]
+    if not 3 <= len(stages) <= 5:
+        pool = [p.strip() for p in promises if str(p or "").strip()]
+        if len(pool) < 3:
+            return []
+        count = min(5, len(pool))
+        stages = [pool[round(i * (len(pool) - 1) / (count - 1))] for i in range(count)]
+    try:
+        limit = int(getattr(rhythm, "payoff_limit", 0) or prev.get("payoff_limit") or 1)
+    except (TypeError, ValueError):
+        limit = 1
+    return [
+        {
+            "kind": "book_rhythm",
+            "opening": "",
+            "stake": str(getattr(rhythm, "stake", "") or prev.get("stake") or ""),
+            "stages": stages,
+            "payoff_limit": max(1, min(3, limit)),
+            "arc_end": str(getattr(rhythm, "arc_end", "") or prev.get("arc_end") or ""),
+        }
+    ]
+
+
 async def _path_node_ids(session: AsyncSession, work: StoryWorkModel) -> list[str]:
     """当前关键路径上的节点 id，按序（P1-3）。
 
@@ -434,19 +475,18 @@ async def expand_next_volume(
     )
     max_ordinal = max((n.ordinal for n in existing_nodes), default=0)
 
+    prev_vol = await session.scalar(
+        select(VolumeModel).where(
+            VolumeModel.work_id == work.id,
+            VolumeModel.volume_no == current_vol_no,
+        )
+    )
     # 尝试 LLM 生成下一卷大纲
     outline = None
     if provider is not None:
         try:
             from regent.novel.application.generation import generate_volume_expansion_outline
 
-            # 获取上一卷信息
-            prev_vol = await session.scalar(
-                select(VolumeModel).where(
-                    VolumeModel.work_id == work.id,
-                    VolumeModel.volume_no == current_vol_no,
-                )
-            )
             # 获取 goal
             goal = await session.scalar(
                 select(StoryGoalModel)
@@ -585,7 +625,11 @@ async def expand_next_volume(
         work_id=work.id,
         volume_no=next_vol_no,
         title=vol_title,
-        summary=[],
+        summary=carried_rhythm(
+            prev_vol.summary if prev_vol else [],
+            outline.rhythm,
+            [node.promise for node in new_nodes],
+        ),
         cultivation_realm=vol_realm,
         start_chapter_no=start_ch,
         end_chapter_no=start_ch + chapters_per_vol - 1,
