@@ -54,7 +54,8 @@ def carried_rhythm(
     """上一卷按阶段写的，下一卷也按阶段写。
 
     没有阶段的新卷会按全书章号去找节点：节点数远少于已写章数，第一章就是主线用尽。
-    大纲没给出 3 到 5 个阶段时，从新卷节点的处境里均匀取五个。
+    大纲没给出 3 到 5 个阶段时，从新卷节点的处境里均匀取五个。上一卷的 arc_end 已经写过了，
+    不带过来。
     """
     prev = next(
         (
@@ -84,7 +85,7 @@ def carried_rhythm(
             "stake": str(getattr(rhythm, "stake", "") or prev.get("stake") or ""),
             "stages": stages,
             "payoff_limit": max(1, min(3, limit)),
-            "arc_end": str(getattr(rhythm, "arc_end", "") or prev.get("arc_end") or ""),
+            "arc_end": str(getattr(rhythm, "arc_end", "") or stages[-1]),
         }
     ]
 

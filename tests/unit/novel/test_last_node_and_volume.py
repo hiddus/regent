@@ -458,7 +458,7 @@ async def test_staged_volume_expands_into_a_staged_volume_with_its_own_nodes(
     second = (await _volumes(novel_db, work_id))[1]
     rhythm = second.summary[0]
     assert rhythm["stages"] == ["处境1", "处境3", "处境5", "处境8", "处境10"]
-    assert (rhythm["stake"], rhythm["arc_end"]) == ("活下去", "逃出去")
+    assert (rhythm["stake"], rhythm["arc_end"]) == ("活下去", "处境10")
 
     async with novel_db() as session:
         work = await session.get(StoryWorkModel, work_id)
