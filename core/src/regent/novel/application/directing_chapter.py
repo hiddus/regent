@@ -52,7 +52,8 @@ CHAPTER_PLAN_SYSTEM = (
     "选择朝它推进一步；结果让它成立时 reaches_stage 为 true。"
     "last_chapter_of_stage 为 true 时，这一章的结果要让它成立。"
     "不要越过它去写 later_stages 或卷末。\n"
-    "place 写这一章主要发生在哪里，只写地点名本身，具体到房间、街道或舱段。"
+    "place 写主角本人这一章待在哪里（不是别人在哪里），只写地点名本身，具体到房间、街道或舱段；"
+    "还在 earlier_plans 里那个地方，就沿用那里的叫法。"
     "place_streak 是主角已经连续待在同一个地点的章数；到了 limit，这一章要让他离开那里，"
     "place 写新的地点。\n"
     "shows_rule 表示这一章是否让全书答应读者的那件核心结果当场发生。"
@@ -160,7 +161,7 @@ class ChapterPlan(BaseModel):
     pressure: str = Field(description="上一章结果造成的新处境，这个人现在卡在哪")
     choice: str = Field(description="他这一章动手做的那一件，不能是 used_methods 里的任何一种；不列没做的事")
     result: str = Field(description="这个选择造成的结果，章末仍然成立；只写这一章改变了什么")
-    place: str = Field(default="", description="这一章主要发生的地点，只写地点名本身，具体到房间、街道或舱段")
+    place: str = Field(default="", description="主角本人这一章待的地方，只写地点名本身，具体到房间、街道或舱段")
     shows_rule: bool = Field(default=False, description="这一章是否让全书答应读者的核心结果当场发生")
     reaches_stage: bool = Field(default=False, description="这一章的结果是否让 current_stage 成立")
 
@@ -527,26 +528,18 @@ def h2_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any], config: A
     return payload
 
 
-def h2_soft_issues(
-    content: str, ctx: dict[str, Any] | None, config: Any, cast: dict[str, Any] | None = None
-) -> list[str]:
-    from regent.novel.harnessing.surface import book_terms, run_soft_checks
+def h2_soft_issues(content: str, ctx: dict[str, Any] | None, config: Any) -> list[str]:
+    from regent.novel.harnessing.surface import run_soft_checks
 
-    return run_soft_checks(
-        content, config, previous_chapter=previous_chapter_text(ctx), names=book_terms(ctx, cast)
-    )
+    return run_soft_checks(content, config, previous_chapter=previous_chapter_text(ctx))
 
 
-def h2_stall_issues(
-    content: str, ctx: dict[str, Any] | None, production: dict[str, Any], cast: dict[str, Any]
-) -> list[str]:
+def h2_stall_issues(content: str, ctx: dict[str, Any] | None, production: dict[str, Any]) -> list[str]:
     """正文原地打转的证据：同一句式反复开头。连续停在同一地点的章数只作背景，不单独算。"""
-    from regent.novel.harnessing.surface import book_terms, run_soft_checks
+    from regent.novel.harnessing.surface import run_soft_checks
 
     config = h2_config(ctx, production)
-    issues = run_soft_checks(
-        content, config, names=book_terms(ctx, cast), kinds=frozenset({"opener"})
-    )
+    issues = run_soft_checks(content, config, kinds=frozenset({"opener"}))
     view = writing_view(ctx, production)
     if issues and view["place_streak"] >= 2:
         issues.append(f"主角已经连续 {view['place_streak']} 章在「{view['place']}」")
@@ -714,8 +707,14 @@ def _plan_entry(node: dict[str, Any]) -> dict[str, Any]:
 
 
 def _same_place(a: str, b: str) -> bool:
+    """换个叫法也算同一处：「约束室」与「物理约束观察室」共有的一段占到较短一方的一半。"""
     a, b = str(a or "").strip(), str(b or "").strip()
-    return bool(a and b) and (a in b or b in a)
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+    shorter = min(len(a), len(b))
+    return bool(longest_common_substring(a, b, min_len=max(2, -(-shorter // 2))))
 
 
 def place_streak(ctx: dict[str, Any] | None, place: str) -> int:
@@ -1759,13 +1758,13 @@ async def produce_chapter_tick(
 
             warnings += [
                 item
-                for item in h2_soft_issues(content, ctx, h2_config(ctx, production), cast)
+                for item in h2_soft_issues(content, ctx, h2_config(ctx, production))
                 if item not in warnings
             ]
         repairs = int(production.get("repairs") or 0)
         production["check_fails"] = fails + warnings
         if h2:
-            stall = [] if fails else h2_stall_issues(content, ctx, production, cast)
+            stall = [] if fails else h2_stall_issues(content, ctx, production)
             trigger = recursion.round_trigger(production, fails=fails, stall=stall)
             if trigger:
                 recursion.start_round(

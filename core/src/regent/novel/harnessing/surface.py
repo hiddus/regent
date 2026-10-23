@@ -84,6 +84,8 @@ HOOK_CONDITIONS: dict[str, tuple[str, ...]] = {
 SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern", "opener"})
 # 句首取这么多字比对：「她记得」「她不知」一类排比够用，再长就把同一句式拆散了。
 OPENER_CHARS = 3
+# 只数代词起句：名字起句（含卡司外的配角、职称）在叙事里是常态，真机上全是误报。
+OPENER_PRONOUNS = frozenset("他她它我你")
 _OPENER_STRIP = "“”\"「」『』‘’'（）()—…·- 　"
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # 量词套量词（``(a+)+``、``(a*)*``、``(a+){2,}``）会回溯爆炸。
@@ -622,18 +624,14 @@ def resolve_hooks(config: ConfigTree, view: dict[str, Any]) -> list[str]:
     return guidance
 
 
-def repeated_opener(
-    text: str, *, names: list[str] | tuple[str, ...] = (), min_count: int = 10
-) -> tuple[str, int] | None:
-    """同一句式开头的句子最多的那一种；人名开头的句子不算——叙事里人名起句是常态。"""
+def repeated_opener(text: str, *, min_count: int = 10) -> tuple[str, int] | None:
+    """代词起句里同一句式最多的那一种，例如一句接一句的「她记得……」「她不知道……」。"""
     counts: dict[str, int] = {}
     for sentence in _sentences(text):
         body = sentence.lstrip(_OPENER_STRIP)
-        if len(body) <= OPENER_CHARS:
+        if len(body) <= OPENER_CHARS or body[0] not in OPENER_PRONOUNS:
             continue
         head = body[:OPENER_CHARS]
-        if any(head.startswith(name) or name.startswith(head) for name in names if name):
-            continue
         counts[head] = counts.get(head, 0) + 1
     if not counts:
         return None
@@ -646,7 +644,6 @@ def run_soft_checks(
     config: ConfigTree,
     *,
     previous_chapter: str = "",
-    names: list[str] | tuple[str, ...] = (),
     kinds: frozenset[str] | None = None,
 ) -> list[str]:
     """执行声明式软检查，返回提示。软检查只送改稿，不放行硬门未过的稿件。
@@ -664,9 +661,7 @@ def run_soft_checks(
             continue
         template = str(spec.get("message") or spec.get("label") or kind)
         if kind == "opener":
-            found = repeated_opener(
-                text, names=names, min_count=int(config.get_knob("soft_check_repeated_opener"))
-            )
+            found = repeated_opener(text, min_count=int(config.get_knob("soft_check_repeated_opener")))
             if found:
                 issues.append(_fill(template, {"matched": found[0], "count": found[1]}))
         elif kind == "repetition":

@@ -451,9 +451,15 @@ def test_place_streak_counts_back_through_old_and_new_plans():
     assert place_streak(ctx, "约束室") == 4
     assert place_streak(ctx, "走廊") == 0
     assert place_streak(ctx, "") == 0
+    # 换个叫法也算同一处；只共一个字不算
     # 正文只提一次不算
     ctx["recent_chapters"][2]["content"] = "约束室的灯灭了。"
     assert place_streak(ctx, "约束室") == 2
+    # 换个叫法也算同一处；只共一个字不算
+    ctx["chapter_plans"][4]["place"] = "物理约束观察室"
+    assert place_streak(ctx, "约束室") == 2
+    ctx["chapter_plans"][4]["place"] = "指挥舱"
+    assert place_streak(ctx, "医疗舱") == 0
 
 
 @pytest.mark.asyncio

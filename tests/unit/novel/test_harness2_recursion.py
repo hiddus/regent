@@ -859,14 +859,15 @@ LONG = _prose("长", 3300)
 LITANY = GOOD + "".join(f"她记得第{i}件事。她不知道为什么。" for i in range(12))
 
 
-def test_repeated_opener_ignores_names():
+def test_repeated_opener_counts_pronoun_led_sentences_only():
     from regent.novel.harnessing.surface import repeated_opener
 
-    # GOOD 本身每句都以「林晚把」开头：人名起句不算
-    assert repeated_opener(GOOD, min_count=10)[0] == "林晚把"
-    assert repeated_opener(GOOD, names=["林晚"], min_count=10) is None
-    assert repeated_opener(LITANY, names=["林晚"], min_count=10) == ("她记得", 12)
-    assert repeated_opener(LITANY, names=["林晚"], min_count=13) is None
+    # GOOD 每句都以「林晚把」开头；名字起句（含卡司外的配角）不算
+    assert repeated_opener(GOOD, min_count=10) is None
+    assert repeated_opener(GOOD + "独眼陈点头。" * 20, min_count=10) is None
+    assert repeated_opener(LITANY, min_count=10) == ("她记得", 12)
+    assert repeated_opener(LITANY, min_count=13) is None
+    assert repeated_opener("“她记得。”" * 10, min_count=10) == ("她记得", 10)
 
 
 def _stalled_run(*, harness_id: str = BASE_HARNESS_ID, executor: str = H2) -> SimpleNamespace:

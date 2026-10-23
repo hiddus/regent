@@ -469,7 +469,7 @@ async def probe_tick(
             ignore_max_length=chapter.cuts_overlong(ctx, production),
         )
         soft = chapter.name_warnings(content, cast)
-        soft += [item for item in chapter.h2_soft_issues(content, ctx, config, cast) if item not in soft]
+        soft += [item for item in chapter.h2_soft_issues(content, ctx, config) if item not in soft]
         result = {
             "kind": kind,
             "skipped": False,
