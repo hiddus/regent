@@ -488,7 +488,8 @@ async def probe_tick(
             "content": content,
             "hard_fails": fails,
             "soft_issues": soft,
-            "passed": not fails,
+            "passed": not fails
+            or chapter.length_settle(content, fails, ctx, production) in ("short", "overlong"),
             "config_hash": config.content_hash,
         }
     production.setdefault("h2_probes", []).append(result)

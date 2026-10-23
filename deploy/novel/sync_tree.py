@@ -96,6 +96,7 @@ SYMBOL_CHECKS = [
     ("regent.novel.application.directing_chapter", "h2_landing_due", "H2 章内判正文写没写到章纲结果"),
     ("regent.novel.harnessing.surface", "model_check", "模型判的软检查由阶段机单独调用"),
     ("regent.novel.application.directing_chapter", "short_accepted", "只差字数下限的稿用尽重试后原样入正史"),
+    ("regent.novel.application.directing_chapter", "length_settle", "字数不占 H2 递归轮：改一次稿后按 1500–4000 收下，更长删段"),
     ("regent.novel.application.works_advance", "clear_last_error", "入正史时清掉上一次的失败原因"),
     ("regent.novel.application.works_constants", "GENRE_MAX_CHARS", "开书/澄清写 genre 前收到列宽"),
 ]

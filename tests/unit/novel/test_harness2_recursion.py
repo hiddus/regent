@@ -74,7 +74,9 @@ def _prose(seed: str, floor: int) -> str:
 
 GOOD = _prose("", 2000)
 GOOD_B = _prose("又", 2000)
+# 除了字数还带一处内容硬门（同一段原文又出现一遍）：只差字数不开递归轮
 SHORT = _prose("短", 900)
+SHORT += SHORT[:60]
 PRIOR = "上一章写的是码头的雾和一艘没有名字的船。"
 
 
@@ -1068,41 +1070,75 @@ async def test_no_stall_round_without_the_v4_check(monkeypatch, harness_id, exec
 
 
 @pytest.mark.asyncio
-async def test_overlong_draft_goes_to_recursion_instead_of_cutting(novel_db, monkeypatch):
+async def test_overlong_draft_is_repaired_once_and_accepted_without_a_round(monkeypatch):
     broker = FakeBroker(
-        {
-            "ChapterProse": [
-                chapter.ChapterProse(content=LONG),
-                chapter.ChapterProse(content=LONG),
-                chapter.ChapterProse(content=GOOD),
-            ],
-            "HarnessProposal": [
-                _proposal(
-                    {"knobs": {"previous_chapter_tail": 300}},
-                    {"knobs": {"previous_chapter_tail": 800}},
-                )
-            ],
-        }
+        {"ChapterProse": [chapter.ChapterProse(content=LONG), chapter.ChapterProse(content=LONG)]}
     )
     monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
     run = _run()
     run.generation_context["overlong"] = chapter.OVERLONG_MARK
-    work = _work()
-    async with novel_db() as session:
-        for _ in range(8):
-            await _tick(session, run, work, broker)
-            if run.generation_context["production"]["phase"] == "COMPOSE":
-                break
+    for _ in range(4):
+        if await _tick(None, run, _work(), broker):
+            break
     production = run.generation_context["production"]
-    assert production["phase"] == "COMPOSE"
-    assert "fit" not in production and "fit_results" not in production
-    assert run.content == LONG
-    assert production["h2_reference"]["trigger"] == "check"
-    assert any(chapter._overlong_fail(item) for item in production["h2_reference"]["hard_fails"])
-    probes = {p["kind"]: p for p in production["h2_probes"]}
-    assert not probes["generic"]["passed"]
-    assert any(chapter._overlong_fail(item) for item in probes["generic"]["hard_fails"])
-    assert probes["book"]["passed"]
+    assert production["phase"] == "DONE"
+    assert production["overlong_accepted"] == len(LONG)
+    assert "h2_reference" not in production and "fit_results" not in production
+    assert [c["purpose"] for c in broker.calls] == ["chapter_write", "chapter_repair"]
+
+
+HUGE = _prose("巨", 4300)
+
+
+@pytest.mark.asyncio
+async def test_far_too_long_draft_is_cut_once_after_the_repair(monkeypatch):
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run(phase="CHECK", content=HUGE)
+    run.generation_context["overlong"] = chapter.OVERLONG_MARK
+    run.generation_context["production"]["repairs"] = 1
+    assert await _tick(None, run, _work(), broker) is False
+    production = run.generation_context["production"]
+    assert production["phase"] == "FIT"
+    assert production["fit_capped"] is True
+    assert production["fit"]["draft"] == HUGE
+    assert "overlong_accepted" not in production
+
+
+@pytest.mark.asyncio
+async def test_length_is_repaired_before_the_landing_check(monkeypatch):
+    broker = FakeBroker(
+        {
+            "ChapterProse": [chapter.ChapterProse(content=LONG)],
+            "LandingVerdict": [chapter.LandingVerdict(landed=True, ending="林晚握着第二把钥匙")],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _landing_run()
+    run.content = LONG
+    run.generation_context["overlong"] = chapter.OVERLONG_MARK
+    for _ in range(6):
+        if await _tick(None, run, _work(), broker):
+            break
+    production = run.generation_context["production"]
+    assert [c["schema"] for c in broker.calls] == ["ChapterProse", "LandingVerdict"]
+    assert production["h2_landing"]["landed"] is True
+    assert production["overlong_accepted"] == len(LONG)
+    assert "h2_reference" not in production
+
+
+def test_length_settle_accepts_only_length_misses_inside_the_window():
+    run = _run(content=LONG)
+    run.generation_context["overlong"] = chapter.OVERLONG_MARK
+    production = run.generation_context["production"]
+    ctx = run.generation_context
+    over = [f"正文超过{chapter.MAX_CHAPTER_CHARS}字（这一稿{len(LONG)}字）"]
+    assert chapter.length_settle(LONG, over, ctx, production) == "overlong"
+    assert chapter.length_settle(HUGE, over, ctx, production) == "fit"
+    assert chapter.length_settle(LONG, [*over, "结果没落地"], ctx, production) == ""
+    short = [f"正文不足{chapter.MIN_CHAPTER_CHARS}字"]
+    assert chapter.length_settle(_prose("近", 1800), short, ctx, production) == "short"
+    assert chapter.length_settle(_prose("短", 900), short, ctx, production) == ""
 
 
 def _exhausted(content: str, *, executor: str = H2, marked: bool = True) -> SimpleNamespace:

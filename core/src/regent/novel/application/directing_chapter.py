@@ -34,8 +34,10 @@ PROMPT_MAX_CHARS = MIN_CHAPTER_CHARS + 500
 # 验收上限比提示宽 500 字：照提示写的初稿也常到三千字上下，按提示上限验收要删十几段，
 # 删掉的铺垫让正文前后接不上。提示里的字数不跟着放宽，否则初稿会一起变长。
 MAX_CHAPTER_CHARS = PROMPT_MAX_CHARS + 500
-# 改稿、重写都补不到下限时，不低于这个字数的稿只差字数，原样入正史，不为字数停章。
+# 只差字数、改一次稿没改回来时，落在这个范围里的稿原样入正史，不为字数停章；
+# 更长的删段一次，更短的照旧重写。字数不占 H2 的递归轮。
 SHORT_ACCEPT_MIN_CHARS = 1500
+OVERLONG_ACCEPT_MAX_CHARS = 4000
 
 CHAPTER_PLAN_SYSTEM = (
     "你只出即将要写的这一章的章纲，不出后文，也不改全书节奏。\n"
@@ -1935,16 +1937,25 @@ async def produce_chapter_tick(
             ]
         repairs = int(production.get("repairs") or 0)
         production["check_fails"] = fails + warnings
-        if h2:
-            if not fails and h2_landing_due(content, ctx, production):
+        content_fails = [item for item in fails if not _length_fail(item)]
+        # 只差字数先改一次稿，改完再判结果、照抄、打转：同一章不为字数判两次结果
+        length_first = bool(fails) and not content_fails and repairs == 0
+        if h2 and not length_first:
+            if not content_fails and h2_landing_due(content, ctx, production):
                 production["phase"] = "LAND"
                 _save(run, production)
                 return False
-            stall = [] if fails else h2_stall_issues(content, ctx, production)
-            trigger = recursion.round_trigger(production, fails=fails, stall=stall)
+            stall = [] if content_fails else h2_stall_issues(content, ctx, production)
+            trigger = recursion.round_trigger(production, fails=content_fails, stall=stall)
             if trigger:
+                length = [item for item in fails if item not in content_fails]
                 recursion.start_round(
-                    run, production, trigger=trigger, fails=fails, soft=warnings, stall=stall
+                    run,
+                    production,
+                    trigger=trigger,
+                    fails=content_fails,
+                    soft=warnings + length,
+                    stall=stall,
                 )
                 _save(run, production)
                 return False
@@ -1959,24 +1970,21 @@ async def produce_chapter_tick(
             return True
         digest = _content_hash(content)
         if repairs >= 1 or production.get("last_failed_hash") == digest:
+            settle = length_settle(content, fails, ctx, production)
+            if settle in ("short", "overlong"):
+                production[f"{settle}_accepted"] = len(content)
+                production["soft_issues"] = warnings
+                production["phase"] = "DONE"
+                _save(run, production)
+                return True
+            if settle == "fit" and not production.get("fit_capped"):
+                production["fit_capped"] = True
+                production["fit"] = {"draft": content, "tag": f"cap:{digest[:8]}"}
+                production["phase"] = "FIT"
+                _save(run, production)
+                return False
             rewrites = int(production.get("rewrites") or 0)
             if rewrites >= MAX_REWRITES:
-                if not cuts_overlong(ctx, production) and all(_overlong_fail(item) for item in fails):
-                    # 递归、改稿、重写都没压回来：只差字数就原样入正史并记账，
-                    # 不删段不砍尾，也不为字数停掉整章
-                    production["overlong_accepted"] = len(content)
-                    production["soft_issues"] = warnings
-                    production["phase"] = "DONE"
-                    _save(run, production)
-                    return True
-                if len(content.strip()) >= SHORT_ACCEPT_MIN_CHARS and all(
-                    _short_fail(item) for item in fails
-                ):
-                    production["short_accepted"] = len(content)
-                    production["soft_issues"] = warnings
-                    production["phase"] = "DONE"
-                    _save(run, production)
-                    return True
                 raise ProductionStopped(
                     "短链重写后仍未通过硬门：" + "；".join(str(item) for item in fails[:4])
                 )
@@ -2072,6 +2080,27 @@ def overlong_accepted(content: str, production: dict[str, Any]) -> bool:
 
 def _short_fail(fail: str) -> bool:
     return str(fail) == f"正文不足{MIN_CHAPTER_CHARS}字"
+
+
+def _length_fail(fail: str) -> bool:
+    return _overlong_fail(fail) or _short_fail(fail)
+
+
+def length_settle(
+    content: str, fails: list[str], ctx: dict[str, Any] | None, production: dict[str, Any]
+) -> str:
+    """只差字数的稿怎么收：``short``/``overlong`` 原样收下，``fit`` 删段一次，空串照旧重写或停章。
+
+    删段的运行超长稿进 CHECK 前已经删过，这里不再收超长。
+    """
+    if not fails or not all(_length_fail(item) for item in fails):
+        return ""
+    chars = len((content or "").strip())
+    if any(_short_fail(item) for item in fails):
+        return "short" if chars >= SHORT_ACCEPT_MIN_CHARS else ""
+    if cuts_overlong(ctx, production):
+        return ""
+    return "overlong" if chars <= OVERLONG_ACCEPT_MAX_CHARS else "fit"
 
 
 def short_accepted(content: str, production: dict[str, Any]) -> bool:
