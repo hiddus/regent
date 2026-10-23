@@ -198,12 +198,24 @@ async def library_hits(
     reference = production.get("h2_reference") or {}
     fails = reference.get("hard_fails") or []
     stalled = reference.get("trigger") == "stall"
+    code = failure_code(fails[0]) if fails else "landing" if landing_missed(production) else ""
     return await library.search(
         session,
         work_id=getattr(work, "id", None),
         genre_tag=str(getattr(work, "genre", "") or ""),
         chapter_role=_chapter_role(ctx, production),
-        failure_code=failure_code(fails[0]) if fails else "stall" if stalled else "",
+        failure_code=code or ("stall" if stalled else ""),
+    )
+
+
+def landing_missed(production: dict[str, Any]) -> bool:
+    """这一轮的参照稿被判没写到章纲结果：经验另记 landing，不和句式打转混在一起。"""
+    reference = production.get("h2_reference") or {}
+    landing = production.get("h2_landing") if isinstance(production.get("h2_landing"), dict) else {}
+    return (
+        reference.get("trigger") == "stall"
+        and landing.get("landed") is False
+        and landing.get("hash") == chapter._content_hash(str(reference.get("draft") or ""))
     )
 
 
@@ -759,8 +771,7 @@ async def compose_tick(
         + (["reference"] if reference.get("passed") else []),
         "library_hits": list(production.get("h2_library_hits") or []),
     }
-    landing = production.get("h2_landing") if isinstance(production.get("h2_landing"), dict) else {}
-    if reference.get("trigger") == "stall" and landing.get("landed") is False:
+    if landing_missed(production):
         request["chapter_result"] = str(chapter._plan_now(ctx, production).get("result") or "")
     round_no = _round(production)
     decision = await chapter._call(
@@ -788,7 +799,8 @@ async def compose_tick(
         "trigger": reference.get("trigger") or "check",
         "observation": decision.observation,
         "experience": decision.experience,
-        "failure_codes": [failure_code(item) for item in reference.get("hard_fails") or []],
+        "failure_codes": [failure_code(item) for item in reference.get("hard_fails") or []]
+        or (["landing"] if landing_missed(production) else []),
     }
     if deliver in KINDS:
         kind = deliver

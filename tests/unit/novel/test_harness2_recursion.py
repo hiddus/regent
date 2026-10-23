@@ -988,7 +988,9 @@ async def test_missed_plan_result_opens_a_stall_round(novel_db, monkeypatch):
 
     def _compose(payload, system, command_id):
         composed.append(payload)
-        return ComposeDecision(decision="keep", deliver="reference", observation="两稿都没写到")
+        return ComposeDecision(
+            decision="adopt_book", deliver="book", observation="本书稿写到了钥匙", experience="按章纲写到结果再收尾"
+        )
 
     broker = FakeBroker(
         {
@@ -1027,6 +1029,8 @@ async def test_missed_plan_result_opens_a_stall_round(novel_db, monkeypatch):
             await _tick(session, run, work, broker)
     assert composed and composed[0]["chapter_result"] == LANDING_PLAN["result"]
     assert [c["schema"] for c in broker.calls].count("LandingVerdict") == 1
+    # 经验按 landing 记，不和句式打转的 stall 经验混在一起
+    assert run.generation_context["production"]["h2_lesson"]["failure_codes"] == ["landing"]
 
 
 @pytest.mark.asyncio
