@@ -1436,6 +1436,7 @@ async def prepare_chapter_canon(
         ctx=run.generation_context,
         cast=production.get("cast") or {},
         title=str(getattr(run, "title", "") or ""),
+        ignore_max_length=overlong_accepted(content, production),
     )
     if fails:
         raise ProductionStopped("短链硬门未过：" + "；".join(fails[:4]))
@@ -1872,3 +1873,9 @@ def cuts_overlong(ctx: dict[str, Any] | None, production: dict[str, Any]) -> boo
 
 def _overlong_fail(fail: str) -> bool:
     return str(fail).startswith(f"正文超过{MAX_CHAPTER_CHARS}字")
+
+
+def overlong_accepted(content: str, production: dict[str, Any]) -> bool:
+    """这一稿是 CHECK 兜底原样收下的超长稿：审校与入库不再按字数拦它。"""
+    accepted = int(production.get("overlong_accepted") or 0)
+    return accepted > 0 and accepted == len(content or "")

@@ -987,6 +987,23 @@ async def test_overlong_only_after_everything_is_accepted_as_is(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_overlong_accepted_draft_passes_review_but_others_do_not(monkeypatch):
+    from regent.novel.application.chapter_review import validate_chapter
+    from regent.novel.domain.errors import ProductionStopped
+
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _exhausted(LONG)
+    assert await _tick(None, run, _work(), broker) is True
+    assert await validate_chapter(None, provider=None, work=_work(), run=run) is True
+    assert run.review["passed"] is True
+    # 换了一稿就不是兜底收下的那一稿，照旧按字数拦
+    run.content = LONG + "又多一句。"
+    with pytest.raises(ProductionStopped, match="正文超过3000字"):
+        await validate_chapter(None, provider=None, work=_work(), run=run)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("other_fail", "executor", "marked"),
     [

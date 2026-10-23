@@ -345,7 +345,11 @@ async def validate_chapter(
     production = deepcopy(run.generation_context["production"])
     architecture = (run.generation_context or {}).get("architecture_version")
     if production.get("protocol") == PROTOCOL_CHAPTER or architecture in CHAPTER_ARCHITECTURES:
-        from regent.novel.application.directing_chapter import check_chapter, seal_chapter_review
+        from regent.novel.application.directing_chapter import (
+            check_chapter,
+            overlong_accepted,
+            seal_chapter_review,
+        )
 
         if production.get("phase") != "DONE" or not run.content:
             raise ProductionStopped("未完成的短链章节不能审校")
@@ -354,6 +358,7 @@ async def validate_chapter(
             ctx=run.generation_context,
             cast=production.get("cast") or {},
             title=str(getattr(run, "title", "") or ""),
+            ignore_max_length=overlong_accepted(str(run.content or ""), production),
         )
         if fails:
             raise ProductionStopped("短链硬门未过：" + "；".join(fails[:4]))
