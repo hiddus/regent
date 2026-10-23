@@ -102,6 +102,8 @@ def stage_rhythm_finished(context: dict[str, Any], chapter_no: int) -> bool:
 async def _last_node_completed(session: AsyncSession, work: StoryWorkModel, run) -> bool:
     """本章完成的是不是关键路径上的最后一个节点（P1-3）。"""
     context = run.generation_context or {}
+    if context.get("volume_expansion_resolved"):
+        return False
     if stage_rhythm_finished(context, int(getattr(run, "chapter_no", 0) or 0)):
         return True
     if not context.get("node_completed"):

@@ -686,6 +686,19 @@ def test_last_stage_landing_ends_the_volume():
 
 
 @pytest.mark.asyncio
+async def test_expanded_staged_volume_does_not_end_the_story():
+    from regent.novel.application.works_volumes import _last_node_completed
+
+    rhythm = {"stages": ["一"], "volume_start": 1, "volume_chapters": 3}
+    last = {"id": "ch3", "pressure": "p", "choice": "c", "result": "r", "stage_index": 0}
+    context = {"book_rhythm": rhythm, "target_node": last}
+    run = SimpleNamespace(chapter_no=3, generation_context=context)
+    assert await _last_node_completed(None, None, run) is True
+    run.generation_context = dict(context, volume_expansion_resolved={"volume_no": 2})
+    assert await _last_node_completed(None, None, run) is False
+
+
+@pytest.mark.asyncio
 async def test_plan_that_ignores_editor_notes_is_replanned(monkeypatch):
     run = _run(phase="PLAN")
     run.generation_context["book_rhythm"] = {"stake": "活下去", "payoff_limit": 1}
