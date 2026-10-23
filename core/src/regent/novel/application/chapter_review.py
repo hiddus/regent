@@ -349,6 +349,7 @@ async def validate_chapter(
             check_chapter,
             overlong_accepted,
             seal_chapter_review,
+            short_accepted,
         )
 
         if production.get("phase") != "DONE" or not run.content:
@@ -359,6 +360,7 @@ async def validate_chapter(
             cast=production.get("cast") or {},
             title=str(getattr(run, "title", "") or ""),
             ignore_max_length=overlong_accepted(str(run.content or ""), production),
+            ignore_min_length=short_accepted(str(run.content or ""), production),
         )
         if fails:
             raise ProductionStopped("短链硬门未过：" + "；".join(fails[:4]))

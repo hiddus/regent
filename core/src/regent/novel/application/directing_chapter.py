@@ -34,6 +34,8 @@ PROMPT_MAX_CHARS = MIN_CHAPTER_CHARS + 500
 # 验收上限比提示宽 500 字：照提示写的初稿也常到三千字上下，按提示上限验收要删十几段，
 # 删掉的铺垫让正文前后接不上。提示里的字数不跟着放宽，否则初稿会一起变长。
 MAX_CHAPTER_CHARS = PROMPT_MAX_CHARS + 500
+# 改稿、重写都补不到下限时，不低于这个字数的稿只差字数，原样入正史，不为字数停章。
+SHORT_ACCEPT_MIN_CHARS = 1500
 
 CHAPTER_PLAN_SYSTEM = (
     "你只出即将要写的这一章的章纲，不出后文，也不改全书节奏。\n"
@@ -1184,6 +1186,7 @@ def check_chapter(
     cast: dict[str, Any],
     title: str,
     ignore_max_length: bool = False,
+    ignore_min_length: bool = False,
 ) -> list[str]:
     data = ctx or {}
     text = (content or "").strip()
@@ -1201,7 +1204,7 @@ def check_chapter(
         world_bible=world,
         reader_contract=contract,
     )
-    if len(text) < MIN_CHAPTER_CHARS:
+    if len(text) < MIN_CHAPTER_CHARS and not ignore_min_length:
         fails.append(f"正文不足{MIN_CHAPTER_CHARS}字")
     if len(text) > MAX_CHAPTER_CHARS and not ignore_max_length:
         fails.append(f"正文超过{MAX_CHAPTER_CHARS}字（这一稿{len(text)}字）")
@@ -1532,6 +1535,7 @@ async def prepare_chapter_canon(
         cast=production.get("cast") or {},
         title=str(getattr(run, "title", "") or ""),
         ignore_max_length=overlong_accepted(content, production),
+        ignore_min_length=short_accepted(content, production),
     )
     if fails:
         raise ProductionStopped("短链硬门未过：" + "；".join(fails[:4]))
@@ -1965,6 +1969,14 @@ async def produce_chapter_tick(
                     production["phase"] = "DONE"
                     _save(run, production)
                     return True
+                if len(content.strip()) >= SHORT_ACCEPT_MIN_CHARS and all(
+                    _short_fail(item) for item in fails
+                ):
+                    production["short_accepted"] = len(content)
+                    production["soft_issues"] = warnings
+                    production["phase"] = "DONE"
+                    _save(run, production)
+                    return True
                 raise ProductionStopped(
                     "短链重写后仍未通过硬门：" + "；".join(str(item) for item in fails[:4])
                 )
@@ -2055,4 +2067,14 @@ def _overlong_fail(fail: str) -> bool:
 def overlong_accepted(content: str, production: dict[str, Any]) -> bool:
     """这一稿是 CHECK 兜底原样收下的超长稿：审校与入库不再按字数拦它。"""
     accepted = int(production.get("overlong_accepted") or 0)
+    return accepted > 0 and accepted == len(content or "")
+
+
+def _short_fail(fail: str) -> bool:
+    return str(fail) == f"正文不足{MIN_CHAPTER_CHARS}字"
+
+
+def short_accepted(content: str, production: dict[str, Any]) -> bool:
+    """这一稿是 CHECK 兜底原样收下的不足字数稿：审校与入库不再按下限拦它。"""
+    accepted = int(production.get("short_accepted") or 0)
     return accepted > 0 and accepted == len(content or "")

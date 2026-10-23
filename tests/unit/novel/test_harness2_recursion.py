@@ -1168,6 +1168,44 @@ async def test_overlong_fallback_only_for_marked_h2_overlength(monkeypatch, othe
         await _tick(None, run, _work(), broker)
 
 
+NEARLY = _prose("近", 1800)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executor", [H2, "director_chapter"])
+async def test_short_only_after_everything_is_accepted_and_passes_review(monkeypatch, executor):
+    from regent.novel.application.chapter_review import validate_chapter
+    from regent.novel.domain.errors import ProductionStopped
+
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _exhausted(NEARLY, executor=executor)
+    assert await _tick(None, run, _work(), broker) is True
+    production = run.generation_context["production"]
+    assert production["phase"] == "DONE"
+    assert production["short_accepted"] == len(NEARLY)
+    assert broker.calls == []
+    assert await validate_chapter(None, provider=None, work=_work(), run=run) is True
+    run.content = NEARLY[:-10]
+    with pytest.raises(ProductionStopped, match="正文不足2000字"):
+        await validate_chapter(None, provider=None, work=_work(), run=run)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("content", "other_fail"), [(SHORT, False), (NEARLY, True)])
+async def test_short_fallback_stops_far_too_short_or_other_fails(monkeypatch, content, other_fail):
+    from regent.novel.domain.errors import ProductionStopped
+
+    if other_fail:
+        check = chapter.check_chapter
+        monkeypatch.setattr(chapter, "check_chapter", lambda *a, **k: [*check(*a, **k), "结果没落地"])
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _exhausted(content, executor="director_chapter")
+    with pytest.raises(ProductionStopped, match="短链重写后仍未通过硬门"):
+        await _tick(None, run, _work(), broker)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("executor", "marked"), [(H2, False), ("director_chapter", True)])
 async def test_cutting_arms_still_cut_overlong_drafts(monkeypatch, executor, marked):
