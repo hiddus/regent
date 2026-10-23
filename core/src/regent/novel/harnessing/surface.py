@@ -20,7 +20,7 @@ import yaml
 
 PACK_ROOT = Path(__file__).resolve().parent.parent / "harness_packs"
 # 新运行钉这一版；已发布的包不原地改，旧运行按钉住的 harness_id 加载旧包，回放哈希才对得上。
-BASE_PACK_VERSION = "v4"
+BASE_PACK_VERSION = "v5"
 BASE_HARNESS_ID = f"base/{BASE_PACK_VERSION}"
 
 FROZEN_KEYS: frozenset[str] = frozenset(
@@ -61,6 +61,7 @@ DEFAULT_KNOB_RANGES: dict[str, dict[str, Any]] = {
     "soft_check_chapter_opening_overlap": {"min": 20, "max": 100, "default": 50},
     "stall_place_chapters": {"min": 3, "max": 10, "default": 4},
     "soft_check_repeated_opener": {"min": 6, "max": 30, "default": 10},
+    "soft_check_copied_sentences": {"min": 2, "max": 20, "default": 4},
 }
 
 # 技巧的 ``when`` 只能用这些条件；值类型固定，程序求值，不执行模型写的代码。
@@ -81,7 +82,9 @@ HOOK_CONDITIONS: dict[str, tuple[str, ...]] = {
     "method_rejected_at_least": ("rounds",),
     "place_streak_at_least": ("chapters", "place"),
 }
-SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern", "opener"})
+SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern", "opener", "echo"})
+# 短句（「他没有回头。」）两章撞上是常事，这么长以上的整句一字不差才算照抄。
+ECHO_SENTENCE_CHARS = 12
 # 句首取这么多字比对：「她记得」「她不知」一类排比够用，再长就把同一句式拆散了。
 OPENER_CHARS = 3
 # 只数代词起句：名字起句（含卡司外的配角、职称）在叙事里是常态，真机上全是误报。
@@ -639,6 +642,17 @@ def repeated_opener(text: str, *, min_count: int = 10) -> tuple[str, int] | None
     return (head, count) if count >= min_count else None
 
 
+def copied_sentences(text: str, previous: str, *, min_chars: int = ECHO_SENTENCE_CHARS) -> list[str]:
+    """正文里和上一章一字不差的整句（去空白后够长的才算），按出现顺序、不重复。"""
+    seen = {"".join(s.split()) for s in _sentences(previous)}
+    found: list[str] = []
+    for sentence in _sentences(text):
+        key = "".join(sentence.split())
+        if len(key) >= min_chars and key in seen and key not in found:
+            found.append(key)
+    return found
+
+
 def run_soft_checks(
     content: str,
     config: ConfigTree,
@@ -677,6 +691,10 @@ def run_soft_checks(
             )
             if span and not is_legitimate_repetition(span):
                 issues.append(_fill(template, {"matched_len": len(span)}))
+        elif kind == "echo":
+            copied = copied_sentences(text, previous_chapter)
+            if len(copied) >= int(config.get_knob("soft_check_copied_sentences")):
+                issues.append(_fill(template, {"count": len(copied), "matched": copied[0][:30]}))
         elif kind == "pattern":
             for pattern in spec.get("patterns") or []:
                 try:

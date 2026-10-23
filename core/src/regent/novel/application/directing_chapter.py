@@ -535,11 +535,16 @@ def h2_soft_issues(content: str, ctx: dict[str, Any] | None, config: Any) -> lis
 
 
 def h2_stall_issues(content: str, ctx: dict[str, Any] | None, production: dict[str, Any]) -> list[str]:
-    """正文原地打转的证据：同一句式反复开头。连续停在同一地点的章数只作背景，不单独算。"""
+    """正文原地打转的证据：同一句式反复开头、整句照抄上一章。连续停在同一地点的章数只作背景，不单独算。"""
     from regent.novel.harnessing.surface import run_soft_checks
 
     config = h2_config(ctx, production)
-    issues = run_soft_checks(content, config, kinds=frozenset({"opener"}))
+    issues = run_soft_checks(
+        content,
+        config,
+        previous_chapter=previous_chapter_text(ctx),
+        kinds=frozenset({"opener", "echo"}),
+    )
     view = writing_view(ctx, production)
     if issues and view["place_streak"] >= 2:
         issues.append(f"主角已经连续 {view['place_streak']} 章在「{view['place']}」")
@@ -882,6 +887,20 @@ def _clip(text: Any, limit: int = 60) -> str:
     return body if len(body) <= limit else body[:limit] + "……"
 
 
+def repeated_scene(
+    plan: dict[str, Any], earlier: list[dict[str, Any]], *, chapter_no: int | None = None
+) -> str:
+    """章纲的结果和前面某章是同一场时，返回那一章和它的结果。"""
+    result = str(plan.get("result") or "").strip()
+    if not result:
+        return ""
+    first = int(chapter_no or len(earlier) + 1) - len(earlier)
+    for offset, item in enumerate(earlier):
+        if _overlap_share(result, str(item.get("result") or ""), 10) >= 0.5:
+            return f"第{first + offset}章已经写过这一场（{_clip(item.get('result'))}）"
+    return ""
+
+
 def rhythm_mismatch(
     plan: dict[str, Any],
     rhythm: dict[str, Any],
@@ -905,7 +924,10 @@ def rhythm_mismatch(
         label = f"第{first + offset}章"
         # 结果里复述没变的处境不算同一场：共有原文要占到一半以上。
         if _overlap_share(result, str(item.get("result") or ""), 10) >= 0.5:
-            return f"这一章的结果和{label}是同一场（{label}：{_clip(item.get('result'))}）"
+            return (
+                f"这一章的结果和{label}是同一场（{label}：{_clip(item.get('result'))}），"
+                "那一场已经写完，这一章写它之后发生的事"
+            )
         if _shared_span(pressure, str(item.get("pressure") or ""), 20):
             return f"这一章的压力和{label}相同，要写上一章结果造成的新处境"
         if _shared_span(choice, str(item.get("choice") or ""), 12):
@@ -1576,22 +1598,26 @@ async def produce_chapter_tick(
         )
         if isinstance(production.get("arc_review"), dict):
             node["arc_review"] = production["arc_review"]
+        chapter_no = int(getattr(run, "chapter_no", 0) or 0) or None
         stall = place_stall_reason(node, ctx, production)
+        repeats = repeated_scene(node, earlier, chapter_no=chapter_no)
         mismatch = rhythm_mismatch(
             node,
             rhythm,
             earlier,
-            chapter_no=int(getattr(run, "chapter_no", 0) or 0) or None,
+            chapter_no=chapter_no,
             review=production.get("arc_review") if isinstance(production.get("arc_review"), dict) else None,
         )
         reason = "；".join(item for item in (stall, mismatch) if item)
         out_of_plans = plan_calls + 1 >= MAX_PLAN_CALLS
-        if not stall and mismatch:
+        if not (stall or repeats) and mismatch:
             production["plan_moved"] = {"node": node, "reason": mismatch}
-        elif stall and out_of_plans and isinstance(production.get("plan_moved"), dict):
-            # 节奏没对上还能带着警告写；原地再写一章不行：换回离开了那里的那一稿
+        elif (stall or repeats) and out_of_plans and isinstance(production.get("plan_moved"), dict):
+            # 节奏没对上还能带着警告写；原地再写一章、把写过的一场再写一遍不行：换回没有这两样的那一稿
             node = dict(production["plan_moved"]["node"])
             reason = str(production["plan_moved"]["reason"])
+        elif repeats and out_of_plans:
+            node["already_written"] = f"{repeats}：这一章从那一场之后写起，那一场里的动作和对白不再写"
         if reason and not out_of_plans:
             production["plan_reject"] = reason
             production["plan_rejected"] = {

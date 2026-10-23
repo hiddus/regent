@@ -529,6 +529,78 @@ async def test_plan_that_only_misses_rhythm_beats_a_plan_that_stays_put(monkeypa
     assert production["plan_warnings"] == ["结果和上一章是同一场"]
 
 
+SCENE_SHOT = "照见渠底水面上浮着一层油光，上方又传来一声竹哨"
+
+
+def _scene_run() -> SimpleNamespace:
+    run = _run(phase="PLAN")
+    run.generation_context["book_rhythm"] = {"stake": "活下去", "payoff_limit": 1}
+    run.generation_context["chapter_plans"] = [
+        {"chapter_no": 1, "pressure": "巡渠的人下来了", "choice": "钻进暗渠", "result": SCENE_SHOT}
+    ]
+    return run
+
+
+async def _plan_four_times(monkeypatch, run, plans) -> dict:
+    calls: list[int] = []
+
+    async def _fake_call(*args, **kwargs):
+        if args[5] is MethodVerdict:
+            return MethodVerdict(same_method=False, matched="")
+        calls.append(1)
+        return plans(len(calls))
+
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", _fake_call)
+    production = run.generation_context["production"]
+    for _ in range(4):
+        await produce_chapter_tick(None, provider=None, work=SimpleNamespace(id="w"), run=run, production=production)
+        production = run.generation_context["production"]
+    assert len(calls) == 4
+    return production
+
+
+def test_repeated_scene_names_the_chapter_that_already_wrote_it():
+    from regent.novel.application.directing_chapter import repeated_scene
+
+    earlier = [{"result": "r1"}, {"result": SCENE_SHOT}]
+    found = repeated_scene({"result": SCENE_SHOT + "，他屏住呼吸"}, earlier, chapter_no=5)
+    assert found.startswith("第4章已经写过这一场")
+    assert repeated_scene({"result": "他顺着竹哨声摸到了闸门"}, earlier, chapter_no=5) == ""
+
+
+@pytest.mark.asyncio
+async def test_plan_that_only_misses_rhythm_beats_a_plan_that_repeats_a_scene(monkeypatch):
+    run = _scene_run()
+
+    def _plans(n: int) -> ChapterPlan:
+        if n == 2:
+            return ChapterPlan(pressure="闸门落了", choice="撬开闸门", result="他顺着竹哨声摸到了闸门外")
+        return ChapterPlan(pressure="竹哨又响", choice="贴着渠壁不动", result=SCENE_SHOT)
+
+    def _mismatch(node, *args, **kwargs):
+        return "节奏没对上" if "闸门" in node.get("result", "") else "这一章的结果和第1章是同一场"
+
+    monkeypatch.setattr("regent.novel.application.directing_chapter.rhythm_mismatch", _mismatch)
+    production = await _plan_four_times(monkeypatch, run, _plans)
+    assert production["chapter_plan"]["result"] == "他顺着竹哨声摸到了闸门外"
+    assert "already_written" not in production["chapter_plan"]
+    assert production["plan_warnings"] == ["节奏没对上"]
+
+
+@pytest.mark.asyncio
+async def test_plan_that_keeps_repeating_a_scene_tells_the_writer_it_was_written(monkeypatch):
+    run = _scene_run()
+    production = await _plan_four_times(
+        monkeypatch,
+        run,
+        lambda n: ChapterPlan(pressure=f"竹哨第{n}次响", choice="贴着渠壁不动", result=SCENE_SHOT),
+    )
+    note = production["chapter_plan"]["already_written"]
+    assert note.startswith("第1章已经写过这一场") and "从那一场之后写起" in note
+    assert "同一场" in production["plan_warnings"][0]
+    assert production["phase"] in {"METHOD", "WRITE"}
+
+
 @pytest.mark.asyncio
 async def test_new_method_goes_on_to_write(monkeypatch):
     run = _run(phase="PLAN")

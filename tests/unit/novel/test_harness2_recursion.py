@@ -915,6 +915,61 @@ async def test_litany_opens_one_stall_round(monkeypatch):
     assert run.generation_context["production"]["phase"] == "REPAIR"
 
 
+def _lifted(*numbers: int) -> str:
+    """GOOD 里不相邻的几句整句，中间夹着别的句子：单段公共子串都不长。"""
+    return "他咳了一声。".join(
+        f"林晚把第{i}枚铜钥匙放进第{i}只抽屉，窗外第{i}阵雨还在下，走廊里没有第{i}个人经过。"
+        for i in numbers
+    )
+
+
+def test_copied_sentences_counts_long_sentences_lifted_from_the_previous_chapter():
+    from regent.novel.harnessing.surface import copied_sentences
+
+    previous = _lifted(3, 7, 11, 15) + "他没有回头。"
+    found = copied_sentences(GOOD + "他没有回头。", previous)
+    assert len(found) == 4 and found[0].startswith("林晚把第3枚")
+    assert copied_sentences(GOOD, "") == []
+    config = load_base_pack()
+    issues = run_soft_checks(GOOD, config, previous_chapter=previous, kinds=frozenset({"echo"}))
+    assert issues and "有 4 句和上一章一字不差" in issues[0]
+    assert not run_soft_checks(GOOD, config, previous_chapter=_lifted(3, 7, 11), kinds=frozenset({"echo"}))
+
+
+def _echo_run(*numbers: int, harness_id: str = BASE_HARNESS_ID) -> SimpleNamespace:
+    run = _run(phase="CHECK", content=GOOD)
+    ctx = run.generation_context
+    ctx["harness_id"] = harness_id
+    ctx["harness_hash"] = load_harness(harness_id).content_hash
+    ctx["recent_chapters"] = [{"content": PRIOR + _lifted(*numbers)}]
+    return run
+
+
+@pytest.mark.asyncio
+async def test_copying_the_previous_chapter_opens_a_stall_round(monkeypatch):
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _echo_run(3, 7, 11, 15)
+    await _tick(None, run, _work(), broker)
+    production = run.generation_context["production"]
+    assert production["phase"] == "PROPOSE"
+    reference = production["h2_reference"]
+    assert reference["trigger"] == "stall"
+    assert any("和上一章一字不差" in item for item in reference["stall_issues"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("numbers", "harness_id"), [((3, 7, 11), BASE_HARNESS_ID), ((3, 7, 11, 15), "base/v4")]
+)
+async def test_no_stall_round_for_a_few_echoes_or_without_the_v5_check(monkeypatch, numbers, harness_id):
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _echo_run(*numbers, harness_id=harness_id)
+    assert await _tick(None, run, _work(), broker) is True
+    assert run.generation_context["production"]["phase"] == "DONE"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("harness_id", "executor"), [("base/v3", H2), (BASE_HARNESS_ID, "director_chapter")])
 async def test_no_stall_round_without_the_v4_check(monkeypatch, harness_id, executor):
@@ -1141,8 +1196,14 @@ def test_compose_never_delivers_failed_draft():
 
 def test_base_pack_matches_python_constants_and_defaults():
     config = load_base_pack()
-    assert BASE_HARNESS_ID == "base/v4"
+    assert BASE_HARNESS_ID == "base/v5"
     assert config.get_prompt("write") == chapter.CHAPTER_WRITE_SYSTEM
+    # v5 只在 v4 上加照抄上一章的旋钮与软检查，提示词逐字不变
+    v4 = load_harness("base/v4")
+    assert v4.tree["prompts"] == config.tree["prompts"]
+    assert config.get_knob("soft_check_copied_sentences") == 4
+    assert "copied_previous_chapter" in config.get_soft_checks()
+    assert "copied_previous_chapter" not in v4.get_soft_checks()
     # v4 只在 v3 上加原地打转的旋钮、软检查与钩子，提示词逐字不变
     v3 = load_harness("base/v3")
     assert v3.tree["prompts"] == config.tree["prompts"]
