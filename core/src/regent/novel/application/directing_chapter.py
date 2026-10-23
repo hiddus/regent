@@ -322,6 +322,9 @@ def open_promises(ctx: dict[str, Any] | None) -> list[dict[str, Any]]:
 WRITE_CANON_MARK = "relevant"
 # 前置门提示删了不分题材的金手指条款；没有这个标记的老运行回放时照旧带上它。
 FRONT_GATE_MARK = "no_power_clause"
+# H2 臂超长不删段：删段只看字数不看连贯，删多了正文前后接不上。超长按硬门失败交给
+# 递归，探针也按字数判。没有这个标记的运行（含默认臂）照旧删段。
+OVERLONG_MARK = "harness"
 WRITE_CANON_RECENT_CHAPTERS = 2
 WRITE_CANON_RECENT_MAX = 40
 WRITE_CANON_EARLIER_MAX = 20
@@ -1007,7 +1010,7 @@ def check_chapter(
     if len(text) < MIN_CHAPTER_CHARS:
         fails.append(f"正文不足{MIN_CHAPTER_CHARS}字")
     if len(text) > MAX_CHAPTER_CHARS and not ignore_max_length:
-        fails.append(f"正文超过{MAX_CHAPTER_CHARS}字")
+        fails.append(f"正文超过{MAX_CHAPTER_CHARS}字（这一稿{len(text)}字）")
     previous = previous_chapter_text(data)
     copied = longest_common_substring(text, previous, min_len=80)
     if copied and not is_legitimate_repetition(copied):
@@ -1186,12 +1189,15 @@ def fit_payload(
 def accept_draft(
     run: Any, production: dict[str, Any], *, ctx: dict[str, Any] | None, draft: str, tag: str
 ) -> None:
-    """收下一稿：去重后不超长就落稿进 CHECK，超长先进 FIT 删段，不砍尾。"""
+    """收下一稿：去重后不超长就落稿进 CHECK，超长先进 FIT 删段，不砍尾。
+
+    H2 臂打了 ``OVERLONG_MARK`` 的运行不删段，超长稿原样进 CHECK。
+    """
     production.pop("fit_truncated", None)
     body = dedupe_chapter_text(draft, previous_chapter_text(ctx))
     # 首稿字数：覆盖层试用拿它和试用前比，加戏的覆盖层会先在这里露出来
     production.setdefault("draft_chars", len(body))
-    if len(body) <= MAX_CHAPTER_CHARS:
+    if len(body) <= MAX_CHAPTER_CHARS or not cuts_overlong(ctx, production):
         _store_prose(run, production, body)
         production["phase"] = "CHECK"
         return
@@ -1675,6 +1681,14 @@ async def produce_chapter_tick(
         if repairs >= 1 or production.get("last_failed_hash") == digest:
             rewrites = int(production.get("rewrites") or 0)
             if rewrites >= MAX_REWRITES:
+                if not cuts_overlong(ctx, production) and all(_overlong_fail(item) for item in fails):
+                    # 递归、改稿、重写都没压回来：只差字数就原样入正史并记账，
+                    # 不删段不砍尾，也不为字数停掉整章
+                    production["overlong_accepted"] = len(content)
+                    production["soft_issues"] = warnings
+                    production["phase"] = "DONE"
+                    _save(run, production)
+                    return True
                 raise ProductionStopped(
                     "短链重写后仍未通过硬门：" + "；".join(str(item) for item in fails[:4])
                 )
@@ -1745,3 +1759,12 @@ async def produce_chapter_tick(
 
 def _is_h2(production: dict[str, Any]) -> bool:
     return str(production.get("executor") or "") == H2_ARCHITECTURE
+
+
+def cuts_overlong(ctx: dict[str, Any] | None, production: dict[str, Any]) -> bool:
+    """超长稿是否走删段；H2 臂的新运行交给递归，不删。"""
+    return not (_is_h2(production) and (ctx or {}).get("overlong") == OVERLONG_MARK)
+
+
+def _overlong_fail(fail: str) -> bool:
+    return str(fail).startswith(f"正文超过{MAX_CHAPTER_CHARS}字")

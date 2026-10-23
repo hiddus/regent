@@ -1132,6 +1132,7 @@ async def assemble(
         "canon": canon,
         "write_canon": "relevant",
         "front_gate": "no_power_clause",
+        "overlong": "harness",
         "memory": recalled.as_payload(),
         "memory_source_hash": recalled.source_hash,
     }

@@ -855,6 +855,105 @@ async def test_two_rounds_then_falls_back_to_repair(novel_db, monkeypatch):
     assert production["call_count"] <= effective_call_cap(production)
 
 
+LONG = _prose("长", 3300)
+
+
+@pytest.mark.asyncio
+async def test_overlong_draft_goes_to_recursion_instead_of_cutting(novel_db, monkeypatch):
+    broker = FakeBroker(
+        {
+            "ChapterProse": [
+                chapter.ChapterProse(content=LONG),
+                chapter.ChapterProse(content=LONG),
+                chapter.ChapterProse(content=GOOD),
+            ],
+            "HarnessProposal": [
+                _proposal(
+                    {"knobs": {"previous_chapter_tail": 300}},
+                    {"knobs": {"previous_chapter_tail": 800}},
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run()
+    run.generation_context["overlong"] = chapter.OVERLONG_MARK
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(8):
+            await _tick(session, run, work, broker)
+            if run.generation_context["production"]["phase"] == "COMPOSE":
+                break
+    production = run.generation_context["production"]
+    assert production["phase"] == "COMPOSE"
+    assert "fit" not in production and "fit_results" not in production
+    assert run.content == LONG
+    assert production["h2_reference"]["trigger"] == "check"
+    assert any(chapter._overlong_fail(item) for item in production["h2_reference"]["hard_fails"])
+    probes = {p["kind"]: p for p in production["h2_probes"]}
+    assert not probes["generic"]["passed"]
+    assert any(chapter._overlong_fail(item) for item in probes["generic"]["hard_fails"])
+    assert probes["book"]["passed"]
+
+
+def _exhausted(content: str, *, executor: str = H2, marked: bool = True) -> SimpleNamespace:
+    run = _run(phase="CHECK", content=content, executor=executor)
+    if marked:
+        run.generation_context["overlong"] = chapter.OVERLONG_MARK
+    production = run.generation_context["production"]
+    production.update({"repairs": 1, "rewrites": chapter.MAX_REWRITES, "h2_round": 2, "h2_stop": True})
+    return run
+
+
+@pytest.mark.asyncio
+async def test_overlong_only_after_everything_is_accepted_as_is(monkeypatch):
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _exhausted(LONG)
+    assert await _tick(None, run, _work(), broker) is True
+    production = run.generation_context["production"]
+    assert production["phase"] == "DONE"
+    assert production["overlong_accepted"] == len(LONG)
+    assert run.content == LONG
+    assert broker.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("other_fail", "executor", "marked"),
+    [
+        # 除了超长还有别的硬门没过：照旧停
+        (True, H2, True),
+        # 删段的运行走到这里说明删段也没救回来：照旧停
+        (False, H2, False),
+        (False, "director_chapter", True),
+    ],
+)
+async def test_overlong_fallback_only_for_marked_h2_overlength(monkeypatch, other_fail, executor, marked):
+    from regent.novel.domain.errors import ProductionStopped
+
+    if other_fail:
+        check = chapter.check_chapter
+        monkeypatch.setattr(chapter, "check_chapter", lambda *a, **k: [*check(*a, **k), "结果没落地"])
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _exhausted(LONG, executor=executor, marked=marked)
+    with pytest.raises(ProductionStopped, match="短链重写后仍未通过硬门"):
+        await _tick(None, run, _work(), broker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("executor", "marked"), [(H2, False), ("director_chapter", True)])
+async def test_cutting_arms_still_cut_overlong_drafts(monkeypatch, executor, marked):
+    broker = FakeBroker({"ChapterProse": [chapter.ChapterProse(content=LONG)]})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _run(executor=executor)
+    if marked:
+        run.generation_context["overlong"] = chapter.OVERLONG_MARK
+    await _tick(None, run, _work(), broker)
+    assert run.generation_context["production"]["phase"] == "FIT"
+
+
 @pytest.mark.asyncio
 async def test_default_arm_never_enters_recursion(monkeypatch):
     broker = FakeBroker({"ChapterProse": lambda *_: chapter.ChapterProse(content=SHORT)})
