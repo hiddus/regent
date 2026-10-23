@@ -26,6 +26,7 @@ HOST = CFG.get("SERVER_IP") or "118.31.171.159"
 PASSWORD = CFG["LOGIN_PASSWORD"]
 
 HOST_CONSOLE_DIST = "/opt/regent/console-dist"
+HOST_CONSOLE_CONF_DIR = "/opt/regent/console-nginx"
 API_CONSOLE_DIST = "/app/apps/regent-console/dist"
 
 
@@ -102,6 +103,10 @@ if [ -L /opt/regent/current ] || [ -d /opt/regent/current ]; then
 fi
 
 # 2) Standalone nginx :3000 (optional / LAN)
+# nginx.conf 不能从 /tmp 挂：重启后 /tmp 清空，docker 会在原路径建空目录，容器再也起不来
+mkdir -p {HOST_CONSOLE_CONF_DIR}
+if [ -d {HOST_CONSOLE_CONF_DIR}/nginx.conf ]; then rmdir {HOST_CONSOLE_CONF_DIR}/nginx.conf; fi
+cp /tmp/console-deploy/nginx/nginx.conf {HOST_CONSOLE_CONF_DIR}/nginx.conf
 if docker ps -a --format '{{{{.Names}}}}' | grep -q '^regent-console$'; then
   docker rm -f regent-console
 fi
@@ -110,7 +115,7 @@ docker run -d \
   --network regent-net \
   -p 3000:80 \
   -v {HOST_CONSOLE_DIST}:/usr/share/nginx/html:ro \
-  -v /tmp/console-deploy/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
+  -v {HOST_CONSOLE_CONF_DIR}/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
   --restart unless-stopped \
   nginx:1.27-alpine
 echo CONTAINER_CREATED
