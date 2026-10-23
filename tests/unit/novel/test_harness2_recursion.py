@@ -223,7 +223,7 @@ def test_h2_routes_through_chapter_protocol():
         ChapterStep.REVIEW,
         ChapterStep.CANON,
     )
-    assert effective_call_cap({"protocol": "chapter", "executor": H2}) == 30
+    assert effective_call_cap({"protocol": "chapter", "executor": H2}) == 31
     assert effective_call_cap({"protocol": "chapter", "executor": "director_chapter"}) == 16
     assert {"harness_overlay", "harness_overlay_id"} <= set(executor_app.PINNED_CONTEXT_KEYS)
 
@@ -970,6 +970,87 @@ async def test_no_stall_round_for_a_few_echoes_or_without_the_v5_check(monkeypat
     assert run.generation_context["production"]["phase"] == "DONE"
 
 
+LANDING_PLAN = {"pressure": "抽屉锁着", "choice": "撬开第七只抽屉", "result": "林晚在第七只抽屉底摸到第二把铜钥匙"}
+
+
+def _landing_run(*, harness_id: str = BASE_HARNESS_ID, executor: str = H2) -> SimpleNamespace:
+    run = _run(phase="CHECK", content=GOOD, executor=executor)
+    ctx = run.generation_context
+    ctx["harness_id"] = harness_id
+    ctx["harness_hash"] = load_harness(harness_id).content_hash
+    ctx["production"]["chapter_plan"] = dict(LANDING_PLAN)
+    return run
+
+
+@pytest.mark.asyncio
+async def test_missed_plan_result_opens_a_stall_round(novel_db, monkeypatch):
+    composed: list[dict] = []
+
+    def _compose(payload, system, command_id):
+        composed.append(payload)
+        return ComposeDecision(decision="keep", deliver="reference", observation="两稿都没写到")
+
+    broker = FakeBroker(
+        {
+            "LandingVerdict": [
+                chapter.LandingVerdict(landed=False, missing="没摸到第二把铜钥匙", ending="林晚关上抽屉出了门")
+            ],
+            "HarnessProposal": [
+                _proposal({"knobs": {"previous_chapter_tail": 300}}, {"knobs": {"previous_chapter_tail": 800}})
+            ],
+            "ChapterProse": [chapter.ChapterProse(content=GOOD_B), chapter.ChapterProse(content=GOOD_B)],
+            "ComposeDecision": _compose,
+        }
+    )
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _landing_run()
+    await _tick(None, run, _work(), broker)
+    assert run.generation_context["production"]["phase"] == "LAND"
+    await _tick(None, run, _work(), broker)
+    production = run.generation_context["production"]
+    assert production["phase"] == "CHECK" and production["h2_landing"]["landed"] is False
+    landing_call = broker.calls[0]
+    assert landing_call["schema"] == "LandingVerdict"
+    assert landing_call["payload"]["planned_result"] == LANDING_PLAN["result"]
+    await _tick(None, run, _work(), broker)
+    reference = run.generation_context["production"]["h2_reference"]
+    assert reference["trigger"] == "stall"
+    assert any(
+        "正文没写到章纲的结果（没写到：没摸到第二把铜钥匙），停在了：林晚关上抽屉出了门" in item
+        for item in reference["stall_issues"]
+    )
+    work = _work()
+    async with novel_db() as session:
+        for _ in range(8):
+            if composed:
+                break
+            await _tick(session, run, work, broker)
+    assert composed and composed[0]["chapter_result"] == LANDING_PLAN["result"]
+    assert [c["schema"] for c in broker.calls].count("LandingVerdict") == 1
+
+
+@pytest.mark.asyncio
+async def test_landed_plan_result_is_judged_once_and_goes_on(monkeypatch):
+    broker = FakeBroker({"LandingVerdict": [chapter.LandingVerdict(landed=True, ending="林晚握着第二把钥匙")]})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _landing_run()
+    assert await _tick(None, run, _work(), broker) is False
+    assert await _tick(None, run, _work(), broker) is False
+    assert await _tick(None, run, _work(), broker) is True
+    assert run.generation_context["production"]["phase"] == "DONE"
+    assert [c["schema"] for c in broker.calls] == ["LandingVerdict"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("harness_id", "executor"), [("base/v5", H2), (BASE_HARNESS_ID, "director_chapter")])
+async def test_no_landing_call_without_the_v6_check(monkeypatch, harness_id, executor):
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _landing_run(harness_id=harness_id, executor=executor)
+    assert await _tick(None, run, _work(), broker) is True
+    assert broker.calls == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("harness_id", "executor"), [("base/v3", H2), (BASE_HARNESS_ID, "director_chapter")])
 async def test_no_stall_round_without_the_v4_check(monkeypatch, harness_id, executor):
@@ -1196,8 +1277,13 @@ def test_compose_never_delivers_failed_draft():
 
 def test_base_pack_matches_python_constants_and_defaults():
     config = load_base_pack()
-    assert BASE_HARNESS_ID == "base/v5"
+    assert BASE_HARNESS_ID == "base/v6"
     assert config.get_prompt("write") == chapter.CHAPTER_WRITE_SYSTEM
+    # v6 只在 v5 上加「正文没写到章纲结果」的模型判软检查，提示词逐字不变
+    v5 = load_harness("base/v5")
+    assert v5.tree["prompts"] == config.tree["prompts"]
+    assert config.get_soft_checks()["plan_result_missed"]["kind"] == "landing"
+    assert "plan_result_missed" not in v5.get_soft_checks()
     # v5 只在 v4 上加照抄上一章的旋钮与软检查，提示词逐字不变
     v4 = load_harness("base/v4")
     assert v4.tree["prompts"] == config.tree["prompts"]

@@ -12,10 +12,12 @@ CURRENCY = "CNY"
 MAX_CALLS = 120
 CHAPTER_MAX_CALLS = 16
 # Harness² 递归臂：一章至多 H2_MAX_ROUNDS 轮，每轮 PROPOSE + 2×PROBE + COMPOSE
-# + 通用条目的专有性筛查 + 后继正文，加上交付稿超长时的一次删段。
+# + 通用条目的专有性筛查 + 后继正文，加上交付稿超长时的一次删段；
+# 另有一次判正文写没写到章纲结果。
 H2_MAX_ROUNDS = 2
 H2_CALLS_PER_ROUND = 7
-CHAPTER_H2_MAX_CALLS = CHAPTER_MAX_CALLS + H2_MAX_ROUNDS * H2_CALLS_PER_ROUND
+H2_LANDING_CALLS = 1
+CHAPTER_H2_MAX_CALLS = CHAPTER_MAX_CALLS + H2_MAX_ROUNDS * H2_CALLS_PER_ROUND + H2_LANDING_CALLS
 
 
 def effective_call_cap(production: dict[str, Any], *, base_calls: int | None = None) -> int:

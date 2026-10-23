@@ -855,6 +855,7 @@ def test_chapter_call_cap_covers_the_short_path_only():
     from regent.novel.application.directing_budget import (
         CHAPTER_MAX_CALLS,
         H2_CALLS_PER_ROUND,
+        H2_LANDING_CALLS,
         H2_MAX_ROUNDS,
         MAX_CALLS,
         effective_call_cap,
@@ -868,7 +869,7 @@ def test_chapter_call_cap_covers_the_short_path_only():
         effective_call_cap(
             {"protocol": "chapter", "executor": "director_chapter_h2", "call_count": 0}
         )
-        == CHAPTER_MAX_CALLS + H2_MAX_ROUNDS * H2_CALLS_PER_ROUND
+        == CHAPTER_MAX_CALLS + H2_MAX_ROUNDS * H2_CALLS_PER_ROUND + H2_LANDING_CALLS
     )
 
 

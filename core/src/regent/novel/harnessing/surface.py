@@ -20,7 +20,7 @@ import yaml
 
 PACK_ROOT = Path(__file__).resolve().parent.parent / "harness_packs"
 # 新运行钉这一版；已发布的包不原地改，旧运行按钉住的 harness_id 加载旧包，回放哈希才对得上。
-BASE_PACK_VERSION = "v5"
+BASE_PACK_VERSION = "v6"
 BASE_HARNESS_ID = f"base/{BASE_PACK_VERSION}"
 
 FROZEN_KEYS: frozenset[str] = frozenset(
@@ -82,7 +82,9 @@ HOOK_CONDITIONS: dict[str, tuple[str, ...]] = {
     "method_rejected_at_least": ("rounds",),
     "place_streak_at_least": ("chapters", "place"),
 }
-SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern", "opener", "echo"})
+SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern", "opener", "echo", "landing"})
+# 这几类要模型判，run_soft_checks 不跑；由阶段机在 CHECK 后单独调用，结果按模板写成提示。
+MODEL_CHECK_KINDS = frozenset({"landing"})
 # 短句（「他没有回头。」）两章撞上是常事，这么长以上的整句一字不差才算照抄。
 ECHO_SENTENCE_CHARS = 12
 # 句首取这么多字比对：「她记得」「她不知」一类排比够用，再长就把同一句式拆散了。
@@ -671,7 +673,7 @@ def run_soft_checks(
     issues: list[str] = []
     for spec in config.get_soft_checks().values():
         kind = str(spec.get("kind") or "")
-        if kinds is not None and kind not in kinds:
+        if (kinds is not None and kind not in kinds) or kind in MODEL_CHECK_KINDS:
             continue
         template = str(spec.get("message") or spec.get("label") or kind)
         if kind == "opener":
@@ -705,6 +707,18 @@ def run_soft_checks(
                     issues.append(_fill(template, {"matched": match.group()[:30]}))
                     break
     return issues
+
+
+def model_check(config: ConfigTree, kind: str) -> dict[str, Any] | None:
+    """配置里开着的那一条模型判的软检查；没有就是 None。"""
+    for spec in config.get_soft_checks().values():
+        if str(spec.get("kind") or "") == kind:
+            return spec
+    return None
+
+
+def model_check_issue(spec: dict[str, Any], values: dict[str, Any]) -> str:
+    return _fill(str(spec.get("message") or spec.get("label") or spec.get("kind")), values)
 
 
 def _deep_diff(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:

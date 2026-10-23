@@ -26,7 +26,7 @@ from regent.novel.infrastructure.models import PersonaSpecModel, StoryWorkModel
 
 CHAPTER_PHASES = ("PLAN", "METHOD", "WRITE", "FIT", "CHECK", "REPAIR", "DONE")
 # Harness² 递归臂在 CHECK 失败或追读自评报问题后插入的阶段。
-H2_PHASES = ("PROPOSE", "PROBE", "COMPOSE", "SCREEN")
+H2_PHASES = ("PROPOSE", "PROBE", "COMPOSE", "SCREEN", "LAND")
 
 # 网文单章通行下限。提示里要的上限只比下限多 500 字。
 MIN_CHAPTER_CHARS = 2000
@@ -146,6 +146,15 @@ CHAPTER_FIT_SYSTEM = (
     "只输出 drop。"
 )
 
+LANDING_SYSTEM = (
+    "你只判断这一章正文有没有写到章纲的结果，不改写正文。\n"
+    "choice 是主角这一章要做的那件事，planned_result 是它该造成的结果。"
+    "结果的大意在正文里当场发生了就算写到，换了说法、细节不同也算；"
+    "正文停在它之前、绕开了它或者走向了别处，算没写到。\n"
+    "missing 用一句话写下没写到的那部分，写到了留空。"
+    "ending 用一句话写下正文最后主角实际处在什么局面，只写正文写明的。"
+)
+
 CHAPTER_FACT_SYSTEM = (
     "从已完成章节提取后续必须保持一致的客观事实。"
     "每项使用 statement、quote、entities、known_by、confidence。"
@@ -238,6 +247,12 @@ class ChapterFitCut(BaseModel):
 
 MAX_CHAPTER_FACTS = 40
 LANDING_ENDING_MAX_CHARS = 200
+
+
+class LandingVerdict(BaseModel):
+    landed: bool = Field(description="正文有没有写到 planned_result")
+    missing: str = Field(default="", description="没写到的那部分，一句话；写到了留空")
+    ending: str = Field(default="", description="正文最后主角实际处在什么局面，一句话")
 
 
 class ChapterFacts(BaseModel):
@@ -544,6 +559,8 @@ def h2_stall_issues(content: str, ctx: dict[str, Any] | None, production: dict[s
     """正文原地打转的证据：同一句式反复开头、整句照抄上一章。连续停在同一地点的章数只作背景，不单独算。"""
     from regent.novel.harnessing.surface import run_soft_checks
 
+    from regent.novel.harnessing.surface import model_check, model_check_issue
+
     config = h2_config(ctx, production)
     issues = run_soft_checks(
         content,
@@ -551,10 +568,41 @@ def h2_stall_issues(content: str, ctx: dict[str, Any] | None, production: dict[s
         previous_chapter=previous_chapter_text(ctx),
         kinds=frozenset({"opener", "echo"}),
     )
+    landing = production.get("h2_landing") if isinstance(production.get("h2_landing"), dict) else {}
+    spec = model_check(config, "landing")
+    if spec and landing.get("landed") is False and landing.get("hash") == _content_hash(content):
+        issues.append(
+            model_check_issue(
+                spec,
+                {"missing": landing.get("missing") or "章纲的结果", "ending": landing.get("ending") or ""},
+            )
+        )
     view = writing_view(ctx, production)
     if issues and view["place_streak"] >= 2:
         issues.append(f"主角已经连续 {view['place_streak']} 章在「{view['place']}」")
     return issues
+
+
+def _plan_now(ctx: dict[str, Any] | None, production: dict[str, Any]) -> dict[str, Any]:
+    plan = production.get("chapter_plan") or (ctx or {}).get("target_node") or {}
+    return plan if isinstance(plan, dict) else {}
+
+
+def h2_landing_due(content: str, ctx: dict[str, Any] | None, production: dict[str, Any]) -> bool:
+    """这一稿该不该判一次写没写到章纲结果：配置开着、这一章还开得了 stall 轮、这一稿没判过。"""
+    from regent.novel.harnessing.surface import model_check
+
+    if int(production.get("h2_round") or 0) or production.get("h2_stall_done") or production.get("h2_stop"):
+        return False
+    review = production.get("arc_review")
+    if isinstance(review, dict) and review.get("keeps_reading") is False and not production.get("h2_arc_done"):
+        return False
+    if not str(_plan_now(ctx, production).get("result") or "").strip():
+        return False
+    if model_check(h2_config(ctx, production), "landing") is None:
+        return False
+    landing = production.get("h2_landing") if isinstance(production.get("h2_landing"), dict) else {}
+    return landing.get("hash") != _content_hash(content)
 
 
 def drop_copied_span(
@@ -1548,6 +1596,55 @@ async def prepare_chapter_canon(
     _save(run, production)
 
 
+async def _land_tick(
+    session: AsyncSession,
+    provider: ModelProvider,
+    work: StoryWorkModel,
+    run: Any,
+    production: dict[str, Any],
+    version: int,
+) -> None:
+    """判这一稿写没写到章纲结果，判完回 CHECK。拿不到结果就当写到了：这一项不能停掉整章。"""
+    from regent.novel.application.production import CallUnknown
+
+    content = str(run.content or "")
+    digest = _content_hash(content)
+    plan = _plan_now(run.generation_context, production)
+    misses = int(production.get("landing_unknown") or 0)
+    try:
+        verdict = await _call(
+            session,
+            provider,
+            work,
+            run,
+            production,
+            LandingVerdict,
+            LANDING_SYSTEM,
+            {
+                "choice": str(plan.get("choice") or ""),
+                "planned_result": str(plan.get("result") or ""),
+                "chapter": content,
+            },
+            "h2_landing",
+            f"v{version}:h2:landing:{digest[:12]}" + (f":m{misses}" if misses else ""),
+        )
+    except CallUnknown:
+        production["landing_unknown"] = misses + 1
+        if misses < 1:
+            _save(run, production)
+            raise
+        verdict = LandingVerdict(landed=True)
+    production = run.generation_context["production"]
+    production["h2_landing"] = {
+        "hash": digest,
+        "landed": bool(verdict.landed),
+        "missing": str(verdict.missing or "").strip()[:LANDING_ENDING_MAX_CHARS],
+        "ending": str(verdict.ending or "").strip()[:LANDING_ENDING_MAX_CHARS],
+    }
+    production["phase"] = "CHECK"
+    _save(run, production)
+
+
 async def produce_chapter_tick(
     session: AsyncSession,
     *,
@@ -1835,6 +1932,10 @@ async def produce_chapter_tick(
         repairs = int(production.get("repairs") or 0)
         production["check_fails"] = fails + warnings
         if h2:
+            if not fails and h2_landing_due(content, ctx, production):
+                production["phase"] = "LAND"
+                _save(run, production)
+                return False
             stall = [] if fails else h2_stall_issues(content, ctx, production)
             trigger = recursion.round_trigger(production, fails=fails, stall=stall)
             if trigger:
@@ -1877,6 +1978,12 @@ async def produce_chapter_tick(
         production["last_failed_hash"] = digest
         production["phase"] = "REPAIR"
         _save(run, production)
+        return False
+
+    if phase == "LAND":
+        if not _is_h2(production):
+            raise ProductionStopped(f"非 H2 臂不走递归阶段: {phase}")
+        await _land_tick(session, provider, work, run, production, version)
         return False
 
     if phase in H2_PHASES:

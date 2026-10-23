@@ -77,7 +77,7 @@ SYMBOL_CHECKS = [
     ("regent.novel.application.directing_chapter", "accept_draft", "落稿前统一走去重与压缩分流"),
     ("regent.novel.application.directing_chapter", "fit_seam_break", "删段不许让专名凭空出现、问答拆开"),
     ("regent.novel.application.directing_chapter", "length_brief", "改稿入参带现成字数"),
-    ("regent.novel.harnessing.surface", "BASE_PACK_VERSION", "新运行钉 base/v5，旧运行按钉住的版本回放"),
+    ("regent.novel.harnessing.surface", "BASE_PACK_VERSION", "新运行钉 base/v6，旧运行按钉住的版本回放"),
     ("regent.novel.application.directing_chapter", "CHAPTER_LENGTH_RULE", "执笔与改稿提示首尾各一次字数规则"),
     ("regent.novel.harnessing.surface", "upgrade_prompts", "覆盖层提示只能追加，旧整段替换钉住时转成追加"),
     ("regent.novel.application.directing_chapter", "h2_repair_system", "改稿提示接覆盖层追加的指引"),
@@ -93,6 +93,8 @@ SYMBOL_CHECKS = [
     ("regent.novel.harnessing.surface", "copied_sentences", "整句照抄上一章的软检查"),
     ("regent.novel.application.directing_chapter", "repeated_scene", "章纲和前面同一场不放行"),
     ("regent.novel.application.directing_chapter", "landed_plan", "正文没写到章纲结果时台账以正文为准"),
+    ("regent.novel.application.directing_chapter", "h2_landing_due", "H2 章内判正文写没写到章纲结果"),
+    ("regent.novel.harnessing.surface", "model_check", "模型判的软检查由阶段机单独调用"),
     ("regent.novel.application.works_advance", "clear_last_error", "入正史时清掉上一次的失败原因"),
     ("regent.novel.application.works_constants", "GENRE_MAX_CHARS", "开书/澄清写 genre 前收到列宽"),
 ]

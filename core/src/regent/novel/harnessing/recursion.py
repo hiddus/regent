@@ -759,6 +759,9 @@ async def compose_tick(
         + (["reference"] if reference.get("passed") else []),
         "library_hits": list(production.get("h2_library_hits") or []),
     }
+    landing = production.get("h2_landing") if isinstance(production.get("h2_landing"), dict) else {}
+    if reference.get("trigger") == "stall" and landing.get("landed") is False:
+        request["chapter_result"] = str(chapter._plan_now(ctx, production).get("result") or "")
     round_no = _round(production)
     decision = await chapter._call(
         session,
