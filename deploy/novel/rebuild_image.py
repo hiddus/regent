@@ -2,8 +2,8 @@
 
 sync_tree 只把代码 docker cp 进容器的可写层：容器一旦被删重建，就退回镜像里的旧代码。
 本脚本把同一棵树（core/src、core/migrations、alembic.ini）和前端 dist 打进镜像；
-旧镜像留一个回退标签；容器的环境变量、挂载、端口、网络、重启策略照抄 docker inspect，
-重建前的 inspect 原样存在服务器上。健康检查不过就用回退标签把容器换回去。
+旧镜像留一个回退标签；容器的环境变量、挂载、端口、网络、重启策略照抄 docker inspect。
+健康检查不过就用回退标签把容器换回去；成功后删掉服务器上的构建上下文和含密钥的 env 文件。
 
 依赖装在基础镜像 regent-core:latest 里，本脚本不重装依赖：pyproject.toml 变了要先重建基础镜像。
 
@@ -140,6 +140,8 @@ def main() -> int:
 
         print("[6/6] 容器状态：")
         print(r.run("docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}'").text)
+        # env 文件与 inspect 里是明文密钥；容器已建好，回退靠回退标签与 docker inspect
+        r.run(f"rm -rf {REMOTE_DIR}", check=True)
     print(f"[OK] 镜像重建完成（{datetime.now().strftime('%H:%M:%S')}），回退标签 {rollback}")
     return 0
 
