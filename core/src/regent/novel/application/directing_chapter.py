@@ -774,9 +774,11 @@ def previous_plans(ctx: dict[str, Any] | None) -> list[dict[str, Any]]:
     ledger = data.get("chapter_plans")
     if isinstance(ledger, list) and ledger:
         return [_plan_entry(node) for node in ledger if isinstance(node, dict)]
+    rhythm = data.get("book_rhythm") if isinstance(data.get("book_rhythm"), dict) else {}
+    start = int(rhythm.get("volume_start") or 0)
     found: list[dict[str, Any]] = []
     for chapter in reversed(list(data.get("recent_chapters") or [])):
-        if not isinstance(chapter, dict):
+        if not isinstance(chapter, dict) or int(chapter.get("chapter_no") or 0) < start:
             continue
         node = chapter.get("target_node") if isinstance(chapter.get("target_node"), dict) else {}
         if node.get("choice") and node.get("result"):

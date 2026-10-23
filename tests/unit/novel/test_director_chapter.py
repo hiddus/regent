@@ -685,6 +685,20 @@ def test_last_stage_landing_ends_the_volume():
     assert volume_finished_by(expanded) is False
 
 
+def test_new_volume_does_not_inherit_the_last_volume_stages():
+    from regent.novel.application.directing_chapter import previous_plans
+
+    old = {"choice": "c", "result": "r", "stage_index": 4, "reaches_stage": True}
+    ctx = {
+        "book_rhythm": {"stages": ["一", "二", "三"], "volume_start": 31, "volume_chapters": 36},
+        "chapter_plans": [],
+        "recent_chapters": [{"chapter_no": 30, "target_node": old}, {"chapter_no": 29, "target_node": old}],
+    }
+    assert previous_plans(ctx) == []
+    ctx["book_rhythm"]["volume_start"] = 1
+    assert len(previous_plans(ctx)) == 2
+
+
 @pytest.mark.asyncio
 async def test_expanded_staged_volume_does_not_end_the_story():
     from regent.novel.application.works_volumes import _last_node_completed
