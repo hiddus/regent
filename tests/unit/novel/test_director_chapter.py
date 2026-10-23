@@ -1373,6 +1373,47 @@ async def test_prepare_drops_ungrounded_facts(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("landed", [True, False])
+async def test_prepare_records_where_the_prose_actually_ended(monkeypatch, landed):
+    text = PROSE
+    run = _run(phase="DONE", content=text)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    run.review = {"passed": True, "hard_issues": []}
+    production = run.generation_context["production"]
+    production["review_history"] = [{"content_hash": digest, "passed": True, "hard_issues": []}]
+    production["chapter_plan"] = {"choice": "撬开抽屉", "result": "林晚在抽屉底摸到第二把钥匙"}
+    seen: list = []
+
+    async def _fake_call(*args, **kwargs):
+        seen.append((args[7], args[9]))
+        return ChapterFacts(facts=[], result_landed=landed, ending="林晚锁上抽屉出了门")
+
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", _fake_call)
+    await prepare_chapter_canon(None, provider=None, work=SimpleNamespace(id="w"), run=run)
+    request, call_id = seen[0]
+    assert request["planned_result"] == "林晚在抽屉底摸到第二把钥匙"
+    assert call_id.endswith(":landing")
+    landing = run.generation_context["production"]["landing"]
+    assert landing == {"landed": landed, "ending": "林晚锁上抽屉出了门"}
+
+
+def test_ledger_takes_where_the_prose_ended_when_the_plan_result_was_not_written():
+    from regent.novel.application.directing_chapter import landed_plan, previous_plans
+
+    node = {"choice": "钻进夹道", "result": "在夹道里听见玄真说话，被堵在中段", "place": "夹道"}
+    missed = {"landing": {"landed": False, "ending": "林尘爬出夹道，朝城外灯火走"}}
+    entry = landed_plan(node, missed)
+    assert entry["result"] == "林尘爬出夹道，朝城外灯火走"
+    assert entry["planned_result"] == node["result"] and entry["place"] == "夹道"
+    assert landed_plan(node, {"landing": {"landed": True, "ending": "x"}}) is node
+    assert landed_plan(node, {"landing": {"landed": False, "ending": ""}}) is node
+    assert landed_plan(node, {}) is node and landed_plan(node, None) is node
+    # 下一章规划读到的上一章结果是正文停下的局面
+    earlier = previous_plans({"chapter_plans": [{"chapter_no": 1, **entry}]})
+    assert earlier[-1]["result"] == "林尘爬出夹道，朝城外灯火走"
+
+
+@pytest.mark.asyncio
 async def test_past_last_node_stops_before_model(monkeypatch):
     run = _run()
     run.generation_context["story_complete"] = True

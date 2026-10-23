@@ -480,6 +480,49 @@ async def test_staged_volume_expands_into_a_staged_volume_with_its_own_nodes(
     assert not context.get("story_complete")
 
 
+async def test_next_chapter_plans_from_where_the_prose_ended(novel_db):
+    """上一章正文没写到章纲的结果：下一章台账里的结果是正文停下的局面。"""
+    from regent.novel.application import generation
+    from regent.novel.application.directing_types import CHAPTER_ARCHITECTURE
+
+    owner, work_id = await _boot(novel_db, node_count=3, end_chapter=6)
+    planned = {"id": "n1", "choice": "钻进夹道", "result": "在夹道里听见玄真说话，被堵在中段", "place": "夹道"}
+    async with novel_db() as session:
+        work = await session.get(StoryWorkModel, work_id)
+        session.add(
+            ChapterRunModel(
+                id=uuid.uuid4(),
+                work_id=work_id,
+                branch_id=work.branch_id,
+                chapter_no=1,
+                attempt=1,
+                state="CANONIZED",
+                content="林尘爬出夹道，朝城外的灯火走去。" * 40,
+                generation_context={
+                    "architecture_version": CHAPTER_ARCHITECTURE,
+                    "target_node": planned,
+                    "production": {"landing": {"landed": False, "ending": "林尘爬出夹道，朝城外灯火走"}},
+                },
+            )
+        )
+        work.latest_chapter_no = 1
+        run = ChapterRunModel(
+            id=uuid.uuid4(),
+            work_id=work_id,
+            branch_id=work.branch_id,
+            chapter_no=2,
+            attempt=1,
+            state="QUEUED",
+            generation_context={"architecture_version": CHAPTER_ARCHITECTURE},
+        )
+        session.add(run)
+        await session.commit()
+        await generation.assemble(session, work=work, run=run)
+        ledger = run.generation_context["chapter_plans"]
+    assert ledger[0]["result"] == "林尘爬出夹道，朝城外灯火走"
+    assert ledger[0]["planned_result"] == planned["result"]
+
+
 async def _volumes_in(session, work_id) -> list[VolumeModel]:
     return list(
         (

@@ -149,7 +149,10 @@ CHAPTER_FIT_SYSTEM = (
 CHAPTER_FACT_SYSTEM = (
     "从已完成章节提取后续必须保持一致的客观事实。"
     "每项使用 statement、quote、entities、known_by、confidence。"
-    "quote 必须是正文里的连续原文，不得改写。正文没有写明的事不要提取。"
+    "quote 必须是正文里的连续原文，不得改写。正文没有写明的事不要提取。\n"
+    "给了 planned_result 时，它是这一章计划写到的结果：result_landed 写下正文有没有写到它"
+    "（换了说法、细节不同也算写到；正文停在它之前或走向了别处算没写到）；"
+    "ending 用一句话写下正文最后主角实际处在什么局面，只写正文写明的。"
 )
 
 
@@ -234,10 +237,13 @@ class ChapterFitCut(BaseModel):
 
 
 MAX_CHAPTER_FACTS = 40
+LANDING_ENDING_MAX_CHARS = 200
 
 
 class ChapterFacts(BaseModel):
     facts: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_CHAPTER_FACTS)
+    result_landed: bool = Field(default=True, description="正文是否写到了 planned_result；没给时为 true")
+    ending: str = Field(default="", description="正文最后主角实际处在什么局面，一句话")
 
     @field_validator("facts", mode="before")
     @classmethod
@@ -694,6 +700,20 @@ def stray_names(text: str, cast_names: list[str]) -> list[str]:
             if token not in found:
                 found.append(token)
     return found
+
+
+def landed_plan(node: dict[str, Any], production: dict[str, Any] | None) -> dict[str, Any]:
+    """入台账的章纲：正文没写到章纲的结果时，结果换成正文实际停下的局面。
+
+    后面几章按台账规划，结果若还是没写出来的那一场，规划会一直想把它补写出来。
+    """
+    landing = (production or {}).get("landing")
+    if not isinstance(landing, dict) or landing.get("landed") is not False:
+        return node
+    ending = str(landing.get("ending") or "").strip()
+    if not ending:
+        return node
+    return {**node, "result": ending, "planned_result": node.get("result")}
 
 
 def _plan_entry(node: dict[str, Any]) -> dict[str, Any]:
@@ -1477,6 +1497,11 @@ async def prepare_chapter_canon(
     from regent.novel.application.production import CallUnknown
 
     misses = int(production.get("facts_unknown") or 0)
+    plan = production.get("chapter_plan") or run.generation_context.get("target_node") or {}
+    planned = str(plan.get("result") or "").strip() if isinstance(plan, dict) else ""
+    request: dict[str, Any] = {"chapter": content}
+    if planned:
+        request["planned_result"] = planned
     try:
         extracted = await _call(
             session,
@@ -1486,9 +1511,10 @@ async def prepare_chapter_canon(
             production,
             ChapterFacts,
             CHAPTER_FACT_SYSTEM,
-            {"chapter": content},
+            request,
             "chapter_facts",
             f"v{_input_version(run)}:chapter_facts:{digest[:12]}"
+            + (":landing" if planned else "")
             + (f":m{misses}" if misses else ""),
         )
     except CallUnknown:
@@ -1502,6 +1528,11 @@ async def prepare_chapter_canon(
         extracted = ChapterFacts(facts=[])
     # _call 已把带 call_count 的 production 写回 run；继续用这份字典。
     production = run.generation_context["production"]
+    if planned and not production.get("facts_skipped"):
+        production["landing"] = {
+            "landed": bool(extracted.result_landed),
+            "ending": str(extracted.ending or "").strip()[:LANDING_ENDING_MAX_CHARS],
+        }
     facts = grounded_facts(content, list(extracted.facts))
     if not production.get("takes"):
         _store_prose(run, production, content)

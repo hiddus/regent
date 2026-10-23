@@ -910,6 +910,7 @@ async def assemble(
             ChapterRunModel.state == ChapterRunState.CANONIZED.value,
         ).order_by(ChapterRunModel.chapter_no.desc(), ChapterRunModel.attempt.desc()).limit(30)
     )).all())
+    from regent.novel.application.directing_chapter import landed_plan
     from regent.novel.domain.chapter_handoff import (
         annotate_chapter_handoff,
         select_previous_handoff,
@@ -935,7 +936,9 @@ async def assemble(
             and plan_node.get("choice")
             and plan_node.get("result")
         ):
-            chapter_plans.append({"chapter_no": number, **plan_node})
+            chapter_plans.append(
+                {"chapter_no": number, **landed_plan(plan_node, previous_context.get("production"))}
+            )
         if len(recent_chapters) >= 3:
             continue
         content = row.content or ""

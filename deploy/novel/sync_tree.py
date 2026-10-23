@@ -92,6 +92,7 @@ SYMBOL_CHECKS = [
     ("regent.novel.harnessing.surface", "repeated_opener", "同一句式反复开头的软检查"),
     ("regent.novel.harnessing.surface", "copied_sentences", "整句照抄上一章的软检查"),
     ("regent.novel.application.directing_chapter", "repeated_scene", "章纲和前面同一场不放行"),
+    ("regent.novel.application.directing_chapter", "landed_plan", "正文没写到章纲结果时台账以正文为准"),
     ("regent.novel.application.works_advance", "clear_last_error", "入正史时清掉上一次的失败原因"),
     ("regent.novel.application.works_constants", "GENRE_MAX_CHARS", "开书/澄清写 genre 前收到列宽"),
 ]
