@@ -730,6 +730,10 @@ def place_streak(ctx: dict[str, Any] | None, place: str) -> int:
     for node in data.get("chapter_plans") or []:
         if isinstance(node, dict) and node.get("chapter_no") is not None:
             plans[int(node["chapter_no"])] = node
+    # chapter_plans 只有本卷；跨卷还待在同一处，要靠不分卷的地点记录接上
+    for item in data.get("place_history") or []:
+        if isinstance(item, dict) and item.get("chapter_no") is not None:
+            plans.setdefault(int(item["chapter_no"]), item)
     prose: dict[int, str] = {}
     for item in data.get("recent_chapters") or []:
         if not isinstance(item, dict) or item.get("chapter_no") is None:
@@ -1572,14 +1576,22 @@ async def produce_chapter_tick(
         )
         if isinstance(production.get("arc_review"), dict):
             node["arc_review"] = production["arc_review"]
-        reason = rhythm_mismatch(
+        stall = place_stall_reason(node, ctx, production)
+        mismatch = rhythm_mismatch(
             node,
             rhythm,
             earlier,
             chapter_no=int(getattr(run, "chapter_no", 0) or 0) or None,
             review=production.get("arc_review") if isinstance(production.get("arc_review"), dict) else None,
-        ) or place_stall_reason(node, ctx, production)
+        )
+        reason = "；".join(item for item in (stall, mismatch) if item)
         out_of_plans = plan_calls + 1 >= MAX_PLAN_CALLS
+        if not stall and mismatch:
+            production["plan_moved"] = {"node": node, "reason": mismatch}
+        elif stall and out_of_plans and isinstance(production.get("plan_moved"), dict):
+            # 节奏没对上还能带着警告写；原地再写一章不行：换回离开了那里的那一稿
+            node = dict(production["plan_moved"]["node"])
+            reason = str(production["plan_moved"]["reason"])
         if reason and not out_of_plans:
             production["plan_reject"] = reason
             production["plan_rejected"] = {

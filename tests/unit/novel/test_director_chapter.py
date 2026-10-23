@@ -488,6 +488,47 @@ async def test_plan_that_stays_in_the_same_place_too_long_is_replanned(monkeypat
     assert production["chapter_plan"]["place"] == "通风管"
 
 
+def test_place_streak_reaches_back_across_a_volume_boundary():
+    from regent.novel.application.directing_chapter import place_streak
+
+    ctx = {
+        "chapter_no": 36,
+        "chapter_plans": [],
+        "recent_chapters": [{"chapter_no": n, "content": ""} for n in (35, 34, 33)],
+        "place_history": [{"chapter_no": n, "place": "牢房"} for n in range(35, 29, -1)],
+    }
+    assert place_streak(ctx, "青云宗外门牢房") == 6
+
+
+@pytest.mark.asyncio
+async def test_plan_that_only_misses_rhythm_beats_a_plan_that_stays_put(monkeypatch):
+    run = _run(phase="PLAN")
+    run.generation_context.update(_room_ctx())
+    run.generation_context["book_rhythm"] = {"stake": "逃出去", "payoff_limit": 1}
+    seen: list[dict] = []
+
+    async def _fake_call(*args, **kwargs):
+        if args[5] is MethodVerdict:
+            return MethodVerdict(same_method=False, matched="")
+        seen.append(args[7])
+        if len(seen) == 2:
+            return ChapterPlan(pressure="门开了", choice="趁换班冲出去", result="躲进通风管", place="通风管")
+        return ChapterPlan(pressure="又被绑住", choice="咬破嘴唇", result="血滴在扶手上", place="约束室")
+
+    def _mismatch(node, *args, **kwargs):
+        return "结果和上一章是同一场" if node.get("place") == "通风管" else ""
+
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", _fake_call)
+    monkeypatch.setattr("regent.novel.application.directing_chapter.rhythm_mismatch", _mismatch)
+    production = run.generation_context["production"]
+    for _ in range(4):
+        await produce_chapter_tick(None, provider=None, work=SimpleNamespace(id="w"), run=run, production=production)
+        production = run.generation_context["production"]
+    assert len(seen) == 4
+    assert production["chapter_plan"]["place"] == "通风管"
+    assert production["plan_warnings"] == ["结果和上一章是同一场"]
+
+
 @pytest.mark.asyncio
 async def test_new_method_goes_on_to_write(monkeypatch):
     run = _run(phase="PLAN")

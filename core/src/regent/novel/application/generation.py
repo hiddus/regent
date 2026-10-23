@@ -917,6 +917,7 @@ async def assemble(
 
     recent_chapters: list[dict[str, Any]] = []
     chapter_plans: list[dict[str, Any]] = []
+    place_history: list[dict[str, Any]] = []
     volume_start = int(current_vol.start_chapter_no) if current_vol is not None else 1
     seen_chapters: set[int] = set()
     for row in recent_rows:
@@ -926,6 +927,8 @@ async def assemble(
         seen_chapters.add(number)
         previous_context = row.generation_context or {}
         plan_node = previous_context.get("target_node")
+        if isinstance(plan_node, dict) and plan_node.get("place") and len(place_history) < 12:
+            place_history.append({"chapter_no": number, "place": str(plan_node["place"])})
         if (
             number >= volume_start
             and isinstance(plan_node, dict)
@@ -1108,6 +1111,7 @@ async def assemble(
         },
         "book_rhythm": _book_rhythm_from_volume(current_vol),
         "chapter_plans": chapter_plans,
+        "place_history": place_history,
         "target_node": {
             "id": target.node_id,
             "title": target.title,
