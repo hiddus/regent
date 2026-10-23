@@ -20,7 +20,7 @@ import yaml
 
 PACK_ROOT = Path(__file__).resolve().parent.parent / "harness_packs"
 # 新运行钉这一版；已发布的包不原地改，旧运行按钉住的 harness_id 加载旧包，回放哈希才对得上。
-BASE_PACK_VERSION = "v3"
+BASE_PACK_VERSION = "v4"
 BASE_HARNESS_ID = f"base/{BASE_PACK_VERSION}"
 
 FROZEN_KEYS: frozenset[str] = frozenset(
@@ -59,6 +59,8 @@ DEFAULT_KNOB_RANGES: dict[str, dict[str, Any]] = {
     "open_promises_max": {"min": 0, "max": 20, "default": 0},
     "soft_check_repetition_ngram": {"min": 40, "max": 120, "default": 80},
     "soft_check_chapter_opening_overlap": {"min": 20, "max": 100, "default": 50},
+    "stall_place_chapters": {"min": 3, "max": 10, "default": 4},
+    "soft_check_repeated_opener": {"min": 6, "max": 30, "default": 10},
 }
 
 # 技巧的 ``when`` 只能用这些条件；值类型固定，程序求值，不执行模型写的代码。
@@ -77,8 +79,12 @@ HOOK_CONDITIONS: dict[str, tuple[str, ...]] = {
     "previous_ends_mid_action": (),
     "open_promise_age_exceeds": ("age",),
     "method_rejected_at_least": ("rounds",),
+    "place_streak_at_least": ("chapters", "place"),
 }
-SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern"})
+SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern", "opener"})
+# 句首取这么多字比对：「她记得」「她不知」一类排比够用，再长就把同一句式拆散了。
+OPENER_CHARS = 3
+_OPENER_STRIP = "“”\"「」『』‘’'（）()—…·- 　"
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # 量词套量词（``(a+)+``、``(a*)*``、``(a+){2,}``）会回溯爆炸。
 _NESTED_QUANTIFIER = re.compile(r"\([^()]*[+*][^()]*\)\s*[+*{]")
@@ -609,11 +615,44 @@ def resolve_hooks(config: ConfigTree, view: dict[str, Any]) -> list[str]:
             rounds = int(view.get("same_method_rejects") or 0)
             if rounds >= threshold:
                 guidance.append(_fill(text, {"rounds": rounds}))
+        elif condition == "place_streak_at_least":
+            chapters = int(view.get("place_streak") or 0)
+            if chapters >= threshold and view.get("place"):
+                guidance.append(_fill(text, {"chapters": chapters, "place": view["place"]}))
     return guidance
 
 
-def run_soft_checks(content: str, config: ConfigTree, *, previous_chapter: str = "") -> list[str]:
-    """执行声明式软检查，返回提示。软检查只送改稿，不放行硬门未过的稿件。"""
+def repeated_opener(
+    text: str, *, names: list[str] | tuple[str, ...] = (), min_count: int = 10
+) -> tuple[str, int] | None:
+    """同一句式开头的句子最多的那一种；人名开头的句子不算——叙事里人名起句是常态。"""
+    counts: dict[str, int] = {}
+    for sentence in _sentences(text):
+        body = sentence.lstrip(_OPENER_STRIP)
+        if len(body) <= OPENER_CHARS:
+            continue
+        head = body[:OPENER_CHARS]
+        if any(head.startswith(name) or name.startswith(head) for name in names if name):
+            continue
+        counts[head] = counts.get(head, 0) + 1
+    if not counts:
+        return None
+    head, count = max(counts.items(), key=lambda item: item[1])
+    return (head, count) if count >= min_count else None
+
+
+def run_soft_checks(
+    content: str,
+    config: ConfigTree,
+    *,
+    previous_chapter: str = "",
+    names: list[str] | tuple[str, ...] = (),
+    kinds: frozenset[str] | None = None,
+) -> list[str]:
+    """执行声明式软检查，返回提示。软检查只送改稿，不放行硬门未过的稿件。
+
+    ``kinds`` 给了就只跑这几类。
+    """
     from regent.novel.application.directing_chapter import repeated_span
     from regent.novel.domain.prose_copy import is_legitimate_repetition, longest_common_substring
 
@@ -621,8 +660,16 @@ def run_soft_checks(content: str, config: ConfigTree, *, previous_chapter: str =
     issues: list[str] = []
     for spec in config.get_soft_checks().values():
         kind = str(spec.get("kind") or "")
+        if kinds is not None and kind not in kinds:
+            continue
         template = str(spec.get("message") or spec.get("label") or kind)
-        if kind == "repetition":
+        if kind == "opener":
+            found = repeated_opener(
+                text, names=names, min_count=int(config.get_knob("soft_check_repeated_opener"))
+            )
+            if found:
+                issues.append(_fill(template, {"matched": found[0], "count": found[1]}))
+        elif kind == "repetition":
             span = repeated_span(text, min_len=int(config.get_knob("soft_check_repetition_ngram")))
             if span:
                 issues.append(_fill(template, {"matched_len": len(span)}))

@@ -52,6 +52,9 @@ CHAPTER_PLAN_SYSTEM = (
     "选择朝它推进一步；结果让它成立时 reaches_stage 为 true。"
     "last_chapter_of_stage 为 true 时，这一章的结果要让它成立。"
     "不要越过它去写 later_stages 或卷末。\n"
+    "place 写这一章主要发生在哪里，只写地点名本身，具体到房间、街道或舱段。"
+    "place_streak 是主角已经连续待在同一个地点的章数；到了 limit，这一章要让他离开那里，"
+    "place 写新的地点。\n"
     "shows_rule 表示这一章是否让全书答应读者的那件核心结果当场发生。"
     "已经发生满 payoff_limit 次时，shows_rule 必须为 false。\n"
     "若给了 rejected_plan，那份章纲已因 reject_reason 被退回，写一份和它不同的。\n"
@@ -157,9 +160,15 @@ class ChapterPlan(BaseModel):
     pressure: str = Field(description="上一章结果造成的新处境，这个人现在卡在哪")
     choice: str = Field(description="他这一章动手做的那一件，不能是 used_methods 里的任何一种；不列没做的事")
     result: str = Field(description="这个选择造成的结果，章末仍然成立；只写这一章改变了什么")
+    place: str = Field(default="", description="这一章主要发生的地点，只写地点名本身，具体到房间、街道或舱段")
     shows_rule: bool = Field(default=False, description="这一章是否让全书答应读者的核心结果当场发生")
     reaches_stage: bool = Field(default=False, description="这一章的结果是否让 current_stage 成立")
 
+
+# 主角连续停在同一个地点这么多章，下一章的章纲就要换地方；H2 臂取旋钮 stall_place_chapters。
+STALL_PLACE_CHAPTERS = 4
+# 没记地点的旧章：正文里这个地名出现这么多次，就算那一章还在那里。
+PLACE_MENTIONS_IN_PROSE = 2
 
 MAX_PLAN_ROUNDS = 3
 # 一章最多出 4 份章纲、判 2 次同一招。用完还撞车就收下最后一份并记警告：
@@ -448,7 +457,10 @@ def writing_view(ctx: dict[str, Any] | None, production: dict[str, Any]) -> dict
         and not item.get("invalidated")
         and item.get("source_chapter_no") is not None
     ]
+    place = str(plan.get("place") or "").strip()
     return {
+        "place": place,
+        "place_streak": place_streak(data, place) + 1 if place else 0,
         "chapter_no": chapter_no,
         "shows_rule": bool(plan.get("shows_rule")),
         "payoff_due": bool(latest_arc_review(data, production).get("payoff_due")),
@@ -515,10 +527,30 @@ def h2_write_payload(ctx: dict[str, Any] | None, cast: dict[str, Any], config: A
     return payload
 
 
-def h2_soft_issues(content: str, ctx: dict[str, Any] | None, config: Any) -> list[str]:
-    from regent.novel.harnessing.surface import run_soft_checks
+def h2_soft_issues(
+    content: str, ctx: dict[str, Any] | None, config: Any, cast: dict[str, Any] | None = None
+) -> list[str]:
+    from regent.novel.harnessing.surface import book_terms, run_soft_checks
 
-    return run_soft_checks(content, config, previous_chapter=previous_chapter_text(ctx))
+    return run_soft_checks(
+        content, config, previous_chapter=previous_chapter_text(ctx), names=book_terms(ctx, cast)
+    )
+
+
+def h2_stall_issues(
+    content: str, ctx: dict[str, Any] | None, production: dict[str, Any], cast: dict[str, Any]
+) -> list[str]:
+    """正文原地打转的证据：同一句式反复开头。连续停在同一地点的章数只作背景，不单独算。"""
+    from regent.novel.harnessing.surface import book_terms, run_soft_checks
+
+    config = h2_config(ctx, production)
+    issues = run_soft_checks(
+        content, config, names=book_terms(ctx, cast), kinds=frozenset({"opener"})
+    )
+    view = writing_view(ctx, production)
+    if issues and view["place_streak"] >= 2:
+        issues.append(f"主角已经连续 {view['place_streak']} 章在「{view['place']}」")
+    return issues
 
 
 def drop_copied_span(
@@ -673,10 +705,68 @@ def _plan_entry(node: dict[str, Any]) -> dict[str, Any]:
         "result": str(node.get("result") or ""),
         "shows_rule": bool(node.get("shows_rule")),
     }
+    if node.get("place"):
+        entry["place"] = str(node["place"])
     if node.get("stage_index") is not None:
         entry["stage_index"] = int(node.get("stage_index") or 0)
         entry["reaches_stage"] = bool(node.get("reaches_stage"))
     return entry
+
+
+def _same_place(a: str, b: str) -> bool:
+    a, b = str(a or "").strip(), str(b or "").strip()
+    return bool(a and b) and (a in b or b in a)
+
+
+def place_streak(ctx: dict[str, Any] | None, place: str) -> int:
+    """主角在 ``place`` 已经连续待了几章，不含这一章。
+
+    记了地点的章按地点比；没记地点的旧章看章纲里提没提到这个地名，或正文里出现几次。
+    """
+    place = str(place or "").strip()
+    if not place:
+        return 0
+    data = ctx or {}
+    plans: dict[int, dict[str, Any]] = {}
+    for node in data.get("chapter_plans") or []:
+        if isinstance(node, dict) and node.get("chapter_no") is not None:
+            plans[int(node["chapter_no"])] = node
+    prose: dict[int, str] = {}
+    for item in data.get("recent_chapters") or []:
+        if not isinstance(item, dict) or item.get("chapter_no") is None:
+            continue
+        number = int(item["chapter_no"])
+        prose[number] = str(item.get("content") or "")
+        if isinstance(item.get("target_node"), dict):
+            plans.setdefault(number, item["target_node"])
+    streak = 0
+    number = int(data.get("chapter_no") or 0) - 1
+    while number >= 1:
+        node = plans.get(number) or {}
+        if node.get("place"):
+            here = _same_place(place, str(node["place"]))
+        else:
+            text = "".join(str(node.get(key) or "") for key in ("pressure", "choice", "result"))
+            here = place in text or prose.get(number, "").count(place) >= PLACE_MENTIONS_IN_PROSE
+        if not here:
+            break
+        streak += 1
+        number -= 1
+    return streak
+
+
+def place_limit(ctx: dict[str, Any] | None, production: dict[str, Any]) -> int:
+    if _is_h2(production):
+        return int(h2_config(ctx, production).get_knob("stall_place_chapters") or STALL_PLACE_CHAPTERS)
+    return STALL_PLACE_CHAPTERS
+
+
+def place_stall_reason(node: dict[str, Any], ctx: dict[str, Any] | None, production: dict[str, Any]) -> str:
+    place = str(node.get("place") or "").strip()
+    streak = place_streak(ctx, place)
+    if not place or streak < place_limit(ctx, production):
+        return ""
+    return f"主角已经连续 {streak} 章在「{place}」，这一章让他离开那里（逃出去、被带走或被逼去别处），place 写新的地点"
 
 
 def previous_plans(ctx: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -862,6 +952,7 @@ def _plan_node(
         "result": plan.result,
         "shows_rule": bool(plan.shows_rule),
         "used_methods": list(plan.used_methods),
+        **({"place": plan.place.strip()} if plan.place.strip() else {}),
         "preconditions": [],
         "consequences": [],
     }
@@ -905,6 +996,14 @@ def plan_payload(ctx: dict[str, Any] | None, cast: dict[str, Any], production: d
         payload["later_stages"] = stages[index + 1 :]
         payload["advance_stage"] = stage_pushed(rhythm, earlier, review)
     payload["payoff_due"] = bool(review.get("payoff_due"))
+    last_place = str((earlier[-1] if earlier else {}).get("place") or "")
+    streak = place_streak(data, last_place)
+    if streak >= 2:
+        payload["place_streak"] = {
+            "place": last_place,
+            "chapters": streak,
+            "limit": place_limit(data, production),
+        }
     notes = editor_notes(data, production)
     if notes:
         payload["editor_notes"] = notes
@@ -1477,7 +1576,7 @@ async def produce_chapter_tick(
             earlier,
             chapter_no=int(getattr(run, "chapter_no", 0) or 0) or None,
             review=production.get("arc_review") if isinstance(production.get("arc_review"), dict) else None,
-        )
+        ) or place_stall_reason(node, ctx, production)
         out_of_plans = plan_calls + 1 >= MAX_PLAN_CALLS
         if reason and not out_of_plans:
             production["plan_reject"] = reason
@@ -1658,14 +1757,19 @@ async def produce_chapter_tick(
             from regent.novel.harnessing import recursion
 
             warnings += [
-                item for item in h2_soft_issues(content, ctx, h2_config(ctx, production)) if item not in warnings
+                item
+                for item in h2_soft_issues(content, ctx, h2_config(ctx, production), cast)
+                if item not in warnings
             ]
         repairs = int(production.get("repairs") or 0)
         production["check_fails"] = fails + warnings
         if h2:
-            trigger = recursion.round_trigger(production, fails=fails)
+            stall = [] if fails else h2_stall_issues(content, ctx, production, cast)
+            trigger = recursion.round_trigger(production, fails=fails, stall=stall)
             if trigger:
-                recursion.start_round(run, production, trigger=trigger, fails=fails, soft=warnings)
+                recursion.start_round(
+                    run, production, trigger=trigger, fails=fails, soft=warnings, stall=stall
+                )
                 _save(run, production)
                 return False
         if not fails and (not warnings or repairs >= 1):

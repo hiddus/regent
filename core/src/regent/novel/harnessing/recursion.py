@@ -128,8 +128,11 @@ def arc_issues(production: dict[str, Any]) -> list[str]:
     return issues
 
 
-def round_trigger(production: dict[str, Any], *, fails: list[str]) -> str:
-    """该不该开一轮递归：硬门没过开 check 轮；过了但追读自评判「不追」开一次 arc 轮。
+def round_trigger(
+    production: dict[str, Any], *, fails: list[str], stall: list[str] | tuple[str, ...] = ()
+) -> str:
+    """该不该开一轮递归：硬门没过开 check 轮；过了但追读自评判「不追」开一次 arc 轮；
+    过了但正文原地打转（``stall`` 非空）开一次 stall 轮。
 
     自评判「会追」时也会列问题；按「有问题就开」会让每个自评章都多花一轮、
     交付重写稿，而追读自评分不出重写稿是否更好。
@@ -145,21 +148,32 @@ def round_trigger(production: dict[str, Any], *, fails: list[str]) -> str:
     lost = isinstance(review, dict) and review.get("keeps_reading") is False
     if rounds == 0 and not production.get("h2_arc_done") and lost:
         return "arc"
+    if rounds == 0 and not production.get("h2_stall_done") and stall:
+        return "stall"
     return ""
 
 
 def start_round(
-    run: Any, production: dict[str, Any], *, trigger: str, fails: list[str], soft: list[str]
+    run: Any,
+    production: dict[str, Any],
+    *,
+    trigger: str,
+    fails: list[str],
+    soft: list[str],
+    stall: list[str] | tuple[str, ...] = (),
 ) -> None:
     production["h2_round"] = int(production.get("h2_round") or 0) + 1
     if trigger == "arc":
         production["h2_arc_done"] = True
+    if trigger == "stall":
+        production["h2_stall_done"] = True
     production["h2_reference"] = {
         "trigger": trigger,
         "draft": str(run.content or ""),
         "hard_fails": list(fails),
         "soft_issues": list(soft),
         "arc_issues": arc_issues(production) if trigger == "arc" else [],
+        "stall_issues": list(stall) if trigger == "stall" else [],
         "passed": not fails,
     }
     for key in ("h2_candidates", "h2_probes", "h2_probe_index", "h2_library_hits"):
@@ -181,13 +195,15 @@ async def library_hits(
 ) -> list[dict[str, Any]]:
     from regent.novel.harnessing import library
 
-    fails = (production.get("h2_reference") or {}).get("hard_fails") or []
+    reference = production.get("h2_reference") or {}
+    fails = reference.get("hard_fails") or []
+    stalled = reference.get("trigger") == "stall"
     return await library.search(
         session,
         work_id=getattr(work, "id", None),
         genre_tag=str(getattr(work, "genre", "") or ""),
         chapter_role=_chapter_role(ctx, production),
-        failure_code=failure_code(fails[0]) if fails else "",
+        failure_code=failure_code(fails[0]) if fails else "stall" if stalled else "",
     )
 
 
@@ -232,6 +248,7 @@ def _plan_view(ctx: dict[str, Any], production: dict[str, Any]) -> dict[str, Any
         "pressure": str(plan.get("pressure") or ""),
         "choice": str(plan.get("choice") or ""),
         "result": str(plan.get("result") or ""),
+        "place": str(plan.get("place") or ""),
     }
 
 
@@ -346,6 +363,7 @@ async def propose_tick(
         "check_fails": list(reference.get("hard_fails") or []),
         "soft_issues": list(reference.get("soft_issues") or []),
         "arc_issues": list(reference.get("arc_issues") or []),
+        "stall_issues": list(reference.get("stall_issues") or []),
         "chapter": _plan_view(ctx, production),
         "current_config": _config_view(config),
         "surface_rules": _surface_rules(),
@@ -451,7 +469,7 @@ async def probe_tick(
             ignore_max_length=chapter.cuts_overlong(ctx, production),
         )
         soft = chapter.name_warnings(content, cast)
-        soft += [item for item in chapter.h2_soft_issues(content, ctx, config) if item not in soft]
+        soft += [item for item in chapter.h2_soft_issues(content, ctx, config, cast) if item not in soft]
         result = {
             "kind": kind,
             "skipped": False,
@@ -720,6 +738,7 @@ async def compose_tick(
             "hard_fails": list(reference.get("hard_fails") or []),
             "soft_issues": list(reference.get("soft_issues") or []),
             "arc_issues": list(reference.get("arc_issues") or []),
+            "stall_issues": list(reference.get("stall_issues") or []),
             "passed": bool(reference.get("passed")),
         },
         "candidates": [

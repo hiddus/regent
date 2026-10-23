@@ -424,6 +424,64 @@ async def test_same_method_replans_twice_then_writes(monkeypatch):
     assert production["plan_reject"] == ""
 
 
+def _room_ctx(chapter_no: int = 6) -> dict:
+    """第 1 章在走廊；第 2–3 章没记地点、章纲提到约束室；第 4–5 章记了地点。"""
+    return {
+        "chapter_no": chapter_no,
+        "chapter_plans": [
+            {"chapter_no": 1, "pressure": "p1", "choice": "c1", "result": "r1", "place": "走廊"},
+            {"chapter_no": 2, "pressure": "被押进约束室", "choice": "c2", "result": "r2"},
+            {"chapter_no": 3, "pressure": "p3", "choice": "c3", "result": "r3"},
+            {"chapter_no": 4, "pressure": "p4", "choice": "c4", "result": "r4", "place": "约束室"},
+            {"chapter_no": 5, "pressure": "p5", "choice": "c5", "result": "r5", "place": "医疗舱约束室"},
+        ],
+        # 第 3 章章纲没提地点，正文里约束室出现两次也算还在那里
+        "recent_chapters": [
+            {"chapter_no": 5, "content": "……"},
+            {"chapter_no": 4, "content": "……"},
+            {"chapter_no": 3, "content": "约束室的灯灭了。他在约束室里数心跳。"},
+        ],
+    }
+
+
+def test_place_streak_counts_back_through_old_and_new_plans():
+    from regent.novel.application.directing_chapter import place_streak
+
+    ctx = _room_ctx()
+    assert place_streak(ctx, "约束室") == 4
+    assert place_streak(ctx, "走廊") == 0
+    assert place_streak(ctx, "") == 0
+    # 正文只提一次不算
+    ctx["recent_chapters"][2]["content"] = "约束室的灯灭了。"
+    assert place_streak(ctx, "约束室") == 2
+
+
+@pytest.mark.asyncio
+async def test_plan_that_stays_in_the_same_place_too_long_is_replanned(monkeypatch):
+    run = _run(phase="PLAN")
+    run.generation_context.update(_room_ctx())
+    run.generation_context["book_rhythm"] = {"stake": "逃出去", "payoff_limit": 1}
+    seen: list[dict] = []
+
+    async def _fake_call(*args, **kwargs):
+        schema = args[5]
+        if schema is MethodVerdict:
+            return MethodVerdict(same_method=False, matched="")
+        seen.append(args[7])
+        if len(seen) == 1:
+            return ChapterPlan(pressure="又被绑住", choice="咬破嘴唇", result="血滴在扶手上", place="约束室")
+        return ChapterPlan(pressure="门开了", choice="趁换班冲出去", result="躲进通风管", place="通风管")
+
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", _fake_call)
+    production = run.generation_context["production"]
+    for _ in range(2):
+        await produce_chapter_tick(None, provider=None, work=SimpleNamespace(id="w"), run=run, production=production)
+        production = run.generation_context["production"]
+    assert seen[0]["place_streak"] == {"place": "医疗舱约束室", "chapters": 2, "limit": 4}
+    assert "连续 4 章在「约束室」" in seen[1]["reject_reason"]
+    assert production["chapter_plan"]["place"] == "通风管"
+
+
 @pytest.mark.asyncio
 async def test_new_method_goes_on_to_write(monkeypatch):
     run = _run(phase="PLAN")

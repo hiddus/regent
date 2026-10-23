@@ -1,0 +1,31 @@
+# 声明式软检查（v1）。只产生提示送入改稿，不能放行硬门未过的稿件。
+# 阈值取旋钮 soft_check_repetition_ngram / soft_check_chapter_opening_overlap。
+# pattern 的正则须短、无嵌套量词、无反向引用（surface.safe_pattern）。
+
+long_span_reuse:
+  label: 长段复用
+  kind: repetition
+  severity: warning
+  message: "正文中有一段 {matched_len} 字的连续重复，删掉后一次"
+
+chapter_opening_overlap:
+  label: 章首与前章尾重合
+  kind: overlap
+  severity: warning
+  message: "章首与上一章结尾连续重合 {matched_len} 字，从结尾之后往下写"
+
+repeated_opener:
+  label: 同一句式反复开头
+  kind: opener
+  severity: warning
+  message: "有 {count} 句都以「{matched}」开头，原地打转：留一两句，其余换成推进情节的动作"
+
+banned_phrases:
+  label: 禁用句式
+  kind: pattern
+  patterns:
+    - "原来.{0,20}竟然"
+    - "不由得.{0,20}心中"
+    - "只见.{0,20}但见"
+  severity: hint
+  message: "出现套话句式：{matched}"

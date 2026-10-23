@@ -856,6 +856,74 @@ async def test_two_rounds_then_falls_back_to_repair(novel_db, monkeypatch):
 
 
 LONG = _prose("长", 3300)
+LITANY = GOOD + "".join(f"她记得第{i}件事。她不知道为什么。" for i in range(12))
+
+
+def test_repeated_opener_ignores_names():
+    from regent.novel.harnessing.surface import repeated_opener
+
+    # GOOD 本身每句都以「林晚把」开头：人名起句不算
+    assert repeated_opener(GOOD, min_count=10)[0] == "林晚把"
+    assert repeated_opener(GOOD, names=["林晚"], min_count=10) is None
+    assert repeated_opener(LITANY, names=["林晚"], min_count=10) == ("她记得", 12)
+    assert repeated_opener(LITANY, names=["林晚"], min_count=13) is None
+
+
+def _stalled_run(*, harness_id: str = BASE_HARNESS_ID, executor: str = H2) -> SimpleNamespace:
+    run = _run(phase="CHECK", content=LITANY, executor=executor)
+    ctx = run.generation_context
+    ctx["harness_id"] = harness_id
+    ctx["chapter_plans"] = [
+        {"chapter_no": 1, "pressure": "p", "choice": "c", "result": "r", "place": "约束室"},
+    ]
+    ctx["target_node"]["place"] = "约束室"
+    return run
+
+
+def test_place_hook_tells_the_writer_how_long_it_has_been_there():
+    run = _stalled_run()
+    ctx = run.generation_context
+    production = ctx["production"]
+    config = load_base_pack()
+    assert chapter.writing_view(ctx, production)["place_streak"] == 2
+    assert not [h for h in resolve_hooks(config, chapter.writing_view(ctx, production)) if "约束室" in h]
+    ctx["chapter_plans"].insert(0, {"chapter_no": 0, "place": "约束室", "pressure": "p", "choice": "c", "result": "r"})
+    ctx["chapter_plans"][0]["chapter_no"] = 1
+    ctx["chapter_plans"][1]["chapter_no"] = 2
+    ctx["chapter_no"] = 3
+    hooks = resolve_hooks(config, chapter.writing_view(ctx, production))
+    assert any("连续第 3 章在「约束室」" in h for h in hooks)
+
+
+@pytest.mark.asyncio
+async def test_litany_opens_one_stall_round(monkeypatch):
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _stalled_run()
+    await _tick(None, run, _work(), broker)
+    production = run.generation_context["production"]
+    assert production["phase"] == "PROPOSE"
+    reference = production["h2_reference"]
+    assert reference["trigger"] == "stall" and reference["passed"] is True
+    assert any("「她记得」开头" in item for item in reference["stall_issues"])
+    assert any("连续 2 章在「约束室」" in item for item in reference["stall_issues"])
+    # 同一章只开一次 stall 轮
+    production["phase"] = "CHECK"
+    production["h2_round"] = 0
+    await _tick(None, run, _work(), broker)
+    assert run.generation_context["production"]["phase"] == "REPAIR"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("harness_id", "executor"), [("base/v3", H2), (BASE_HARNESS_ID, "director_chapter")])
+async def test_no_stall_round_without_the_v4_check(monkeypatch, harness_id, executor):
+    broker = FakeBroker({})
+    monkeypatch.setattr("regent.novel.application.directing_chapter._call", broker)
+    run = _stalled_run(harness_id=harness_id, executor=executor)
+    if harness_id == "base/v3":
+        run.generation_context["harness_hash"] = load_harness("base/v3").content_hash
+    assert await _tick(None, run, _work(), broker) is True
+    assert run.generation_context["production"]["phase"] == "DONE"
 
 
 @pytest.mark.asyncio
@@ -1055,8 +1123,14 @@ def test_compose_never_delivers_failed_draft():
 
 def test_base_pack_matches_python_constants_and_defaults():
     config = load_base_pack()
-    assert BASE_HARNESS_ID == "base/v3"
+    assert BASE_HARNESS_ID == "base/v4"
     assert config.get_prompt("write") == chapter.CHAPTER_WRITE_SYSTEM
+    # v4 只在 v3 上加原地打转的旋钮、软检查与钩子，提示词逐字不变
+    v3 = load_harness("base/v3")
+    assert v3.tree["prompts"] == config.tree["prompts"]
+    assert config.get_knob("stall_place_chapters") == chapter.STALL_PLACE_CHAPTERS
+    assert "repeated_opener" in config.get_soft_checks() and "place_stall" in config.get_hooks()
+    assert "repeated_opener" not in v3.get_soft_checks() and "place_stall" not in v3.get_hooks()
     assert config.get_prompt("repair") == chapter.CHAPTER_REPAIR_SYSTEM
     # 字数规则首尾各一次：提示开头一次，系统提示最末再一次
     rule = chapter.CHAPTER_LENGTH_RULE
@@ -1078,7 +1152,7 @@ def test_base_pack_matches_python_constants_and_defaults():
     old = load_harness("base/v1")
     assert old.content_hash != config.content_hash
     assert old.get_prompt("write").endswith("正文两千字以上，两千五百字以内。")
-    assert old.tree["knobs"] == config.tree["knobs"]
+    assert old.tree["knobs"].items() <= config.tree["knobs"].items()
     assert config.get_knob("open_promises_max") == 0
     assert config.get_memory() == ""
     run = _run()

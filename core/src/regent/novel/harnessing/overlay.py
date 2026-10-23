@@ -320,7 +320,9 @@ async def record_verified_round(
         scope_key=str(work_id) if scope == "work" else "",
         genre_tag=genre,
         chapter_role="payoff" if isinstance(plan, dict) and plan.get("shows_rule") else "chapter",
-        failure_code=codes[0] if codes else "arc" if lesson.get("trigger") == "arc" else "",
+        failure_code=codes[0] if codes else str(lesson.get("trigger") or "")
+        if lesson.get("trigger") in ("arc", "stall")
+        else "",
         config_tree=h2_config(ctx, production).tree,
         config_diff=overrides,
         experience=experience,
