@@ -1,0 +1,165 @@
+"""Session Work Plan helpers (Step 0 gate, completeness, plan_approve)."""
+
+from __future__ import annotations
+
+from typing import Any, Sequence
+
+from regent.application.agent_loop_exit import build_ask_envelope
+
+# Tools that mutate the product workspace — require a work plan first (W-1).
+WRITE_TOOLS = frozenset(
+    {
+        "write_file",
+        "edit_file",
+        "run_command",
+    }
+)
+
+_TRIVIAL_HINTS = (
+    "只改",
+    "仅改",
+    "fix typo",
+    "typo",
+    "一行",
+    "single file",
+    "one file",
+    "小修",
+)
+
+
+def is_trivial_work(plan: dict[str, Any] | None, user_or_goal_text: str = "") -> bool:
+    """Small fixes may skip Step 0 (product Q2)."""
+    meta = dict((plan or {}).get("acceptance_contract") or {})
+    if meta.get("plan_required") is False or meta.get("work_plan_trivial"):
+        return True
+    if (plan or {}).get("work_plan_trivial"):
+        return True
+    text = (user_or_goal_text or str((plan or {}).get("goal_anchor_text") or "")).lower()
+    if any(h.lower() in text for h in _TRIVIAL_HINTS):
+        return True
+    paths = list((plan or {}).get("planned_paths") or [])
+    if len(paths) == 1 and str(paths[0]).count("/") <= 1:
+        return True
+    return False
+
+
+def has_active_plan_items(todos: Sequence[dict[str, Any]] | None) -> bool:
+    """True if Step 0 was done this lease (any pending/in_progress/completed item)."""
+    if not todos:
+        return False
+    for item in todos:
+        status = str(item.get("status") or "pending").lower()
+        if status in {"pending", "in_progress", "completed"}:
+            return True
+    return False
+
+
+def has_open_plan_items(todos: Sequence[dict[str, Any]] | None) -> bool:
+    """True when checklist still has unfinished work (blocks submit/COMPLETE)."""
+    return bool(open_plan_item_contents(todos))
+
+
+def open_plan_item_contents(items: Sequence[dict[str, Any]] | None) -> list[str]:
+    out: list[str] = []
+    for item in items or []:
+        status = str(item.get("status") or "").lower()
+        if status in {"completed", "cancelled"}:
+            continue
+        content = str(item.get("content") or item.get("item_key") or "").strip()
+        if content:
+            out.append(content[:200])
+    return out[:12]
+
+
+def plan_approve_envelope(*, items: Sequence[dict[str, Any]], goal_summary: str = "") -> dict[str, Any]:
+    lines = []
+    for i, item in enumerate(items[:12], start=1):
+        lines.append(f"{i}. {item.get('content') or item.get('id') or item.get('item_key')}")
+    question = "请确认本轮工作清单后再开始改代码："
+    if lines:
+        question = question + "\n" + "\n".join(lines)
+    if goal_summary:
+        question = f"{goal_summary.strip()[:200]}\n\n{question}"
+    return build_ask_envelope(
+        question=question[:800],
+        why_blocked="大改/首跑需先批准工作清单（OpenWork plan preview）。",
+        options=[
+            {"id": "approve_plan", "label": "批准计划，开始执行"},
+            {"id": "revise_plan", "label": "要修改计划（说明方向）"},
+            {"id": "stop", "label": "停止"},
+        ],
+        suggested="approve_plan",
+        ask_type="plan_approve",
+    )
+
+
+def current_blocked_item_key(todos: Sequence[dict[str, Any]] | None) -> str | None:
+    for item in todos or []:
+        if str(item.get("status") or "").lower() == "in_progress":
+            return str(item.get("id") or item.get("item_key") or "") or None
+    for item in todos or []:
+        if str(item.get("status") or "").lower() == "pending":
+            return str(item.get("id") or item.get("item_key") or "") or None
+    return None
+
+
+def todo_nudge_message(
+    todos: Sequence[dict[str, Any]] | None,
+    *,
+    turns_since_plan_update: int,
+    nudge_after_turns: int = 8,
+) -> str | None:
+    """System催办 when checklist exists but is not being progressed (H1.5)."""
+    if turns_since_plan_update < nudge_after_turns:
+        return None
+    open_items = open_plan_item_contents(todos)
+    if not open_items:
+        return None
+    blocked = current_blocked_item_key(todos)
+    head = open_items[0]
+    return (
+        f"Work-plan nudge: {turns_since_plan_update} turns since last plan update. "
+        f"Mark progress with plan_update/todo_write. "
+        f"Current focus should be: {blocked or head}. "
+        f"Open: {'; '.join(open_items[:4])}"
+    )
+
+
+def looks_like_replan_request(text: str) -> bool:
+    t = (text or "").lower()
+    keys = (
+        "重新规划",
+        "重规划",
+        "改计划",
+        "修改计划",
+        "revise_plan",
+        "replan",
+        "new plan",
+        "换个方案",
+    )
+    return any(k in t for k in keys)
+
+
+def normalize_single_in_progress(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """At most one in_progress (W-2 soft)."""
+    seen = False
+    out: list[dict[str, Any]] = []
+    for item in todos:
+        row = dict(item)
+        status = str(row.get("status") or "pending").lower()
+        if status == "in_progress":
+            if seen:
+                row["status"] = "pending"
+            else:
+                seen = True
+                row["status"] = "in_progress"
+        out.append(row)
+    return out
+
+
+def step0_rejection_message() -> str:
+    return (
+        "Work plan required (Step 0): call todo_write with a checklist of steps "
+        "before write_file/edit_file/run_command. "
+        "Example: [{\"id\":\"1\",\"content\":\"scaffold app\",\"status\":\"pending\"}, ...]"
+    )

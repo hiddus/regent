@@ -1,0 +1,410 @@
+"""导演模型调用协议。
+
+这些 schema 的字段、约束与类名参与模型请求和恢复协议；迁移不得改变。
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+from regent.novel.domain.models import DecisionOption
+from regent.novel.domain.scene_card import BeatVerdict, SceneCard
+
+
+class ActorDirection(BaseModel):
+    persona: str = Field(
+        min_length=1,
+        description="必须是给定角色表里的确切名字，一字不差；"
+        "不得添加括号、头衔、别称或本场说明，也不得新造人物",
+    )
+    role: str = Field(default="", description="该人物在本场的作用，如「旁观者」；不要写进 persona")
+    objective: str = Field(min_length=1)
+    instruction: str = Field(min_length=1, description="表演指导，不含本人未知的秘密或未来结果")
+
+
+class NarrativeSpec(BaseModel):
+    viewpoint: str
+    distance: str
+    style: str
+    reader_effect: str = Field(min_length=1)
+    disclosure_rule: str = Field(min_length=1)
+
+
+class SceneBrief(BaseModel):
+    purpose: str = Field(min_length=1)
+    setting: str = Field(min_length=1)
+    conflict: str = Field(min_length=1)
+    exit_condition: str = Field(min_length=1)
+    actors: list[ActorDirection] = Field(min_length=1, max_length=4)
+    narrative: NarrativeSpec
+
+
+class NewPersonaSpec(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    voice: str = Field(min_length=1, description="说话方式：句式、用词、语气；这是该人物的声纹")
+    identity: str = Field(default="", description="一句话身份，如「码头搬工」")
+    drives: str = Field(default="", description="他此刻想要什么")
+    reason: str = Field(min_length=1, description="为什么现有角色撑不起这场戏")
+    kind: str = Field(
+        default="",
+        description="可选：traveler（穿越者意识）或 host_body（原身躯壳）",
+    )
+    bio: str = Field(default="", description="小传：前史/过人之处；穿越作建议填写")
+
+
+class DualDossierBundle(BaseModel):
+    traveler_name: str = Field(min_length=1, description="穿越者称呼或前史名")
+    traveler_bio: str = Field(
+        min_length=40, description="穿越前身份、死因/契机、性格、目标（从本作 premise 发明）"
+    )
+    traveler_voice: str = Field(min_length=1)
+    host_name: str = Field(min_length=1, description="原身对外姓名")
+    host_bio: str = Field(
+        min_length=40,
+        description="原身外表资源、为何能独自活动、过人之处；勿写入穿越者死亡/前职",
+    )
+    host_voice: str = Field(min_length=1, description="原身对外声纹/人设说话方式")
+
+
+class ChapterDirection(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    reader_intent: str = Field(min_length=1)
+    ending_reason: str = Field(min_length=1)
+    scenes: list[SceneBrief] = Field(min_length=1, max_length=4)
+    new_personas: list[NewPersonaSpec] = Field(default_factory=list)
+
+
+class ActorTurn(BaseModel):
+    intention: str
+    actions: list[str] = Field(min_length=1, max_length=5)
+    dialogue: list[str] = Field(default_factory=list, max_length=5)
+    private_reasoning: str = ""
+
+
+class SceneEvent(BaseModel):
+    statement: str = Field(min_length=1)
+    known_by: list[str] = Field(
+        default_factory=list,
+        description="实际获知者的角色名，必须取自给定角色表且一字不差；缺席人物不能自动获知",
+    )
+    reader_visible: bool
+    state_changes: dict[str, str] = Field(default_factory=dict)
+    dialogue_by_character: dict[str, list[str]] = Field(
+        default_factory=dict, description="键为角色表中的确切名字，值为该人物实际说出的台词"
+    )
+
+
+class SceneResolution(BaseModel):
+    events: list[SceneEvent] = Field(min_length=1, max_length=8)
+    rule_issues: list[str] = Field(default_factory=list)
+
+
+class DecisionRequestSpec(BaseModel):
+    trigger_summary: str = Field(min_length=1)
+    why_human: str = Field(min_length=1)
+    options: list[DecisionOption] = Field(min_length=2, max_length=4)
+    default_option_id: str = Field(min_length=1)
+    impact_level: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
+    impact_horizon_chapters: int = Field(default=1, ge=1, le=50)
+    node_id: str = ""
+
+    @model_validator(mode="after")
+    def _default_exists(self) -> DecisionRequestSpec:
+        ids = {option.option_id for option in self.options}
+        if self.default_option_id not in ids:
+            raise ValueError("default_option_id 必须出现在 options 中")
+        if len(ids) != len(self.options):
+            raise ValueError("option_id 不得重复")
+        return self
+
+
+class TakeDirection(BaseModel):
+    action: Literal["CONTINUE", "RETAKE", "RENDER"]
+    observation: str = Field(min_length=1)
+    evidence: list[str] = Field(min_length=1)
+    instruction: str = Field(min_length=1)
+    revised_brief: SceneBrief | None = None
+    request_decision: DecisionRequestSpec | None = None
+
+
+class SceneText(BaseModel):
+    content: str = Field(min_length=200, max_length=12000)
+
+
+class ParagraphReplacement(BaseModel):
+    paragraph_ids: list[str] = Field(min_length=1)
+    text: str = Field(min_length=1)
+
+
+class SceneTextPatch(BaseModel):
+    base_content_hash: str = Field(min_length=16)
+    purpose: str = Field(default="")
+    replacements: list[ParagraphReplacement] = Field(min_length=1)
+
+
+class ProseDirection(BaseModel):
+    action: Literal["ACCEPT", "REWRITE", "RETAKE"]
+    observation: str = Field(min_length=1)
+    evidence: list[str] = Field(min_length=1)
+    instruction: str = Field(min_length=1)
+    revised_brief: SceneBrief | None = None
+    request_decision: DecisionRequestSpec | None = None
+    revision_mode: Literal["full", "patch"] | None = None
+
+
+class VerifiedFact(BaseModel):
+    statement: str = Field(min_length=1)
+    quote: str = Field(min_length=1, description="最终正文中逐字存在的证据")
+    known_by: list[str] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
+    memory_kind: str = Field(
+        default="", description="rule / character_arc / promise / relation；不填即按事实结构判定"
+    )
+    subject: str = Field(default="", description="记忆主题；不填即按在册人物推导")
+    resolves: str = Field(
+        default="",
+        description="被本条事实兑现的具体承诺（写承诺内容，不写人物名）；不填即不兑现",
+    )
+
+
+class VerifiedStateChange(BaseModel):
+    key: str = Field(min_length=1)
+    value: str
+    quote: str = Field(min_length=1)
+
+
+class RequirementVerdict(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    status: Literal["supported", "contradicted", "missing"]
+    quote: str = Field(
+        default="", description="当前正文证据；supported/contradicted 必填且须在稿中"
+    )
+    explanation: str = Field(default="", description="自然语言解释，不承担身份比较")
+
+
+class SceneValidation(BaseModel):
+    passed: bool
+    issues: list[str] = Field(default_factory=list)
+    facts: list[VerifiedFact] = Field(default_factory=list)
+    requirements: list[RequirementVerdict] = Field(default_factory=list)
+    state_changes: list[VerifiedStateChange] = Field(default_factory=list)
+
+
+class SemanticResolution(BaseModel):
+    """下游对一条语义问题的结论。closed 的 evidence 必须是当前正文逐字片段。"""
+
+    description: str = ""
+    verdict: Literal["closed", "open", "withdrawn"] = "open"
+    evidence: str = ""
+
+
+class ChapterValidation(BaseModel):
+    passed: bool
+    issues: list[str] = Field(default_factory=list)
+    node_completed: bool = False
+    completion_quote: str = ""
+    failed_scene_index: int | None = Field(default=None, ge=0)
+    semantic_resolutions: list[SemanticResolution] = Field(default_factory=list)
+
+
+class EndingVerdict(BaseModel):
+    story_complete: bool
+    reason: str = Field(min_length=1, description="引用已写内容说明为什么算/不算讲完")
+
+
+class LocatedIssueSpec(BaseModel):
+    """整章硬失败的可追踪定位（与 domain.repair_locate.LocatedIssue 对齐）。"""
+
+    issue_id: str = Field(min_length=1)
+    code: str = Field(min_length=1)
+    severity: Literal["hard", "soft"] = "hard"
+    scene_ids: list[str] = Field(default_factory=list)
+    evidence_quotes: list[str] = Field(default_factory=list)
+    beat_ids: list[str] = Field(
+        default_factory=list,
+        description="缺失节拍的显式 beat_id 列表；无引文时仅按此映射场次",
+    )
+    content_hash: str = ""
+    expected_action: str = "rewrite_scene"
+    verify_rule: str = ""
+    message: str = ""
+
+
+class ScriptChapterValidation(BaseModel):
+    hard_fails: list[str] = Field(default_factory=list)
+    soft_notes: list[str] = Field(default_factory=list)
+    facts: list[VerifiedFact] = Field(default_factory=list)
+    located_issues: list[LocatedIssueSpec] = Field(default_factory=list)
+
+
+class ScenePlanDraft(BaseModel):
+    cards: list[SceneCard] = Field(min_length=1, max_length=6)
+    chapter_goal: str = ""
+    continuity_notes: str = ""
+    continuation_mode: str = Field(
+        default="",
+        description="direct、time_jump、pov_switch 或 opening；有前章交接时不得留空",
+    )
+    transition_note: str = Field(
+        default="",
+        description="时间跳跃或视角切换时说明合法转换；不得添加前章正文没有的事实",
+    )
+
+
+class SelfReviewIssue(BaseModel):
+    """自审意见分类（工作包4）。
+
+    - structural：可程序检查的结构化约束
+    - semantic：语义问题（如"这句虚构了前章事实"），须由下游场记/审校关闭
+    """
+
+    category: Literal["structural", "semantic"] = "semantic"
+    description: str = Field(min_length=1)
+    involves_prior_chapter: bool = False
+    text_must_include: str = ""
+    text_must_exclude: str = ""
+
+
+class RoleSelfReview(BaseModel):
+    """角色交活前的一次自审。passed 只表示这份成果可以交出，不表示整章通过。"""
+
+    passed: bool = True
+    issues: list[str] = Field(default_factory=list)
+    classified_issues: list[SelfReviewIssue] = Field(default_factory=list)
+    revision_note: str = ""
+    failed_scene_index: int | None = Field(default=None, ge=0)
+    prior_chapter: bool = False
+
+
+class AliasBinding(BaseModel):
+    """大纲用名与世界书规范名是否同一实体。证据必须同时写出两边的原词。"""
+
+    alias: str = ""
+    canon_name: str = ""
+    same_entity: bool = False
+    evidence: str = ""
+
+
+class AliasMapReview(BaseModel):
+    """开写前一次别名核对。没有把握就留空，不按字形相近猜测。"""
+
+    bindings: list[AliasBinding] = Field(default_factory=list)
+
+
+class EvidenceRecheckItem(BaseModel):
+    """证据复核：对一条无法接地的审校硬问题给出可接地证据或明确撤回。"""
+
+    issue_id: str = Field(min_length=1)
+    verdict: Literal["grounded", "withdrawn"] = Field(
+        description="grounded=补出当前正文逐字证据；withdrawn=撤回该问题（计误报）"
+    )
+    grounded_quote: str = Field(
+        default="",
+        description="verdict=grounded 时必填，须是当前正文中的逐字片段",
+    )
+    note: str = ""
+
+
+class EvidenceRecheck(BaseModel):
+    """一次有界证据复核的结论；同一轮审校最多复核一次。"""
+
+    items: list[EvidenceRecheckItem] = Field(default_factory=list)
+
+
+class SceneProseWithBeats(BaseModel):
+    content: str = Field(min_length=50)
+    beat_evidence: dict[str, str] = Field(default_factory=dict)
+
+
+class LedgerPropRegistration(BaseModel):
+    prop_id: str = Field(min_length=1)
+    name: str = ""
+    position: str = "unknown"
+    holder: str = ""
+
+
+class LedgerPropUpdate(BaseModel):
+    prop_id: str = Field(min_length=1)
+    position: str | None = None
+    holder: str | None = None
+    lifecycle: str | None = None
+    repair_quote: str = ""
+    partition_updates: dict[str, str] = Field(default_factory=dict)
+
+
+class LedgerResourceRegistration(BaseModel):
+    resource_id: str = Field(min_length=1)
+    name: str = ""
+
+
+class LedgerResourceConsumption(BaseModel):
+    resource_id: str = Field(min_length=1)
+    entry: str = Field(min_length=1)
+    cause_event_id: str = ""
+
+
+class LedgerOneTimeEvent(BaseModel):
+    event_type: str = ""
+    object_id: str = ""
+    actor_id: str = ""
+    location: str = ""
+    read_type: str = ""
+    entry: str = ""
+
+
+class LedgerActorPositionUpdate(BaseModel):
+    actor_id: str = Field(min_length=1)
+    location: str = Field(min_length=1)
+
+
+class LedgerDelta(BaseModel):
+    """台账增量（工作包2）。场记在 SceneAudit 中可选输出，程序校验后原子应用。"""
+
+    prop_registrations: list[LedgerPropRegistration] = Field(default_factory=list)
+    prop_updates: list[LedgerPropUpdate] = Field(default_factory=list)
+    resource_registrations: list[LedgerResourceRegistration] = Field(default_factory=list)
+    resource_consumptions: list[LedgerResourceConsumption] = Field(default_factory=list)
+    one_time_events: list[LedgerOneTimeEvent] = Field(default_factory=list)
+    actor_position_updates: list[LedgerActorPositionUpdate] = Field(default_factory=list)
+    time_marker: str = ""
+
+
+class ActualEvent(BaseModel):
+    """场记报告的实际事件（工作包3.2）。
+
+    模态：
+    - occurrence：本场实际发生
+    - recall：回忆/重读前场事件
+    - plan：计划/预期（未发生）
+    - negation：否定/未发生
+    """
+
+    event_id: str = ""
+    statement: str = Field(min_length=1)
+    modality: Literal["occurrence", "recall", "plan", "negation"] = "occurrence"
+    evidence: str = ""
+    responsibility_scene_id: str = ""
+
+
+class SceneAudit(BaseModel):
+    scene_id: str = Field(min_length=1)
+    beat_verdicts: list[BeatVerdict] = Field(default_factory=list)
+    continuity_ok: bool = True
+    continuity_issues: list[str] = Field(default_factory=list)
+    hard_fails: list[str] = Field(default_factory=list)
+    facts: list[str] = Field(default_factory=list)
+    state_changes: dict[str, str] = Field(default_factory=dict)
+    character_shifts: list[str] = Field(default_factory=list)
+    hooks_opened: list[str] = Field(default_factory=list)
+    hooks_closed: list[str] = Field(default_factory=list)
+    ledger_delta: LedgerDelta | None = None
+    actual_events: list[ActualEvent] = Field(default_factory=list)
+    semantic_resolutions: list[SemanticResolution] = Field(default_factory=list)
+
+
+# Private compatibility names used by existing tests/checkpoints.
+_ScenePlanDraft = ScenePlanDraft
+_SceneProseWithBeats = SceneProseWithBeats
+_SceneAudit = SceneAudit

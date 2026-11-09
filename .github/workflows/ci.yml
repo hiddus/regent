@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check .
+      - run: mypy
+      - name: AC1 delivery dead-end gate
+        run: python ops/delivery_dead_end_gate.py
+      - name: CON-5 console confirm gate
+        run: python ops/console_confirm_gate.py
+      - run: pytest
+      # Marker smoke: unknown markers must fail collection; empty selection is OK.
+      - run: pytest -m governance --collect-only
+      - run: pytest -m "idempotency or permit or recovery or eval" --collect-only
+      - run: python -c "from pathlib import Path; assert Path('Novel-Engine-PRD.md').is_file(); assert Path('Novel-Engine-Tech-Spec.md').is_file(); assert not Path('docs/definitions/REGENT-DEFINITION-3.0.txt').is_file()"
+      - run: python ops/repo_hygiene.py
+      # product authority covered by tests/architecture/test_regent_definition_freeze.py

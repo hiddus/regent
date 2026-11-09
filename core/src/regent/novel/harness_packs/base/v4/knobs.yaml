@@ -1,0 +1,42 @@
+# 写作载荷旋钮（v1）。从 build_write_payload 的硬编码值抽出，范围保守。
+previous_chapter_tail:
+  default: 500
+  min: 200
+  max: 1000
+  description: 前章尾段截取字数
+
+earlier_results_count:
+  default: 0
+  min: 0
+  max: 10
+  description: 前文结果条数上限，0 表示不限制
+
+open_promises_max:
+  default: 0
+  min: 0
+  max: 20
+  description: 未兑现承诺条数上限，0 表示不限制
+
+soft_check_repetition_ngram:
+  default: 80
+  min: 40
+  max: 120
+  description: 长段复用检测的最小字符数
+
+soft_check_chapter_opening_overlap:
+  default: 50
+  min: 20
+  max: 100
+  description: 章首与前章尾重合检查的最小字符数
+
+stall_place_chapters:
+  default: 4
+  min: 3
+  max: 10
+  description: 主角连续停在同一个地点的章数上限，到了就退回原地不动的章纲
+
+soft_check_repeated_opener:
+  default: 10
+  min: 6
+  max: 30
+  description: 同一句式开头的句子数，到了就提示（人名开头不算）

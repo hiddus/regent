@@ -1,0 +1,62 @@
+# Preserve exact bytes for signed P0 experiment artifacts (SHA-256 verified).
+docs/experiments/p0-v1-artifacts/** -text
+
+# R0 context-tail: SHA-256 frozen in deploy/novel/experiments/context_tail_v2_preflight.json
+core/src/regent/novel/experiments/context_tail_runtime.py -text
+tests/integration/test_context_tail_pg.py -text
+tests/integration/test_context_tail_offline.py -text
+docs/novel-quality-loss-r0-v2.md -text
+deploy/novel/experiments/context_tail_v2_preflight.json -text
+deploy/novel/context_tail_preflight.py -text
+deploy/novel/experiments/context_tail_sample_audit_20261106.json -text
+
+# R0 revision 12: hashes recorded in the freeze manifest and preflight checklist
+deploy/novel/experiments/context_tail_pilot_sources_20261106.jsonl -text
+deploy/novel/experiments/context_tail_pilot_cards_20261106.json -text
+deploy/novel/experiments/context_tail_rater_registry.json -text
+deploy/novel/experiments/context_tail_build_cards.py -text
+deploy/novel/experiments/context_tail_make_manifest.py -text
+deploy/novel/experiments/context_tail_entry.py -text
+deploy/novel/experiments/context_tail_fingerprint.py -text
+deploy/novel/experiments/context_tail_blind_review.py -text
+deploy/novel/experiments/context_tail_freeze_manifest.json -text
+
+# R0 revision 13: replay verdict and publication audit evidence
+deploy/novel/experiments/context_tail_history_replay.py -text
+deploy/novel/experiments/context_tail_publication_audit.py -text
+deploy/novel/experiments/context_tail_history_replay_evidence_20261106.json -text
+deploy/novel/experiments/context_tail_history_replay_20261106.json -text
+deploy/novel/experiments/context_tail_publication_audit_20261106.json -text
+deploy/novel/experiments/context_tail_pilot_pool_audit.py -text
+deploy/novel/experiments/context_tail_pilot_pool_audit_20261106.json -text
+docs/novel-quality-loss-r0-v3-prospective.md -text
+deploy/novel/experiments/context_tail_v3/__init__.py -text
+deploy/novel/experiments/context_tail_v3/contract.py -text
+deploy/novel/experiments/context_tail_v3/replay.py -text
+deploy/novel/experiments/context_tail_v3/budget.py -text
+deploy/novel/experiments/context_tail_v3/independence.py -text
+deploy/novel/experiments/context_tail_v3/migration.sql -text
+deploy/novel/experiments/context_tail_v3/selfcheck.py -text
+deploy/novel/experiments/context_tail_v3/selfcheck_20261106.json -text
+deploy/novel/experiments/context_tail_v3/pg_acceptance.py -text
+deploy/novel/experiments/context_tail_v3/pg_acceptance_20261106.json -text
+deploy/novel/experiments/context_tail_adapter_injection.py -text
+deploy/novel/experiments/context_tail_adapter_injection_20261106.json -text
+
+# R0 revision 18: RG1 model identity evidence
+deploy/novel/experiments/context_tail_rg1_model_probe.py -text
+deploy/novel/experiments/context_tail_rg1_model_evidence_20261106.json -text
+
+# R0 revision 19: RG2 ledger and executable stage gate
+deploy/novel/experiments/context_tail_rg2_ledger.py -text
+deploy/novel/experiments/context_tail_rg2_ledger_20261106.json -text
+deploy/novel/experiments/context_tail_v3/stage_gate.py -text
+deploy/novel/experiments/context_tail_v3/stage_gate_20261106.json -text
+
+# R0 revision 20: publication guard, fingerprint checker, tariff criterion
+deploy/novel/experiments/context_tail_prepush_guard.py -text
+deploy/novel/experiments/context_tail_prepush_guard_20261106.json -text
+deploy/novel/experiments/context_tail_v3/fingerprint_gate.py -text
+deploy/novel/experiments/context_tail_v3/fingerprint_gate_20261106.json -text
+deploy/novel/experiments/context_tail_rg1b_tariff_gate.py -text
+deploy/novel/experiments/context_tail_rg1b_tariff_gate_20261106.json -text

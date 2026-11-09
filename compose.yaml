@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: regent
+      POSTGRES_USER: regent
+      POSTGRES_PASSWORD: regent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U regent -d regent"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    ports: ["5432:5432"]
+    volumes: ["regent-postgres:/var/lib/postgresql/data"]
+  api:
+    build: {context: ., dockerfile: core/Dockerfile}
+    command: ["regent-api"]
+    env_file: ${REGENT_ENV_FILE:-.env}
+    environment:
+      # CD-6.4/6.6 Path B: default local — containerized worker has no docker.sock.
+      # For docker agent sandbox on host Path A, set REGENT_SANDBOX_MODE=docker outside compose.
+      REGENT_SANDBOX_MODE: ${REGENT_SANDBOX_MODE:-local}
+      REGENT_AGENT_SANDBOX_IMAGE: ${REGENT_AGENT_SANDBOX_IMAGE:-regent-agent-exec-v1:1}
+      REGENT_HOST_PATH_MAP: ${REGENT_HOST_PATH_MAP:-}
+      # Product surface: novel|legacy|combined (default combined for migration).
+      REGENT_SERVICE_MODE: ${REGENT_SERVICE_MODE:-combined}
+      REGENT_LEGACY_ACCEPT_NEW: ${REGENT_LEGACY_ACCEPT_NEW:-true}
+      REGENT_EDITOR_REPAIR_MODE: ${REGENT_EDITOR_REPAIR_MODE:-shadow}
+      REGENT_EDITOR_REPAIR_AUTO_PERCENT: ${REGENT_EDITOR_REPAIR_AUTO_PERCENT:-0}
+    ports: ["8000:8000"]
+    volumes:
+      - /opt/regent/artifacts:/var/lib/regent/artifacts
+      - /opt/regent/workspaces:/var/lib/regent/workspaces
+      - /opt/regent/builds:/var/lib/regent/builds
+    depends_on:
+      postgres: {condition: service_healthy}
+  worker:
+    build: {context: ., dockerfile: core/Dockerfile}
+    command: ["regent-worker"]
+    env_file: ${REGENT_ENV_FILE:-.env}
+    environment:
+      REGENT_SANDBOX_MODE: ${REGENT_SANDBOX_MODE:-local}
+      REGENT_AGENT_SANDBOX_IMAGE: ${REGENT_AGENT_SANDBOX_IMAGE:-regent-agent-exec-v1:1}
+      REGENT_HOST_PATH_MAP: ${REGENT_HOST_PATH_MAP:-}
+      REGENT_SERVICE_MODE: ${REGENT_SERVICE_MODE:-combined}
+      REGENT_LEGACY_ACCEPT_NEW: ${REGENT_LEGACY_ACCEPT_NEW:-true}
+      REGENT_EDITOR_REPAIR_MODE: ${REGENT_EDITOR_REPAIR_MODE:-shadow}
+      REGENT_EDITOR_REPAIR_AUTO_PERCENT: ${REGENT_EDITOR_REPAIR_AUTO_PERCENT:-0}
+      # Parallelism: N replicas × in-process dispatch concurrency.
+      REGENT_WORKER_DISPATCH_CONCURRENCY: ${REGENT_WORKER_DISPATCH_CONCURRENCY:-2}
+      REGENT_MAX_CONCURRENT_GENERATING: ${REGENT_MAX_CONCURRENT_GENERATING:-12}
+      # Used by effective_max_concurrent_generating auto mode (replicas × dispatch × 2).
+      REGENT_WORKER_REPLICAS: ${REGENT_WORKER_REPLICAS:-1}
+    volumes:
+      - /opt/regent/artifacts:/var/lib/regent/artifacts
+      - /opt/regent/workspaces:/var/lib/regent/workspaces
+      - /opt/regent/builds:/var/lib/regent/builds
+    depends_on:
+      postgres: {condition: service_healthy}
+    # Horizontal scale (compose v2): docker compose up -d --scale worker=3
+    # Outbox claim uses SKIP LOCKED; each process gets a unique worker_id.
+    # On S0 (docker run fleet) use: python ops/scale_workers.py --replicas 3 --execute
+volumes:
+  regent-postgres:

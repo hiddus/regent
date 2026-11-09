@@ -1,0 +1,1567 @@
+"""Novel C 端 HTTP 契约（Tech-Spec §8）。
+
+要点：
+- 所有 mutation 支持 ``Idempotency-Key``；同键同参数返回首个结果，同键异参数 409。
+- 关键路径更新携带 ``expected_version``/ETag；409 返回 current_version 与 conflict_summary。
+- 统一错误 envelope：code / message / request_id / retryable / available_actions。
+- 429 返回 Retry-After；204 不含 JSON body。
+- 服务端解析 principal，不接受客户端 actor（G-11）。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import secrets
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from regent.config import get_settings
+from regent.model import ModelProvider
+from regent.model.factory import build_model_provider
+from regent.novel.application import decisions as decisions_app
+from regent.novel.application import events as events_app
+from regent.novel.application import ledger as ledger_app
+from regent.novel.application import works_advance as advance_app
+from regent.novel.application import works_exports as exports_app
+from regent.novel.application import works_lifecycle as lifecycle_app
+from regent.novel.application import works_moderation as moderation_app
+from regent.novel.application import works_onboarding as onboarding_app
+from regent.novel.application import works_path as path_app
+from regent.novel.application import works_query as query_app
+from regent.novel.application import works_replay as replay_app
+from regent.novel.application import works_run_control as run_app
+from regent.novel.application import works_sharing as sharing_app
+from regent.novel.application import works_volumes as volumes_app
+from regent.novel.application import works_world_bible as bible_app
+from regent.novel.application.principal import (
+    CurrentPrincipal,
+    hash_token,
+    issue_token,
+)
+from regent.novel.application.works_access import get_owned_work
+from regent.novel.application.works_constants import AI_DISCLOSURE
+from regent.novel.domain import money
+from regent.novel.domain.errors import (
+    IdempotencyConflict,
+    NovelError,
+    QuotaExceeded,
+    ValidationFailed,
+)
+from regent.novel.domain.models import (
+    AcknowledgeExportNoticeRequest,
+    AnswerClarifyRequest,
+    AutoAdvanceRequest,
+    BudgetAuthorizeRequest,
+    ConfirmDirectionOut,
+    ConfirmDirectionRequest,
+    ContinuationPolicyOut,
+    ContinuationPolicyRequest,
+    CreateShareRequest,
+    CreateWorkRequest,
+    CreateWorkResponse,
+    CriticalPathOut,
+    CriticalPathUpdate,
+    DecisionView,
+    DirectionKeywordsOut,
+    EndingIntentRequest,
+    EventPage,
+    ExportNoticeOut,
+    ExportOut,
+    ExportRequest,
+    GuidanceRequest,
+    ModerationCaseOut,
+    OnboardingOut,
+    PathChangeImpact,
+    ReportFactRequest,
+    ReportFactResponse,
+    ReportModerationRequest,
+    ResolveAppealRequest,
+    ResolveDecisionRequest,
+    ResolveModerationRequest,
+    ResumeCorrectionRequest,
+    ReviseDirectionsRequest,
+    RunProgressOut,
+    ShareOut,
+    VolumeOut,
+    WorkDetail,
+    WorkStateOut,
+    WorkSummary,
+    WorldBibleLockRequest,
+    WorldBibleOut,
+    WorldBibleReviseRequest,
+)
+from regent.novel.infrastructure.models import (
+    IdempotencyRecordModel,
+    NovelPrincipalModel,
+    NovelSessionModel,
+)
+
+router = APIRouter(prefix="/v1/novel", tags=["novel"])
+
+SESSION_TTL = timedelta(days=30)
+
+
+def _content_disposition(filename: str) -> str:
+    """ASCII 回退 + RFC 5987。中文标题与引号都必须安全。"""
+    from urllib.parse import quote
+
+    ascii_fallback = "".join(
+        ch if ch.isascii() and (ch.isalnum() or ch in "._-") else "_" for ch in filename
+    )
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
+# ---------------------------------------------------------------------------
+# 依赖
+# ---------------------------------------------------------------------------
+
+
+async def _session(request: Request):
+    """Request-scoped session.
+
+    Do not wrap with ``session.begin()``: onboarding / generation may call the
+    model via ``TransactionFreeProvider``, which commits before the HTTP round
+    trip. Nested ``begin()`` forbids further writes after that commit.
+    """
+    async with request.app.state.sessions() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+DbSession = Annotated[AsyncSession, Depends(_session)]
+
+
+def _model_provider() -> ModelProvider:
+    return build_model_provider(get_settings())
+
+
+NovelModel = Annotated[ModelProvider, Depends(_model_provider)]
+
+
+# ---------------------------------------------------------------------------
+# 身份（G-11：服务端签发，客户端无法伪造 principal）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/session", status_code=200)
+async def create_session(
+    request: Request,
+    session: DbSession,
+    subject: Annotated[str | None, Query(max_length=255)] = None,
+    display_name: Annotated[str, Query(max_length=120)] = "",
+) -> dict[str, Any]:
+    """封闭测试用身份签发。
+
+    正式版本替换为手机号/第三方登录；**签发与校验始终在服务端**，
+    客户端拿到的只是不透明 token，无法构造 principal。
+    """
+    if not subject:
+        subject = f"guest-{secrets.token_hex(8)}"
+    row = await session.scalar(
+        select(NovelPrincipalModel).where(NovelPrincipalModel.subject == subject)
+    )
+    if row is None:
+        row = NovelPrincipalModel(
+            id=uuid.uuid4(),
+            subject=subject,
+            display_name=display_name or subject[:16],
+        )
+        session.add(row)
+        await session.flush()
+
+    raw = issue_token()
+    session.add(
+        NovelSessionModel(
+            id=uuid.uuid4(),
+            token_hash=hash_token(raw),
+            principal_id=row.id,
+            expires_at=datetime.now(UTC) + SESSION_TTL,
+            user_agent=request.headers.get("user-agent", "")[:512],
+        )
+    )
+    await session.flush()
+    return {
+        "token": raw,
+        "token_type": "Bearer",
+        "expires_in": int(SESSION_TTL.total_seconds()),
+        "principal_id": str(row.id),
+    }
+
+
+@router.get("/me")
+async def me(principal: CurrentPrincipal) -> dict[str, Any]:
+    return {"principal_id": str(principal.id), "subject": principal.subject}
+
+
+# ---------------------------------------------------------------------------
+# 幂等（Tech-Spec §5）
+# ---------------------------------------------------------------------------
+
+
+async def _guard_idempotency(
+    session: AsyncSession,
+    *,
+    scope: str,
+    key: str | None,
+    payload: dict[str, Any],
+) -> IdempotencyRecordModel | None:
+    """同键同参数返回首个结果；同键异参数 409。"""
+    if not key:
+        return None
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+    existing = await session.scalar(
+        select(IdempotencyRecordModel).where(
+            IdempotencyRecordModel.scope == scope,
+            IdempotencyRecordModel.idempotency_key == key,
+        )
+    )
+    if existing is None:
+        return None
+    if existing.request_fingerprint != fingerprint:
+        raise IdempotencyConflict(key)
+    return existing
+
+
+async def _store_idempotency(
+    session: AsyncSession,
+    *,
+    scope: str,
+    key: str | None,
+    payload: dict[str, Any],
+    body: dict[str, Any],
+    response_ref: str = "",
+) -> None:
+    if not key:
+        return
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+    session.add(
+        IdempotencyRecordModel(
+            id=uuid.uuid4(),
+            scope=scope,
+            idempotency_key=key,
+            request_fingerprint=fingerprint,
+            response_ref=response_ref,
+            response_body=body,
+            status_code=200,
+        )
+    )
+    await session.flush()
+
+
+# ---------------------------------------------------------------------------
+# 作品
+# ---------------------------------------------------------------------------
+
+
+@router.get("/direction-keywords", response_model=DirectionKeywordsOut)
+async def list_direction_keywords() -> DirectionKeywordsOut:
+    from regent.novel.domain.story_direction import catalog_payload
+
+    data = catalog_payload()
+    return DirectionKeywordsOut(**data)
+
+
+@router.post("/works", response_model=CreateWorkResponse, status_code=201)
+async def create_work(
+    request: Request,
+    session: DbSession,
+    payload: CreateWorkRequest,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:create:{principal.id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+
+    work, onboarding = await onboarding_app.create_work(
+        session,
+        owner_id=principal.id,
+        raw_intent=payload.raw_intent,
+        title=payload.title,
+        genre=payload.genre,
+        direction_keywords=payload.direction_keywords,
+        direction_custom_keywords=payload.direction_custom_keywords,
+        client_nonce=payload.client_nonce,
+        provider=provider,
+    )
+
+    out = CreateWorkResponse(
+        work_id=str(work.id),
+        state=WorkStateOut(work.state),
+        onboarding=onboarding,
+    ).model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"works:create:{principal.id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+        body=out,
+        response_ref=str(work.id),
+    )
+
+    return out
+
+
+@router.get("/works", response_model=list[WorkSummary])
+async def list_works(
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await query_app.list_works(session, owner_id=principal.id)
+
+
+@router.get("/works/{work_id}", response_model=WorkDetail)
+async def get_work(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await query_app.get_work(session, owner_id=principal.id, work_id=work_id)
+
+
+@router.delete("/works/{work_id}", status_code=204, response_model=None)
+async def delete_work(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Response:
+    await _guard_idempotency(
+        session,
+        scope=f"works:delete:{principal.id}",
+        key=idempotency_key,
+        payload={"work_id": str(work_id)},
+    )
+    await lifecycle_app.soft_delete_work(session, owner_id=principal.id, work_id=work_id)
+
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Onboarding：澄清与方向
+# ---------------------------------------------------------------------------
+
+
+@router.post("/works/{work_id}/clarify", response_model=OnboardingOut)
+async def answer_clarify(
+    work_id: uuid.UUID,
+    payload: AnswerClarifyRequest,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+) -> Any:
+    out = await onboarding_app.answer_clarify(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        answers=payload.answers,
+        accept_defaults=payload.accept_defaults,
+        provider=provider,
+    )
+
+    return out
+
+
+@router.get("/works/{work_id}/onboarding", response_model=OnboardingOut)
+async def restore_onboarding(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """刷新恢复：仍在引导中则返回 onboarding 会话，否则 404（前端按无引导处理）。"""
+    out = await onboarding_app.get_onboarding(session, owner_id=principal.id, work_id=work_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="onboarding not found")
+    return out
+
+
+@router.post("/works/{work_id}/directions", response_model=ConfirmDirectionOut)
+async def confirm_direction(
+    work_id: uuid.UUID,
+    payload: ConfirmDirectionRequest,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:directions:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+    if not (payload.card_id or "").strip() and not (payload.custom_direction or "").strip():
+        raise HTTPException(status_code=422, detail="card_id or custom_direction required")
+    out_model = await onboarding_app.confirm_direction(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        card_id=payload.card_id,
+        provider=provider,
+        custom_direction=payload.custom_direction,
+    )
+
+    out = out_model.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"works:directions:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+        body=out,
+    )
+
+    return out
+
+
+@router.get("/works/{work_id}/world-bible", response_model=WorldBibleOut)
+async def get_world_bible(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await bible_app.get_world_bible(session, owner_id=principal.id, work_id=work_id)
+
+
+@router.post("/works/{work_id}/world-bible/revise", response_model=OnboardingOut)
+async def revise_world_bible(
+    work_id: uuid.UUID,
+    payload: WorldBibleReviseRequest,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:world-bible-revise:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+    out_model = await bible_app.revise_world_bible(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        notes=payload.notes,
+        provider=provider,
+    )
+    out = out_model.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"works:world-bible-revise:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+        body=out,
+    )
+    return out
+
+
+@router.post("/works/{work_id}/world-bible/lock", response_model=OnboardingOut)
+async def lock_world_bible(
+    work_id: uuid.UUID,
+    payload: WorldBibleLockRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:world-bible-lock:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+    _, out_model = await bible_app.lock_world_bible(session, owner_id=principal.id, work_id=work_id)
+    out = out_model.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"works:world-bible-lock:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=body,
+        body=out,
+    )
+    return out
+
+
+@router.post("/works/{work_id}/directions/revise", response_model=OnboardingOut)
+async def revise_directions(
+    work_id: uuid.UUID,
+    payload: ReviseDirectionsRequest,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+) -> Any:
+    """都不合适：按用户意见重出方向卡，仍停在选择页。"""
+    return await onboarding_app.revise_directions(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        feedback=payload.feedback,
+        provider=provider,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 关键路径（FR-04 / FR-05）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/works/{work_id}/critical-path", response_model=CriticalPathOut)
+async def get_critical_path(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await path_app.get_critical_path(session, owner_id=principal.id, work_id=work_id)
+
+
+@router.put("/works/{work_id}/critical-path")
+async def update_critical_path(
+    work_id: uuid.UUID,
+    payload: CriticalPathUpdate,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+) -> Any:
+    """expected_version 冲突保护。409 返回 current_version 与 conflict_summary。"""
+    if if_match:
+        raw = if_match.strip().strip('"')
+        try:
+            expected = int(raw)
+        except ValueError as exc:
+            raise ValidationFailed("If-Match must be an integer version") from exc
+        if expected != payload.expected_version:
+            raise ValidationFailed("If-Match does not match expected_version")
+    path, impact = await path_app.update_critical_path(
+        session, owner_id=principal.id, work_id=work_id, payload=payload
+    )
+
+    return {
+        "critical_path": path.model_dump(mode="json"),
+        "impact": impact.model_dump(mode="json"),
+        "version": path.version,
+    }
+
+
+@router.post("/works/{work_id}/critical-path/preview", response_model=PathChangeImpact)
+async def preview_critical_path(
+    work_id: uuid.UUID,
+    payload: CriticalPathUpdate,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """只算影响，不落库。用于「改之前先看到代价」（PRD §3.2）。"""
+    from regent.novel.application.works_constants import MAX_PATH_NODES, MIN_PATH_NODES
+    from regent.novel.application.works_path import get_critical_path, preview_impact
+
+    if not MIN_PATH_NODES <= len(payload.nodes) <= MAX_PATH_NODES:
+        raise ValidationFailed(
+            f"critical path must contain {MIN_PATH_NODES}-{MAX_PATH_NODES} nodes"
+        )
+    current = await get_critical_path(session, owner_id=principal.id, work_id=work_id)
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    return preview_impact(
+        current_nodes=current.nodes,
+        next_nodes=payload.nodes,
+        frozen_through_chapter=current.frozen_through_chapter,
+        latest_chapter_no=int(work.latest_chapter_no) if work else 0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 卷导航（30 万字架构）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/works/{work_id}/volumes", response_model=list[VolumeOut])
+async def get_volumes(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await volumes_app.get_volumes(session, owner_id=principal.id, work_id=work_id)
+
+
+@router.get("/works/{work_id}/volumes/{volume_no}", response_model=VolumeOut)
+async def get_volume(
+    work_id: uuid.UUID,
+    volume_no: int,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    vols = await volumes_app.get_volumes(session, owner_id=principal.id, work_id=work_id)
+    for v in vols:
+        if v.volume_no == volume_no:
+            return v
+    raise ValidationFailed(f"volume {volume_no} not found")
+
+
+@router.post("/works/{work_id}/volumes/{volume_no}/expand", status_code=202)
+async def expand_volume(
+    work_id: uuid.UUID,
+    volume_no: int,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+) -> Any:
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    expected = int(work.total_volume_count or 0) + 1
+    # 目标卷号参与幂等：已存在则直接返回；错号拒绝，避免连点扩出第 N+2 卷
+    if int(volume_no) != expected:
+        existing = next(
+            (v for v in await volumes_app.get_volumes(
+                session, owner_id=principal.id, work_id=work_id
+            ) if int(v.volume_no) == int(volume_no)),
+            None,
+        )
+        if existing is not None and int(volume_no) <= int(work.total_volume_count or 0):
+            return existing
+        raise ValidationFailed(
+            f"expand target volume_no={volume_no} mismatch; expected {expected}"
+        )
+    result = await volumes_app.expand_next_volume(
+        session,
+        work=work,
+        provider=provider,
+        target_volume_no=int(volume_no),
+    )
+    if result is None:
+        raise ValidationFailed("cannot expand volume")
+    from regent.novel.domain.models import VolumeOut as _VO
+
+    return _VO(
+        volume_no=int(result.volume_no),
+        title=result.title,
+        cultivation_realm=result.cultivation_realm or "",
+        start_chapter_no=int(result.start_chapter_no),
+        end_chapter_no=int(result.end_chapter_no),
+        state=result.state,
+        summary=list(result.summary or []),
+        arcs=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 运行（FR-06 / FR-13 / FR-20）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/works/{work_id}/ending-intent", status_code=200)
+async def set_ending_intent(
+    work_id: uuid.UUID,
+    payload: EndingIntentRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """设定用户认可的终局：写完几卷，或者什么情况算讲完（B-05）。"""
+    return await volumes_app.set_ending_intent(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        target_volume_count=payload.target_volume_count,
+        ending_statement=payload.ending_statement,
+    )
+
+
+@router.post("/works/{work_id}/ending/resolve", status_code=200)
+async def resolve_ending(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    provider: NovelModel,
+) -> Any:
+    """终局待定时重新判定：能判就结束或扩卷，判不了继续待定（B-05）。"""
+    return await volumes_app.resolve_ending(
+        session, owner_id=principal.id, work_id=work_id, provider=provider
+    )
+
+
+@router.post("/works/{work_id}/runs", response_model=RunProgressOut, status_code=202)
+async def start_run(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    provider: NovelModel,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:runs:{principal.id}:{work_id}",
+        key=idempotency_key,
+        payload={"work_id": str(work_id)},
+    )
+    if cached is not None:
+        return cached.response_body
+    out = await run_app.start_run(
+        session, owner_id=principal.id, work_id=work_id, provider=provider
+    )
+
+    body = out.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"works:runs:{principal.id}:{work_id}",
+        key=idempotency_key,
+        payload={"work_id": str(work_id)},
+        body=body,
+    )
+
+    return body
+
+
+@router.get("/works/{work_id}/runs", response_model=RunProgressOut)
+async def get_run(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """一章都没开时返回 404（不是编一个 QUEUED）。
+
+    这一层必须说实话：前端把「有没有 progress」当作「能不能开工」的判据，
+    编出来的进度会把真实故障（例如 POST /runs 失败）伪装成「正在生成」。
+    """
+    out = await run_app.get_active_run_progress(session, owner_id=principal.id, work_id=work_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="no chapter run yet")
+    return out
+
+
+@router.post("/works/{work_id}/runs/{chapter_no}/advance", response_model=RunProgressOut)
+async def advance_step(
+    work_id: uuid.UUID,
+    chapter_no: int,
+    session: DbSession,
+    provider: NovelModel,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    """推进一个真实 Agent-loop 检查点，可安全重试。"""
+    out = await advance_app.advance_step(
+        session,
+        provider=provider,
+        owner_id=principal.id,
+        work_id=work_id,
+        chapter_no=chapter_no,
+    )
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 人在回路检查点
+# ---------------------------------------------------------------------------
+
+
+@router.post("/works/{work_id}/runs/{chapter_no}/guidance", response_model=RunProgressOut)
+async def submit_guidance(
+    work_id: uuid.UUID,
+    chapter_no: int,
+    payload: GuidanceRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """用户在检查点提交反馈，恢复流水线。"""
+    return await run_app.submit_guidance(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        chapter_no=chapter_no,
+        payload=payload,
+    )
+
+
+@router.put("/works/{work_id}/runs/{chapter_no}/auto-advance", response_model=RunProgressOut)
+async def set_auto_advance(
+    work_id: uuid.UUID,
+    chapter_no: int,
+    payload: AutoAdvanceRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """切换自动/手动模式。"""
+    return await run_app.set_auto_advance(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        chapter_no=chapter_no,
+        payload=payload,
+    )
+
+
+@router.post("/works/{work_id}/pause")
+async def pause_work(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    state = await run_app.pause_work(session, owner_id=principal.id, work_id=work_id)
+
+    return {"state": state.value, "worker_released": True}
+
+
+@router.post("/works/{work_id}/resume")
+async def resume_work(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    state = await run_app.resume_work(session, owner_id=principal.id, work_id=work_id)
+    # WorkResumeOut 含 state + blocker；兼容仅取 state 的旧客户端
+    return state
+
+
+@router.get("/works/{work_id}/continuation", response_model=ContinuationPolicyOut)
+async def get_continuation(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """读取作品级连续创作授权（默认关闭）。"""
+    from regent.novel.application.works_continuation import get_continuation_policy
+
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    pol = get_continuation_policy(work)
+    return ContinuationPolicyOut(
+        enabled=pol.enabled,
+        target_chapter_no=pol.target_chapter_no,
+        max_chapters=pol.max_chapters,
+        volume_scope=pol.volume_scope,
+        version=pol.version,
+        budget_grant_note=pol.budget_grant_note,
+        authorized_volume_no=pol.authorized_volume_no,
+        authorized_end_chapter_no=pol.authorized_end_chapter_no,
+    )
+
+
+@router.put("/works/{work_id}/continuation", response_model=ContinuationPolicyOut)
+async def put_continuation(
+    work_id: uuid.UUID,
+    payload: ContinuationPolicyRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """启停作品级连续创作；与章内 auto_advance 分离。"""
+    from regent.novel.application.works_continuation import set_continuation_policy
+
+    work = await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    pol = set_continuation_policy(
+        work,
+        enabled=payload.enabled,
+        target_chapter_no=payload.target_chapter_no,
+        max_chapters=payload.max_chapters,
+        volume_scope=payload.volume_scope,
+        budget_grant_note=payload.budget_grant_note,
+        expected_version=payload.expected_version,
+        authorized_volume_no=payload.authorized_volume_no,
+        authorized_end_chapter_no=payload.authorized_end_chapter_no,
+    )
+    await session.flush()
+    return ContinuationPolicyOut(
+        enabled=pol.enabled,
+        target_chapter_no=pol.target_chapter_no,
+        max_chapters=pol.max_chapters,
+        volume_scope=pol.volume_scope,
+        version=pol.version,
+        budget_grant_note=pol.budget_grant_note,
+        authorized_volume_no=pol.authorized_volume_no,
+        authorized_end_chapter_no=pol.authorized_end_chapter_no,
+    )
+
+
+@router.post("/works/{work_id}/budget/authorize")
+async def authorize_budget(
+    work_id: uuid.UUID,
+    payload: BudgetAuthorizeRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    """预算暂停后授权追加额度并恢复创作（BQ-1）。"""
+    cached = await _guard_idempotency(
+        session,
+        scope=f"works:budget_authorize:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached.response_body
+    state = await run_app.authorize_budget(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        grant_calls=payload.grant_calls,
+        grant_cost_minor=payload.grant_cost_minor,
+        client_nonce=payload.client_nonce,
+    )
+    body = {
+        "state": getattr(state, "state", state).value
+        if hasattr(getattr(state, "state", state), "value")
+        else str(getattr(state, "state", state)),
+        "blocker_code": getattr(state, "blocker_code", ""),
+        "recommended_actions": list(getattr(state, "recommended_actions", []) or []),
+        "grant_calls": payload.grant_calls,
+        "grant_cost_minor": payload.grant_cost_minor,
+    }
+    await _store_idempotency(
+        session,
+        scope=f"works:budget_authorize:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+        body=body,
+    )
+    return body
+
+
+# ---------------------------------------------------------------------------
+# 阅读（FR-15 / FR-22 / G-14）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/works/{work_id}/chapters/{chapter_no}")
+async def get_chapter(
+    work_id: uuid.UUID,
+    chapter_no: int,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    attempt: Annotated[int | None, Query(ge=1)] = None,
+) -> Any:
+    """只读路径。attempt 默认返回最新版本。"""
+    out = await query_app.get_chapter(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        chapter_no=chapter_no,
+        attempt=attempt,
+    )
+    return out
+
+
+@router.get("/works/{work_id}/chapters/{chapter_no}/versions")
+async def list_chapter_versions(
+    work_id: uuid.UUID,
+    chapter_no: int,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """列出指定章节的所有版本。"""
+    return await query_app.list_chapter_versions(
+        session, owner_id=principal.id, work_id=work_id, chapter_no=chapter_no
+    )
+
+
+@router.post("/works/{work_id}/chapters/{chapter_no}/regenerate", status_code=202)
+async def regenerate_chapter(
+    work_id: uuid.UUID,
+    chapter_no: int,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """重写指定章节（创建新 attempt）。"""
+    return await replay_app.regenerate_chapter(
+        session, owner_id=principal.id, work_id=work_id, chapter_no=chapter_no
+    )
+
+
+@router.get("/works/{work_id}/chapters")
+async def list_chapters(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """列出所有已完成章节（仅摘要）。"""
+    return await query_app.list_chapters(session, owner_id=principal.id, work_id=work_id)
+
+
+@router.get("/works/{work_id}/characters")
+async def list_characters(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """列出作品所有角色。"""
+    return await query_app.list_characters(session, owner_id=principal.id, work_id=work_id)
+
+
+# ---------------------------------------------------------------------------
+# 裁决（FR-10 / G-13）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/decisions", response_model=list[DecisionView])
+async def list_decisions(session: DbSession, principal: CurrentPrincipal) -> Any:
+    """跨作品待裁决收件箱（FR-12）：只返回本人作品的待裁决项。"""
+    return await decisions_app.list_pending_decisions(session, owner_id=principal.id)
+
+
+@router.get("/works/{work_id}/decisions", response_model=list[DecisionView])
+async def list_work_decisions(
+    work_id: uuid.UUID, session: DbSession, principal: CurrentPrincipal
+) -> Any:
+    await query_app.get_work(session, work_id=work_id, owner_id=principal.id)
+    return await decisions_app.list_pending_decisions(
+        session, owner_id=principal.id, work_id=work_id
+    )
+
+
+@router.get("/works/{work_id}/decisions/{decision_id}", response_model=DecisionView)
+async def get_decision(
+    work_id: uuid.UUID,
+    decision_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await decisions_app.get_decision(
+        session, owner_id=principal.id, work_id=work_id, decision_id=decision_id
+    )
+
+
+@router.post("/works/{work_id}/decisions/{decision_id}/resolve", response_model=DecisionView)
+async def resolve_decision(
+    work_id: uuid.UUID,
+    decision_id: uuid.UUID,
+    payload: ResolveDecisionRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    cached = await _guard_idempotency(
+        session,
+        scope=f"decisions:resolve:{principal.id}:{decision_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached.response_body
+    out = await decisions_app.resolve_decision(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        decision_id=decision_id,
+        option_id=payload.option_id,
+        accept_default=payload.accept_default,
+        confirm_nonce=payload.confirm_nonce,
+        resolved_by="user",
+    )
+
+    body = out.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"decisions:resolve:{principal.id}:{decision_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+        body=body,
+    )
+
+    return body
+
+
+# ---------------------------------------------------------------------------
+# 事实报错（FR-11）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/works/{work_id}/facts/report", response_model=ReportFactResponse)
+async def report_fact(
+    work_id: uuid.UUID,
+    payload: ReportFactRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    cached = await _guard_idempotency(
+        session,
+        scope=f"facts:report:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached.response_body
+    out = await replay_app.report_fact(
+        session, owner_id=principal.id, work_id=work_id, payload=payload
+    )
+
+    return out
+
+
+@router.post("/works/{work_id}/resume-correction", status_code=200)
+async def resume_after_correction(
+    work_id: uuid.UUID,
+    payload: ResumeCorrectionRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    """恢复创作以执行已排队的局部重演（C-01）。
+
+    完结或暂停的作品，后台不会领取任务；报错后必须由用户明确恢复，重演才会
+    真正发生。这是「恢复后才执行」那句话对应的动作，不是自动恢复。
+    """
+    return await run_app.resume_after_correction(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        ticket_id=payload.ticket_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 分享（FR-17）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/public/shares/{token}")
+async def read_public_share(token: str, session: DbSession) -> Response:
+    if len(token) < 20 or len(token) > 64:
+        raise ValidationFailed("invalid share token")
+    body = await sharing_app.get_public_share(session, token=token)
+    return JSONResponse(
+        content=json.loads(json.dumps(body, ensure_ascii=False, default=str)),
+        headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "private, no-store"},
+    )
+
+
+@router.post("/works/{work_id}/shares", response_model=ShareOut, status_code=201)
+async def create_share(
+    request: Request,
+    work_id: uuid.UUID,
+    payload: CreateShareRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"shares:create:{principal.id}:{work_id}",
+        key=idempotency_key,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+    base = str(request.base_url).rstrip("/")
+    out = await sharing_app.create_share(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        scope=payload.scope,
+        from_chapter=payload.from_chapter,
+        to_chapter=payload.to_chapter,
+        expires_in_hours=payload.expires_in_hours,
+        invitee_label=payload.invitee_label,
+        base_url=base,
+    )
+
+    dumped = out.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"shares:create:{principal.id}:{work_id}",
+        key=idempotency_key,
+        payload=body,
+        body=dumped,
+        response_ref=out.share_id,
+    )
+
+    return dumped
+
+
+@router.delete("/works/{work_id}/shares/{share_id}", status_code=204, response_model=None)
+async def revoke_share(
+    work_id: uuid.UUID,
+    share_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Response:
+    await sharing_app.revoke_share(
+        session, owner_id=principal.id, work_id=work_id, share_id=share_id
+    )
+
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# 导出（FR-23 / G-15 / G-22）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/works/{work_id}/export-notice", response_model=ExportNoticeOut)
+async def get_export_notice(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await exports_app.get_export_notice(session, owner_id=principal.id, work_id=work_id)
+
+
+@router.post("/works/{work_id}/export-notice/acknowledge", response_model=ExportNoticeOut)
+async def acknowledge_export_notice(
+    work_id: uuid.UUID,
+    payload: AcknowledgeExportNoticeRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    out = await exports_app.acknowledge_export_notice(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        notice_version=payload.notice_version,
+    )
+
+    return out
+
+
+@router.post("/works/{work_id}/exports", response_model=ExportOut, status_code=201)
+async def export_work(
+    request: Request,
+    work_id: uuid.UUID,
+    payload: ExportRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    body = payload.model_dump(mode="json")
+    cached = await _guard_idempotency(
+        session,
+        scope=f"exports:{principal.id}:{work_id}",
+        key=idempotency_key,
+        payload=body,
+    )
+    if cached is not None:
+        return cached.response_body
+    base = str(request.base_url).rstrip("/")
+    out = await exports_app.export_work(
+        session, owner_id=principal.id, work_id=work_id, payload=payload, base_url=base
+    )
+
+    dumped = out.model_dump(mode="json")
+    await _store_idempotency(
+        session,
+        scope=f"exports:{principal.id}:{work_id}",
+        key=idempotency_key,
+        payload=body,
+        body=dumped,
+        response_ref=out.export_id,
+    )
+
+    return dumped
+
+
+@router.get("/exports/{export_id}/content")
+async def get_export_content(
+    export_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    filename, text = await exports_app.get_export_payload(
+        session, owner_id=principal.id, export_id=export_id
+    )
+    from urllib.parse import quote
+
+    return Response(
+        content=text.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": _content_disposition(filename),
+            # G-15：导出物始终带 AI 标识（URL 编码中文）
+            "X-AI-Disclosure": quote(AI_DISCLOSURE),
+            "X-Content-Options": "nosniff",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# 审核与申诉（FR-25 / G-23）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/works/{work_id}/moderation", response_model=list[ModerationCaseOut])
+async def list_moderation(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+) -> Any:
+    return await moderation_app.list_moderation_cases(
+        session, owner_id=principal.id, work_id=work_id
+    )
+
+
+@router.post("/works/{work_id}/moderation/report", response_model=ModerationCaseOut)
+async def report_moderation(
+    work_id: uuid.UUID,
+    payload: ReportModerationRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    cached = await _guard_idempotency(
+        session,
+        scope=f"moderation:report:{principal.id}:{work_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached.response_body
+    out = await moderation_app.report_moderation(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        chapter_no=payload.chapter_no,
+        reason_code=payload.reason_code,
+        detail=payload.detail,
+    )
+    return out
+
+
+@router.post("/works/{work_id}/moderation/scan")
+async def scan_moderation(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    chapter_no: Annotated[int, Query(ge=1)],
+) -> Any:
+    """按配置词表扫描已提交章节，产出疑似命中案件。
+
+    只提名不判定：未配置词表时返回 configured=false，不产生“通过”含义（G-23）。
+    """
+    return await moderation_app.scan_chapter_rules(
+        session, owner_id=principal.id, work_id=work_id, chapter_no=chapter_no
+    )
+
+
+@router.post("/works/{work_id}/moderation/{case_id}/appeal", response_model=ModerationCaseOut)
+async def appeal_moderation(
+    work_id: uuid.UUID,
+    case_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    reason: Annotated[str, Query(max_length=2000)] = "",
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    out = await moderation_app.appeal_moderation(
+        session, owner_id=principal.id, work_id=work_id, case_id=case_id, reason=reason
+    )
+
+    return out
+
+
+@router.post("/works/{work_id}/moderation/{case_id}/resolve", response_model=ModerationCaseOut)
+async def resolve_moderation(
+    work_id: uuid.UUID,
+    case_id: uuid.UUID,
+    payload: ResolveModerationRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    """给出审核结论：无结论不得视为通过（G-23 / P1-4）。"""
+    cached = await _guard_idempotency(
+        session,
+        scope=f"moderation:resolve:{principal.id}:{case_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached.response_body
+    out = await moderation_app.resolve_moderation(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        case_id=case_id,
+        decision=payload.decision,
+        reason_code=payload.reason_code,
+        evidence=payload.evidence,
+        actor=payload.actor,
+    )
+    return out
+
+
+@router.post(
+    "/works/{work_id}/moderation/{case_id}/appeal/resolve", response_model=ModerationCaseOut
+)
+async def resolve_appeal(
+    work_id: uuid.UUID,
+    case_id: uuid.UUID,
+    payload: ResolveAppealRequest,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Any:
+    """申诉结论：成立则恢复，维持则保留原判定，两种结果都留痕（P1-4）。"""
+    cached = await _guard_idempotency(
+        session,
+        scope=f"moderation:appeal_resolve:{principal.id}:{case_id}",
+        key=idempotency_key or payload.client_nonce or None,
+        payload=payload.model_dump(mode="json"),
+    )
+    if cached is not None:
+        return cached.response_body
+    out = await moderation_app.resolve_appeal(
+        session,
+        owner_id=principal.id,
+        work_id=work_id,
+        case_id=case_id,
+        upheld=payload.upheld,
+        reason_code=payload.reason_code,
+        evidence=payload.evidence,
+        actor=payload.actor,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 成本（FR-19）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/works/{work_id}/costs")
+async def work_costs(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    currency: Annotated[str, Query(max_length=3)] = "CNY",
+) -> Any:
+    money.currency_exponent(currency)
+    await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    return await ledger_app.work_cost(session, work_id=work_id, currency=currency.upper())
+
+
+# ---------------------------------------------------------------------------
+# 事件与 SSE（Tech-Spec §9 / G-17）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/works/{work_id}/events", response_model=EventPage)
+async def get_events(
+    work_id: uuid.UUID,
+    session: DbSession,
+    principal: CurrentPrincipal,
+    after_seq: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+) -> Any:
+    await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+    return await events_app.read_events(session, work_id=work_id, after_seq=after_seq, limit=limit)
+
+
+@router.get("/works/{work_id}/events/stream")
+async def stream_events(
+    request: Request,
+    work_id: uuid.UUID,
+    principal: CurrentPrincipal,
+    after_seq: Annotated[int, Query(ge=0)] = 0,
+) -> Any:
+    """SSE。``id:`` 为持久 sequence；客户端可用 Last-Event-ID 续接。
+
+    heartbeat 只表示连接存活；数据查询失败会发送 stream.degraded，不吞异常。
+    """
+    last_event_id = request.headers.get("last-event-id")
+    start = after_seq
+    if last_event_id and last_event_id.isdigit():
+        start = max(start, int(last_event_id))
+
+    async def gen():
+        nonlocal start
+        factory = request.app.state.sessions
+        idle = 0
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                async with factory() as session:
+                    await get_owned_work(session, work_id=work_id, owner_id=principal.id)
+                    page = await events_app.read_events(
+                        session, work_id=work_id, after_seq=start, limit=200
+                    )
+            except NovelError:
+                # 资源不存在/越权：直接结束流，不泄露存在性
+                return
+            except Exception:
+                yield "event: stream.degraded\ndata: {}\n\n"
+                await _sleep(2.0)
+                continue
+
+            if page.resync_required:
+                yield "event: stream.resync_required\ndata: {}\n\n"
+                return
+
+            if page.events:
+                for event in page.events:
+                    yield events_app.sse_frame(event)
+                    start = event.sequence
+                idle = 0
+            else:
+                idle += 1
+                yield ": heartbeat\n\n"
+                if idle > 600:  # ~10 分钟无事件，收流由客户端重连
+                    return
+            await _sleep(1.0)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _sleep(seconds: float) -> None:
+    import asyncio
+
+    await asyncio.sleep(seconds)
+
+
+# ---------------------------------------------------------------------------
+# 错误 envelope
+# ---------------------------------------------------------------------------
+
+
+def register_exception_handlers(app: Any) -> None:
+    """统一错误 envelope：code / message / request_id / retryable / available_actions。"""
+
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
+
+    if not isinstance(app, FastAPI):
+        return
+
+    @app.exception_handler(NovelError)
+    async def _novel_error_handler(request: Request, exc: NovelError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", None) or request.headers.get(
+            "x-request-id", ""
+        )
+        headers: dict[str, str] = {}
+        if isinstance(exc, QuotaExceeded):
+            headers["Retry-After"] = str(getattr(exc, "retry_after", 60))
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.to_payload(request_id),
+            headers=headers,
+        )

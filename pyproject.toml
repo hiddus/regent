@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "regent-core"
+version = "0.1.0"
+description = "Reliable, governed goal execution core for Regent"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "Proprietary" }
+dependencies = [
+  "alembic>=1.14,<2",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "pydantic-settings>=2.7,<3",
+  "psycopg[binary]>=3.2,<4",
+  "python-multipart>=0.0.9",
+  "sqlalchemy[asyncio]>=2.0.36,<3",
+  "structlog>=24.4,<26",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.9,<1",
+  "aiosqlite>=0.20,<1",
+]
+
+[project.scripts]
+regent-api = "regent.api.main:run"
+regent-worker = "regent.worker.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core/src/regent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"core/src/regent/capabilities_bootstrap/allowlisted_http_source_v1.json" = "regent/capabilities_bootstrap/allowlisted_http_source_v1.json"
+
+[tool.pytest.ini_options]
+# Per-run basetemp under repo (QA: avoid shared system Temp WinError 5; xdist workers
+# override via PYTEST_XDIST_WORKER in tests/conftest.py when possible).
+addopts = "-q --basetemp=.pytest_tmp/pytest"
+pythonpath = ["core/src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "governance: behavior tests through real governance pipelines (Goal/Work/Run/Evidence/Audit)",
+  "idempotency: replay and duplicate-effect safety",
+  "permit: Permit revoke/expire/fencing/claim behavior",
+  "recovery: lease reclaim, crash recovery, UNKNOWN reconciliation",
+  "eval: Eval harness scoring and DecisionRecord gates",
+  "sandbox: optional real Docker sandbox smoke (may skip without Docker)",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"core/src/regent/api/*.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["regent"]
+mypy_path = "core/src"

@@ -1,0 +1,9 @@
+{
+  "skill_id": "test-harness",
+  "version": "1.0.0",
+  "title": "Test Harness",
+  "description": "Add pytest coverage for routes and persistence Journeys.",
+  "applies_when": ["pytest", "test", "harness", "ci", "verify"],
+  "anti_examples": ["tests that only assert True"],
+  "gap_codes": ["TEST_FAILED", "project-tests", "TEST_COMMAND_MISSING"]
+}

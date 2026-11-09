@@ -1,0 +1,9 @@
+{
+  "skill_id": "persistence",
+  "version": "1.0.0",
+  "title": "Persistence",
+  "description": "SQLite/file persistence with empty-state UX instead of fake seed data.",
+  "applies_when": ["sqlite", "persist", "database", "crud", "todo", "notes", "storage", "持久化", "数据库", "存储", "待办", "笔记"],
+  "anti_examples": ["hardcoded demo users with no write path"],
+  "gap_codes": ["ARTIFACT_INCOMPLETE", "TEST_FAILED", "forbid-demo-shell", "persistence"]
+}

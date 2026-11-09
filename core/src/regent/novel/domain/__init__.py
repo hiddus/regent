@@ -1,0 +1,1 @@
+"""Novel Engine domain package."""

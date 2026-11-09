@@ -1,0 +1,251 @@
+from functools import lru_cache
+from typing import Literal, Self
+
+from pydantic import Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="REGENT_", env_file=".env", extra="ignore")
+    environment: Literal["development", "test", "production"] = "development"
+    # Migration: combined keeps current process shape; target default is novel.
+    service_mode: Literal["novel", "legacy", "combined"] = "combined"
+    # Drain phase: set false to reject new Generated-App creates (410) while finishing in-flight work.
+    legacy_accept_new: bool = True
+    # Editorial repair: off|shadow|auto. auto is further gated by editor_repair_auto_percent.
+    editor_repair_mode: Literal["off", "shadow", "auto"] = "shadow"
+    # Stable work-id canary for auto apply (0 = never apply, stay shadow even if mode=auto).
+    editor_repair_auto_percent: int = Field(default=0, ge=0, le=100)
+    database_url: str = "postgresql+psycopg://regent:regent@localhost:5432/regent"
+    log_level: str = "INFO"
+    artifact_root: str = "/var/lib/regent/artifacts"
+    workspace_root: str = "/var/lib/regent/workspaces"
+    build_root: str = "/var/lib/regent/builds"
+    sandbox_image: str = "regent-python-web-v1-sandbox:1"
+    agent_sandbox_image: str = "regent-agent-exec-v1:1"
+    # Safe default for every real workspace. Tests may explicitly choose local.
+    sandbox_mode: Literal["docker", "local"] = "docker"
+    # CD-6.3: container_prefix=host_prefix;... e.g. /var/lib/regent=/opt/regent
+    host_path_map: str = ""
+    # CD-6.2: override sandbox --user (uid or uid:gid); empty = os.getuid()/getgid()
+    agent_sandbox_uid: str | None = None
+    dependency_resolver_image: str = "regent-python-web-v1-resolver:1"
+    dependency_egress_proxy: str | None = None
+    worker_poll_seconds: float = Field(default=1.0, gt=0)
+    worker_lease_seconds: int = Field(default=30, ge=5)
+    model_provider: str = "openai-compatible"
+    model_base_url: str | None = None
+    model_name: str | None = None
+    # Optional secondary/tertiary models (gateway aliases); primary is model_name.
+    model_name_2: str | None = None
+    model_name_3: str | None = None
+    model_api_key: SecretStr | None = None
+    # GLM / long codegen often exceeds 180s; 504s still retry via outbox backoff.
+    model_timeout_seconds: float = Field(default=300.0, ge=30.0, le=1800.0)
+    # Stream idle: no SSE line for this many seconds → ModelOutputError (卡死可观测)。
+    # Default None → provider uses min(90, model_timeout_seconds).
+    model_stream_idle_seconds: float | None = Field(default=None, ge=15.0, le=1800.0)
+    # M1-1: configurable chat completion output cap (None disables max_tokens).
+    model_max_output_tokens: int | None = Field(default=8192, ge=256, le=128_000)
+    model_input_cost_per_million: float = Field(default=0.0, ge=0.0)
+    model_output_cost_per_million: float = Field(default=0.0, ge=0.0)
+    model_price_book_version: str = "model-price-book-v1"
+    # DeepSeek V4 enables thinking by default; CoT shares max_tokens with content/tools.
+    # Agent tool loops default to disabled to avoid empty finish_reason=length.
+    model_thinking_mode: Literal["disabled", "enabled", "default"] = "disabled"
+    # Ship-first default: always agentic. artifact-backed is kill-switch fallback only.
+    generation_strategy: Literal["artifact-backed", "agentic"] = "agentic"
+    generation_strategy_kill_switch: bool = False
+    generation_strategy_fallback: Literal["artifact-backed", "agentic"] = "artifact-backed"
+    # Peer AB↔agentic canary is dead (M3). Retained for ops telemetry only;
+    # resolve_effective_generation_strategy ignores percent for arm selection.
+    generation_strategy_canary_percent: int = Field(default=0, ge=0, le=100)
+    generation_strategy_canary_variant: Literal["artifact-backed", "agentic"] = "agentic"
+    generation_strategy_canary_gate: bool = False
+    # Ops reporting ladder only — does NOT demote product path to artifact-backed.
+    # artifact-backed remains SCAFFOLD_OR_KILL_SWITCH_FALLBACK (see generation_strategy_policy).
+    agentic_qualification_state: Literal[
+        "DISABLED",
+        "OFFLINE_QUALIFICATION",
+        "INTERNAL_DOGFOOD",
+        "CANARY_5",
+        "CANARY_25",
+        "CANARY_50",
+        "DEFAULT",
+    ] = "DISABLED"
+    generation_strategy_shadow_mode: bool = False
+    delivery_batch_enabled: bool = False
+    delivery_profile: Literal["aggressive", "balanced", "conservative"] = "balanced"
+    # ── Task-tiered budgets (P0-1 audit fix) ──────────────────────────────
+    # Default budgets by goal scale. The legacy agent_max_turns/tokens remain
+    # as fallback when goal_scale is unknown or LARGE exceeds tier limits.
+    # Small: 8 turns / 60k tokens — enough for single-page apps, landing pages.
+    # Medium: 12 turns / 100k tokens — interactive apps, multi-component.
+    # Large: 20 turns / 180k tokens — multi-milestone, complex backends.
+    agent_budget_small_turns: int = Field(default=8, ge=1, le=50)
+    agent_budget_small_tokens: int = Field(default=60_000, ge=1_000)
+    agent_budget_medium_turns: int = Field(default=12, ge=1, le=100)
+    agent_budget_medium_tokens: int = Field(default=100_000, ge=1_000)
+    agent_budget_large_turns: int = Field(default=20, ge=1, le=200)
+    agent_budget_large_tokens: int = Field(default=180_000, ge=1_000)
+    # Legacy fallback (used when goal_scale is not yet known).
+    agent_max_turns: int = Field(default=40, ge=1, le=200)
+    agent_max_tokens: int = Field(default=400_000, ge=1_000)
+    agent_max_wall_seconds: int = Field(default=900, ge=30)
+    agent_nested_repair_max: int = Field(default=4, ge=0, le=8)
+    # ── Marginal ROI circuit breaker (P0-2 audit fix) ─────────────────────
+    # If verification score doesn't improve by this fraction after a repair
+    # round, stop the current strategy and force replan or human intervention.
+    roi_min_improvement_fraction: float = Field(default=0.05, ge=0.0, le=1.0)
+    roi_consecutive_stagnant_rounds: int = Field(default=2, ge=1, le=5)
+    # ── Same-gap no-improvement circuit breaker (P0-3 audit fix) ──────────
+    # If the same gap fingerprint appears N consecutive times with no score
+    # improvement, stop immediately (don't wait for identical_gap_stop_after).
+    gap_stagnant_stop_after: int = Field(default=2, ge=1, le=5)
+    # M1: VerificationGap prefers Session chassis; A0 forbids silent auto-resume.
+    # When agent_loop_exit_enforced, gap → ASK_HUMAN/STOP; resume only after human.
+    agent_session_resume_enabled: bool = True
+    agent_loop_exit_enforced: bool = True
+    # Progress ROI: each spend cycle must buy measurable delivery progress.
+    # Empty continue_fix is upgraded to self_repair → replan_global → STOP.
+    progress_roi_enforced: bool = True
+    progress_roi_min_tokens: int = Field(default=2000, ge=0)
+    progress_roi_stagnant_stop: int = Field(default=3, ge=1, le=10)
+    # Session Work Plan (W1–W2): force Step 0 checklist before write tools.
+    agent_work_plan_required: bool = True
+    # First substantial plan in a Session may ASK plan_approve (OpenWork-style).
+    agent_plan_approve_on_first: bool = True
+    # soft: product HTML/tests/smoke do not hard-reject; only empty + BLOCKING_* fail.
+    # full: legacy hard gates (death-loop risk). off: skip product review (still empty/safety).
+    # A0: soft must NOT map to exit_kind COMPLETE with stop_reason=verified_pass.
+    delivery_product_gates_mode: Literal["full", "soft", "off"] = "soft"
+    # W4-P1-4: follow model context window (default matches common 128k).
+    agent_context_window_tokens: int = Field(default=128_000, ge=8_000, le=2_000_000)
+    goal_semantic_alignment_enabled: bool = False
+    observation_signing_key: SecretStr | None = None
+    experiment_signing_key: SecretStr | None = None
+    public_base_url: str | None = None
+    evidence_egress_proxy: str | None = None
+    evidence_allowed_domains: str = ""
+    evidence_max_bytes: int = Field(default=262_144, ge=1024)
+    scheduler_org_keys: str = ""
+    scheduler_enabled: bool = True
+    search_api_url: str | None = None
+    search_api_key: SecretStr | None = None
+    vercel_token: SecretStr | None = None
+    vercel_team_id: str | None = None
+    netlify_token: SecretStr | None = None
+    tunnel_type: str = "cloudflared"
+    aar1_phase: Literal[
+        "expand", "dual_write", "read_switch", "enforce", "contract"
+    ] = "contract"
+    aar1_envelope_hmac_key: SecretStr | None = None
+    aar1_shadow_log_divergences: bool = True
+    # Certified multi-agent Hive is available but requires explicit per-goal opt-in.
+    # Single Agent is the production default until a measured net benefit exists.
+    aar1_certified_hive: bool = False
+    # Nested delegate_plan_item depth (0 = no delegation).
+    # Default 1: only the main Agent may delegate; sub-agents cannot re-delegate.
+    # This prevents A→B→A dead-loops and wasteful token burn.
+    max_subagent_depth: int = Field(default=1, ge=0, le=8)
+    require_release_human_approval: bool = True
+    decision_preference: Literal["aggressive", "balanced", "conservative"] = "balanced"
+    decision_allow_actions: str = ""
+    decision_deny_actions: str = ""
+    confirmation_timeout_seconds: int = Field(default=300, ge=0)
+    reconciliation_interval_seconds: float = Field(default=300.0, ge=30.0)
+    # Host self-heal: measure disk/mem/load, prune preview venvs, soft-pause burn.
+    host_guard_enabled: bool = True
+    host_guard_interval_seconds: float = Field(default=60.0, ge=15.0)
+    host_disk_percent_max: float = Field(default=85.0, ge=50.0, le=99.0)
+    host_mem_percent_max: float = Field(default=92.0, ge=50.0, le=99.5)
+    host_load1_per_cpu_max: float = Field(default=4.0, ge=1.0, le=32.0)
+    host_prune_disk_percent: float = Field(default=80.0, ge=50.0, le=99.0)
+    host_prune_mem_percent: float = Field(default=85.0, ge=50.0, le=99.5)
+    host_prune_preview_keep: int = Field(default=8, ge=1, le=64)
+    host_reap_preview_processes: bool = True
+    # Runtime behavior monitoring: periodic re-observation of deployed
+    # previews for goals that opted in via org_mode.enable_monitoring.
+    behavior_monitor_enabled: bool = True
+    behavior_monitor_interval_seconds: float = Field(default=600.0, ge=60.0)
+    # 0 = derive from worker_replicas × worker_dispatch_concurrency × 2
+    max_concurrent_generating: int = Field(default=0, ge=0, le=64)
+    worker_dispatch_concurrency: int = Field(default=2, ge=1, le=32)
+    worker_replicas: int = Field(default=1, ge=1, le=32)
+    privacy_consent_enforced: bool = True
+    privacy_retention_days: int = Field(default=90, ge=1, le=3650)
+    privacy_retention_interval_seconds: float = Field(default=3600.0, ge=60.0)
+
+    @model_validator(mode="after")
+    def _enforce_production_sandbox(self) -> Self:
+        if self.environment == "production" and self.sandbox_mode != "docker":
+            raise ValueError(
+                "sandbox_mode must be 'docker' when environment=production "
+                "(Tech-Spec §13.8 / CD-0.1)"
+            )
+        if self.environment == "production" and (
+            self.model_input_cost_per_million <= 0
+            or self.model_output_cost_per_million <= 0
+        ):
+            raise ValueError(
+                "production requires non-zero model input/output prices so "
+                "pre-dispatch budget reservations cannot silently reserve zero"
+            )
+        # N-1: previous canary∩!docker check was unreachable (subset of the rule above).
+        # Canary still requires docker via the production sandbox invariant.
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+def effective_runtime_profile(settings: Settings) -> dict[str, object]:
+    """Non-secret runtime facts suitable for health, audit and support."""
+    return {
+        "environment": settings.environment,
+        "sandbox_mode": settings.sandbox_mode,
+        "generation_strategy": settings.generation_strategy,
+        "generation_kill_switch": settings.generation_strategy_kill_switch,
+        "canary_gate": settings.generation_strategy_canary_gate,
+        "canary_percent": settings.generation_strategy_canary_percent,
+        "certified_hive": settings.aar1_certified_hive,
+        "max_turns": settings.agent_max_turns,
+        "max_tokens": settings.agent_max_tokens,
+        "max_wall_seconds": settings.agent_max_wall_seconds,
+        "max_subagent_depth": settings.max_subagent_depth,
+        "model_price_book_version": settings.model_price_book_version,
+        "model_pricing_configured": (
+            settings.model_input_cost_per_million > 0
+            and settings.model_output_cost_per_million > 0
+        ),
+        # Tiered budget info (P0-1 audit fix).
+        "budget_small_turns": settings.agent_budget_small_turns,
+        "budget_small_tokens": settings.agent_budget_small_tokens,
+        "budget_medium_turns": settings.agent_budget_medium_turns,
+        "budget_medium_tokens": settings.agent_budget_medium_tokens,
+        "budget_large_turns": settings.agent_budget_large_turns,
+        "budget_large_tokens": settings.agent_budget_large_tokens,
+    }
+
+
+def budget_for_goal_scale(goal_scale: str | None = None) -> tuple[int, int]:
+    """Return (max_turns, max_tokens) for the given goal scale.
+
+    P0-1 audit fix: task-tiered budgets prevent over-burning on simple goals.
+    - SMALL: 8 turns / 60k tokens
+    - MEDIUM: 12 turns / 100k tokens
+    - LARGE: 20 turns / 180k tokens
+    - Unknown/None: legacy fallback (40 turns / 400k tokens)
+    """
+    s = get_settings()
+    scale = (goal_scale or "").upper()
+    if scale == "SMALL":
+        return s.agent_budget_small_turns, s.agent_budget_small_tokens
+    elif scale == "MEDIUM":
+        return s.agent_budget_medium_turns, s.agent_budget_medium_tokens
+    elif scale == "LARGE":
+        return s.agent_budget_large_turns, s.agent_budget_large_tokens
+    # Unknown scale — use legacy fallback.
+    return s.agent_max_turns, s.agent_max_tokens

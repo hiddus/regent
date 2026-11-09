@@ -1,0 +1,188 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.env
+.coverage
+htmlcov/
+dist/
+build/
+node_modules/
+*.egg-info/
+.artifacts/
+output/
+.tmp_test/
+
+.secrets.env
+
+# Local ops / diagnostics with credentials (never commit)
+ssh_check.py
+deploy_p1.py
+db_check.py
+check_goal_events.py
+check_resolution.py
+_force_rebuild.py
+_logs.py
+
+# Test temporary data
+.pytest-tmp*/
+.pytest-tmp-*
+patch-test.tmp
+
+# Root-level diagnostic / one-off scripts (never commit)
+/check_*.py
+/_check_*.py
+/fix_*.py
+/debug_*.py
+/q[0-9]*.py
+/_*.py
+/verify_*.py
+/acceptance_*.py
+/archive_dl.py
+/comprehensive_check.py
+/deep_check*.py
+/deploy_health.py
+/detailed_check.py
+/dod_check.py
+/export_*.py
+/extra_data.py
+/final_*.py
+/finalize_*.py
+/full_status.py
+/g8_live_probe.py
+/graduation_harness.py
+/monitor_progress.py
+/product_journey_bootstrap.py
+/redeploy_p1.py
+/replay_deadletters.py
+/schema_check.py
+/setup_cron.py
+/start_*.py
+/status_check.py
+/sync_docs_to_server.py
+/synth_events.py
+
+# Screenshots and images (test artifacts)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+
+# HTML reports (generated artifacts)
+/*.html
+
+# Archive tarballs
+/*.tgz
+
+# Canvas reports at root level
+/console-restructure-report.canvas*
+/v3-freeze-summary.canvas*
+/regent-v3-gap-repair-summary.canvas*
+
+# Cleanup script
+/_cleanup_git.py
+
+# ops/ diagnostic / one-off scripts (never commit)
+ops/diag_*.py
+ops/check_*.py
+ops/fix_*.py
+ops/poll_*.py
+ops/enqueue_*.py
+ops/deploy_aar1_*.py
+ops/deploy_org_*.py
+ops/finish_*.py
+ops/pull_*.py
+ops/reclaim_*.py
+ops/remote_*.py
+ops/run_remote_*.py
+ops/safe_*.py
+ops/sync_*.py
+ops/unstick_*.py
+ops/upgrade_*.py
+ops/verify_*.py
+ops/compare_*.py
+ops/_*.py
+ops/archive/
+
+# Keep durable delivery unstick scripts in-repo (override broad ops/* ignores above).
+!ops/reclaim_generation_outbox.py
+!ops/fix_delivery_stuck.py
+!ops/apply_p1_runtime_knobs.py
+!ops/scale_workers.py
+!ops/probe_delivery_stuck.py
+!ops/probe_p1_runtime.py
+!ops/restart_api_verify_p1.py
+
+# archive directory at root (tarballs, reports, artifacts)
+/archive/
+
+# Canvas status files (auto-generated)
+*.canvas.status.json
+
+# pytest temp preview
+.pytest-tmp-preview-val/
+
+# ---------------------------------------------------------------------------
+# 2026-08-31 补录：历史未覆盖的本地产物（推送前安全整理）
+# ---------------------------------------------------------------------------
+
+# pytest 临时工作目录（历史规则只覆盖 .pytest-tmp*，实际产生了 .pytest-quality-* /
+# .pytest_arc_* / .pytest_tmpN 等命名，全部漏网）
+.pytest-quality-*/
+.pytest_arc*/
+.pytest_tmp*/
+.pytest-cache/
+.pytest_last_run.txt
+
+# 本地运行日志（可能含真实路径与服务器信息）
+*.log
+
+# 本地工具与编辑器状态目录（非项目源码）
+.cursor/
+.slidep/
+.workbuddy/
+.vt2_accept/
+.vt_delivery/
+
+# 环境变量 / 凭证 dump（含明文服务器 IP，绝不提交）
+docs/_env_keys_dump.txt
+*_keys_dump*
+docs/_tmp_*.txt
+docs/_cw_ws_snapshot/
+
+# 诊断探针输出（与既有 ops/_*.py 同逻辑，历史只忽略了脚本未忽略其输出）
+ops/_*.txt
+ops/_*.json
+ops/_*.out
+
+# Novel 生成的样章输出
+deploy/novel/novel_output/
+
+# 一次性校验/探测输出（运行产物，不入库）
+deploy/novel/_pgverify.tar.gz
+deploy/novel/_frozen.txt
+deploy/novel/r[0-9]*.txt
+deploy/novel/rfinal.txt
+deploy/novel/regression-*.txt
+/_full_unit.txt
+
+# M2/M4 旅程与整树部署的运行产物：保留结论（报告、终态截图），不提交逐帧churn
+deploy/novel/_sync_tree.tar.gz
+deploy/novel/_image_ctx.tar.gz
+deploy/novel/_sync_manifest.json
+deploy/novel/_m2js.json
+deploy/novel/_ab.js
+deploy/novel/artifacts/*.log
+deploy/novel/artifacts/j1*_run.txt
+deploy/novel/artifacts/m2_*_s[0-9][0-9].png
+deploy/novel/artifacts/m2_j1_step*.png
+
+# Disposable novel deploy probes (keep durable helpers like _ssh.py)
+deploy/novel/_tmp*
+
+# Scratch probes can contain transient credentials; never stage them
+/_tmp/

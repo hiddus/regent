@@ -1,0 +1,757 @@
+"""写作配置树：版本化、内容寻址、按运行钉住。
+
+可编辑面：提示词、载荷旋钮、写作技巧、软检查、阶段钩子、写作经验。
+冻结面：硬门、正史、台账、预算上限、命令白名单——覆盖层碰到即拒收。
+
+配置是一棵树：基础包 ← 本书覆盖层 ← 本章递归覆盖层。
+每次运行创建时解析基础包与本书覆盖层并钉住 ``harness_id`` + ``harness_hash``。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+PACK_ROOT = Path(__file__).resolve().parent.parent / "harness_packs"
+# 新运行钉这一版；已发布的包不原地改，旧运行按钉住的 harness_id 加载旧包，回放哈希才对得上。
+BASE_PACK_VERSION = "v6"
+BASE_HARNESS_ID = f"base/{BASE_PACK_VERSION}"
+
+FROZEN_KEYS: frozenset[str] = frozenset(
+    {
+        "hard_gates",
+        "canon",
+        "ledger",
+        "budget_caps",
+        "command_whitelist",
+    }
+)
+EDITABLE_KEYS: frozenset[str] = frozenset(
+    {"prompts", "knobs", "skills", "soft_checks", "hooks", "memory"}
+)
+# 提示词只能追加指引：整段替换会把基础包钉死在抄写时的版本上，之后的基础包升级
+# 都到不了这本书。早期条目整段替换过 write/repair，只为钉着它们的老运行回放保留。
+EDITABLE_PROMPTS: frozenset[str] = frozenset({"write_extra", "repair_extra"})
+LEGACY_PROMPTS: dict[str, str] = {"write": "write_extra", "repair": "repair_extra"}
+PROMPT_MIN_CHARS = 20
+PROMPT_MAX_CHARS = 3000
+EXTRA_MIN_CHARS = 4
+EXTRA_MAX_CHARS = 600
+MEMORY_MAX_CHARS = 2000
+INSTRUCTION_MAX_CHARS = 300
+GUIDANCE_MAX_CHARS = 200
+MESSAGE_MAX_CHARS = 100
+PATTERN_MAX_CHARS = 80
+PATTERNS_PER_CHECK = 5
+# 章首重合只看正文开头这么多字，对上一章结尾两倍长度。
+OPENING_CHARS = 300
+
+# 0 表示不限制：基础包取 0 时载荷与默认臂逐字一致。
+DEFAULT_KNOB_RANGES: dict[str, dict[str, Any]] = {
+    "previous_chapter_tail": {"min": 200, "max": 1000, "default": 500},
+    "earlier_results_count": {"min": 0, "max": 10, "default": 0},
+    "open_promises_max": {"min": 0, "max": 20, "default": 0},
+    "soft_check_repetition_ngram": {"min": 40, "max": 120, "default": 80},
+    "soft_check_chapter_opening_overlap": {"min": 20, "max": 100, "default": 50},
+    "stall_place_chapters": {"min": 3, "max": 10, "default": 4},
+    "soft_check_repeated_opener": {"min": 6, "max": 30, "default": 10},
+    "soft_check_copied_sentences": {"min": 2, "max": 20, "default": 4},
+}
+
+# 技巧的 ``when`` 只能用这些条件；值类型固定，程序求值，不执行模型写的代码。
+SKILL_CONDITIONS: dict[str, type] = {
+    "shows_rule": bool,
+    "payoff_due": bool,
+    "previous_ends_mid_action": bool,
+    "first_chapter": bool,
+    "choice_any": list,
+    "result_any": list,
+}
+SKILL_MODES = frozenset({"auto", "always", "off"})
+
+# 钩子条件 → 可用占位符。
+HOOK_CONDITIONS: dict[str, tuple[str, ...]] = {
+    "previous_ends_mid_action": (),
+    "open_promise_age_exceeds": ("age",),
+    "method_rejected_at_least": ("rounds",),
+    "place_streak_at_least": ("chapters", "place"),
+}
+SOFT_CHECK_KINDS = frozenset({"repetition", "overlap", "pattern", "opener", "echo", "landing"})
+# 这几类要模型判，run_soft_checks 不跑；由阶段机在 CHECK 后单独调用，结果按模板写成提示。
+MODEL_CHECK_KINDS = frozenset({"landing"})
+# 短句（「他没有回头。」）两章撞上是常事，这么长以上的整句一字不差才算照抄。
+ECHO_SENTENCE_CHARS = 12
+# 句首取这么多字比对：「她记得」「她不知」一类排比够用，再长就把同一句式拆散了。
+OPENER_CHARS = 3
+# 只数代词起句：名字起句（含卡司外的配角、职称）在叙事里是常态，真机上全是误报。
+OPENER_PRONOUNS = frozenset("他她它我你")
+_OPENER_STRIP = "“”\"「」『』‘’'（）()—…·- 　"
+_ID = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# 量词套量词（``(a+)+``、``(a*)*``、``(a+){2,}``）会回溯爆炸。
+_NESTED_QUANTIFIER = re.compile(r"\([^()]*[+*][^()]*\)\s*[+*{]")
+_BACKREF = re.compile(r"\\[1-9]")
+_END_MARKS = frozenset('。！？!?…」』”"）)')
+
+
+class ConfigTree:
+    """一棵版本化的写作配置。
+
+    ``tree`` 是纯 dict，可 JSON 序列化。``content_hash`` 由 tree 的规范 JSON 计算，
+    用于钉住和比较。
+    """
+
+    def __init__(self, tree: dict[str, Any], *, parent_id: str | None = None) -> None:
+        self.tree = deepcopy(tree)
+        self.parent_id = parent_id
+        self._hash: str | None = None
+
+    @property
+    def content_hash(self) -> str:
+        if self._hash is None:
+            canonical = json.dumps(self.tree, ensure_ascii=False, sort_keys=True)
+            self._hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        return self._hash
+
+    def get_prompt(self, key: str) -> str:
+        return str((self.tree.get("prompts") or {}).get(key) or "")
+
+    def get_knob(self, key: str) -> Any:
+        knobs = self.tree.get("knobs") or {}
+        if key in knobs:
+            return knobs[key]
+        return DEFAULT_KNOB_RANGES.get(key, {}).get("default")
+
+    def get_skills(self) -> dict[str, Any]:
+        return {k: v for k, v in (self.tree.get("skills") or {}).items() if isinstance(v, dict)}
+
+    def get_soft_checks(self) -> dict[str, Any]:
+        return {
+            k: v
+            for k, v in (self.tree.get("soft_checks") or {}).items()
+            if isinstance(v, dict) and v.get("enabled", True)
+        }
+
+    def get_hooks(self) -> dict[str, Any]:
+        return {
+            k: v
+            for k, v in (self.tree.get("hooks") or {}).items()
+            if isinstance(v, dict) and v.get("enabled", True)
+        }
+
+    def get_memory(self) -> str:
+        lines = str(self.tree.get("memory") or "").splitlines()
+        return "\n".join(
+            line for line in lines if line.strip() and not line.lstrip().startswith("#")
+        )
+
+    def diff(self, other: ConfigTree) -> dict[str, Any]:
+        return _deep_diff(self.tree, other.tree)
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"配置文件必须是映射: {path}")
+    return raw
+
+
+def load_base_pack(version: str = BASE_PACK_VERSION) -> ConfigTree:
+    """从 ``harness_packs/base/<version>/`` 加载基础配置包。"""
+    pack_dir = PACK_ROOT / "base" / version
+    if not pack_dir.is_dir():
+        raise FileNotFoundError(f"配置包不存在: {pack_dir}")
+
+    prompts: dict[str, str] = {}
+    prompts_dir = pack_dir / "prompts"
+    if prompts_dir.is_dir():
+        for path in sorted(prompts_dir.glob("*.md")):
+            prompts[path.stem] = path.read_text(encoding="utf-8").strip()
+
+    knobs: dict[str, Any] = {}
+    for key, spec in _read_yaml(pack_dir / "knobs.yaml").items():
+        knobs[key] = spec.get("default") if isinstance(spec, dict) else spec
+
+    memory_path = pack_dir / "memory.md"
+    tree = {
+        "pack_version": version,
+        "prompts": prompts,
+        "knobs": knobs,
+        "skills": _read_yaml(pack_dir / "skills" / "skills.yaml"),
+        "soft_checks": _read_yaml(pack_dir / "soft_checks.yaml"),
+        "hooks": _read_yaml(pack_dir / "hooks.yaml"),
+        "memory": memory_path.read_text(encoding="utf-8").strip() if memory_path.is_file() else "",
+    }
+    return ConfigTree(tree)
+
+
+def load_harness(harness_id: str) -> ConfigTree:
+    """按钉住的 ``harness_id``（``base/<version>``）加载基础包。"""
+    kind, _, version = str(harness_id or BASE_HARNESS_ID).partition("/")
+    if kind != "base" or not version:
+        raise ValueError(f"未知配置包: {harness_id}")
+    return load_base_pack(version)
+
+
+def base_pack_versions() -> list[str]:
+    return sorted(path.name for path in (PACK_ROOT / "base").iterdir() if path.is_dir())
+
+
+_SENTENCE = re.compile(r"[^。！？!?\n]+[。！？!?]*")
+
+
+def _sentences(text: str) -> list[str]:
+    return [m.group(0).strip() for m in _SENTENCE.finditer(text or "") if m.group(0).strip()]
+
+
+def prompt_additions(text: str, known: list[str] | tuple[str, ...]) -> str:
+    """整段改写的提示词里，已知提示（各版基础包、当前生效的）都没有的句子。"""
+    seen = {"".join(s.split()) for prompt in known for s in _sentences(prompt)}
+    added: list[str] = []
+    for sentence in _sentences(text):
+        key = "".join(sentence.split())
+        if key not in seen:
+            seen.add(key)
+            added.append(sentence)
+    out = ""
+    for sentence in added:
+        if len(out) + len(sentence) > EXTRA_MAX_CHARS:
+            break
+        out += sentence
+    return out
+
+
+def known_prompts(key: str, *extra: str) -> list[str]:
+    texts = [load_base_pack(version).get_prompt(key) for version in base_pack_versions()]
+    return [text for text in (*texts, *extra) if text]
+
+
+def upgrade_prompts(overrides: Any, *, current: ConfigTree | None = None) -> Any:
+    """把整段替换的 prompts.write / prompts.repair 改写成追加指引。
+
+    只留下各版基础包与当前生效提示里都没有的句子；改写了基础句的，整句当新增
+    追加（重复一遍基础句，好过把基础包钉死）。新增为空就整项丢掉。
+    """
+    if not isinstance(overrides, dict):
+        return overrides
+    out = deepcopy(overrides)
+    prompts = out.get("prompts")
+    if not isinstance(prompts, dict):
+        return out
+    for legacy, extra_key in LEGACY_PROMPTS.items():
+        if legacy not in prompts:
+            continue
+        text = str(prompts.pop(legacy) or "")
+        have = str(prompts.get(extra_key) or "")
+        own = [current.get_prompt(legacy), current.get_prompt(extra_key)] if current else []
+        added = prompt_additions(text, known_prompts(legacy, have, *own))
+        joined = (have + added)[:EXTRA_MAX_CHARS] if added else have
+        if joined:
+            prompts[extra_key] = joined
+    if not prompts:
+        out.pop("prompts")
+    return out
+
+
+def load_improver_prompt(kind: str) -> str:
+    """加载改进器提示词。kind: propose / compose / screen。"""
+    path = PACK_ROOT / "improver" / f"{kind}.md"
+    if not path.is_file():
+        raise FileNotFoundError(f"改进器提示词不存在: {path}")
+    return path.read_text(encoding="utf-8").strip()
+
+
+def validate_knob_value(key: str, value: Any) -> int:
+    """校验旋钮取值在登记范围内，越界或未登记都拒收。"""
+    spec = DEFAULT_KNOB_RANGES.get(key)
+    if not spec:
+        raise ValueError(f"未登记的旋钮: {key}")
+    if isinstance(value, bool):
+        raise ValueError(f"旋钮 {key} 取值不是数字: {value!r}")
+    try:
+        num = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"旋钮 {key} 取值不是数字: {value!r}") from None
+    if num < spec["min"] or num > spec["max"]:
+        raise ValueError(f"旋钮 {key} 取值 {num} 越界 [{spec['min']}, {spec['max']}]")
+    return num
+
+
+def safe_pattern(pattern: Any) -> re.Pattern[str]:
+    """软检查的正则只收短的、不会回溯爆炸的。"""
+    text = str(pattern or "")
+    if not text or len(text) > PATTERN_MAX_CHARS:
+        raise ValueError(f"正则长度须在 1-{PATTERN_MAX_CHARS} 字: {text[:20]!r}")
+    if _NESTED_QUANTIFIER.search(text):
+        raise ValueError(f"正则含嵌套量词: {text!r}")
+    if _BACKREF.search(text):
+        raise ValueError(f"正则含反向引用: {text!r}")
+    try:
+        return re.compile(text)
+    except re.error as exc:
+        raise ValueError(f"正则无法编译: {text!r}（{exc}）") from None
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def book_terms(ctx: dict[str, Any] | None, cast: Any) -> list[str]:
+    """这本书的专有名词：卡司、世界书人物与地点（含别名）。
+
+    只查人名是不够的——通用条目一旦采纳就对所有书可见，本书的物件与地名同样
+    会让它在别的书里变成噪音。这里只能确定性地拿到专有名词，改写成别的情节
+    说法（例如把「齿轮」写成「同字不同齿距」）由 ``recursion.screen_tick`` 判。
+    """
+    data = ctx if isinstance(ctx, dict) else {}
+    bible = data.get("world_bible") if isinstance(data.get("world_bible"), dict) else {}
+    terms: list[str] = [str(name).strip() for name in (cast or {}) if str(name).strip()]
+    for key in ("personas", "places"):
+        for item in (bible or {}).get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            terms.append(str(item.get("name") or "").strip())
+            terms.extend(str(alias).strip() for alias in item.get("aliases") or [])
+    return sorted({term for term in terms if len(term) >= 2})
+
+
+def mentions_names(value: Any, names: list[str] | tuple[str, ...]) -> list[str]:
+    """值里出现的本书专有名词。通用候选与通用经验不许带本书事实。"""
+    text = "\n".join(_strings(value))
+    return [name for name in names if len(name) >= 2 and name in text]
+
+
+def _check_text(value: Any, label: str, low: int, high: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} 必须是文本")
+    body = value.strip()
+    if len(body) < low or len(body) > high:
+        raise ValueError(f"{label} 长度须在 {low}-{high} 字")
+    return body
+
+
+def _check_when(when: Any) -> Any:
+    clauses = when if isinstance(when, list) else [when]
+    if not clauses:
+        raise ValueError("when 不能为空")
+    for clause in clauses:
+        if not isinstance(clause, dict) or not clause:
+            raise ValueError("when 每一项必须是非空映射")
+        for key, value in clause.items():
+            kind = SKILL_CONDITIONS.get(key)
+            if kind is None:
+                raise ValueError(f"未登记的技巧条件: {key}")
+            if not isinstance(value, kind):
+                raise ValueError(f"技巧条件 {key} 取值类型不对")
+            if kind is list and not all(isinstance(item, str) and item for item in value):
+                raise ValueError(f"技巧条件 {key} 须是非空词列表")
+    return when
+
+
+def _check_skill(skill_id: str, value: Any, base: dict[str, Any]) -> Any:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError(f"技巧 {skill_id} 必须是映射或开关")
+    clean: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "instruction":
+            clean[key] = _check_text(item, f"技巧 {skill_id}.instruction", 4, INSTRUCTION_MAX_CHARS)
+        elif key in ("label", "trigger"):
+            clean[key] = _check_text(item, f"技巧 {skill_id}.{key}", 1, 60)
+        elif key == "when":
+            clean[key] = _check_when(item)
+        elif key == "mode":
+            if item not in SKILL_MODES:
+                raise ValueError(f"技巧 {skill_id}.mode 只能是 {sorted(SKILL_MODES)}")
+            clean[key] = item
+        else:
+            raise ValueError(f"技巧 {skill_id} 不认识字段 {key}")
+    if skill_id not in base:
+        if "instruction" not in clean:
+            raise ValueError(f"新技巧 {skill_id} 缺 instruction")
+        if "when" not in clean and clean.get("mode") != "always":
+            raise ValueError(f"新技巧 {skill_id} 要么给 when，要么 mode 为 always")
+    return clean
+
+
+def _check_soft_check(check_id: str, value: Any, base: dict[str, Any]) -> Any:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError(f"软检查 {check_id} 必须是映射或开关")
+    clean: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "kind":
+            if item not in SOFT_CHECK_KINDS:
+                raise ValueError(f"软检查 {check_id}.kind 只能是 {sorted(SOFT_CHECK_KINDS)}")
+            clean[key] = item
+        elif key == "patterns":
+            if not isinstance(item, list) or not item or len(item) > PATTERNS_PER_CHECK:
+                raise ValueError(f"软检查 {check_id}.patterns 须是 1-{PATTERNS_PER_CHECK} 条")
+            for pattern in item:
+                safe_pattern(pattern)
+            clean[key] = [str(p) for p in item]
+        elif key in ("label", "message"):
+            clean[key] = _check_text(item, f"软检查 {check_id}.{key}", 1, MESSAGE_MAX_CHARS)
+        elif key == "severity":
+            clean[key] = str(item)[:16]
+        elif key == "enabled":
+            clean[key] = bool(item)
+        else:
+            raise ValueError(f"软检查 {check_id} 不认识字段 {key}")
+    kind = clean.get("kind") or (base.get(check_id) or {}).get("kind")
+    if kind not in SOFT_CHECK_KINDS:
+        raise ValueError(f"软检查 {check_id} 缺 kind")
+    if kind == "pattern" and not (
+        clean.get("patterns") or (base.get(check_id) or {}).get("patterns")
+    ):
+        raise ValueError(f"软检查 {check_id} 缺 patterns")
+    return clean
+
+
+def _check_hook(hook_id: str, value: Any, base: dict[str, Any]) -> Any:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError(f"钩子 {hook_id} 必须是映射或开关")
+    clean: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "condition":
+            if item not in HOOK_CONDITIONS:
+                raise ValueError(f"未登记的钩子条件: {item}")
+            clean[key] = item
+        elif key == "threshold":
+            if isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 50:
+                raise ValueError(f"钩子 {hook_id}.threshold 须是 1-50 的整数")
+            clean[key] = item
+        elif key == "guidance":
+            clean[key] = _check_text(item, f"钩子 {hook_id}.guidance", 4, GUIDANCE_MAX_CHARS)
+        elif key == "label":
+            clean[key] = _check_text(item, f"钩子 {hook_id}.label", 1, 60)
+        elif key == "enabled":
+            clean[key] = bool(item)
+        else:
+            raise ValueError(f"钩子 {hook_id} 不认识字段 {key}")
+    if hook_id not in base and not ("condition" in clean and "guidance" in clean):
+        raise ValueError(f"新钩子 {hook_id} 缺 condition 或 guidance")
+    return clean
+
+
+def validate_overrides(
+    overrides: Any,
+    base: ConfigTree,
+    *,
+    book_terms: list[str] | tuple[str, ...] = (),
+    generic: bool = False,
+    legacy: bool = False,
+) -> tuple[dict[str, Any], list[str]]:
+    """只留下可编辑面里合法的修改，返回 (干净的覆盖层, 拒收理由)。
+
+    ``legacy`` 只给加载已钉住的覆盖层用：老条目整段替换过 write/repair，回放要原样复原。
+    """
+    if not overrides:
+        return {}, []
+    if not isinstance(overrides, dict):
+        return {}, ["覆盖层必须是映射"]
+    clean: dict[str, Any] = {}
+    errors: list[str] = []
+    for top, value in overrides.items():
+        if top in FROZEN_KEYS:
+            errors.append(f"{top} 是冻结面，不许改")
+            continue
+        if top not in EDITABLE_KEYS:
+            errors.append(f"不认识的配置项: {top}")
+            continue
+        if generic and mentions_names(value, book_terms):
+            errors.append(
+                f"通用候选的 {top} 带了本书专有名词：{'、'.join(mentions_names(value, book_terms))}"
+            )
+            continue
+        try:
+            if top == "memory":
+                clean[top] = _check_text(value, "memory", 1, MEMORY_MAX_CHARS)
+                continue
+            if not isinstance(value, dict):
+                raise ValueError(f"{top} 必须是映射")
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        section: dict[str, Any] = {}
+        existing = base.tree.get(top) or {}
+        for key, item in value.items():
+            try:
+                if top == "prompts":
+                    if key in EDITABLE_PROMPTS:
+                        section[key] = _check_text(
+                            item, f"提示词 {key}", EXTRA_MIN_CHARS, EXTRA_MAX_CHARS
+                        )
+                    elif legacy and key in LEGACY_PROMPTS:
+                        section[key] = _check_text(
+                            item, f"提示词 {key}", PROMPT_MIN_CHARS, PROMPT_MAX_CHARS
+                        )
+                    else:
+                        raise ValueError(f"不许改提示词 {key}（只能追加：write_extra / repair_extra）")
+                elif top == "knobs":
+                    section[key] = validate_knob_value(key, item)
+                else:
+                    if not _ID.match(str(key)):
+                        raise ValueError(f"{top} 的标识不合法: {key}")
+                    checker = {
+                        "skills": _check_skill,
+                        "soft_checks": _check_soft_check,
+                        "hooks": _check_hook,
+                    }[top]
+                    section[key] = checker(str(key), item, existing)
+            except ValueError as exc:
+                errors.append(str(exc))
+        if section:
+            clean[top] = section
+    return clean, errors
+
+
+def _normalize(overrides: dict[str, Any]) -> dict[str, Any]:
+    """开关写法展开成映射：技巧 True/False → mode always/off；软检查、钩子 → enabled。"""
+    out = deepcopy(overrides)
+    for skill_id, value in list((out.get("skills") or {}).items()):
+        if isinstance(value, bool):
+            out["skills"][skill_id] = {"mode": "always" if value else "off"}
+    for top in ("soft_checks", "hooks"):
+        for item_id, value in list((out.get(top) or {}).items()):
+            if isinstance(value, bool):
+                out[top][item_id] = {"enabled": value}
+    return out
+
+
+def merge_overrides(lower: dict[str, Any] | None, upper: dict[str, Any] | None) -> dict[str, Any]:
+    """两层覆盖层叠成一层，上层优先。"""
+    merged = deepcopy(lower or {})
+    _deep_merge(merged, _normalize(upper or {}))
+    return _normalize(merged)
+
+
+def apply_overrides(base: ConfigTree, overrides: dict[str, Any] | None) -> ConfigTree:
+    """把覆盖层合并到基础配置上。非法修改丢弃，不进入配置。"""
+    clean, _ = validate_overrides(overrides or {}, base, legacy=True)
+    if not clean:
+        return base
+    merged = deepcopy(base.tree)
+    _deep_merge(merged, _normalize(clean))
+    return ConfigTree(merged, parent_id=base.content_hash)
+
+
+def ends_mid_action(text: str) -> bool:
+    body = (text or "").rstrip()
+    return bool(body) and body[-1] not in _END_MARKS
+
+
+def _clause_holds(clause: dict[str, Any], view: dict[str, Any]) -> bool:
+    for key, value in clause.items():
+        if key == "choice_any":
+            if not any(word in str(view.get("choice") or "") for word in value):
+                return False
+        elif key == "result_any":
+            if not any(word in str(view.get("result") or "") for word in value):
+                return False
+        elif key == "first_chapter":
+            if (int(view.get("chapter_no") or 1) == 1) != value:
+                return False
+        elif bool(view.get(key)) != value:
+            return False
+    return True
+
+
+def when_holds(when: Any, view: dict[str, Any]) -> bool:
+    """映射是「同时成立」，列表是「任一成立」。"""
+    if isinstance(when, list):
+        return any(isinstance(c, dict) and _clause_holds(c, view) for c in when)
+    if isinstance(when, dict):
+        return _clause_holds(when, view)
+    return False
+
+
+def resolve_skills(config: ConfigTree, view: dict[str, Any]) -> str:
+    """按本章视图选取写作技巧，返回追加到执笔提示的文本。"""
+    parts: list[str] = []
+    for spec in config.get_skills().values():
+        instruction = str(spec.get("instruction") or "").strip()
+        mode = spec.get("mode") or "auto"
+        if not instruction or mode == "off":
+            continue
+        if mode == "always" or when_holds(spec.get("when"), view):
+            parts.append(instruction)
+    return "\n".join(parts)
+
+
+def _fill(template: str, values: dict[str, Any]) -> str:
+    text = template
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", str(value))
+    return text
+
+
+def resolve_hooks(config: ConfigTree, view: dict[str, Any]) -> list[str]:
+    """评估阶段钩子，返回满足条件的指引。占位符只填登记过的几个。"""
+    guidance: list[str] = []
+    for spec in config.get_hooks().values():
+        text = str(spec.get("guidance") or "").strip()
+        condition = str(spec.get("condition") or "")
+        threshold = int(spec.get("threshold") or 1)
+        if not text:
+            continue
+        if condition == "previous_ends_mid_action" and view.get("previous_ends_mid_action"):
+            guidance.append(text)
+        elif condition == "open_promise_age_exceeds":
+            age = int(view.get("oldest_promise_age") or 0)
+            if age > threshold:
+                guidance.append(_fill(text, {"age": age}))
+        elif condition == "method_rejected_at_least":
+            rounds = int(view.get("same_method_rejects") or 0)
+            if rounds >= threshold:
+                guidance.append(_fill(text, {"rounds": rounds}))
+        elif condition == "place_streak_at_least":
+            chapters = int(view.get("place_streak") or 0)
+            if chapters >= threshold and view.get("place"):
+                guidance.append(_fill(text, {"chapters": chapters, "place": view["place"]}))
+    return guidance
+
+
+def repeated_opener(text: str, *, min_count: int = 10) -> tuple[str, int] | None:
+    """代词起句里同一句式最多的那一种，例如一句接一句的「她记得……」「她不知道……」。"""
+    counts: dict[str, int] = {}
+    for sentence in _sentences(text):
+        body = sentence.lstrip(_OPENER_STRIP)
+        if len(body) <= OPENER_CHARS or body[0] not in OPENER_PRONOUNS:
+            continue
+        head = body[:OPENER_CHARS]
+        counts[head] = counts.get(head, 0) + 1
+    if not counts:
+        return None
+    head, count = max(counts.items(), key=lambda item: item[1])
+    return (head, count) if count >= min_count else None
+
+
+def copied_sentences(text: str, previous: str, *, min_chars: int = ECHO_SENTENCE_CHARS) -> list[str]:
+    """正文里和上一章一字不差的整句（去空白后够长的才算），按出现顺序、不重复。"""
+    seen = {"".join(s.split()) for s in _sentences(previous)}
+    found: list[str] = []
+    for sentence in _sentences(text):
+        key = "".join(sentence.split())
+        if len(key) >= min_chars and key in seen and key not in found:
+            found.append(key)
+    return found
+
+
+def run_soft_checks(
+    content: str,
+    config: ConfigTree,
+    *,
+    previous_chapter: str = "",
+    kinds: frozenset[str] | None = None,
+) -> list[str]:
+    """执行声明式软检查，返回提示。软检查只送改稿，不放行硬门未过的稿件。
+
+    ``kinds`` 给了就只跑这几类。
+    """
+    from regent.novel.application.directing_chapter import repeated_span
+    from regent.novel.domain.prose_copy import is_legitimate_repetition, longest_common_substring
+
+    text = content or ""
+    issues: list[str] = []
+    for spec in config.get_soft_checks().values():
+        kind = str(spec.get("kind") or "")
+        if (kinds is not None and kind not in kinds) or kind in MODEL_CHECK_KINDS:
+            continue
+        template = str(spec.get("message") or spec.get("label") or kind)
+        if kind == "opener":
+            found = repeated_opener(text, min_count=int(config.get_knob("soft_check_repeated_opener")))
+            if found:
+                issues.append(_fill(template, {"matched": found[0], "count": found[1]}))
+        elif kind == "repetition":
+            span = repeated_span(text, min_len=int(config.get_knob("soft_check_repetition_ngram")))
+            if span:
+                issues.append(_fill(template, {"matched_len": len(span)}))
+        elif kind == "overlap":
+            if not previous_chapter:
+                continue
+            min_len = int(config.get_knob("soft_check_chapter_opening_overlap"))
+            span = longest_common_substring(
+                text[:OPENING_CHARS], previous_chapter[-OPENING_CHARS * 2 :], min_len=min_len
+            )
+            if span and not is_legitimate_repetition(span):
+                issues.append(_fill(template, {"matched_len": len(span)}))
+        elif kind == "echo":
+            copied = copied_sentences(text, previous_chapter)
+            if len(copied) >= int(config.get_knob("soft_check_copied_sentences")):
+                issues.append(_fill(template, {"count": len(copied), "matched": copied[0][:30]}))
+        elif kind == "pattern":
+            for pattern in spec.get("patterns") or []:
+                try:
+                    match = safe_pattern(pattern).search(text)
+                except ValueError:
+                    continue
+                if match:
+                    issues.append(_fill(template, {"matched": match.group()[:30]}))
+                    break
+    return issues
+
+
+def model_check(config: ConfigTree, kind: str) -> dict[str, Any] | None:
+    """配置里开着的那一条模型判的软检查；没有就是 None。"""
+    for spec in config.get_soft_checks().values():
+        if str(spec.get("kind") or "") == kind:
+            return spec
+    return None
+
+
+def model_check_issue(spec: dict[str, Any], values: dict[str, Any]) -> str:
+    return _fill(str(spec.get("message") or spec.get("label") or spec.get("kind")), values)
+
+
+def _deep_diff(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
+    diff: dict[str, Any] = {}
+    for key in set(base) | set(other):
+        bv = base.get(key)
+        ov = other.get(key)
+        if bv == ov:
+            continue
+        if isinstance(bv, dict) and isinstance(ov, dict):
+            sub = _deep_diff(bv, ov)
+            if sub:
+                diff[key] = sub
+        else:
+            diff[key] = {"old": bv, "new": ov}
+    return diff
+
+
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> None:
+    for key, value in overrides.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = deepcopy(value)
+
+
+def flatten(tree: dict[str, Any], prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], Any]:
+    """覆盖层拍平成 路径 → 叶值。"""
+    out: dict[tuple[str, ...], Any] = {}
+    for key, value in (tree or {}).items():
+        path = (*prefix, str(key))
+        if isinstance(value, dict) and value:
+            out.update(flatten(value, path))
+        else:
+            out[path] = value
+    return out

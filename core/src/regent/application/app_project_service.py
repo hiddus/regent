@@ -1,0 +1,396 @@
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from regent.application.p1_contracts import canonical_hash
+from regent.application.goal_readiness import assess_goal_readiness
+from regent.domain.errors import DomainError, ErrorCode
+from regent.infrastructure.models import (
+    AppProjectModel,
+    AuditRecordModel,
+    ConversationMessageModel,
+    ConversationModel,
+    GoalModel,
+    GoalSpecModel,
+    OutboxEventModel,
+)
+from regent.model import ModelProvider, ModelUsage
+
+
+class ForkOptionUnderstanding(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=400)
+
+
+class ProductUnderstanding(BaseModel):
+    app_name: str = Field(min_length=1, max_length=120)
+    product_intent: str = Field(min_length=1)
+    target_users: str = Field(min_length=1)
+    problem: str = Field(min_length=1)
+    first_deliverable: str = Field(min_length=1)
+    success_criteria: dict[str, str | int | float | bool] = Field(min_length=1)
+    explicit_constraints: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    non_goals: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    # run-think-learn L1/L2: model-proposed steps + self-assessed clarity
+    proposed_steps: list[str] = Field(default_factory=list)
+    deduction_clear: bool = True
+    fork_options: list[ForkOptionUnderstanding] = Field(default_factory=list)
+    feasibility_verdict: Literal[
+        "FEASIBLE", "REVISION_REQUIRED", "NOT_FEASIBLE"
+    ] = "REVISION_REQUIRED"
+    feasibility_reasons: list[str] = Field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class AppProjectDraftReceipt:
+    project: AppProjectModel
+    goal: GoalModel
+    spec: GoalSpecModel
+    conversation: ConversationModel
+    understanding: ProductUnderstanding
+    model: str
+    usage: ModelUsage
+    runtime_plan: dict
+    needs_user_fork: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmAppProjectReceipt:
+    project: AppProjectModel
+    goal: GoalModel
+    spec: GoalSpecModel
+
+
+class AppProjectService:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        provider: ModelProvider,
+    ) -> None:
+        self._sessions = sessions
+        self._provider = provider
+
+    async def create_draft(
+        self, *, idea: str, actor: str, budget_limit: float
+    ) -> AppProjectDraftReceipt:
+        from regent.application.goal_runtime_plan import build_runtime_plan
+
+        response = await self._provider.generate_structured(
+            system_prompt=(
+                "Turn the product idea into a concise provisional understanding. Do not "
+                "invent user constraints. Preserve ambiguity as explicit unknowns. Success "
+                "criteria must be externally observable. Keep the first deliverable small "
+                "enough for a preview validation.\n"
+                "Also fill proposed_steps (3-6 human-like steps). "
+                "Set deduction_clear=true only if you can self-consistently deduce an "
+                "executable path; otherwise deduction_clear=false and provide 2-4 "
+                "fork_options (id/label/description) for the user to choose."
+            ),
+            user_prompt=idea,
+            response_model=ProductUnderstanding,
+        )
+        understanding = response.output
+        runtime_plan = build_runtime_plan(
+            app_name=understanding.app_name,
+            product_intent=understanding.product_intent,
+            target_users=understanding.target_users,
+            problem=understanding.problem,
+            first_deliverable=understanding.first_deliverable,
+            success_criteria=dict(understanding.success_criteria),
+            unknowns=list(understanding.unknowns),
+            proposed_steps=list(understanding.proposed_steps),
+            deduction_clear=bool(understanding.deduction_clear),
+            fork_options=[o.model_dump() for o in understanding.fork_options],
+            non_goals=list(understanding.non_goals),
+        )
+        needs_user_fork = bool(runtime_plan["needs_user_fork"])
+        project_id, goal_id, spec_id, conversation_id = (uuid.uuid4() for _ in range(4))
+        correlation_id = uuid.uuid4()
+        constraints = {
+            **understanding.explicit_constraints,
+            "non_goals": understanding.non_goals,
+        }
+        unknowns = [
+            {"question": question, "blocking": False} for question in understanding.unknowns
+        ]
+        spec_content = {
+            "explicit_constraints": constraints,
+            "system_inferences": {
+                "target_users": understanding.target_users,
+                "problem": understanding.problem,
+                "first_deliverable": understanding.first_deliverable,
+                "proposed_steps": runtime_plan["proposed_steps"],
+                "runtime_plan": runtime_plan,
+            },
+            "unknowns": unknowns,
+            "success_criteria": understanding.success_criteria,
+            "source_refs": [{"type": "conversation", "conversation_id": str(conversation_id)}],
+        }
+        project = AppProjectModel(
+            id=project_id,
+            name=understanding.app_name,
+            product_intent=understanding.product_intent,
+            status="DRAFT",
+            created_by=actor,
+        )
+        goal = GoalModel(
+            id=goal_id,
+            app_project_id=project_id,
+            original_input=idea,
+            status="DRAFT",
+            version=0,
+            created_by=actor,
+            correlation_id=correlation_id,
+            metadata_json={
+                "target_users": understanding.target_users,
+                "problem": understanding.problem,
+                "first_deliverable": understanding.first_deliverable,
+                "understanding_model": response.model,
+                "runtime_plan": runtime_plan,
+                "needs_user_fork": needs_user_fork,
+                "pending_fork_options": runtime_plan.get("fork_options") or [],
+                "budget_limit": float(budget_limit),
+                "clarification_rounds": 0,
+                "feasibility_verdict": understanding.feasibility_verdict.upper(),
+                "feasibility_reasons": list(understanding.feasibility_reasons),
+                "execution_boundary_locked": False,
+            },
+        )
+        spec = GoalSpecModel(
+            id=spec_id,
+            goal_id=goal_id,
+            version=1,
+            status="DRAFT",
+            content_hash=canonical_hash(spec_content),
+            **spec_content,
+        )
+        conversation = ConversationModel(
+            id=conversation_id,
+            app_project_id=project_id,
+            title=understanding.app_name,
+            status="ACTIVE",
+            created_by=actor,
+            metadata_json={"type": "APP"},
+        )
+        if needs_user_fork:
+            assistant_content = (
+                "我已形成第一版方案，但还有关键分叉需要你辅助决断。"
+                "请选择一个方向后，我会按该路径继续推进。"
+            )
+        else:
+            assistant_content = (
+                "我已形成第一版产品方案，并将基于当前理解开始探索。"
+                "你可以随时补充或修正目标。"
+            )
+        messages = (
+            ConversationMessageModel(
+                id=uuid.uuid4(),
+                conversation_id=conversation_id,
+                ordinal=1,
+                role="USER",
+                message_type="CREATE_APP_REQUEST",
+                content=idea,
+                metadata_json={},
+                created_by=actor,
+            ),
+            ConversationMessageModel(
+                id=uuid.uuid4(),
+                conversation_id=conversation_id,
+                ordinal=2,
+                role="ASSISTANT",
+                message_type="GOAL_PLAN_PROPOSED",
+                content=assistant_content,
+                metadata_json={
+                    "app_project_id": str(project_id),
+                    "goal_id": str(goal_id),
+                    "goal_spec_id": str(spec_id),
+                    "goal_spec_hash": spec.content_hash,
+                    "goal_spec_version": spec.version,
+                    "goal_spec_status": spec.status,
+                    "understanding": understanding.model_dump(mode="json"),
+                    "plan": runtime_plan,
+                    "needs_user_fork": needs_user_fork,
+                },
+                created_by="regent-core",
+            ),
+        )
+        async with self._sessions() as session, session.begin():
+            session.add_all((project, goal, spec, conversation))
+            await session.flush()
+            session.add_all(messages)
+        return AppProjectDraftReceipt(
+            project,
+            goal,
+            spec,
+            conversation,
+            understanding,
+            response.model,
+            response.usage,
+            runtime_plan,
+            needs_user_fork,
+        )
+
+    async def list_projects(self, *, limit: int = 100) -> list[AppProjectModel]:
+        async with self._sessions() as session:
+            return list(
+                await session.scalars(
+                    select(AppProjectModel).order_by(AppProjectModel.updated_at.desc()).limit(limit)
+                )
+            )
+
+    async def get(self, project_id: uuid.UUID) -> AppProjectModel:
+        async with self._sessions() as session:
+            project = await session.get(AppProjectModel, project_id)
+            if project is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "app project not found")
+            return project
+
+    async def confirm(
+        self, project_id: uuid.UUID, *, actor: str, expected_spec_hash: str
+    ) -> ConfirmAppProjectReceipt:
+        now = datetime.now(UTC)
+        async with self._sessions() as session, session.begin():
+            project = await session.get(AppProjectModel, project_id, with_for_update=True)
+            if project is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "app project not found")
+            goal = await session.scalar(
+                select(GoalModel)
+                .where(GoalModel.app_project_id == project_id)
+                .order_by(GoalModel.created_at.desc())
+                .with_for_update()
+            )
+            if goal is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "app project goal not found")
+            spec = await session.scalar(
+                select(GoalSpecModel)
+                .where(GoalSpecModel.goal_id == goal.id)
+                .order_by(GoalSpecModel.version.desc())
+                .with_for_update()
+            )
+            if spec is None:
+                raise DomainError(ErrorCode.NOT_FOUND, "goal spec not found")
+            if spec.content_hash != expected_spec_hash:
+                raise DomainError(
+                    ErrorCode.VERSION_CONFLICT,
+                    "goal proposal changed",
+                    details={
+                        "current_spec_id": str(spec.id),
+                        "current_spec_version": spec.version,
+                        "current_spec_hash": spec.content_hash,
+                    },
+                )
+            metadata = dict(goal.metadata_json or {})
+            readiness = assess_goal_readiness(
+                verdict=metadata.get("feasibility_verdict"),
+                rounds=int(metadata.get("clarification_rounds") or 0),
+                unknowns=spec.unknowns,
+            )
+            if readiness.rounds < 2:
+                raise DomainError(ErrorCode.POLICY_DENIED, "two clarification rounds required")
+            if readiness.blocking_unknowns:
+                raise DomainError(ErrorCode.POLICY_DENIED, "goal boundary has unresolved questions")
+            if not readiness.ready:
+                raise DomainError(
+                    ErrorCode.POLICY_DENIED,
+                    "feasibility analysis must be FEASIBLE",
+                )
+            if spec.status == "FROZEN" and goal.status in {"READY", "ACTIVE"}:
+                return ConfirmAppProjectReceipt(project, goal, spec)
+            if (
+                project.status not in {"DRAFT", "ACTIVE"}
+                or goal.status != "DRAFT"
+                or spec.status != "DRAFT"
+            ):
+                raise DomainError(ErrorCode.INVALID_STATE, "app project cannot be confirmed")
+            active_other = await session.scalar(
+                select(GoalModel.id).where(
+                    GoalModel.app_project_id == project_id,
+                    GoalModel.id != goal.id,
+                    GoalModel.status.in_(("READY", "ACTIVE")),
+                )
+            )
+            if active_other is not None:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "finish or stop the current goal before confirming a revision",
+                )
+            spec.status = "FROZEN"
+            spec.confirmed_by = actor
+            spec.confirmed_at = now
+            project.status = "ACTIVE"
+            goal.status = "READY"
+            goal.version = 1
+            goal.metadata_json = {
+                **metadata,
+                "feasibility_verdict": readiness.verdict,
+                "execution_boundary_locked": True,
+                "locked_spec_hash": spec.content_hash,
+                "locked_spec_version": spec.version,
+                "locked_by": actor,
+                "goal_phase": "READY_LOCKED",
+                "goal_clarity_state": "LOCKED",
+                "confirmation_state": "USED",
+            }
+            payload = {
+                "app_project_id": str(project.id),
+                "goal_spec_id": str(spec.id),
+                "goal_spec_version": spec.version,
+                "content_hash": spec.content_hash,
+                "confirmed_by": actor,
+            }
+            session.add_all(
+                (
+                    AuditRecordModel(
+                        id=uuid.uuid4(),
+                        aggregate_type="goal",
+                        aggregate_id=goal.id,
+                        aggregate_version=goal.version,
+                        action="FREEZE_GOAL_SPEC",
+                        actor=actor,
+                        payload=payload,
+                        correlation_id=goal.correlation_id,
+                    ),
+                    OutboxEventModel(
+                        id=uuid.uuid4(),
+                        event_type="GoalSpecFrozen",
+                        aggregate_type="goal",
+                        aggregate_id=goal.id,
+                        aggregate_version=goal.version,
+                        payload=payload,
+                        correlation_id=goal.correlation_id,
+                    ),
+                )
+            )
+            conversation = await session.scalar(
+                select(ConversationModel)
+                .where(ConversationModel.app_project_id == project_id)
+                .with_for_update()
+            )
+            if conversation is not None:
+                last = await session.scalar(
+                    select(ConversationMessageModel.ordinal)
+                    .where(ConversationMessageModel.conversation_id == conversation.id)
+                    .order_by(ConversationMessageModel.ordinal.desc())
+                    .limit(1)
+                )
+                session.add(
+                    ConversationMessageModel(
+                        id=uuid.uuid4(),
+                        conversation_id=conversation.id,
+                        ordinal=(last or 0) + 1,
+                        role="EVENT",
+                        message_type="GOAL_CONFIRMED",
+                        content="产品目标已确认并固化, Core 现在可以开始规划。",
+                        metadata_json=payload,
+                        created_by="regent-core",
+                    )
+                )
+            await session.flush()
+            return ConfirmAppProjectReceipt(project, goal, spec)

@@ -1,0 +1,24 @@
+{
+  "skill_id": "agent-optimization",
+  "version": "1.0.0",
+  "title": "Agent Optimization (Harness Evolution)",
+  "description": "PenguinHarness-style loop: evaluate product QA gaps, diagnose, edit LESSONS, keep only on strict improvement.",
+  "applies_when": [
+    "self-evolution",
+    "自进化",
+    "harness",
+    "optimize agent",
+    "lesson",
+    "benchmark"
+  ],
+  "gap_codes": [
+    "PREVIEW_PRODUCT_QA_FAILED",
+    "stylesheet-substance",
+    "styled-surface",
+    "preview-internal-nav"
+  ],
+  "anti_examples": [
+    "Disable QA to green-pass",
+    "Edit model weights instead of harness lessons"
+  ]
+}

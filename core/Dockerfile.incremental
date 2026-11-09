@@ -1,0 +1,8 @@
+FROM regent-core:0.7.3
+WORKDIR /app
+COPY core/src/regent /app/core/src/regent
+COPY core/migrations /app/core/migrations
+COPY alembic.ini /app/alembic.ini
+COPY apps /app/apps
+COPY docs /app/docs
+ENV PYTHONPATH=/app/core/src

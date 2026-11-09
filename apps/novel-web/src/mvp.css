@@ -1,0 +1,8 @@
+.nextChapter { background:#a04f35 !important; color:#fff !important; border-color:#a04f35 !important; }
+.sharedPage { min-height:100vh; padding:7vh 20px; }
+.sharedReader { max-width:760px; margin:auto; }
+.sharedReader > header { height:auto; display:block; text-align:center; padding:35px 0 55px; border-bottom:1px solid #d6cec0; }
+.sharedReader h1 { font:700 46px/1.3 "Noto Serif SC",serif; }
+.sharedReader section { padding:55px 0; border-bottom:1px solid #d6cec0; }
+.sharedReader h2 { font:600 32px/1.4 "Noto Serif SC",serif; }
+.sharedReader footer { text-align:center; color:#999084; padding:45px; }

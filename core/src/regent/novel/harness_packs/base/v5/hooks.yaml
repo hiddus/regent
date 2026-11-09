@@ -1,0 +1,25 @@
+# 阶段钩子（v1）。条件成立时向执笔提示追加一条指引，不能删除载荷字段。
+# 条件与占位符见 surface.HOOK_CONDITIONS。
+
+previous_chapter_cliffhanger:
+  label: 上一章停在动作中途
+  condition: previous_ends_mid_action
+  guidance: "上一章结尾停在动作或对话中途，本章第一句直接接上那个动作。"
+
+stale_promise:
+  label: 有承诺悬了太久
+  condition: open_promise_age_exceeds
+  threshold: 5
+  guidance: "有一条承诺已经悬了 {age} 章，本章至少让它被提起一次。"
+
+method_rejected:
+  label: 章纲因同一招被退回
+  condition: method_rejected_at_least
+  threshold: 1
+  guidance: "这一章的章纲已经 {rounds} 次因为重复用过的办法被退回，正文里主角必须付出更高的代价。"
+
+place_stall:
+  label: 连续几章停在同一个地点
+  condition: place_streak_at_least
+  threshold: 3
+  guidance: "这已经是主角连续第 {chapters} 章在「{place}」。前几章在这里写过的动作、声响和意象不要再写，写这里发生的新变化。"
